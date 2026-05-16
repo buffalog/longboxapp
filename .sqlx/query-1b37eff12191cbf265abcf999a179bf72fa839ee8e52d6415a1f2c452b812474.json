@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\"\n           FROM files WHERE id = ?",
+  "query": "INSERT INTO files (issue_id, library_root_id, path_relative,\n                              size_bytes, mtime, last_scanned_at,\n                              match_method, match_confidence, status,\n                              cached_comicinfo_xml, cached_at,\n                              is_present, last_seen_at)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                     path_relative, size_bytes AS \"size_bytes!: i64\",\n                     mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                     match_method, match_confidence, status,\n                     cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                     is_present AS \"is_present!: bool\",\n                     last_seen_at AS \"last_seen_at: _\"",
   "describe": {
     "columns": [
       {
@@ -62,10 +62,20 @@
         "name": "cached_at: _",
         "ordinal": 11,
         "type_info": "Datetime"
+      },
+      {
+        "name": "is_present!: bool",
+        "ordinal": 12,
+        "type_info": "Bool"
+      },
+      {
+        "name": "last_seen_at: _",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 13
     },
     "nullable": [
       false,
@@ -79,8 +89,10 @@
       false,
       false,
       true,
-      true
+      true,
+      false,
+      false
     ]
   },
-  "hash": "ca06ba2df405b4e7377fb44b4619997d1fca1fabd8a3811b5f55ce5f291bfe95"
+  "hash": "1b37eff12191cbf265abcf999a179bf72fa839ee8e52d6415a1f2c452b812474"
 }

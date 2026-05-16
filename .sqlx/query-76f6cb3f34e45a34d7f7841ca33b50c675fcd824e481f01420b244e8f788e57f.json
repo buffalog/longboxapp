@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files\n           SET is_present = 0\n           WHERE library_root_id = ?\n             AND last_seen_at < ?\n             AND is_present = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "76f6cb3f34e45a34d7f7841ca33b50c675fcd824e481f01420b244e8f788e57f"
+}

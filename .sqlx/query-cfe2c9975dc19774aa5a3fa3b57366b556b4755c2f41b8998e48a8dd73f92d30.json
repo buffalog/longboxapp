@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "UPDATE files\n           SET issue_id = ?, size_bytes = ?, mtime = ?, last_scanned_at = ?,\n               match_method = ?, match_confidence = ?, status = ?,\n               cached_comicinfo_xml = ?, cached_at = ?\n           WHERE id = ?\n           RETURNING id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                     path_relative, size_bytes AS \"size_bytes!: i64\",\n                     mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                     match_method, match_confidence, status,\n                     cached_comicinfo_xml, cached_at AS \"cached_at: _\"",
+  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                  is_present AS \"is_present!: bool\",\n                  last_seen_at AS \"last_seen_at: _\"\n           FROM files WHERE library_root_id = ? AND path_relative = ?",
   "describe": {
     "columns": [
       {
@@ -62,10 +62,20 @@
         "name": "cached_at: _",
         "ordinal": 11,
         "type_info": "Datetime"
+      },
+      {
+        "name": "is_present!: bool",
+        "ordinal": 12,
+        "type_info": "Bool"
+      },
+      {
+        "name": "last_seen_at: _",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 10
+      "Right": 2
     },
     "nullable": [
       true,
@@ -79,8 +89,10 @@
       false,
       false,
       true,
-      true
+      true,
+      false,
+      false
     ]
   },
-  "hash": "6ce025dd08133149322f42f1efc657ab1e10a34bf18646b2573c1fc5f726a5ac"
+  "hash": "cfe2c9975dc19774aa5a3fa3b57366b556b4755c2f41b8998e48a8dd73f92d30"
 }

@@ -78,7 +78,7 @@ async fn list_all_orders_by_sort_title() {
     )
     .await
     .unwrap();
-    let rows = series_repo::list_all(&pool).await.unwrap();
+    let rows = series_repo::find_all(&pool).await.unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
     assert_eq!(titles, vec!["Action Comics", "Saga"]);
 }
@@ -160,6 +160,6 @@ async fn null_cv_ids_are_independent_under_unique() {
     };
     series_repo::insert(&pool, a).await.unwrap();
     series_repo::insert(&pool, b).await.unwrap();
-    let rows = series_repo::list_all(&pool).await.unwrap();
+    let rows = series_repo::find_all(&pool).await.unwrap();
     assert_eq!(rows.len(), 2);
 }

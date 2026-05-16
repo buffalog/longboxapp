@@ -98,7 +98,7 @@ where
     Ok(row)
 }
 
-pub async fn list_all<'e, E>(executor: E) -> Result<Vec<SeriesRow>>
+pub async fn find_all<'e, E>(executor: E) -> Result<Vec<SeriesRow>>
 where
     E: SqliteExecutor<'e>,
 {

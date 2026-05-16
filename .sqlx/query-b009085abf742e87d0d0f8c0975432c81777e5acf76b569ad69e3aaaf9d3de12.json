@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\"\n           FROM files WHERE status = ? ORDER BY path_relative",
+  "query": "UPDATE files\n           SET issue_id = ?, size_bytes = ?, mtime = ?, last_scanned_at = ?,\n               match_method = ?, match_confidence = ?, status = ?,\n               cached_comicinfo_xml = ?, cached_at = ?,\n               is_present = ?, last_seen_at = ?\n           WHERE id = ?\n           RETURNING id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                     path_relative, size_bytes AS \"size_bytes!: i64\",\n                     mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                     match_method, match_confidence, status,\n                     cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                     is_present AS \"is_present!: bool\",\n                     last_seen_at AS \"last_seen_at: _\"",
   "describe": {
     "columns": [
       {
@@ -62,10 +62,20 @@
         "name": "cached_at: _",
         "ordinal": 11,
         "type_info": "Datetime"
+      },
+      {
+        "name": "is_present!: bool",
+        "ordinal": 12,
+        "type_info": "Bool"
+      },
+      {
+        "name": "last_seen_at: _",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 12
     },
     "nullable": [
       true,
@@ -79,8 +89,10 @@
       false,
       false,
       true,
-      true
+      true,
+      false,
+      false
     ]
   },
-  "hash": "8db80924ff5ae435209b7880882f1d2acfc1f30481d489d48d556329b7e43dab"
+  "hash": "b009085abf742e87d0d0f8c0975432c81777e5acf76b569ad69e3aaaf9d3de12"
 }
