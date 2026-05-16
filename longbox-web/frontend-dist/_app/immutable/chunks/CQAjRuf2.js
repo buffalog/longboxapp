@@ -1,0 +1,1 @@
+import{a as r}from"./pI-r-YMP.js";function i(){return r("/series")}function t(e){return r(`/series/${e}`)}function n(e){return r("/series",{method:"POST",body:JSON.stringify({cv_id:e})})}function o(e){return r(`/series/${e}`,{method:"DELETE"})}function a(e){return r(`/series/${e}/refresh`,{method:"POST"})}export{n as a,o as d,t as g,i as l,a as r};
