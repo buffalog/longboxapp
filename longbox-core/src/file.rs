@@ -10,10 +10,10 @@ use time::OffsetDateTime;
 #[serde(rename_all = "snake_case")]
 pub enum MatchMethod {
     /// CV issue ID extracted from a `<Web>` URL in ComicInfo.xml.
-    ComicInfoWebCv,
+    WebUrlCv,
     /// Metron issue slug extracted from a `<Web>` URL in ComicInfo.xml.
     /// Passive ingestion — Phase A captures these but does not call Metron.
-    ComicInfoWebMetron,
+    WebUrlMetron,
     /// Matched via `<Series>` + `<Number>` similarity in ComicInfo.xml.
     ComicInfoXml,
     /// Matched via filename parsing through `parsing_patterns`.
@@ -29,8 +29,8 @@ pub enum MatchMethod {
 impl MatchMethod {
     pub fn as_db_str(self) -> &'static str {
         match self {
-            Self::ComicInfoWebCv => "comicinfo_web_cv",
-            Self::ComicInfoWebMetron => "comicinfo_web_metron",
+            Self::WebUrlCv => "web_url_cv",
+            Self::WebUrlMetron => "web_url_metron",
             Self::ComicInfoXml => "comicinfo_xml",
             Self::FilenameRegex => "filename_regex",
             Self::Manual => "manual",
@@ -41,8 +41,8 @@ impl MatchMethod {
 
     pub fn from_db_str(s: &str) -> Option<Self> {
         Some(match s {
-            "comicinfo_web_cv" => Self::ComicInfoWebCv,
-            "comicinfo_web_metron" => Self::ComicInfoWebMetron,
+            "web_url_cv" => Self::WebUrlCv,
+            "web_url_metron" => Self::WebUrlMetron,
             "comicinfo_xml" => Self::ComicInfoXml,
             "filename_regex" => Self::FilenameRegex,
             "manual" => Self::Manual,
@@ -137,8 +137,8 @@ mod tests {
     #[test]
     fn match_method_db_round_trip() {
         for m in [
-            MatchMethod::ComicInfoWebCv,
-            MatchMethod::ComicInfoWebMetron,
+            MatchMethod::WebUrlCv,
+            MatchMethod::WebUrlMetron,
             MatchMethod::ComicInfoXml,
             MatchMethod::FilenameRegex,
             MatchMethod::Manual,

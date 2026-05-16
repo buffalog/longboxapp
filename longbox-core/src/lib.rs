@@ -2,8 +2,9 @@
 //!
 //! This crate has no I/O, no HTTP, no SQL. It compiles standalone and every
 //! test runs without any async runtime, database, or network. The matcher
-//! algorithm takes its candidate series and issue pools as slices; the caller
-//! is responsible for fetching them.
+//! algorithm (Tier 2 + Tier 3) takes a pre-fetched [`Candidate`] pool as a
+//! slice; Tier 1 (`<Web>` URL → issue ID) is the caller's responsibility,
+//! built from the per-URL extraction helpers in [`comicinfo`].
 
 pub mod comicinfo;
 pub mod error;
@@ -15,12 +16,14 @@ pub mod normalize;
 pub mod series;
 pub mod similarity;
 
-pub use comicinfo::ComicInfo;
+pub use comicinfo::{
+    extract_cv_issue_id_from_url, extract_metron_issue_id_from_url, ComicInfo,
+};
 pub use error::{CoreError, Result};
 pub use file::{classify_status, FileStatus, LocalFile, MatchMethod};
 pub use filename::{ParsedFilename, ParsingPattern};
 pub use issue::{Issue, IssueNumber};
-pub use matcher::{match_file, FileContext, MatchResult};
+pub use matcher::{match_file, Candidate, MatchResult};
 pub use normalize::normalize_title;
 pub use series::Series;
 
