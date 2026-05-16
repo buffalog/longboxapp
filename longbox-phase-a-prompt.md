@@ -1250,6 +1250,301 @@ Plus unit tests in `cbz.rs` (extract ComicInfo from valid CBZ, return None when 
 
 End of Step 4: scanner walks a real library, populates the files table with match results across all three tiers, identifies missing files via `is_present`, surfaces per-file errors without aborting the scan, runs both rematch flows. Single-process scan lock prevents concurrent runs. The migration is applied; `longbox-db` has the new `mark_files_not_seen_since` method. The crate is independent of `longbox-comicvine` (offline). Ready to be invoked from Step 5's web handlers.
 
+## Step 5 — Approved file structure for `longbox-web`
+
+Step 5 is where the data + scan layer becomes a running application. First binary, first time all four prior crates compose together, first thing you can `cargo run` and curl. It also nails down the HTTP contract Step 6's frontend will consume.
+
+### Additions to `longbox-core` and `longbox-db`
+
+Step 5 needs JSON-serializable domain types. Add `#[derive(Serialize, Deserialize)]` (or just `Serialize` where deserialize doesn't make sense) to these types:
+
+In `longbox-core`:
+- `Series`, `NewSeries`, `SeriesUpdate`
+- `Issue`, `NewIssue`, `IssueUpdate`
+- `IssueNumber`
+- `MatchMethod`
+- `FileStatus`
+
+In `longbox-db`:
+- `File` (row type), `LibraryRoot`
+
+Additive — no signature changes, no breaking changes. Add the `serde` feature to longbox-core's and longbox-db's Cargo.toml. No schema migrations in Step 5; scan history is in-memory.
+
+### Approved file layout
+
+```
+longbox-web/
+├── Cargo.toml
+├── frontend-dist/              # placeholder; Step 6 replaces this directory
+│   ├── index.html              # minimal "LongBox API is running" page
+│   └── 404.html
+└── src/
+    ├── main.rs                 # binary entry point
+    ├── lib.rs                  # library exports for integration tests
+    ├── config.rs               # AppConfig from env vars
+    ├── error.rs                # ApiError + IntoResponse
+    ├── state.rs                # AppState (db, cv, scanner, scan status)
+    ├── bootstrap.rs            # startup orchestration
+    ├── frontend.rs             # rust-embed serving of frontend-dist
+    ├── tracing_setup.rs        # tracing-subscriber init
+    └── routes/
+        ├── mod.rs              # build_router, attaches all routes
+        ├── health.rs
+        ├── cv_search.rs
+        ├── series.rs
+        ├── files.rs
+        └── scan.rs
+```
+
+Nested `routes/` subdir is appropriate at this file count (~6 route modules + 4 top-level). If Claude Code prefers flat, fine — same precedent as Step 4's longbox-db.
+
+### File responsibilities
+
+- **`main.rs`** — Binary entry. Initializes tracing, loads config, calls `bootstrap::run`, builds router, binds TCP listener, serves. Non-zero exit + clear stderr message on any startup failure. No partial startup.
+
+- **`lib.rs`** — Re-exports `build_router`, `AppState`, `AppConfig`, `ApiError`, `bootstrap::run` so integration tests can spin up the app in-process without going through `main.rs`.
+
+- **`config.rs`** — `AppConfig::from_env() -> Result<AppConfig, ConfigError>`. See "Configuration" section below for the env var list and validation rules.
+
+- **`error.rs`** — `ApiError` enum via `thiserror`, with `axum::response::IntoResponse` impl:
+
+  ```rust
+  pub enum ApiError {
+      BadRequest { message: String },                              // 400
+      NotFound { resource: &'static str, id: String },             // 404
+      Conflict { code: &'static str, message: String },            // 409
+      Validation { errors: Vec<FieldError> },                      // 422
+      Upstream { source: &'static str, status: u16, message: String },  // 502
+      RateLimited { retry_after_seconds: u64 },                    // 503 + Retry-After header
+      Internal { message: String, #[source] source: anyhow::Error }, // 500
+  }
+  ```
+
+  `From` impls for `longbox_db::DbError`, `longbox_comicvine::CvError`, `longbox_scanner::ScanError`. Mapping rules:
+  - `CvError::Auth` → `Internal { message: "ComicVine credentials misconfigured" }` (user can't fix from UI; this is ops)
+  - `CvError::NotFound` → `NotFound { resource: "comicvine_volume", id: ... }`
+  - `CvError::RateLimited` → `RateLimited`
+  - `CvError::Http`, `CvError::Network`, `CvError::Timeout`, `CvError::Malformed` → `Upstream { source: "comicvine", ... }`
+  - `ScanError::AlreadyRunning` → `Conflict { code: "conflict.scan_running", ... }`
+  - `ScanError::LibraryRootNotFound` → `NotFound { resource: "library_root", ... }`
+  - Other ScanErrors → `Internal`
+  - `DbError` mostly → `Internal`, except unique-violation → `Conflict`
+
+  Response body shape:
+  ```json
+  { "error": { "code": "conflict.scan_running", "message": "Scan already in progress", "details": {} } }
+  ```
+
+  The `code` field is a stable machine-readable string the frontend can branch on. The `message` is human-readable. Errors log at WARN (4xx) or ERROR (5xx, including source chain) before returning.
+
+- **`state.rs`** — Shared application state:
+
+  ```rust
+  pub struct AppState {
+      pub db: longbox_db::Pool,
+      pub cv: Arc<longbox_comicvine::ComicVineClient>,
+      pub scanner: Arc<longbox_scanner::Scanner>,
+      pub config: Arc<AppConfig>,
+      pub scan_status: Arc<tokio::sync::RwLock<ScanStatus>>,
+  }
+
+  pub struct ScanStatus {
+      pub current: Option<CurrentScan>,
+      pub recent: VecDeque<ScanReport>,   // bounded to last 10
+  }
+
+  pub struct CurrentScan {
+      pub scan_id: String,                 // ULID
+      pub library_root_id: i64,
+      pub kind: ScanKind,
+      pub started_at: PrimitiveDateTime,
+  }
+
+  pub enum ScanKind { Full, RescanUnmatched, RematchForSeries }
+  ```
+
+  Cloned cheaply (Arc + sqlx pool is Arc-internal). Axum `State<AppState>` extractor.
+
+- **`bootstrap.rs`** — Startup orchestration:
+  1. `SqlitePool::connect(&config.database_url).await`
+  2. `sqlx::migrate!("../longbox-db/migrations").run(&pool).await`
+  3. Upsert library_roots from `config.library_root_path`:
+     - If row exists with matching path → use its id.
+     - If row exists with different path → return error (do NOT silently mutate; prevents orphaning the catalog).
+     - If no row → insert one.
+  4. Construct `ComicVineClient` from config.
+  5. Construct `Scanner` from pool + config.
+  6. Return `AppState` with empty `ScanStatus`.
+
+- **`frontend.rs`** — `rust-embed` of `frontend-dist/`. Handler serves static files from the embedded bundle. SPA fallback: any GET that doesn't match an API route AND isn't a known static asset returns `index.html` (so client-side routing works for `/series/42` etc.). True 404 only for `.well-known/` and similar reserved paths.
+
+- **`tracing_setup.rs`** — `tracing-subscriber` with `EnvFilter` from `LOG_LEVEL`. JSON output when stderr is not a TTY (production / Docker); pretty otherwise. Per-request middleware (`tower_http::trace::TraceLayer`) logs request_id, method, path, status, duration.
+
+- **`routes/mod.rs`** — `build_router(state: AppState) -> Router`. Attaches all route modules with appropriate paths. Middleware: trace layer, CORS (permissive in dev, same-origin in prod — gated by env var).
+
+- **`routes/health.rs`** — `GET /api/health` → `{ "status": "ok", "version": env!("CARGO_PKG_VERSION") }`. No DB call; pure liveness.
+
+- **`routes/cv_search.rs`** — `GET /api/cv/search?q=<query>`. Calls `cv.search_volumes(query)`, returns `Vec<SeriesSearchResult>` as JSON.
+
+- **`routes/series.rs`** — All series endpoints. See HTTP API table below.
+
+- **`routes/files.rs`** — File listing + PATCH endpoints.
+
+- **`routes/scan.rs`** — Scan trigger + status endpoints.
+
+### HTTP API surface (Phase A)
+
+All under `/api`. JSON in, JSON out. Errors per the `ApiError` shape.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Liveness |
+| GET | `/api/cv/search?q=<query>` | Search ComicVine for volumes to add |
+| POST | `/api/series` | Body `{ "cv_id": 12345 }` — fetch from CV, insert, trigger rematch |
+| GET | `/api/series` | List series with computed `owned_count` and `missing_count` |
+| GET | `/api/series/:id` | Series detail with issue list and per-issue file status |
+| DELETE | `/api/series/:id` | Remove series; 409 if any owned files matched to its issues |
+| GET | `/api/files?status=<filter>&library_root_id=<id>` | List files, filterable |
+| GET | `/api/files/:id` | File detail |
+| PATCH | `/api/files/:id` | Body `{ "issue_id": N }` for manual rematch; `{ "status": "ignored" }` to ignore; `{ "status": null }` to clear ignore |
+| POST | `/api/library-roots/:id/scan` | Trigger full scan; 202 + scan_id, 409 if running |
+| POST | `/api/library-roots/:id/rescan-unmatched` | Trigger rescan of needs_review files |
+| GET | `/api/scans/current` | Current scan status or null |
+| GET | `/api/scans/recent` | Last 10 completed scan reports |
+
+### Add-series flow
+
+```
+POST /api/series { "cv_id": 12345 }
+
+1. Validate cv_id > 0 → 400 if not.
+2. series_repo::find_by_cv_id(12345) → if exists, 409 Conflict { "code": "conflict.series_already_exists" }.
+3. cv.fetch_volume(12345).await → CvVolumeDetail
+   Errors map per the ApiError From impls.
+4. cv.fetch_issues(12345).await → Vec<CvIssueDetail>
+5. Project to domain types in the handler (Step 3's deliberate seam):
+   - new_series = NewSeries from cv_volume, sort_title = normalize_title(cv_volume.name).
+   - new_issues = cv_issues.iter().map(|i| NewIssue from i, series_id = TBD).
+6. Begin transaction:
+   - inserted = series_repo::insert(new_series).await?
+   - Fill series_id in each new_issue with inserted.id.
+   - issue_repo::bulk_insert(&new_issues).await?
+   - Commit.
+7. Fire-and-forget: tokio::spawn(scanner.rematch_for_series(inserted.id))
+   Update scan_status to indicate a RematchForSeries scan is running.
+8. Return 201 Created with the inserted series.
+
+Handler timeout: 60s wall-clock budget. Steps 3-4 dominate; rate-limited CV could push past, in which case 503 to client.
+```
+
+### Scan endpoints
+
+```
+POST /api/library-roots/:id/scan
+1. Validate library_root_id exists → 404 if not.
+2. Acquire scan_status.write().
+   If current is Some → 409 Conflict { "code": "conflict.scan_running" }.
+3. scan_id = ULID::new().to_string().
+4. Set current = Some(CurrentScan { scan_id, library_root_id, kind: Full, started_at: utc_now() }).
+5. Drop write lock.
+6. tokio::spawn:
+   match scanner.scan_full(library_root_id).await {
+     Ok(report) => { scan_status.write(): current = None; recent.push_front(report); truncate(10) }
+     Err(e) => { scan_status.write(): current = None; log error; do NOT push to recent }
+   }
+7. Return 202 Accepted { "scan_id": "...", "status": "started" }.
+```
+
+`rescan-unmatched` is structurally identical with `scanner.rescan_unmatched` and `kind: RescanUnmatched`.
+
+`GET /api/scans/current` reads the lock, returns `Some(CurrentScan)` or `null`.
+`GET /api/scans/recent` reads the lock, returns the recent VecDeque as a JSON array.
+
+### Cargo.toml dependencies
+
+```toml
+[dependencies]
+longbox-core = { path = "../longbox-core" }
+longbox-db = { path = "../longbox-db" }
+longbox-comicvine = { path = "../longbox-comicvine" }
+longbox-scanner = { path = "../longbox-scanner" }
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+ulid = { version = "1", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "macros"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "migrate"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+hyper = "1"
+http-body-util = "0.1"
+pretty_assertions = "1"
+tempfile = "3"
+wiremock = "0.6"
+```
+
+### Configuration
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `COMICVINE_API_KEY` | yes | — | Non-empty after trim |
+| `LIBRARY_ROOT_PATH` | yes | — | Must exist and be a readable directory |
+| `DATABASE_URL` | no | `sqlite:./longbox.db?mode=rwc` | Path is created if missing |
+| `BIND_ADDR` | no | `0.0.0.0:3000` | `host:port` |
+| `LOG_LEVEL` | no | `info` | `tracing-subscriber` EnvFilter syntax |
+| `MATCH_THRESHOLD` | no | `0.85` | f64 in [0.0, 1.0] |
+| `CORS_PERMISSIVE` | no | `false` | Set `true` in dev for SvelteKit dev server on port 5173 |
+
+Startup validation prints a clear stderr message naming the offending variable and exits with status 1. No partial startup.
+
+### Test strategy
+
+Integration tests in `longbox-web/tests/`:
+
+- Spin up app in-process via `lib::build_router` with a test `AppState`:
+  - In-memory SQLite via sqlx
+  - Mocked CV client backed by wiremock
+  - Real scanner against a tempdir library
+- Use `tower::ServiceExt::oneshot` for requests; no real TCP listener needed
+- Assert response status, response body shape, resulting DB state
+
+Test coverage (~25-30 cases):
+- Health endpoint returns 200 with version
+- CV search: happy path, empty result, rate-limited, upstream error
+- Add series: happy path inserts series + issues + spawns rematch
+- Add series: existing cv_id → 409 with `conflict.series_already_exists`
+- Add series: CV NotFound → 404
+- Add series: invalid cv_id → 400
+- List series with computed owned/missing counts
+- Series detail with mixed file states (owned, needs_review, missing)
+- Delete series with no files → 200, cascade clears issues
+- Delete series with matched files → 409
+- File list filtered by status
+- File PATCH: rematch sets new issue_id and status
+- File PATCH: mark ignored
+- File PATCH: clear ignored → status becomes needs_review with cleared issue_id; next scan re-classifies normally
+- Scan trigger 202; second concurrent trigger 409
+- `/api/scans/current` and `/api/scans/recent` return correct state during and after scan
+- Bootstrap with missing required env var fails cleanly
+- Bootstrap with mismatched `library_roots.path` errors (catalog-orphan prevention)
+- Frontend fallback: GET `/series/42` returns index.html
+- True 404 for `/.well-known/something`
+- 422 for malformed JSON in POST body
+
+### Done definition
+
+End of Step 5: `cargo run` starts the server, opens the DB, runs migrations, ensures the library_root row, listens on the configured port. `curl http://localhost:3000/api/health` returns OK. The full API surface works against real CV (with a real API key) and a real disk library. Scan triggers run async and status is pollable. Frontend placeholder serves at `/`. Ready for Step 6 to consume the API.
+
 ## Kickoff discipline
 
 Before writing any code:
