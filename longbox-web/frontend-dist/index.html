@@ -2,46 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="/favicon.ico" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LongBox</title>
-    <link href="/_app/immutable/entry/start.CAG3MvSG.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/DZiMCFDK.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/DHS9J6Mf.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/gDhrysgT.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/DWx4Azbe.js" rel="modulepreload">
-		<link href="/_app/immutable/entry/app.Czkkm8wC.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/CM-VHOV-.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/BrrP7mG1.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/HYDpWJaS.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/DbZTCDBX.js" rel="modulepreload">
-		<link href="/_app/immutable/nodes/0.DtJ_EuKv.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/pI-r-YMP.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/B4ui2Bz8.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/D2k2S0_k.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/49yH0btC.js" rel="modulepreload">
-		<link href="/_app/immutable/chunks/DATyCZku.js" rel="modulepreload">
-		
-		<link href="/_app/immutable/assets/0.CWdq7xWQ.css" rel="stylesheet">
+    <title>LongBox — frontend bundle not built</title>
+    <style>
+      body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; color: #1e293b; }
+      code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f1f5f9; padding: 0.1em 0.3em; border-radius: 3px; }
+      pre { padding: 0.75rem 1rem; overflow-x: auto; }
+      h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    </style>
   </head>
-  <body class="min-h-screen bg-slate-50 text-slate-900 antialiased">
-    <div style="display: contents">
-			<script>
-				{
-					__sveltekit_1be54gj = {
-						base: ""
-					};
-
-					const element = document.currentScript.parentElement;
-
-					Promise.all([
-						import("/_app/immutable/entry/start.CAG3MvSG.js"),
-						import("/_app/immutable/entry/app.Czkkm8wC.js")
-					]).then(([kit, app]) => {
-						kit.start(app, element);
-					});
-				}
-			</script>
-		</div>
+  <body>
+    <h1>LongBox — frontend bundle not built</h1>
+    <p>
+      This placeholder is what gets baked into the binary when
+      <code>cargo build</code> runs without first building the SvelteKit
+      frontend. The Docker build does this for you; local dev needs one
+      extra step.
+    </p>
+    <pre>cd longbox-frontend
+pnpm install
+pnpm build
+cd ..
+cargo build --release -p longbox-web</pre>
+    <p>
+      <code>pnpm build</code> writes the static bundle into
+      <code>longbox-web/frontend-dist/</code>, where
+      <code>rust-embed</code> picks it up at compile time. The generated
+      <code>_app/</code> directory and <code>favicon.ico</code> are
+      gitignored; only this file is tracked.
+    </p>
   </body>
 </html>
