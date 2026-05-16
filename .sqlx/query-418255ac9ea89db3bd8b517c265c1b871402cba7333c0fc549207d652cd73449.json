@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files SET status = 'ignored', match_method = 'ignored', issue_id = NULL\n           WHERE path_relative = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "418255ac9ea89db3bd8b517c265c1b871402cba7333c0fc549207d652cd73449"
+}

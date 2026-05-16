@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n\n           FROM files f\n           JOIN issues i ON f.issue_id = i.id\n           WHERE i.series_id = ? AND f.status = 'owned'",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1459d410097d9c8afc41076a7f05fe9d98394cccf27d95a8cb935b29a0f43961"
+}
