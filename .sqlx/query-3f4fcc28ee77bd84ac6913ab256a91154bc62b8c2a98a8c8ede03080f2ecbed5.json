@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files SET status = 'needs_review' WHERE path_relative = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3f4fcc28ee77bd84ac6913ab256a91154bc62b8c2a98a8c8ede03080f2ecbed5"
+}
