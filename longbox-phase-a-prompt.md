@@ -1790,7 +1790,7 @@ Types in `lib/types.ts` mirror the backend's JSON response shapes:
 
 ```typescript
 export type FileStatus = 'owned' | 'needs_review' | 'ignored' | 'unmatched';
-export type MatchMethod = 'web_url_cv' | 'web_url_metron' | 'comic_info' | 'filename';
+export type MatchMethod = 'web_url_cv' | 'web_url_metron' | 'comicinfo_xml' | 'filename_regex' | 'manual' | 'unmatched' | 'ignored';
 
 export interface Series {
   id: number;
@@ -1828,11 +1828,70 @@ These types are manually maintained. Drift between frontend types and backend re
 
 ### Backend additions for Step 6
 
-The frontend needs one endpoint that Step 5's spec didn't include:
+The frontend needs two endpoints that Step 5's spec didn't include:
 
-- **`POST /api/series/:id/refresh`** — Re-fetch the series from ComicVine, update the series row's mutable fields, and upsert its issues. Same error mapping as `POST /api/series`. Returns the updated series. Implementation: thin variant of the add-series flow that uses `series_repo::update` instead of `insert` and `issue_repo::upsert_by_cv_id` instead of bulk_insert. Add to `longbox-web/src/routes/series.rs` as part of Step 6 scope.
+**1. `POST /api/series/:id/refresh`** — Re-fetch the series from ComicVine, update the series row's mutable fields, and upsert its issues. Same error mapping as `POST /api/series`. Returns the updated series. Implementation: thin variant of the add-series flow that uses `series_repo::update` instead of `insert` and `issue_repo::upsert_by_cv_id` instead of bulk_insert. Add to `longbox-web/src/routes/series.rs` as part of Step 6 scope.
 
-No other backend changes needed.
+After the DB update succeeds, fire-and-forget `tokio::spawn(scanner.rematch_for_series(id))` — same pattern and same silent-skip semantics as the add-series handler. Refresh can introduce new issues to the catalog (e.g., CV published issue #194 since last refresh) and existing files in needs_review may now match. Without the auto-rematch, the catalog updates but matches stay stale until the next manual scan.
+
+**2. `GET /api/stats`** — Workspace-wide aggregate counts for the dashboard. Single SQL query with conditional aggregates. Response shape:
+
+```json
+{
+  "total_series": 142,
+  "total_issues": 5832,
+  "owned_files": 5104,
+  "needs_review_files": 287,
+  "ignored_files": 12,
+  "unmatched_files": 23,
+  "missing_issues": 728
+}
+```
+
+`missing_issues` is the count of issues with no present file matched (not the count of `is_present = false` file rows; those are a separate concept the dashboard doesn't expose in Phase A). All file counts include only `is_present = true` rows.
+
+**Plus: refactor the series-list query from Step 5's N+1 to a single JOIN.**
+
+Step 5 decision #8 accepted N+1 (3-4 queries per series) as Phase A acceptable and called out the JOIN as Phase B work. Step 6 adds `missing_count` per series, which would chain another N+1 onto the existing one. Do the JOIN now instead — it's the same logical effort and pays off both the new requirement and the existing tech debt. Single query returns per-series rows with `owned_count`, `needs_review_count`, `ignored_count`, `unmatched_count`, `missing_count`, `total_count`. The `series_repo` gains a `find_all_with_counts` method (or the existing `find_all` grows the counts; either is fine, Claude Code's call). The series-list handler in `longbox-web` uses the new method. Public API response shape adds the new fields; existing fields unchanged. No frontend breakage; new fields available for the series-list and dashboard cards.
+
+**Semantic note on "missing":** the per-series `missing_count` and the aggregate `missing_issues` are computed the same way — issues for which no present file is matched. They are not derivable from `total_count - owned_count` because that subtraction conflates truly-missing issues with needs_review and ignored states.
+
+**3. Enrich `/api/files` responses with issue + series by default.**
+
+The review queue needs `series_title`, `issue_number`, and related context per file row. Add a LEFT JOIN to `issues` and `series` in the file repo's query path; all file response shapes (list, detail, PATCH result) include nested `issue` and `series` objects. When `issue_id` is NULL (unmatched files), both `issue` and `series` are `null`. Response shape:
+
+```json
+{
+  "id": 1,
+  "library_root_id": 1,
+  "path_relative": "Walking Dead (2003)/Walking Dead 001 (2003).cbz",
+  "issue_id": 42,
+  "status": "needs_review",
+  "match_method": "filename_regex",
+  "match_confidence": 0.78,
+  "is_present": true,
+  "last_seen_at": "2026-05-16T10:32:14Z",
+  "issue": {
+    "id": 42,
+    "series_id": 5,
+    "cv_issue_id": 12345,
+    "issue_number": "1",
+    "name": "Days Gone Bye",
+    "cover_date": "2003-10-01",
+    "cover_url": "..."
+  },
+  "series": {
+    "id": 5,
+    "title": "The Walking Dead",
+    "start_year": 2003,
+    "publisher": "Image Comics"
+  }
+}
+```
+
+No `?with=` opt-in parameter — flexibility we don't need now is complexity we maintain forever. If a Phase B consumer ever wants thin files, that's the time to add `?with=`, and it's a backwards-compatible addition.
+
+**4. `GET /api/library-roots`** — Returns the list of library root rows. Response is a JSON array; Phase A always returns exactly one element, but the array shape future-proofs for multi-root in Phase B without frontend churn. Each element: `{ id, path, created_at }`. Frontend fetches this once at app load and uses the first (only) element's id wherever it needs `library_root_id` (e.g., dashboard scan triggers). Replaces the fragile "infer library_root_id from the most recent scan, fall back to 1" pattern.
 
 ### Cargo / package.json dependencies
 
@@ -1931,6 +1990,155 @@ These are the acceptance scenarios for Step 6:
 ### Done definition
 
 End of Step 6: `pnpm build` produces a working static site in `longbox-web/frontend-dist/`. A subsequent `cargo build --release` of longbox-web bakes it into the binary. Running the binary serves a working LongBox UI at `http://localhost:3000/`. All six user flows above are exercisable end-to-end against a real library with a real CV API key. Tests pass via `pnpm test`. Ready for Step 7 (Docker packaging).
+
+## Step 7 — Docker packaging and deployment
+
+Step 7 is the smallest in scope. No new functionality, no new crate, no new schema. The work is shaping the five crates plus the frontend into a single-container deployable artifact that someone (including future-you) can `docker compose up` and have a working LongBox in 60 seconds.
+
+### Approved file layout
+
+New files at repo root:
+
+```
+longbox/
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── .env.example
+└── deploy/
+    └── README.md          # operations runbook
+```
+
+Plus a small cleanup item from Step 6's deviations: `.gitignore` updates to exclude built frontend artifacts (`longbox-web/frontend-dist/_app/`, etc.). Keep a placeholder `longbox-web/frontend-dist/index.html` committed so a fresh clone can `cargo build` without first running the frontend toolchain (the placeholder displays a "run `pnpm build` to see the real UI" message).
+
+### Dockerfile design — three-stage build
+
+**Stage 1: frontend-builder**
+- Base: `node:20-alpine`
+- Install pnpm globally
+- Copy `longbox-frontend/package.json` and `pnpm-lock.yaml` first; `pnpm install --frozen-lockfile`. (Cache hit on this layer when only source changes.)
+- Copy rest of `longbox-frontend/`; run `pnpm build`.
+- Output: built static bundle at `/build/longbox-web/frontend-dist/`.
+
+**Stage 2: backend-builder**
+- Base: `rust:1.78-alpine` (or current stable).
+- Install build deps: `musl-dev`, `sqlite-dev`, `pkgconfig`.
+- Target: `aarch64-unknown-linux-musl` (Apple Silicon native; no emulation).
+- Cache strategy: copy `Cargo.toml`, `Cargo.lock`, and workspace member `Cargo.toml` files first. Create empty `src/lib.rs` shells for each crate. Run `cargo build --release` to cache the dependency layer. Then copy real source and rebuild — only the workspace crates recompile, dependencies stay cached. (`cargo-chef` is an alternative if Claude Code prefers, but manual shells work and add no tooling dep.)
+- Before the final cargo build: copy the frontend build artifacts from Stage 1 into `longbox-web/frontend-dist/` so rust-embed picks them up.
+- Run `cargo build --release --target aarch64-unknown-linux-musl`.
+- Output: `/build/target/aarch64-unknown-linux-musl/release/longbox-web`.
+
+**Stage 3: runtime**
+- Base: `alpine:3.19` (or current). NOT scratch — keeping shell access (sh, wget) is worth ~5 MB for debugging.
+- Install runtime deps: `ca-certificates` (for HTTPS to ComicVine), `sqlite-libs`.
+- Create non-root user `longbox` with uid:gid 1000:1000.
+- Copy binary from Stage 2 to `/usr/local/bin/longbox-web`.
+- Create directories: `/data` (owned by longbox; holds the SQLite DB), `/library` (mount point; read-only at runtime via docker compose).
+- `USER longbox`.
+- `HEALTHCHECK` against `/api/health` via `wget --spider`.
+- `ENTRYPOINT ["/usr/local/bin/longbox-web"]`.
+
+Final image size target: under 30 MB compressed.
+
+### .dockerignore
+
+Aggressively minimal build context. Exclude: `target/`, `node_modules/`, `longbox-web/frontend-dist/_app/`, `.git/`, `*.md` (except the ones the build needs), `tests/fixtures/library/` (the test CBZ files), `.sqlx/` (regenerated by build), `.env`, IDE folders.
+
+### docker-compose.yml
+
+```yaml
+services:
+  longbox:
+    image: longbox:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: longbox
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - longbox-data:/data
+      - ${LIBRARY_PATH}:/library:ro
+    environment:
+      LIBRARY_ROOT_PATH: /library
+      DATABASE_URL: "sqlite:/data/longbox.db?mode=rwc"
+      BIND_ADDR: "0.0.0.0:3000"
+      LOG_LEVEL: info
+      MATCH_THRESHOLD: "0.85"
+      COMICVINE_API_KEY: ${COMICVINE_API_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  longbox-data:
+```
+
+### .env.example
+
+```
+# Your ComicVine API key (get one at https://comicvine.gamespot.com/api/)
+COMICVINE_API_KEY=replace_with_your_key
+
+# Absolute path to your comic library on the host (will be bind-mounted into the container)
+# On macOS with SMB-mounted library, this might look like: /Volumes/comics
+LIBRARY_PATH=/path/to/your/library
+```
+
+Copy to `.env` for real values. `.env` is gitignored.
+
+### deploy/README.md
+
+Operations runbook covering:
+
+- **Prerequisites:** Docker Desktop on Mac (or Docker Engine on Linux), Comic Vine API key.
+- **First-run setup:**
+  1. Clone repo.
+  2. Copy `.env.example` to `.env`; fill in `COMICVINE_API_KEY` and `LIBRARY_PATH`.
+  3. On macOS: ensure `LIBRARY_PATH` is in Docker Desktop's File Sharing allow-list (Settings → Resources → File Sharing).
+  4. `docker compose up -d`.
+  5. Open `http://localhost:3000/`.
+- **Daily operations:**
+  - Logs: `docker compose logs -f longbox`
+  - Shell access: `docker compose exec longbox sh`
+  - Restart: `docker compose restart longbox`
+- **Backups:** Back up the `longbox-data` named Docker volume. It contains `longbox.db` (SQLite) — the entire catalog state. Library files themselves are on the host filesystem and backed up by whatever you already use for that.
+- **Updates:** `git pull && docker compose build && docker compose up -d`.
+- **Full reset:** `docker compose down -v` destroys the database volume and wipes the catalog. Library files on the host are never touched.
+- **Apple Silicon notes:**
+  - Image is built for `aarch64-unknown-linux-musl` — native arch, no emulation.
+  - Mac sleep pauses the container. Phase A scans are manual so this is irrelevant; Phase A.5's scheduled scans will need a workaround (host-side wake schedule, or running on a small always-on Linux box instead).
+  - SMB mounts need to be in Docker Desktop's File Sharing allow-list, or the bind mount fails silently and the container starts but reports an empty library on every scan.
+
+### Test strategy
+
+No automated tests for Docker packaging itself. Manual acceptance:
+
+1. `docker compose build` succeeds without warnings.
+2. Resulting image size is under 30 MB compressed (`docker images longbox:latest`).
+3. `docker compose up -d` produces a running, healthy container (`docker compose ps` shows healthy).
+4. `curl http://localhost:3000/api/health` returns 200 OK.
+5. Browser at `http://localhost:3000/` loads the SvelteKit UI.
+6. Add a series via UI; backend persists to the `longbox-data` volume.
+7. Trigger a scan against the bind-mounted library; scan completes; files are matched and visible in the UI.
+8. `docker compose restart longbox`; DB persists, UI shows the same state.
+9. `docker compose down && docker compose up -d`; DB still persists (named volume survives).
+10. `docker compose down -v && docker compose up -d`; clean install works from scratch (no series, library scan needed).
+
+Pass all ten and Phase A is done.
+
+### Apple Silicon arch decision
+
+Single-arch (`linux/arm64`) for Phase A. Multi-arch builds (`amd64` + `arm64`) are useful if you ever publish the image publicly or run it on a non-Apple Linux box; they double build time and aren't needed for the immediate Mac-Docker target. Adding `--platform linux/amd64,linux/arm64` to a future `docker buildx` invocation is a one-line change when that need appears.
+
+### Done definition
+
+End of Step 7: `docker compose up` produces a running LongBox container hosting a fully functional UI at `localhost:3000` against your real library. All ten manual acceptance steps pass. Image size under 30 MB. Health check works. Volumes persist data across restarts. `deploy/README.md` contains sufficient documentation for redeployment without consulting conversation history. The Step 6 leftover (`.gitignore` for `frontend-dist/_app/`) is cleaned up. **Phase A is complete.**
 
 ## Kickoff discipline
 
