@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET title = ?, sort_title = ?, start_year = ?,\n               publisher = ?, description = ?, cover_url = ?,\n               updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?\n           RETURNING id AS \"id!: i64\", cv_id, metron_id, title, sort_title,\n                     start_year, publisher, description, cover_url,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "metron_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "sort_title",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 9,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "updated_at: _",
+        "ordinal": 10,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "791efc938281a5acf05c40dd6c210c365b785906bf545f0a8c2bb2bae3e32e7d"
+}

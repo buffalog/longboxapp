@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", library_root_id AS \"library_root_id!: i64\",\n                  started_at AS \"started_at: _\", finished_at AS \"finished_at: _\",\n                  files_seen AS \"files_seen!: i64\",\n                  files_added AS \"files_added!: i64\",\n                  files_updated AS \"files_updated!: i64\",\n                  files_matched AS \"files_matched!: i64\",\n                  files_needs_review AS \"files_needs_review!: i64\",\n                  files_unmatched AS \"files_unmatched!: i64\",\n                  status, error_message\n           FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "library_root_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "started_at: _",
+        "ordinal": 2,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "finished_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "files_seen!: i64",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "files_added!: i64",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "files_updated!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "files_matched!: i64",
+        "ordinal": 7,
+        "type_info": "Int64"
+      },
+      {
+        "name": "files_needs_review!: i64",
+        "ordinal": 8,
+        "type_info": "Int64"
+      },
+      {
+        "name": "files_unmatched!: i64",
+        "ordinal": 9,
+        "type_info": "Int64"
+      },
+      {
+        "name": "status",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "7299a76659b0b43ed06a5855476acd378b65a7565bb3ebf5b91826e07b62c140"
+}
