@@ -1,0 +1,645 @@
+# LongBox — Phase A Build Brief
+
+## What you're building
+
+LongBox is a single-user, self-hosted comic library catalog. Phase A is the foundation: it knows what series the user tracks, what issues exist in those series, what files exist on disk, and what's missing. Nothing more.
+
+LongBox is NOT a fork or rebrand of Mylar. It is a from-scratch new product. Architectural decisions are made without reference to Mylar's choices except as cautionary examples.
+
+This brief is the contract. If a behavior isn't specified here, stop and ask. Do not infer scope.
+
+## Phase A "done" definition
+
+Phase A is complete when, on a fresh deployment against the user's real comic library (SMB-mounted, mixed tagged/untagged, potentially thousands of files), the user can:
+
+1. Configure the library root via the UI.
+2. Add series to the watchlist by searching ComicVine, picking a result, and getting a populated issue list — synchronously, with transactional rollback on any error.
+3. Click "Scan Library" and have LongBox walk the filesystem, parse ComicInfo.xml where present, parse filenames where it isn't, and produce a catalog of owned / needs_review / unmatched / ignored files.
+4. View per-series status (owned vs total) and a full-catalog view filtered by status.
+5. Resolve `needs_review` matches by picking the correct series + issue from autocompletes in the catalog view.
+6. Mark stray non-comic files as `ignored` so they stop appearing.
+7. Re-run a scan and have it complete in seconds (not minutes) for libraries up to 10K files via `(path, size, mtime)` cache hits.
+
+All seven working reliably against the user's real library = done. Anything more belongs to Phase B or later.
+
+## Architecture
+
+### Cargo workspace
+
+Rust workspace at the repo root. Five crates, hard boundaries:
+
+- **`longbox-core`** — domain types and pure logic. No I/O. No HTTP. No SQL. Defines `Series`, `Issue`, `LocalFile`, `MatchMethod`, `MatchResult`, the matcher algorithm, error types per domain. Must compile in isolation. Must be unit-tested without any external dependencies.
+
+- **`longbox-db`** — SQLx connection pool, migration runner, repository types. Owns the SQL. Exposes typed repository methods (`SeriesRepo::find_by_cv_id`, `FileRepo::insert`, etc.). Migrations live in `longbox-db/migrations/` using SQLx's standard naming.
+
+- **`longbox-comicvine`** — ComicVine API client. Owns rate-limiting (governor token bucket, 180/hr safety margin under CV's 200/hr cap), retry-with-backoff, response shape validation. Exposes typed methods: `search_volumes(query)`, `fetch_volume(cv_id)`, `fetch_issues(cv_volume_id)`. Callers never see `reqwest`.
+
+- **`longbox-scanner`** — filesystem walker and matcher. Two public entry points:
+  - `scan_full(library_root: &Path) -> ScanReport` — walks the filesystem, populates/updates the `files` table.
+  - `rematch_unmatched(series_id: i64) -> RematchReport` — runs the matcher against `unmatched`-status files, scoped to one series. No filesystem walk.
+
+- **`longbox-web`** — Axum HTTP server, route handlers, `rust-embed` integration for SvelteKit assets. Thinnest crate possible — handlers parse inputs, call into other crates, format responses. No business logic.
+
+The crate boundaries are not suggestions. The borrow checker should fail any attempt to leak SQLx types out of `longbox-db` or `reqwest::Client` out of `longbox-comicvine`. This is the architectural antidote to the god-file problem that broke the prior attempt.
+
+### Stack
+
+Backend:
+- Rust stable (latest at build time, >= 1.78)
+- Axum 0.7+ (HTTP)
+- Tokio 1.x (async runtime)
+- SQLx 0.7+ with `sqlite` + `runtime-tokio-rustls` features. **Offline mode required:** `sqlx-data.json` checked into the repo, regenerated via `cargo sqlx prepare` before any commit that touches SQL.
+- SQLite (bundled via `libsqlite3-sys` with `bundled` feature)
+- `tracing` + `tracing-subscriber` (structured logging, JSON in prod, pretty in dev, `RUST_LOG`-configurable)
+- `thiserror` (typed errors per crate)
+- `serde` + `serde_json`
+- `reqwest` with `rustls-tls` (NOT `native-tls`)
+- `governor` (rate limiting token bucket)
+- `zip` (.cbz extraction)
+- `quick-xml` (ComicInfo.xml parsing)
+- `regex` (filename matching)
+- `rust-embed` (frontend assets in binary)
+
+Frontend:
+- SvelteKit with Svelte 5 + runes API (not legacy reactive syntax)
+- TypeScript everywhere
+- Tailwind v4 OR plain CSS modules — pick one and commit. No shadcn, no component libraries. Phase A is functional, not pretty.
+- Vite build, output to `frontend/build/`, included at compile time via `rust-embed`
+
+### Deployment
+
+Target: Docker on Apple Silicon Mac. Linux ARM container.
+
+Build target: `aarch64-unknown-linux-musl`. Static binary, no runtime dependencies.
+
+Multi-stage Dockerfile:
+
+1. **Frontend builder:** `node:20-alpine`, runs `pnpm install` then `pnpm build` in `frontend/`.
+2. **Backend builder:** `rust:alpine` (current stable). Builds the workspace for `aarch64-unknown-linux-musl` with the frontend's `build/` directory in place so `rust-embed` picks it up.
+3. **Runtime:** `FROM scratch` (or `gcr.io/distroless/static-debian12` if debug tooling is needed). Copies the binary. Final image 15-25 MB.
+
+`docker-compose.yml` at the repo root:
+- Service `longbox`
+- `COMICVINE_API_KEY` from a `.env` file (gitignored)
+- Volume mount: `~/longbox/data` → `/data` (SQLite DB at `/data/longbox.db`)
+- Volume mount: Mac SMB-mount-point → `/comics:ro` (Phase A is filesystem-observer; read-only enforced at the mount)
+- Port: `8787:8787`
+
+The container MUST refuse to start if `COMICVINE_API_KEY` is unset, with a clear stderr message. Don't fall back to anything.
+
+## Data model
+
+### SQL DDL — initial migration
+
+```sql
+-- 0001_initial.sql
+
+CREATE TABLE library_roots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cv_id INTEGER UNIQUE,           -- nullable; unique when present (SQLite treats NULLs as distinct)
+    metron_id TEXT UNIQUE,          -- nullable; unique when present; reserved for Phase B
+    title TEXT NOT NULL,
+    sort_title TEXT NOT NULL,       -- normalized for matching: lowercase, "The"/"A" stripped, punctuation removed, whitespace collapsed
+    start_year INTEGER,
+    publisher TEXT,
+    description TEXT,
+    cover_url TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_series_sort_title ON series(sort_title);
+
+CREATE TABLE issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+    cv_issue_id INTEGER UNIQUE,
+    metron_issue_id TEXT UNIQUE,
+    number TEXT NOT NULL,           -- TEXT, not INTEGER — handles "1.MU", "Annual 2", "½", "Year One"
+    title TEXT,
+    cover_date TEXT,                -- "YYYY-MM-DD" or NULL
+    summary TEXT,
+    cover_url TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(series_id, number)
+);
+CREATE INDEX idx_issues_series ON issues(series_id);
+
+CREATE TABLE files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+    library_root_id INTEGER NOT NULL REFERENCES library_roots(id),
+    path_relative TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime TIMESTAMP NOT NULL,
+    last_scanned_at TIMESTAMP NOT NULL,
+    match_method TEXT NOT NULL,     -- enum (see below)
+    match_confidence REAL NOT NULL, -- 0.0..1.0
+    status TEXT NOT NULL,           -- enum (see below)
+    cached_comicinfo_xml TEXT,
+    cached_at TIMESTAMP,
+    UNIQUE(library_root_id, path_relative)
+);
+CREATE INDEX idx_files_issue ON files(issue_id);
+CREATE INDEX idx_files_status ON files(status);
+CREATE INDEX idx_files_match_method ON files(match_method);
+
+-- match_method enum values (enforce in application code, not DB):
+--   'comicinfo_web_cv'      — extracted CV issue ID from <Web> URL inside ComicInfo.xml; confidence 1.0
+--   'comicinfo_web_metron'  — extracted Metron issue ID from <Web> URL; passive Metron ingestion; confidence 1.0
+--   'comicinfo_xml'         — matched via <Series> + <Number> in ComicInfo.xml
+--   'filename_regex'        — matched via filename parsing
+--   'manual'                — user resolved via disambiguation UI; confidence 1.0
+--   'unmatched'             — no plausible match
+--   'ignored'               — user marked as not-a-comic
+
+-- status enum:
+--   'owned'         — confidence >= threshold AND issue_id is set
+--   'needs_review'  — confidence < threshold but a candidate exists; issue_id may be set
+--   'unmatched'     — no candidate found; issue_id NULL
+--   'ignored'       — user-marked; not surfaced in catalog views
+
+CREATE TABLE scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_root_id INTEGER NOT NULL REFERENCES library_roots(id),
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP,
+    files_seen INTEGER NOT NULL DEFAULT 0,
+    files_added INTEGER NOT NULL DEFAULT 0,
+    files_updated INTEGER NOT NULL DEFAULT 0,
+    files_matched INTEGER NOT NULL DEFAULT 0,
+    files_needs_review INTEGER NOT NULL DEFAULT 0,
+    files_unmatched INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',  -- 'running', 'completed', 'failed'
+    error_message TEXT
+);
+
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Reserved keys:
+--   'match_confidence_threshold' — default '0.85'
+--   'library_root_path'          — set via UI on first run
+
+CREATE TABLE parsing_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,             -- human-readable, e.g. "Series #NNN (YYYY)"
+    pattern TEXT NOT NULL,          -- named-capture regex
+    priority INTEGER NOT NULL,      -- lower = tried first
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Seed with 3-5 default patterns covering common filename shapes.
+```
+
+### Schema rationale (terse)
+
+- `cv_id` and `metron_id` are nullable+unique. SQLite's UNIQUE treats multiple NULLs as distinct, which is what we want.
+- `issues.number` is TEXT. Integers do not represent the comics industry's issue numbering.
+- `files.cached_comicinfo_xml` lets re-matching avoid re-reading the .cbz unless `(size, mtime)` changes. Phase A's rescan-in-seconds requirement depends on this.
+- `files.status` is denormalized from `(match_confidence, issue_id)` for query speed. Set on insert/update via application logic.
+- `scan_runs` lets the UI poll progress without coupling to the scanner's in-memory state.
+- `parsing_patterns` is data, not code. The user teaches the matcher about their library's filename quirks by editing this table (eventually via a settings UI; in Phase A, via direct SQL is acceptable).
+
+## Behavior
+
+### Add Series flow
+
+User journey:
+
+1. User clicks "Add Series" on `/`.
+2. Modal opens with a search input.
+3. User types "Walking Dead" → after 400ms debounce, frontend POSTs `/api/series/search` with `{ "query": "walking dead" }`.
+4. Backend calls `ComicVineClient::search_volumes(query)`. CV returns up to 100 results. Backend projects to minimal shape (CV ID, name, year, publisher, issue count, image URL) and returns to frontend.
+5. Frontend renders results as cards. User clicks one.
+6. Frontend POSTs `/api/series` with `{ "cv_id": 12345 }`.
+7. Backend opens a SQL transaction:
+   - Check `series.cv_id` for duplicate; if found, return existing series with HTTP 200 and a `duplicate: true` flag.
+   - Call `ComicVineClient::fetch_volume(cv_id)` for series detail.
+   - Insert `series` row.
+   - Call `ComicVineClient::fetch_issues(cv_volume_id)` paginated (100 per page); for each, insert `issues` row.
+   - Commit.
+8. After commit, call `Scanner::rematch_unmatched(series_id)`.
+9. Return `{ "series": {...}, "issues_count": N, "newly_matched_count": M, "duplicate": false }`.
+10. Frontend updates the watchlist view.
+
+If any step in (7) fails, the transaction rolls back. No partial series ever lives in the DB. Errors are surfaced as typed HTTP responses:
+- 503 with `Retry-After` header for CV rate limiting
+- 502 for CV returning malformed data
+- 504 for CV timeout
+- 500 for unexpected backend errors (with the actual error logged, not exposed)
+
+### CV rate limiting
+
+`governor` token bucket sized at 180 requests/hour (safety margin under CV's documented 200/hour cap). If a request would exceed the limit, the client either blocks for up to 60 seconds waiting for a slot, or returns `Error::RateLimited(retry_after_seconds)` if the wait would exceed that. Handlers turn rate-limit errors into 503 + `Retry-After` responses.
+
+CV returns 429 sometimes anyway (their actual limit isn't perfectly aligned with documentation). Treat any 429 from CV as authoritative — sleep for the duration in `Retry-After`, then retry once. After one retry, surface the error.
+
+### Scan Library flow
+
+User clicks "Scan Library" on `/scan`. Frontend POSTs `/api/scans`:
+
+1. Backend inserts a `scan_runs` row with `status = 'running'`.
+2. Spawns a `tokio::spawn` background task that runs the scanner.
+3. Returns the scan_run ID immediately.
+
+Frontend polls `GET /api/scans/<id>` every 2 seconds until `status != 'running'`. Shows progress: seen / added / updated / matched / needs_review / unmatched.
+
+The background task:
+
+1. Walks `library_root` recursively.
+2. For each candidate file (extension `.cbz`, `.cbr`, `.cb7`, case-insensitive; skip hidden files, `.DS_Store`, `Thumbs.db`):
+   - Compute `path_relative` from the library root.
+   - Check `files` for existing row at `(library_root_id, path_relative)`.
+   - **If exists and `(size, mtime)` unchanged:** update `last_scanned_at` only. Increment `files_seen`. Skip everything else.
+   - **If exists but `(size, mtime)` differ:** re-read ComicInfo.xml (cbz only), re-run matcher, update row. Increment `files_updated`.
+   - **If doesn't exist:** read ComicInfo.xml, run matcher, insert row. Increment `files_added`.
+3. After the walk, run garbage collection: any `files` row whose `(library_root_id, path_relative)` no longer exists on disk gets deleted. Log each deletion.
+4. Update `scan_runs` row: set `finished_at`, `status = 'completed'`, final counts.
+
+For `.cbr` and `.cb7` files in Phase A: don't attempt extraction (unrar/7zip is out of scope). Insert with `match_method = 'unmatched'`, `match_confidence = 0.0`, `status = 'unmatched'`, and a log line noting the format. Phase B may add format support.
+
+### Match algorithm (priority order)
+
+The matcher runs per-file. It returns `MatchResult { issue_id: Option<i64>, method: MatchMethod, confidence: f64 }`.
+
+**Tier 1: `<Web>` URL extraction (confidence 1.0).**
+
+Parse ComicInfo.xml. If a `<Web>` element contains a URL matching:
+- `comicvine\.gamespot\.com/(?:issue|issue-detail)/?[^/]*?/?(\d+-\d+)` → extract CV issue ID, look up in `issues.cv_issue_id`. If found, return match with method `comicinfo_web_cv`, confidence 1.0.
+- `metron\.cloud/issue/([\w-]+)` → extract Metron slug. Look up in `issues.metron_issue_id`. If found, return match with method `comicinfo_web_metron`, confidence 1.0. **This is the passive Metron ingestion** — we capture Metron IDs from ComicInfo.xml even though we don't call Metron's API in Phase A.
+
+If neither URL matches an existing issue, fall through to Tier 2.
+
+**Tier 2: ComicInfo.xml `<Series>` + `<Number>` (confidence 0.65–0.99).**
+
+Parse `<Series>`, `<Volume>` (year), `<Number>`. Normalize Series text (`normalize_title` in `longbox-core`: lowercase, strip leading "The"/"A"/"An", drop punctuation except hyphens, collapse whitespace). Compare to `series.sort_title` (same normalization applied at series-insert time).
+
+Similarity score: token-set ratio (Jaccard on word tokens) or normalized Levenshtein, whichever's more robust in testing. Tie-break: prefer matches where `<Volume>` equals `series.start_year`.
+
+If best match's score >= threshold (default 0.85): return with method `comicinfo_xml`, confidence = score.
+If score in [0.65, 0.85): return with method `comicinfo_xml`, confidence = score, `needs_review` candidate.
+If score < 0.65: fall through to Tier 3.
+
+**Tier 3: filename regex (confidence ceiling 0.85).**
+
+Run filename through enabled `parsing_patterns` ordered by priority. First pattern that captures both `series` and `number` named groups wins. Apply Tier 2's normalization + similarity comparison.
+
+Confidence ceiling at 0.85 for filename matches: even a perfect filename match can never beat a ComicInfo.xml hit. This biases the system toward trusting embedded metadata over filenames.
+
+Same threshold rules apply for `owned` / `needs_review` / `unmatched` outcomes.
+
+### Default seed parsing patterns
+
+Insert these into `parsing_patterns` via the initial migration. **Note priority order: pattern 4 (volume-aware) runs FIRST so it can claim filenames containing volume markers before patterns 1–3 absorb them.**
+
+1. `^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$` (priority **5**, "Series Vol N #M") — case-insensitive volume keyword, runs first
+2. `^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)(?:\s+-\s+(?P<title>.+))?\.(?i:cbz|cbr|cb7)$` (priority 10, "Series #NNN (YYYY)")
+3. `^(?P<series>.+?)\s+(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)\.(?i:cbz|cbr|cb7)$` (priority 20, "Series NNN (YYYY)")
+4. `^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7)$` (priority 30, "Series_NNN" or "Series NNN" no year, no volume)
+
+### Disambiguation flow
+
+`/files?status=needs_review` shows a paginated table:
+
+| File path | Inferred Series | Inferred # | Method | Confidence | Resolve |
+|-----------|-----------------|------------|--------|-----------|---------|
+| `Saga 01.cbz` | Saga (2012) | 1 | filename_regex | 0.72 | [Series ▾] [Issue ▾] [✓ Save] [Ignore] |
+
+Each row provides:
+- **Series autocomplete** scoped to the watchlist. Type-ahead filters by `sort_title`.
+- **Issue picker** populated from the selected series' issue list.
+- **Save (✓)** button: commits `issue_id`, sets `match_method = 'manual'`, `match_confidence = 1.0`, `status = 'owned'`.
+- **Ignore** button: sets `status = 'ignored'`, `issue_id = NULL`, `match_method = 'ignored'`.
+- **"+ Add new series from CV"** option at the bottom of the series autocomplete — opens the Add Series modal. After the new series exists, the autocomplete refreshes.
+
+Batch operations (select multiple rows, bulk save/ignore) are NOT in Phase A.
+
+## UI
+
+### Routes
+
+- **`/`** — Watchlist overview. Lists tracked series. Each row: cover thumbnail, title, year, owned/total badge, link to series detail. "Add Series" button.
+- **`/series/:id`** — Series detail. Cover, metadata, full issue list (table). Each issue row: number, title, cover date, status (owned/missing/needs_review). Owned issues show file path. Action: "Refresh from ComicVine" re-fetches volume + issues and re-runs `rematch_unmatched`.
+- **`/files`** — File browser with status filter (`?status=owned|needs_review|unmatched|ignored|all`). Default filter is `needs_review`. Disambiguation UI lives here.
+- **`/scan`** — Scan status. Latest `scan_runs` row prominently. History of last 20 runs. "Scan Library Now" button (disabled while a scan is running, locked by checking for any `scan_runs` row with `status = 'running'`).
+- **`/settings`** — Library root configuration (set/change library_root path; warning that changing it invalidates the catalog). Confidence threshold slider (default 0.85, range 0.50–0.99). API key status (shown as "configured" / "missing"; never displays the value).
+
+### Layout principles
+
+- Single top nav bar with the five routes. No sidebar, no breadcrumbs, no footer.
+- Tables for catalog data, not card grids. Density matters; prettiness doesn't.
+- Loading states are visible — spinners during sync requests, progress bars during scans. No silent waiting.
+- Errors are typed and human-readable. Never expose a raw stack trace, SQL error, or `reqwest::Error::Debug` to the user.
+- Dark mode is fine if it falls out of CSS variables; otherwise skip in Phase A.
+
+## HTTP API
+
+Routes the backend MUST expose. JSON in, JSON out.
+
+```
+GET    /api/health                       → 200 {"status":"ok"}
+GET    /api/settings                     → 200 {settings...}
+PUT    /api/settings                     → 200 {settings...}
+GET    /api/library-roots                → 200 [{id,path,...}]
+POST   /api/library-roots                → 201 {id,path,...}
+GET    /api/series                       → 200 [{series with owned/total counts}]
+GET    /api/series/:id                   → 200 {series + issues}
+POST   /api/series/search                → 200 {results: [CV search results]}
+POST   /api/series                       → 201 {series, issues_count, newly_matched_count, duplicate}
+POST   /api/series/:id/refresh           → 200 {series, issues_count, newly_matched_count}
+DELETE /api/series/:id                   → 204
+GET    /api/files                        → 200 [{file}]   (supports ?status=... filter)
+PATCH  /api/files/:id                    → 200 {file}     (used for disambiguation: set issue_id, mark ignored)
+POST   /api/scans                        → 202 {scan_run_id}
+GET    /api/scans/:id                    → 200 {scan_run}
+GET    /api/scans                        → 200 [last 20 scan_runs]
+```
+
+Frontend served from `/` (and any non-`/api/*` path) by `rust-embed`. SPA routing handled client-side.
+
+## Out of scope — HARD
+
+Build NONE of the following in Phase A. If you find yourself reasoning toward adding one, STOP and ask:
+
+- Any download integration (Prowlarr, SAB, NZBGet, Transmission, qBittorrent, DDL, blackhole watch dirs)
+- Post-processing (file moves, renames, ComicTagger writes, any mutation of files in the library)
+- Story arc tracking
+- Weekly pull-list scraping (LOCG or anywhere else)
+- OPDS serving
+- In-browser comic reader UI
+- Active Metron API integration (the column exists and we capture IDs passively from `<Web>` URLs; we do NOT call Metron's API)
+- Notification fanout (Discord, Slack, Pushbullet, anything)
+- Multi-user, authentication, sessions
+- File watcher (FSEvents, inotify, fswatch)
+- Scheduled scans
+- CSV/JSON export
+- Bulk disambiguation operations
+- `.cbr` / `.cb7` extraction (insert as unmatched in Phase A)
+- Any settings UI for the CV API key (env var only)
+
+## Build approach
+
+### Recommended order — bottom-up
+
+Don't build top-down. Build each layer in isolation, test it, then move up.
+
+1. **`longbox-core`** — domain types, enums, normalization functions, the pure match algorithm. Unit tests for matcher edge cases: annuals, decimal issue numbers, prefix-stripped series, "The Walking Dead" vs "Walking Dead", etc. No DB, no HTTP.
+
+2. **`longbox-db`** — `migrations/0001_initial.sql`, repository types, basic CRUD. Integration tests against in-memory SQLite (`:memory:`). No business logic in repos — just typed wrappers around SQL.
+
+3. **`longbox-comicvine`** — start with `search_volumes` only. Wire rate limiter + retry. Test with `wiremock` against recorded CV response fixtures (don't hammer the real CV in tests). Add `fetch_volume` and `fetch_issues` once `search_volumes` is solid.
+
+4. **`longbox-scanner`** — `scan_full` first, then `rematch_unmatched`. Create `testdata/library/` with ~20 sample files: some with ComicInfo.xml (with CV `<Web>` URLs, with Metron `<Web>` URLs, with both, with neither), some untagged with valid filename patterns, some untagged with junk filenames, some `.DS_Store` and `Thumbs.db` to test skip logic, a `.cbr` and a `.cb7` to test format-unsupported path. Integration-test against this fixture.
+
+5. **`longbox-web`** — Axum app, routes, handlers. Each handler is thin. Verify API surface works with `curl` before touching the frontend.
+
+6. **SvelteKit frontend** — five routes, plain tables, minimal styling. API contract is fixed by step 5; frontend consumes it.
+
+7. **Dockerfile + docker-compose.yml** — production deployment, multi-stage, scratch runtime.
+
+8. **End-to-end smoke test** in `scripts/e2e.sh` that boots the binary, points it at the fixture library, exercises Add Series → Scan → catalog read.
+
+At each step, verify against a real or fixture scenario. Don't move on until the current layer's tests pass.
+
+### Testing
+
+- **Unit tests** in `#[cfg(test)] mod tests` blocks for `longbox-core`. The matcher's edge cases get extensive coverage.
+- **Integration tests** in `tests/` directories of `longbox-db` (in-memory SQLite), `longbox-comicvine` (wiremock + recorded fixtures), `longbox-scanner` (the fixture library).
+- **One end-to-end smoke test** in `scripts/e2e.sh`.
+- **No frontend tests in Phase A.** Visual inspection is the test for UI.
+
+### Tooling
+
+- `cargo fmt` + `cargo clippy --all-targets -- -D warnings` as pre-commit hooks. Code must be lint-clean.
+- `cargo sqlx prepare` before any commit that adds/changes SQL queries. `sqlx-data.json` is committed.
+- `cargo deny check` in CI for supply-chain hygiene.
+
+## Standing rules
+
+- **No commits unless explicitly asked.** Stop and surface changes before committing. Show what you'd commit, wait for "go."
+- **No destructive ops without per-action confirmation:** `git push`, `git reset --hard`, `rm -rf`, force flags, dropping tables, anything that can't be undone. Ask first.
+- **Read files before editing.** Don't assume; verify. If you've just edited a file, re-view it before editing it again — your earlier view is stale.
+- **Run code to verify behavior.** Don't infer correctness from inspection alone. Run the tests. Run the binary. Curl the endpoints. Actually look at the JSON.
+- **Fact-check present-day claims** before stating them. Especially: ComicVine's API surface (undocumented edges), Axum middleware patterns (changes across versions), SQLx offline mode (version-specific quirks), governor's API (recently refactored). Don't trust training data on third-party APIs.
+- **Direct tone, swearing fine.** No flattery, no preamble, no hedging. No "Great question!" or "I'd be happy to..." Just the work.
+- **Hardware not constrained:** Apple Silicon Mac for dev, Docker for deploy. Don't suggest downgrading models or sampling subsets to "save resources."
+- **Surface ambiguity, don't guess.** If a behavior isn't specified in this brief, ask before implementing. This whole project exists because the prior attempt was engineered in reverse — nothing gets invented in-flight this time.
+
+---
+
+## Step 1 — Approved file structure for `longbox-core`
+
+This is the approved file layout. Do not re-propose it; build it.
+
+```
+longbox-core/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── error.rs
+    ├── series.rs
+    ├── issue.rs
+    ├── file.rs
+    ├── matcher.rs
+    ├── similarity.rs
+    ├── normalize.rs
+    ├── comicinfo.rs
+    └── filename.rs
+```
+
+**File responsibilities:**
+
+- **`lib.rs`** — Crate root. Module declarations and re-exports of the public API (`Series`, `Issue`, `LocalFile`, `MatchMethod`, `FileStatus`, `MatchResult`, `match_file`, `parse_comicinfo`, `parse_filename`, `normalize_title`).
+- **`error.rs`** — `CoreError` enum via `thiserror`, covering match failures, ComicInfo parse errors, filename parse errors, invalid issue numbers. No I/O errors (this crate doesn't do I/O).
+- **`series.rs`** — `Series` struct (id, cv_id, metron_id, title, sort_title, start_year, publisher, etc.) and its constructor that produces a normalized `sort_title` from the raw title.
+- **`issue.rs`** — `Issue` struct and `IssueNumber` newtype that wraps a `String` but exposes ordering and comparison logic for "1", "1.MU", "Annual 2", "½", "Year One", "-1" — the messy real-world numbering. `IssueNumber` implements `PartialEq` + `Eq` + `Hash` on the raw string (so "01" and "1" are distinct values, matching DB behavior). It does NOT implement `Ord` or `PartialOrd` — natural ordering is provided as `IssueNumber::natural_cmp(&self, other: &Self) -> std::cmp::Ordering`. Callers sort with `vec.sort_by(IssueNumber::natural_cmp)`. Semantic equality (treating "01" and "1" as the same issue for matching) is `IssueNumber::matches(&self, other: &Self) -> bool`. The split is deliberate: raw equality for storage, natural ordering for display, semantic matching for the matcher. Document this in the module-level doc comment.
+- **`file.rs`** — `LocalFile` struct, plus the two enums: `MatchMethod` (`ComicInfoWebCv`, `ComicInfoWebMetron`, `ComicInfoXml`, `FilenameRegex`, `Manual`, `Unmatched`, `Ignored`) and `FileStatus` (`Owned`, `NeedsReview`, `Unmatched`, `Ignored`). Also defines `classify_status(issue_id: Option<i64>, confidence: f64, method: MatchMethod, threshold: f64) -> FileStatus` — the post-match policy function that takes a `MatchResult`'s fields plus the user-tunable threshold and returns the file's status. Lives here because `FileStatus` lives here; keeps the matcher pure.
+- **`matcher.rs`** — The match cascade. Public function `match_file(file: &FileContext, series_pool: &[Series], issue_pool: &[Issue]) -> MatchResult`. Internally runs Tier 1 → Tier 2 → Tier 3 in order. `MatchResult` and `MatchCandidate` types live here. The matcher returns raw match data only (issue_id, method, confidence); status classification is the caller's job via `file::classify_status`. The 0.65 tier-fallthrough floor is an internal constant, not the user threshold.
+- **`similarity.rs`** — Pure similarity scoring. Token-set ratio (Jaccard on word tokens) and normalized Levenshtein. Functions return `f64` in `[0.0, 1.0]`. Heavily unit-tested.
+- **`normalize.rs`** — `normalize_title(&str) -> String` — lowercase, strip leading "The"/"A"/"An", drop punctuation except hyphens, collapse whitespace. Same function used at series-insert time AND at match time so both sides of the comparison are in the same normalized space.
+- **`comicinfo.rs`** — Pure ComicInfo.xml parser. Takes `&[u8]` or `&str` (NOT a file path — I/O happens in `longbox-scanner` which hands the bytes to this crate). Returns a `ComicInfo` struct: Series, Number, Volume, Web (Vec — multiple URLs allowed), Title, Summary. URL extraction for CV and Metron lives here.
+- **`filename.rs`** — Pure filename pattern matching. Takes a filename `&str` and a `&[ParsingPattern]` (loaded from the DB by the caller), returns `Option<ParsedFilename>` with extracted series/number/year/title. Regex compilation cached per pattern.
+
+**`Cargo.toml` dependencies:**
+
+```toml
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+quick-xml = { version = "0.31", features = ["serialize"] }
+regex = "1"
+time = { version = "0.3", features = ["serde", "macros"] }
+```
+
+No async runtime. No SQLx. No reqwest. No Tokio. This crate compiles without any of them, which is the architectural enforcement that it stays pure.
+
+**The seam that matters:** `matcher.rs` takes candidate series and issues as slices, NOT as a DB connection. The caller (`longbox-scanner` in Step 4) fetches the candidate pool from the DB and hands it in. This is what makes `longbox-core` testable in pure isolation — every test constructs in-memory `Series` and `Issue` values, runs the matcher, asserts the result. No `tokio::test`, no `#[sqlx::test]`, no test database. Just Rust.
+
+Same principle for `comicinfo.rs` and `filename.rs`: they take bytes/strings, not paths. The scanner does the I/O, hands in the parsed contents.
+
+**Test coverage expected at the end of Step 1**, in `#[cfg(test)] mod tests` blocks:
+
+- `normalize.rs`: 15-20 cases — "The Walking Dead" vs "Walking Dead", "X-Men" preserving the hyphen, multiple spaces collapsing, etc.
+- `similarity.rs`: 10-15 cases — identical, near-identical, totally different, common substring vs different ordering.
+- `issue.rs`: edge cases for `IssueNumber` — "1" < "2", "1.MU" comparable to "1", "Annual 2" ordered after numeric, "½" handled as 0.5 for sort.
+- `comicinfo.rs`: happy path, missing `<Web>`, CV `<Web>` only, Metron `<Web>` only, both, malformed XML.
+- `filename.rs`: each default pattern's happy path, edge cases (underscores, multiple spaces, year-after-name-without-parens).
+- `matcher.rs`: each tier hit, fallthrough between tiers, threshold boundary (0.85 exactly), `needs_review` zone (0.65–0.85), unmatched (below 0.65).
+
+End of Step 1: a thoroughly-tested pure logic crate that compiles in seconds and runs all tests in under 1 second. The rest of the project layers I/O on top of this.
+
+## Step 2 — Approved file structure for `longbox-db`
+
+This is the approved file layout. Do not re-propose it; build it.
+
+```
+longbox-db/
+├── Cargo.toml
+├── migrations/
+│   └── <timestamp>_initial.sql
+└── src/
+    ├── lib.rs
+    ├── error.rs
+    ├── pool.rs
+    ├── series_repo.rs
+    ├── issue_repo.rs
+    ├── file_repo.rs
+    ├── library_root_repo.rs
+    ├── scan_run_repo.rs
+    ├── settings_repo.rs
+    └── parsing_pattern_repo.rs
+```
+
+Use `sqlx migrate add initial` to generate the migration filename (sqlx-cli stamps a timestamp prefix). The single `_initial.sql` migration contains the full DDL from the **Data model** section above, plus the seed inserts below.
+
+**File responsibilities:**
+
+- **`lib.rs`** — Crate root. Module declarations and re-exports of the public API: `DbError`, the row types (`SeriesRow`, `IssueRow`, `FileRow`, `LibraryRootRow`, `ScanRunRow`, `ScanRunStatus`, `ParsingPatternRow`), and each repo module.
+
+- **`error.rs`** — `DbError` via `thiserror`. Wraps `sqlx::Error` with domain-specific variants: `NotFound`, `UniqueViolation { field: &'static str }`, `MigrationFailed`, `Other(#[from] sqlx::Error)`. Application code matches on these instead of inspecting SQLite error codes directly.
+
+- **`pool.rs`** — Connection pool setup. Single public async function `open(path: &Path) -> Result<SqlitePool, DbError>` that builds the pool with these pragmas applied at connect time: `journal_mode = WAL`, `foreign_keys = ON`, `synchronous = NORMAL`, `busy_timeout = 5000` (ms). Runs pending migrations via `sqlx::migrate!("./migrations").run(&pool).await?` before returning. The pool is what other crates depend on.
+
+- **`series_repo.rs`** — Module of free async functions on the `series` table: `find_by_id`, `find_by_cv_id`, `find_by_metron_id`, `list_all`, `insert(NewSeries) -> Series`, `update(id, SeriesUpdate)`. All functions take a generic executor: `where E: SqliteExecutor<'e>`. This lets callers pass `&SqlitePool` (single statement) or `&mut Transaction<'_, Sqlite>` (transactional) interchangeably. Maps between domain `Series` (from `longbox-core`) and `SeriesRow` (DB representation including auto-generated id and timestamps).
+
+- **`issue_repo.rs`** — Same shape, `issues` table: `find_by_id`, `find_by_cv_issue_id`, `find_by_metron_issue_id`, `list_by_series`, `insert(NewIssue) -> Issue`, `bulk_insert(Vec<NewIssue>) -> Vec<Issue>` (single SQL statement using `INSERT ... VALUES (..),(..),(..)` — the Add Series flow inserts up to ~1000 issues at once for mega-series like Action Comics, and per-row inserts are way too slow), `update(id, IssueUpdate)`. Same generic executor pattern.
+
+- **`file_repo.rs`** — Same shape, `files` table: `find_by_id`, `find_by_path(library_root_id, path_relative)`, `list_by_library_root`, `list_by_status`, `list_unmatched_for_series(library_root_id) -> Vec<File>` (the hot path for `rematch_unmatched`), `list_by_issue`, `insert`, `update`, `delete`. The update method must support setting `issue_id` to NULL (for "ignore this file"), and the `(library_root_id, path_relative)` cache lookup is a hot read path.
+
+- **`library_root_repo.rs`** — Operations on `library_roots`. `find_by_id`, `list_all`, `insert(path)`, `update_path(id, new_path)`. Phase A has exactly one row at most, but the repo treats it as a table of N for future-proofing.
+
+- **`scan_run_repo.rs`** — Operations on `scan_runs`. `find_by_id`, `list_recent(limit: u32)`, `insert(library_root_id) -> ScanRun`, `update_progress(id, counts)`, `complete(id)`, `fail(id, error_message)`. The `update_progress` method is called many times during a scan; it must be a single UPDATE statement, no SELECT-then-UPDATE.
+
+- **`settings_repo.rs`** — Key-value access for the `settings` table. `get(key) -> Option<String>`, `set(key, value)`, `get_or_default<T: FromStr>(key, default: T) -> T`. Reserved keys exposed as `pub const` strings: `KEY_MATCH_CONFIDENCE_THRESHOLD = "match_confidence_threshold"`, `KEY_LIBRARY_ROOT_PATH = "library_root_path"`.
+
+- **`parsing_pattern_repo.rs`** — Operations on `parsing_patterns`. `list_enabled() -> Vec<ParsingPattern>` (ordered by priority ascending — this is what the matcher loads via the scanner in Step 4), `find_by_id`, `insert`, `update`, `set_enabled(id, bool)`. Phase A doesn't surface a UI for pattern editing; the seed inserts cover the common cases, and the user can shell into SQLite if they need custom patterns.
+
+**Migration seed content (verbatim):**
+
+The `_initial.sql` migration contains the full DDL from the **Data model** section above, followed by these seed inserts:
+
+```sql
+-- Default confidence threshold
+INSERT INTO settings (key, value) VALUES
+  ('match_confidence_threshold', '0.85');
+
+-- Default parsing patterns. Priority order matters: lower numbers run first.
+-- Pattern at priority 5 (volume-aware) runs first so it can claim filenames
+-- containing volume markers before later patterns absorb them.
+INSERT INTO parsing_patterns (name, pattern, priority, enabled) VALUES
+  ('Series Vol N #M',
+   '^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$',
+   5, 1),
+  ('Series #NNN (YYYY)',
+   '^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)(?:\s+-\s+(?P<title>.+))?\.(?i:cbz|cbr|cb7)$',
+   10, 1),
+  ('Series NNN (YYYY)',
+   '^(?P<series>.+?)\s+(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)\.(?i:cbz|cbr|cb7)$',
+   20, 1),
+  ('Series_NNN or Series NNN',
+   '^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7)$',
+   30, 1);
+```
+
+No other initial data. `library_roots` starts empty (user configures via UI in Step 5). `scan_runs` starts empty.
+
+**No DDL changes** since the original brief. The schema rationale is unchanged. Step 1 surfaced no foundation-shifting findings.
+
+**`Cargo.toml` dependencies:**
+
+```toml
+[dependencies]
+longbox-core = { path = "../longbox-core" }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "time"] }
+thiserror = "1"
+time = { version = "0.3", features = ["serde", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+```
+
+**SQLx offline mode setup:**
+
+After implementing all repo functions, run `cargo sqlx prepare --workspace` from the workspace root to generate `sqlx-data.json`. Commit it. From this point on, any change to a query string requires regenerating `sqlx-data.json` before commit. CI builds will fail loudly if `sqlx-data.json` is stale.
+
+For dev workflow: developers need a real SQLite file with the migrations applied to run `sqlx prepare`. Create `scripts/prepare-sqlx.sh` that does this end-to-end:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export DATABASE_URL="sqlite:./target/sqlx-prepare.db"
+rm -f ./target/sqlx-prepare.db
+sqlx database create
+sqlx migrate run --source longbox-db/migrations
+cargo sqlx prepare --workspace
+rm -f ./target/sqlx-prepare.db
+```
+
+Run that script after any SQL change. The throwaway DB lives in `target/` so it's gitignored.
+
+**Test coverage expected at the end of Step 2**, in `tests/` of the crate:
+
+- **Migration sanity:** runs cleanly against `:memory:` SQLite; schema is created; all indexes exist; seed data is present (one settings row, four parsing_patterns rows in correct priority order).
+- **Each repo's happy path:** insert + find_by_id, insert + list_*, update, delete (where applicable). One test per public function.
+- **Unique violations surface as typed `DbError::UniqueViolation`:**
+  - Two series with same `cv_id` → `UniqueViolation { field: "cv_id" }`
+  - Two issues with same `(series_id, number)` → `UniqueViolation { field: "issues_series_id_number" }` (match the actual constraint name SQLite reports)
+  - Two library_roots with same path → `UniqueViolation { field: "path" }`
+- **`issue_repo::bulk_insert`:** correctly returns inserted rows in input order, and is fast — a test that inserts 500 issues completes in under 100ms on a `:memory:` DB.
+- **`file_repo::list_unmatched_for_series`:** correctly filters — insert files in various statuses, verify only `unmatched` rows are returned for the right library root.
+- **Transactional behavior:** open a transaction, insert series, insert issues, error out before commit — verify the DB has no rows. Then redo and commit — verify rows are present. Tests both paths.
+- **`scan_run_repo::update_progress`:** idempotent — calling it twice with the same values leaves the row in the same state.
+- **`settings_repo`:** `get` returns `None` for unset key, `Some(value)` after set, returns the latest value after multiple sets; `get_or_default` returns the default for missing keys.
+- **`parsing_pattern_repo::list_enabled`:** returns rows in priority order ascending. Disabling a pattern removes it from the list. The four seed patterns are present at priorities 5, 10, 20, 30.
+
+Roughly 30-35 test cases total. Integration-style (real `:memory:` SQLite), one test process per test, no shared state. Each test creates its own pool via `pool::open(":memory:")` so migrations run fresh.
+
+End of Step 2: a thoroughly-tested repository layer that the rest of the project can rely on. All SQL is offline-verified. All schema constraints are exercised. Step 3 (`longbox-comicvine`) can build against a stable DB contract.
+
+## Kickoff discipline
+
+Before writing any code:
+
+1. Read this brief end to end.
+2. Surface ANY ambiguity or contradiction you find. The point of this brief is that nothing gets engineered in-flight — if something is unclear, ask, don't guess.
+3. Wait for confirmation that there are no open questions before starting Step 1.
+
+After Step 1 is written and all tests pass:
+
+1. Run `cargo test --package longbox-core` and confirm all green.
+2. Run `cargo clippy --package longbox-core --all-targets -- -D warnings` and confirm clean.
+3. Surface what you built — show me the public API surface and the test output.
+4. Wait for explicit "proceed to Step 2" before touching anything else.
+
+Same discipline applies at every step boundary: build, test, surface, wait. No "while I'm in there" additions. No skipping ahead.

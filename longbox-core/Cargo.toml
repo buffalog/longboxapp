@@ -1,0 +1,17 @@
+[package]
+name = "longbox-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox domain types and pure logic. No I/O, no HTTP, no SQL."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+quick-xml = { version = "0.31", features = ["serialize"] }
+regex = "1"
+time = { version = "0.3", features = ["serde", "macros"] }
