@@ -1,0 +1,32 @@
+{
+    "status_code": 1,
+    "error": "OK",
+    "limit": 100,
+    "offset": 0,
+    "number_of_page_results": 2,
+    "number_of_total_results": 3,
+    "results": [
+        {
+            "id": 10001,
+            "issue_number": "1",
+            "name": "Days Gone Bye",
+            "cover_date": "2003-10-08",
+            "description": "<p>Rick Grimes wakes up in a hospital alone.</p>",
+            "image": {
+                "medium_url": "https://comicvine.gamespot.com/a/uploads/scale_medium/wd-1.jpg"
+            },
+            "site_detail_url": "https://comicvine.gamespot.com/the-walking-dead-1-days-gone-bye/4000-10001/"
+        },
+        {
+            "id": 10002,
+            "issue_number": "2",
+            "name": "Miles Behind Us",
+            "cover_date": "2003-11-12",
+            "description": null,
+            "image": {
+                "medium_url": "https://comicvine.gamespot.com/a/uploads/scale_medium/wd-2.jpg"
+            },
+            "site_detail_url": "https://comicvine.gamespot.com/the-walking-dead-2/4000-10002/"
+        }
+    ]
+}

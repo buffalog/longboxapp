@@ -1,0 +1,21 @@
+{
+    "status_code": 1,
+    "error": "OK",
+    "limit": 100,
+    "offset": 2,
+    "number_of_page_results": 1,
+    "number_of_total_results": 3,
+    "results": [
+        {
+            "id": 10003,
+            "issue_number": "3",
+            "name": "Safety Behind Bars",
+            "cover_date": "2003-12-10",
+            "description": null,
+            "image": {
+                "medium_url": "https://comicvine.gamespot.com/a/uploads/scale_medium/wd-3.jpg"
+            },
+            "site_detail_url": "https://comicvine.gamespot.com/the-walking-dead-3/4000-10003/"
+        }
+    ]
+}
