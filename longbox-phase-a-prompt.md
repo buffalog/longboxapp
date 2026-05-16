@@ -1369,9 +1369,10 @@ Nested `routes/` subdir is appropriate at this file count (~6 route modules + 4 
   1. `SqlitePool::connect(&config.database_url).await`
   2. `sqlx::migrate!("../longbox-db/migrations").run(&pool).await`
   3. Upsert library_roots from `config.library_root_path`:
-     - If row exists with matching path → use its id.
-     - If row exists with different path → return error (do NOT silently mutate; prevents orphaning the catalog).
-     - If no row → insert one.
+     - Normalize the configured path: strip trailing slashes (except for the root `/` itself). No symlink resolution, no canonicalization, no component parsing. Same normalizer applied to both the configured value and the stored row before comparing.
+     - If row exists with matching normalized path → use its id.
+     - If row exists with different normalized path → return error (do NOT silently mutate; this would orphan the file catalog). Error message must include both the configured path and the existing row's path so the user can diagnose without poking the DB.
+     - If no row → insert one with the normalized path.
   4. Construct `ComicVineClient` from config.
   5. Construct `Scanner` from pool + config.
   6. Return `AppState` with empty `ScanStatus`.
