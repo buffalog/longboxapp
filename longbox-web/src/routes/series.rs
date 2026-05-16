@@ -2,7 +2,10 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
-use longbox_db::{issue_repo, series_repo, IssueRow, NewIssue, NewSeries, SeriesRow};
+use longbox_db::{
+    issue_repo, series_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate,
+    SeriesWithCounts,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -12,6 +15,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/series", post(add).get(list))
         .route("/series/:id", get(detail).delete(remove))
+        .route("/series/:id/refresh", post(refresh))
 }
 
 // -------- shapes --------
@@ -21,13 +25,9 @@ struct AddSeriesBody {
     cv_id: i64,
 }
 
-#[derive(Debug, Serialize)]
-struct SeriesListItem {
-    #[serde(flatten)]
-    series: SeriesRow,
-    owned_count: i64,
-    total_count: i64,
-}
+// SeriesListItem is now sourced directly from `longbox_db::SeriesWithCounts`,
+// which carries the row + all five per-status counts. The handler just
+// passes it through.
 
 #[derive(Debug, Serialize)]
 struct SeriesDetail {
@@ -137,38 +137,8 @@ async fn add(
     Ok(Json(inserted))
 }
 
-async fn list(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<SeriesListItem>>, ApiError> {
-    let all = series_repo::find_all(&state.db).await?;
-    let mut out = Vec::with_capacity(all.len());
-    for series in all {
-        let counts = sqlx::query!(
-            r#"SELECT
-                 COUNT(i.id) AS "total!: i64",
-                 COALESCE(SUM(CASE WHEN EXISTS (
-                   SELECT 1 FROM files f
-                   WHERE f.issue_id = i.id
-                     AND f.status = 'owned'
-                     AND f.is_present = 1
-                 ) THEN 1 ELSE 0 END), 0) AS "owned!: i64"
-               FROM issues i WHERE i.series_id = ?"#,
-            series.id
-        )
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("count query failed: {e}"),
-            source: anyhow::anyhow!(e),
-        })?;
-
-        out.push(SeriesListItem {
-            series,
-            owned_count: counts.owned,
-            total_count: counts.total,
-        });
-    }
-    Ok(Json(out))
+async fn list(State(state): State<AppState>) -> Result<Json<Vec<SeriesWithCounts>>, ApiError> {
+    Ok(Json(series_repo::find_all_with_counts(&state.db).await?))
 }
 
 async fn detail(
@@ -215,6 +185,58 @@ async fn detail(
         series,
         issues: with_files,
     }))
+}
+
+async fn refresh(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<SeriesRow>, ApiError> {
+    let existing = series_repo::find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        })?;
+    let cv_id = existing.cv_id.ok_or_else(|| ApiError::BadRequest {
+        message: "series has no cv_id; cannot refresh from ComicVine".into(),
+    })?;
+
+    let volume = state.cv.fetch_volume(cv_id).await?;
+    let cv_issues = state.cv.fetch_issues(cv_id).await?;
+
+    // Overwrite mutable fields via series_repo::update (identity columns —
+    // cv_id, metron_id — are not in SeriesUpdate).
+    let update_input = SeriesUpdate {
+        title: volume.name.clone(),
+        sort_title: longbox_core::normalize_title(&volume.name),
+        start_year: volume.start_year,
+        publisher: volume.publisher,
+        description: volume.description,
+        cover_url: volume.cover_url,
+    };
+    let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
+    let updated = series_repo::update(&mut *tx, id, update_input).await?;
+
+    // Upsert issues by cv_issue_id so existing issues get refreshed and new
+    // ones are added.
+    for cv_issue in cv_issues {
+        issue_repo::upsert_by_cv_id(
+            &mut *tx,
+            NewIssue {
+                series_id: updated.id,
+                cv_issue_id: Some(cv_issue.cv_issue_id),
+                metron_issue_id: None,
+                number: cv_issue.issue_number,
+                title: cv_issue.name,
+                cover_date: cv_issue.cover_date,
+                summary: cv_issue.description,
+                cover_url: cv_issue.cover_url,
+            },
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(longbox_db::DbError::from)?;
+    Ok(Json(updated))
 }
 
 async fn remove(

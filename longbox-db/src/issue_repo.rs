@@ -180,6 +180,44 @@ where
     Ok(rows)
 }
 
+/// Insert-or-update by `cv_issue_id`. Used by `POST /api/series/:id/refresh`
+/// when re-fetching from ComicVine: existing rows have their mutable fields
+/// refreshed, new rows are inserted. `cv_issue_id` MUST be `Some(...)` — the
+/// upsert keys on it and a `None` would never conflict.
+pub async fn upsert_by_cv_id<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query_as!(
+        IssueRow,
+        r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
+                               title, cover_date, summary, cover_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(cv_issue_id) DO UPDATE
+           SET number = excluded.number,
+               title = excluded.title,
+               cover_date = excluded.cover_date,
+               summary = excluded.summary,
+               cover_url = excluded.cover_url,
+               updated_at = CURRENT_TIMESTAMP
+           RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
+                     cv_issue_id, metron_issue_id, number, title, cover_date,
+                     summary, cover_url,
+                     created_at AS "created_at: _", updated_at AS "updated_at: _""#,
+        input.series_id,
+        input.cv_issue_id,
+        input.metron_issue_id,
+        input.number,
+        input.title,
+        input.cover_date,
+        input.summary,
+        input.cover_url
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(row)
+}
+
 pub async fn update<'e, E>(executor: E, id: i64, patch: IssueUpdate) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,
