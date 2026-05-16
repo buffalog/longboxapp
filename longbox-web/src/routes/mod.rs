@@ -13,6 +13,7 @@ pub mod files;
 pub mod health;
 pub mod scan;
 pub mod series;
+pub mod stats;
 
 pub fn build_router(state: AppState) -> Router {
     let cors = if state.config.cors_permissive {
@@ -29,7 +30,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(cv_search::router())
         .merge(series::router())
         .merge(files::router())
-        .merge(scan::router());
+        .merge(scan::router())
+        .merge(stats::router());
 
     Router::new()
         .nest("/api", api)

@@ -1,0 +1,116 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             s.id AS \"id!: i64\",\n             s.cv_id, s.metron_id, s.title, s.sort_title, s.start_year,\n             s.publisher, s.description, s.cover_url,\n             s.created_at AS \"created_at: time::PrimitiveDateTime\",\n             s.updated_at AS \"updated_at: time::PrimitiveDateTime\",\n             COUNT(DISTINCT i.id) AS \"total_count!: i64\",\n             COUNT(DISTINCT CASE\n               WHEN f.status = 'owned' AND f.is_present = 1\n               THEN i.id END) AS \"owned_count!: i64\",\n             COUNT(DISTINCT CASE\n               WHEN f.status = 'needs_review' AND f.is_present = 1\n               THEN i.id END) AS \"needs_review_count!: i64\",\n             COUNT(DISTINCT CASE\n               WHEN f.status = 'ignored' AND f.is_present = 1\n               THEN i.id END) AS \"ignored_count!: i64\",\n             COUNT(DISTINCT CASE\n               WHEN f.status = 'unmatched' AND f.is_present = 1\n               THEN i.id END) AS \"unmatched_count!: i64\",\n             COUNT(DISTINCT CASE\n               WHEN NOT EXISTS (\n                 SELECT 1 FROM files f2\n                 WHERE f2.issue_id = i.id\n                   AND f2.status = 'owned'\n                   AND f2.is_present = 1\n               )\n               THEN i.id END) AS \"missing_count!: i64\"\n           FROM series s\n           LEFT JOIN issues i ON i.series_id = s.id\n           LEFT JOIN files f ON f.issue_id = i.id\n           GROUP BY s.id\n           ORDER BY s.sort_title",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "metron_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "sort_title",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: time::PrimitiveDateTime",
+        "ordinal": 9,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "updated_at: time::PrimitiveDateTime",
+        "ordinal": 10,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "total_count!: i64",
+        "ordinal": 11,
+        "type_info": "Null"
+      },
+      {
+        "name": "owned_count!: i64",
+        "ordinal": 12,
+        "type_info": "Null"
+      },
+      {
+        "name": "needs_review_count!: i64",
+        "ordinal": 13,
+        "type_info": "Null"
+      },
+      {
+        "name": "ignored_count!: i64",
+        "ordinal": 14,
+        "type_info": "Null"
+      },
+      {
+        "name": "unmatched_count!: i64",
+        "ordinal": 15,
+        "type_info": "Null"
+      },
+      {
+        "name": "missing_count!: i64",
+        "ordinal": 16,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "45b06b3313694d41b6096a6cab176cabf76e1e6245ad26c029253710ae42b5b4"
+}
