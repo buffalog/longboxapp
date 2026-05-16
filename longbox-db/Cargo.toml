@@ -1,0 +1,22 @@
+[package]
+name = "longbox-db"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox SQLx pool, migrations, and repository layer over SQLite."
+
+[lints]
+workspace = true
+
+[dependencies]
+longbox-core = { path = "../longbox-core" }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "time"] }
+thiserror = "1"
+time = { version = "0.3", features = ["serde", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"

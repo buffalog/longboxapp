@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO parsing_patterns (name, pattern, priority, enabled)\n           VALUES (?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", name, pattern,\n                     priority AS \"priority!: i64\",\n                     enabled AS \"enabled!: bool\",\n                     created_at AS \"created_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "pattern",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "priority!: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "30954d8527903d857bf8f710f07f8dc380390c5620a0d339e634b6ed0885d17c"
+}

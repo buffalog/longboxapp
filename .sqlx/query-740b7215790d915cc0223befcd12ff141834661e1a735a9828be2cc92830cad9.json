@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  cv_issue_id, metron_issue_id, number, title, cover_date,\n                  summary, cover_url,\n                  created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"\n           FROM issues WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_issue_id",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "metron_issue_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "number",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_date",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 9,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "updated_at: _",
+        "ordinal": 10,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "740b7215790d915cc0223befcd12ff141834661e1a735a9828be2cc92830cad9"
+}

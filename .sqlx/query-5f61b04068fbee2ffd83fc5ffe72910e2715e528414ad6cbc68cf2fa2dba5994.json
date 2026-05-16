@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE scan_runs\n           SET files_seen = ?, files_added = ?, files_updated = ?,\n               files_matched = ?, files_needs_review = ?, files_unmatched = ?\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "5f61b04068fbee2ffd83fc5ffe72910e2715e528414ad6cbc68cf2fa2dba5994"
+}
