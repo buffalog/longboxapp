@@ -20,6 +20,11 @@ pub struct FileRow {
     pub status: String,
     pub cached_comicinfo_xml: Option<String>,
     pub cached_at: Option<PrimitiveDateTime>,
+    /// `true` iff the most recent scan visited this row on disk. Flipped to
+    /// `false` by [`mark_files_not_seen_since`].
+    pub is_present: bool,
+    /// Timestamp of the most recent scan that visited this row.
+    pub last_seen_at: PrimitiveDateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +40,8 @@ pub struct NewFile {
     pub status: String,
     pub cached_comicinfo_xml: Option<String>,
     pub cached_at: Option<PrimitiveDateTime>,
+    pub is_present: bool,
+    pub last_seen_at: PrimitiveDateTime,
 }
 
 /// All fields except identity (`id`, `library_root_id`, `path_relative`) are
@@ -50,6 +57,8 @@ pub struct FileUpdate {
     pub status: String,
     pub cached_comicinfo_xml: Option<String>,
     pub cached_at: Option<PrimitiveDateTime>,
+    pub is_present: bool,
+    pub last_seen_at: PrimitiveDateTime,
 }
 
 pub async fn find_by_id<'e, E>(executor: E, id: i64) -> Result<Option<FileRow>>
@@ -62,7 +71,9 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
            FROM files WHERE id = ?"#,
         id
     )
@@ -87,7 +98,9 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
            FROM files WHERE library_root_id = ? AND path_relative = ?"#,
         library_root_id,
         path_relative
@@ -110,7 +123,9 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
            FROM files WHERE library_root_id = ? ORDER BY path_relative"#,
         library_root_id
     )
@@ -119,7 +134,13 @@ where
     Ok(rows)
 }
 
-pub async fn list_by_status<'e, E>(executor: E, status: &str) -> Result<Vec<FileRow>>
+/// List files in `library_root_id` whose `status` matches the given enum
+/// string (use [`longbox_core::FileStatus::as_db_str`] to construct).
+pub async fn list_by_status<'e, E>(
+    executor: E,
+    library_root_id: i64,
+    status: &str,
+) -> Result<Vec<FileRow>>
 where
     E: SqliteExecutor<'e>,
 {
@@ -129,8 +150,12 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
-           FROM files WHERE status = ? ORDER BY path_relative"#,
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
+           FROM files WHERE library_root_id = ? AND status = ?
+           ORDER BY path_relative"#,
+        library_root_id,
         status
     )
     .fetch_all(executor)
@@ -139,7 +164,7 @@ where
 }
 
 /// Hot path for `Scanner::rematch_unmatched`. Returns every unmatched file
-/// in the given library root, regardless of which series it might belong to.
+/// in the given library root.
 pub async fn list_unmatched_for_series<'e, E>(
     executor: E,
     library_root_id: i64,
@@ -153,7 +178,9 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
            FROM files
            WHERE library_root_id = ? AND status = 'unmatched'
            ORDER BY path_relative"#,
@@ -174,7 +201,9 @@ where
                   path_relative, size_bytes AS "size_bytes!: i64",
                   mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                   match_method, match_confidence, status,
-                  cached_comicinfo_xml, cached_at AS "cached_at: _"
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _"
            FROM files WHERE issue_id = ? ORDER BY path_relative"#,
         issue_id
     )
@@ -187,18 +216,22 @@ pub async fn insert<'e, E>(executor: E, input: NewFile) -> Result<FileRow>
 where
     E: SqliteExecutor<'e>,
 {
+    let is_present = i64::from(input.is_present);
     let row = sqlx::query_as!(
         FileRow,
         r#"INSERT INTO files (issue_id, library_root_id, path_relative,
                               size_bytes, mtime, last_scanned_at,
                               match_method, match_confidence, status,
-                              cached_comicinfo_xml, cached_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              cached_comicinfo_xml, cached_at,
+                              is_present, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id AS "id!: i64", issue_id, library_root_id AS "library_root_id!: i64",
                      path_relative, size_bytes AS "size_bytes!: i64",
                      mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                      match_method, match_confidence, status,
-                     cached_comicinfo_xml, cached_at AS "cached_at: _""#,
+                     cached_comicinfo_xml, cached_at AS "cached_at: _",
+                     is_present AS "is_present!: bool",
+                     last_seen_at AS "last_seen_at: _""#,
         input.issue_id,
         input.library_root_id,
         input.path_relative,
@@ -210,6 +243,8 @@ where
         input.status,
         input.cached_comicinfo_xml,
         input.cached_at,
+        is_present,
+        input.last_seen_at,
     )
     .fetch_one(executor)
     .await?;
@@ -220,18 +255,22 @@ pub async fn update<'e, E>(executor: E, id: i64, patch: FileUpdate) -> Result<Fi
 where
     E: SqliteExecutor<'e>,
 {
+    let is_present = i64::from(patch.is_present);
     let row = sqlx::query_as!(
         FileRow,
         r#"UPDATE files
            SET issue_id = ?, size_bytes = ?, mtime = ?, last_scanned_at = ?,
                match_method = ?, match_confidence = ?, status = ?,
-               cached_comicinfo_xml = ?, cached_at = ?
+               cached_comicinfo_xml = ?, cached_at = ?,
+               is_present = ?, last_seen_at = ?
            WHERE id = ?
            RETURNING id AS "id!: i64", issue_id, library_root_id AS "library_root_id!: i64",
                      path_relative, size_bytes AS "size_bytes!: i64",
                      mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                      match_method, match_confidence, status,
-                     cached_comicinfo_xml, cached_at AS "cached_at: _""#,
+                     cached_comicinfo_xml, cached_at AS "cached_at: _",
+                     is_present AS "is_present!: bool",
+                     last_seen_at AS "last_seen_at: _""#,
         patch.issue_id,
         patch.size_bytes,
         patch.mtime,
@@ -241,6 +280,8 @@ where
         patch.status,
         patch.cached_comicinfo_xml,
         patch.cached_at,
+        is_present,
+        patch.last_seen_at,
         id
     )
     .fetch_optional(executor)
@@ -260,4 +301,29 @@ where
         return Err(DbError::NotFound);
     }
     Ok(())
+}
+
+/// Mark `is_present = false` for every file in `library_root_id` whose
+/// `last_seen_at` is strictly less than `cutoff`. Returns the row count.
+/// Used by `Scanner::scan_full` after a full pass to flip missing files.
+pub async fn mark_files_not_seen_since<'e, E>(
+    executor: E,
+    library_root_id: i64,
+    cutoff: PrimitiveDateTime,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE files
+           SET is_present = 0
+           WHERE library_root_id = ?
+             AND last_seen_at < ?
+             AND is_present = 1"#,
+        library_root_id,
+        cutoff
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
 }

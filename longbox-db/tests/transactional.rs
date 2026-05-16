@@ -41,7 +41,7 @@ async fn rollback_leaves_no_rows() {
     // Bail without committing.
     drop(tx);
 
-    let series_after = series_repo::list_all(&pool).await.unwrap();
+    let series_after = series_repo::find_all(&pool).await.unwrap();
     assert!(series_after.is_empty(), "series rollback should leave none");
 }
 
@@ -83,6 +83,6 @@ async fn explicit_rollback_leaves_no_rows() {
     series_repo::insert(&mut *tx, series_input()).await.unwrap();
     tx.rollback().await.unwrap();
 
-    let after = series_repo::list_all(&pool).await.unwrap();
+    let after = series_repo::find_all(&pool).await.unwrap();
     assert!(after.is_empty());
 }

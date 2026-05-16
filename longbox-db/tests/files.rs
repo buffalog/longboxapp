@@ -69,6 +69,8 @@ fn new_file(library_root_id: i64, path: &str, status: &str, issue_id: Option<i64
         status: status.to_string(),
         cached_comicinfo_xml: None,
         cached_at: None,
+        is_present: true,
+        last_seen_at: fixed_ts(),
     }
 }
 
@@ -207,7 +209,9 @@ async fn list_by_status_returns_only_matching() {
     )
     .await
     .unwrap();
-    let rows = file_repo::list_by_status(&pool, "owned").await.unwrap();
+    let rows = file_repo::list_by_status(&pool, library_root_id, "owned")
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path_relative, "a.cbz");
 }
@@ -236,6 +240,8 @@ async fn update_can_set_issue_id_to_null_for_ignore_flow() {
             status: "ignored".into(),
             cached_comicinfo_xml: None,
             cached_at: None,
+            is_present: row.is_present,
+            last_seen_at: row.last_seen_at,
         },
     )
     .await
@@ -311,4 +317,94 @@ async fn deleting_issue_clears_issue_id_on_files() {
 
     let after = file_repo::find_by_id(&pool, row.id).await.unwrap().unwrap();
     assert!(after.issue_id.is_none());
+}
+
+#[tokio::test]
+async fn insert_defaults_is_present_true() {
+    let pool = fresh_pool().await;
+    let (library_root_id, _, _) = seed(&pool).await;
+    let row = file_repo::insert(
+        &pool,
+        new_file(library_root_id, "a.cbz", "unmatched", None),
+    )
+    .await
+    .unwrap();
+    assert!(row.is_present);
+}
+
+#[tokio::test]
+async fn mark_files_not_seen_since_flips_old_rows() {
+    use time::macros::datetime;
+
+    let pool = fresh_pool().await;
+    let (library_root_id, _, _) = seed(&pool).await;
+
+    // Two rows last_seen well in the past.
+    let old = datetime!(2024-01-01 00:00:00);
+    let mut a = new_file(library_root_id, "old-1.cbz", "unmatched", None);
+    a.last_seen_at = old;
+    let mut b = new_file(library_root_id, "old-2.cbz", "unmatched", None);
+    b.last_seen_at = old;
+    file_repo::insert(&pool, a).await.unwrap();
+    file_repo::insert(&pool, b).await.unwrap();
+
+    // One row last_seen "now" (after cutoff).
+    let fresh = datetime!(2030-01-01 00:00:00);
+    let mut c = new_file(library_root_id, "fresh.cbz", "unmatched", None);
+    c.last_seen_at = fresh;
+    file_repo::insert(&pool, c).await.unwrap();
+
+    let cutoff = datetime!(2026-06-01 00:00:00);
+    let affected = file_repo::mark_files_not_seen_since(&pool, library_root_id, cutoff)
+        .await
+        .unwrap();
+    assert_eq!(affected, 2, "two old rows should be flipped");
+
+    let all = file_repo::list_by_library_root(&pool, library_root_id)
+        .await
+        .unwrap();
+    let presence_by_path: std::collections::HashMap<&str, bool> = all
+        .iter()
+        .map(|r| (r.path_relative.as_str(), r.is_present))
+        .collect();
+    assert_eq!(presence_by_path.get("old-1.cbz"), Some(&false));
+    assert_eq!(presence_by_path.get("old-2.cbz"), Some(&false));
+    assert_eq!(presence_by_path.get("fresh.cbz"), Some(&true));
+}
+
+#[tokio::test]
+async fn mark_files_not_seen_since_is_scoped_to_library_root() {
+    use time::macros::datetime;
+
+    let pool = fresh_pool().await;
+    let (library_root_id, _, _) = seed(&pool).await;
+    let other_root_id = library_root_repo::insert(
+        &pool,
+        longbox_db::NewLibraryRoot {
+            path: "/other".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let old = datetime!(2024-01-01 00:00:00);
+    let mut a = new_file(library_root_id, "a.cbz", "unmatched", None);
+    a.last_seen_at = old;
+    let mut b = new_file(other_root_id, "b.cbz", "unmatched", None);
+    b.last_seen_at = old;
+    file_repo::insert(&pool, a).await.unwrap();
+    file_repo::insert(&pool, b).await.unwrap();
+
+    let cutoff = datetime!(2026-06-01 00:00:00);
+    let affected = file_repo::mark_files_not_seen_since(&pool, library_root_id, cutoff)
+        .await
+        .unwrap();
+    assert_eq!(affected, 1);
+
+    let other_row = file_repo::find_by_path(&pool, other_root_id, "b.cbz")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(other_row.is_present, "other library root's row must remain untouched");
 }
