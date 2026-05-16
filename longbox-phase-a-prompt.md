@@ -2156,3 +2156,47 @@ After Step 1 is written and all tests pass:
 4. Wait for explicit "proceed to Step 2" before touching anything else.
 
 Same discipline applies at every step boundary: build, test, surface, wait. No "while I'm in there" additions. No skipping ahead.
+
+
+## Phase A.5 cleanup queue
+
+Known follow-ups, deferred during Phase A, captured here for future reference. Not blocking Phase A completion. Pick up at discretion, not necessarily in order.
+
+**Timestamp serialization consistency.** `PrimitiveDateTime` row fields serialize as `"2026-05-16 22:12:15.0"` (space separator, no timezone), while `OffsetDateTime` fields serialize as ISO 8601 `"2026-05-16T22:12:15Z"`. The frontend's `parseUtc()` helper papers over the format split. The real fix is converting PrimitiveDateTime to OffsetDateTime at the serialization boundary (or migrating row types to OffsetDateTime end-to-end). Single API contract for all timestamps; the helper can be removed when this lands.
+
+**SQLx offline cache check.** During Phase A the `.sqlx/` cache went stale between Step 2's commit and Step 7's smoke. A pre-commit hook or CI check that runs `cargo sqlx prepare --workspace --check` would catch this immediately. Pair with `cargo fmt --check` and `cargo clippy -- -D warnings` for a standard pre-commit suite.
+
+**CBR support.** Phase A is CBZ-only. CBR requires `unrar_rs` plus a system `unrar` binary in the Docker image. Adding both is small but non-zero work; flagged as Phase A.5 when the empty-shelf rate for CBR-distributed series becomes annoying.
+
+**Scan progress reporting.** Phase A scans show "scan running" with no granular progress. The scanner doesn't emit progress events mid-scan. Adding a callback-based progress channel (scanner emits `ScanProgress { files_processed, files_total, current_path }` to a watch channel) would let the dashboard show a real progress bar.
+
+**Persisted scan history.** Currently in-memory only; server restart loses history. A `scans` table with start/end/counters/errors columns would survive restarts and enable longer history retention (vs. the in-memory cap of 10 recent scans).
+
+**Deferred-rematch queue.** When a series is added or refreshed during a running scan, the auto-rematch is silently skipped (logged WARN, no retry). A simple deferred queue that runs pending rematches after the current scan completes would close this UX gap.
+
+**Series list scaling.** The Step 6 JOIN refactor handles per-series counts efficiently for hundreds of series. At 10,000+ series the single-query approach may need pagination or virtualized rendering on the frontend.
+
+**ComicVine `field_list` optimization.** Phase A fetches all fields from CV; per-volume responses are larger than necessary. Adding `&field_list=id,name,start_year,...` to the CV client's request builder reduces bandwidth and serialization cost. Pre-populate the field list once we're confident which fields we actually use.
+
+**Dark mode.** Tailwind's `dark:` variants are sitting unused. Adding dark mode is roughly half a day of design pass over every component. Defer until visual preferences become clear.
+
+**Multi-arch Docker image.** Phase A is `linux/arm64` only (native for Apple Silicon). Adding `linux/amd64` via `docker buildx` enables running on non-Apple Linux boxes — useful if LongBox ever moves off the Mac or gets shared.
+
+**Mac sleep / scheduled scan workaround.** Phase A has no scheduler so this is moot. Once scheduled scans exist, Mac sleep pausing the container will need either a host-side wake schedule or running on an always-on Linux box.
+
+**End-to-end browser tests.** No Playwright in Phase A; manual acceptance via the 10-step smoke. Adding Playwright covering the six core user flows would catch frontend regressions automatically. Real engineering effort to set up and maintain; defer until flows are stable.
+
+## Phase B (sketch, not committed)
+
+Phase B is post-processing: newly-downloaded files arrive in a watch folder, get automatically renamed/tagged/moved into the library, and become catalogued without manual intervention. Pulls in real workflow design — folder format templates, conflict resolution, partial-file handling, ComicTagger integration for write-back, error recovery. Phase B needs its own brief and its own grilling pass. Not a continuation of Phase A's structure.
+
+## Phase C (further sketch)
+
+Phase C is the full pipeline: Prowlarr integration for indexer queries, SAB integration for downloads, automated retry on failed downloads. The full Mylar replacement vision. Needs its own brief; very real work.
+
+## Out of scope (deliberately, indefinitely)
+
+- **OPDS server.** Komga and Kavita exist; LongBox doesn't need to compete on serving comics to readers. Catalog management is the goal.
+- **Built-in reader.** Same reasoning.
+- **Multi-user.** Single-user is a feature, not a limitation. Keeping it that way avoids real complexity (auth, sessions, per-user state).
+- **Public hosting.** Designed for self-hosting on your own hardware. Not a SaaS.
