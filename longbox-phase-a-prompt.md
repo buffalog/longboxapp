@@ -1549,6 +1549,389 @@ Test coverage (~25-30 cases):
 
 End of Step 5: `cargo run` starts the server, opens the DB, runs migrations, ensures the library_root row, listens on the configured port. `curl http://localhost:3000/api/health` returns OK. The full API surface works against real CV (with a real API key) and a real disk library. Scan triggers run async and status is pollable. Frontend placeholder serves at `/`. Ready for Step 6 to consume the API.
 
+## Step 6 — Approved structure for `longbox-frontend`
+
+Step 6 is the SvelteKit frontend. It is the step where LongBox becomes a tool you point a browser at instead of an HTTP API you curl. No Rust changes — the longbox-web rust-embed scaffolding from Step 5 picks up whatever lands in `frontend-dist/` at compile time.
+
+### Build target and integration
+
+- **Framework:** SvelteKit 2.x with Svelte 5 (uses runes: `$state`, `$derived`, `$effect`).
+- **Adapter:** `@sveltejs/adapter-static`. Produces a directory of pre-built HTML/CSS/JS — no runtime SSR.
+- **Output directory:** `../longbox-web/frontend-dist/` (configured in `svelte.config.js`). Sibling-directory coupling between `longbox-frontend/` and `longbox-web/` is assumed.
+- **TypeScript:** strict mode. All API client types declared explicitly; manual sync with backend response shapes (no OpenAPI codegen in Phase A).
+- **Styling:** Tailwind CSS 3.x. No component library on top — no shadcn-svelte, no DaisyUI, no Skeleton. Raw Tailwind utility classes + custom Svelte components.
+- **Icons:** `lucide-svelte` (functional, neutral, large coverage, tree-shakeable).
+- **Build tool:** Vite (SvelteKit default).
+- **Package manager:** `pnpm` (or `npm` if Claude Code prefers; both work).
+
+### Approved project layout
+
+```
+longbox-frontend/
+├── package.json
+├── svelte.config.js              # adapter-static config pointing at ../longbox-web/frontend-dist
+├── vite.config.ts                # dev proxy: /api → localhost:3000
+├── tsconfig.json
+├── tailwind.config.js
+├── postcss.config.js
+├── .prettierrc
+├── static/
+│   └── favicon.ico
+└── src/
+    ├── app.html
+    ├── app.css                   # tailwind directives + global styles
+    ├── app.d.ts                  # ambient types
+    ├── lib/
+    │   ├── api/
+    │   │   ├── client.ts         # base fetch wrapper, ApiError class
+    │   │   ├── series.ts
+    │   │   ├── files.ts
+    │   │   ├── cv.ts
+    │   │   └── scans.ts
+    │   ├── components/
+    │   │   ├── Button.svelte
+    │   │   ├── Modal.svelte
+    │   │   ├── EmptyState.svelte
+    │   │   ├── LoadingSpinner.svelte
+    │   │   ├── ErrorBanner.svelte
+    │   │   ├── ConfidenceMeter.svelte
+    │   │   ├── ScanStatusBadge.svelte
+    │   │   ├── ScanReportCard.svelte
+    │   │   ├── SeriesCard.svelte
+    │   │   ├── SeriesHeader.svelte
+    │   │   ├── IssueRow.svelte
+    │   │   ├── IssueGrid.svelte
+    │   │   ├── FileRow.svelte
+    │   │   └── NavBar.svelte
+    │   ├── stores/
+    │   │   └── scanStatus.svelte.ts    # adaptive-interval polling store
+    │   ├── types.ts                    # API response types
+    │   └── format.ts                   # date, count, confidence formatters
+    └── routes/
+        ├── +layout.svelte              # NavBar + main content slot + global error boundary
+        ├── +layout.ts                  # disable SSR (adapter-static)
+        ├── +page.svelte                # dashboard (/)
+        ├── series/
+        │   ├── +page.svelte            # series list
+        │   ├── +page.ts                # load: listSeries()
+        │   └── [id]/
+        │       ├── +page.svelte        # series detail
+        │       └── +page.ts            # load: getSeries(id)
+        ├── add/
+        │   └── +page.svelte            # CV search + add
+        ├── files/
+        │   ├── +page.svelte            # file review queue
+        │   └── +page.ts                # load: listFiles({ status: 'needs_review' })
+        ├── scans/
+        │   └── +page.svelte            # scan history
+        └── settings/
+            └── +page.svelte            # read-only config display
+```
+
+### Route responsibilities
+
+- **`+layout.svelte`** — Persistent shell. Top nav with logo + links (`/`, `/series`, `/add`, `/files`, `/scans`, `/settings`). `ScanStatusBadge` in the nav showing current scan state. Global error boundary catches uncaught API errors and shows `ErrorBanner`. `scanStatus` store starts polling on mount, stops on destroy.
+
+- **`/` (dashboard)** — At-a-glance overview. Top: current scan status if running, otherwise "Last scan: N minutes ago" with link to scan history. Middle: counts (total series, total issues, owned files, needs-review files, missing files). Bottom: two CTAs — "Add series" → `/add`, "Scan library" → triggers scan on the default library_root, updates store.
+
+- **`/series` (series list)** — Grid of `SeriesCard` components. Each card: cover image (if available, fallback to placeholder SVG), title, start_year, publisher, owned_count / total_count. Sort: title ascending by default. Filter: simple text input that filters client-side on title. No server-side filter in Phase A (Phase B if libraries grow).
+
+- **`/series/[id]` (series detail)** — `SeriesHeader` at top (large cover, title, year, publisher, full description, total/owned counts). Below: `IssueGrid` rendering all issues for the series as `IssueRow` items showing issue number, name (if present), cover_date, current file status (owned with file path / missing / needs_review / ignored). Each owned issue is clickable to show its file path; each missing issue is greyed out. "Refresh from ComicVine" button at top right of header that POSTs `/api/series/:id/refresh` (note: this endpoint isn't in Step 5's spec — adding it is part of Step 6 scope; see "Backend additions" below). Delete-series button at bottom of page with confirmation modal.
+
+- **`/add` (add series)** — Search input at top: types into the box → debounced 400ms → GET `/api/cv/search?q=...` → results shown as cards below. Each result card has cover thumbnail, title, year, publisher, issue count, "Add to Library" button. Clicking Add POSTs `/api/series`, shows loading state, returns success message ("Added 'X' — N issues will be matched on next scan") or error.
+
+- **`/files` (file review queue)** — Default view: files with status `needs_review`. Each file shows path, parsed series/number from filename, current best-guess match (suggested series + issue + confidence via `ConfidenceMeter`), three action buttons: "Accept Match" (PATCH `{ "status": "owned", "issue_id": N }`), "Change Match" (opens modal to pick a different issue), "Mark Ignored" (PATCH `{ "status": "ignored" }`). Filter toggle at top to switch between needs_review / ignored / unmatched / all.
+
+- **`/scans` (scan history)** — Current scan at top if running, with elapsed time and a "scan running" indicator (no progress bar in Phase A — the backend doesn't expose progress mid-scan). Below: list of recent `ScanReportCard` components showing scan_id, timestamps, duration, all counters, errors expandable.
+
+- **`/settings`** — Read-only display of: library root path, ComicVine API key status (configured: yes/no — never display the key itself), match threshold, database path. Note that editing requires restarting the binary with new env vars. No UI to edit in Phase A.
+
+### Component inventory
+
+Core components and their responsibilities:
+
+- **`NavBar.svelte`** — Top navigation bar. Logo (text-only "LongBox" in Phase A), links, ScanStatusBadge.
+
+- **`ScanStatusBadge.svelte`** — Compact indicator. Reads from `scanStatus` store. Renders: "Idle" (gray), "Scanning..." with spinner (blue), "Scan complete" (green, fades after 5s). Click to navigate to `/scans`.
+
+- **`ScanReportCard.svelte`** — Full scan report with all counters, expandable errors list, duration, scan_kind.
+
+- **`SeriesCard.svelte`** — Grid-item display for series list. Props: `series: SeriesWithCounts`. Cover image with object-fit cover, title (truncated to 2 lines), year, publisher, "N / M owned" badge with color (green if N=M, amber if 0<N<M, red if N=0).
+
+- **`SeriesHeader.svelte`** — Detail-page header. Larger cover (max 200px wide), full title + year + publisher + description (collapsed by default with "Show more" toggle).
+
+- **`IssueRow.svelte`** — Single issue line. Props: `issue: Issue, file: File | null`. Issue number (formatted), name, cover_date, file status badge, file path (if owned).
+
+- **`IssueGrid.svelte`** — Container that renders a list of IssueRow components. May add a virtual-scroll wrapper later if performance demands; Phase A renders all rows directly (typical series has <500 issues).
+
+- **`FileRow.svelte`** — File-review-queue row. Props: `file: FileWithMatch, candidates: Issue[]`. Path, parsed metadata, suggested match, confidence, action buttons.
+
+- **`ConfidenceMeter.svelte`** — Visual confidence indicator. Props: `confidence: number` (0-1) and optional `method: MatchMethod`. Renders as a small bar or pip cluster; color shifts: red <0.65, amber 0.65-0.85, green ≥0.85. Method shown as small text label ("Web URL", "ComicInfo", "Filename").
+
+- **`Button.svelte`** — Standard button with `variant` prop (`primary` / `secondary` / `danger` / `ghost`), `size` (`sm` / `md` / `lg`), `loading` state, `disabled`. All Tailwind classes; no external button library.
+
+- **`Modal.svelte`** — Dialog wrapper. Backdrop, close-on-escape, focus trap. Used for confirm-delete, change-match, etc.
+
+- **`EmptyState.svelte`** — Generic "no items" placeholder with icon, title, optional CTA button.
+
+- **`LoadingSpinner.svelte`** — Tailwind-styled spinner with optional label.
+
+- **`ErrorBanner.svelte`** — Top-of-page red banner. Props: `error: ApiError | string`. Dismissable.
+
+### State management
+
+**Svelte 5 runes throughout.** No external state library. Patterns:
+
+- **Route-local state:** `let foo = $state(...)` inside `+page.svelte`. Used for search inputs, modal open/closed, form values.
+
+- **Cross-route state:** `lib/stores/scanStatus.svelte.ts`. Single store class that exports an instance with `$state` fields:
+
+  ```typescript
+  class ScanStatusStore {
+    current = $state<CurrentScan | null>(null);
+    recent = $state<ScanReport[]>([]);
+    error = $state<ApiError | null>(null);
+
+    private interval: number | null = null;
+    private subscribers = 0;
+
+    subscribe() {
+      this.subscribers++;
+      if (this.subscribers === 1) this.startPolling();
+      return () => { this.subscribers--; if (this.subscribers === 0) this.stopPolling(); };
+    }
+
+    private async tick() {
+      try {
+        const newCurrent = await scansApi.getCurrent();
+        const newRecent = await scansApi.getRecent();
+        this.current = newCurrent;
+        this.recent = newRecent;
+        this.adjustInterval();
+      } catch (e) {
+        this.error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      }
+    }
+
+    private adjustInterval() {
+      const desired = this.current ? 2000 : 30000;
+      // re-arm interval if state transitioned
+      if (this.interval) {
+        clearInterval(this.interval);
+        this.interval = setInterval(() => this.tick(), desired);
+      }
+    }
+
+    private startPolling() { /* tick + setInterval */ }
+    private stopPolling() { /* clearInterval */ }
+  }
+
+  export const scanStatus = new ScanStatusStore();
+  ```
+
+  Components subscribe in `onMount` and unsubscribe on destroy. The layout subscribes globally so the badge is always live.
+
+- **Server-derived state:** `+page.ts` load functions return data; components consume via `$props`. For routes that need to re-fetch (e.g., after a mutation), use `invalidate()` or `invalidateAll()` from `$app/navigation`.
+
+### API client
+
+`lib/api/client.ts` exports a base fetch wrapper:
+
+```typescript
+export class ApiError extends Error {
+  constructor(public status: number, public code: string, message: string, public details?: unknown) {
+    super(message);
+  }
+}
+
+const BASE = '/api';
+
+export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  });
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!res.ok) {
+    const err = body?.error ?? { code: 'unknown', message: res.statusText };
+    throw new ApiError(res.status, err.code, err.message, err.details);
+  }
+  return body as T;
+}
+```
+
+Per-domain modules (`series.ts`, `files.ts`, `cv.ts`, `scans.ts`) export typed functions:
+
+```typescript
+// lib/api/series.ts
+export async function listSeries(): Promise<SeriesWithCounts[]> {
+  return apiFetch('/series');
+}
+
+export async function getSeries(id: number): Promise<SeriesDetail> {
+  return apiFetch(`/series/${id}`);
+}
+
+export async function addSeries(cvId: number): Promise<Series> {
+  return apiFetch('/series', { method: 'POST', body: JSON.stringify({ cv_id: cvId }) });
+}
+
+export async function deleteSeries(id: number): Promise<void> {
+  return apiFetch(`/series/${id}`, { method: 'DELETE' });
+}
+
+export async function refreshSeries(id: number): Promise<Series> {
+  return apiFetch(`/series/${id}/refresh`, { method: 'POST' });
+}
+```
+
+Types in `lib/types.ts` mirror the backend's JSON response shapes:
+
+```typescript
+export type FileStatus = 'owned' | 'needs_review' | 'ignored' | 'unmatched';
+export type MatchMethod = 'web_url_cv' | 'web_url_metron' | 'comic_info' | 'filename';
+
+export interface Series {
+  id: number;
+  cv_id: number | null;
+  metron_id: string | null;
+  title: string;
+  sort_title: string;
+  start_year: number | null;
+  publisher: string | null;
+  description: string | null;
+  cover_url: string | null;
+  created_at: string;  // ISO 8601
+  updated_at: string;
+}
+
+export interface SeriesWithCounts extends Series {
+  owned_count: number;
+  total_count: number;
+  missing_count: number;
+}
+
+// ... Issue, File, ScanReport, CurrentScan, SeriesSearchResult, etc.
+```
+
+These types are manually maintained. Drift between frontend types and backend response shapes is a known risk — mitigated by integration tests on the backend that assert response shapes, plus runtime narrowing in `apiFetch` if needed. Phase B can switch to OpenAPI codegen if drift becomes painful.
+
+### Styling approach
+
+- **Tailwind 3.x** with default config plus a small custom theme extension for the palette (slate/zinc primary, semantic status colors).
+- **No CSS frameworks on top.** No shadcn-svelte, no DaisyUI, no Skeleton. Raw utility classes.
+- **Component-local styles** in `<style>` blocks only when Tailwind can't express it (rare).
+- **Dark mode:** NOT in Phase A. Markup is light-mode only. Adding dark mode later is straightforward with Tailwind's `dark:` variants but it doubles design work and review effort.
+- **Responsive:** Phase A targets desktop primarily (1280×800 minimum). Tablet and mobile layouts not designed. Don't actively break them, but don't optimize either.
+- **Accessibility minimum:** semantic HTML (use `<button>`, `<nav>`, `<main>`, `<article>`), keyboard focus states preserved (no `outline: none` without alternative), color is never the sole status indicator (always paired with icon or text), `aria-label` on icon-only buttons.
+
+### Backend additions for Step 6
+
+The frontend needs one endpoint that Step 5's spec didn't include:
+
+- **`POST /api/series/:id/refresh`** — Re-fetch the series from ComicVine, update the series row's mutable fields, and upsert its issues. Same error mapping as `POST /api/series`. Returns the updated series. Implementation: thin variant of the add-series flow that uses `series_repo::update` instead of `insert` and `issue_repo::upsert_by_cv_id` instead of bulk_insert. Add to `longbox-web/src/routes/series.rs` as part of Step 6 scope.
+
+No other backend changes needed.
+
+### Cargo / package.json dependencies
+
+```json
+{
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.0",
+    "@sveltejs/kit": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@tailwindcss/typography": "^0.5.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "prettier": "^3.0.0",
+    "prettier-plugin-svelte": "^3.0.0",
+    "prettier-plugin-tailwindcss": "^0.6.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0",
+    "@testing-library/svelte": "^5.0.0"
+  },
+  "dependencies": {
+    "lucide-svelte": "^0.400.0"
+  }
+}
+```
+
+Versions are approximate; Claude Code resolves to current stable at build time. Pinning happens via `pnpm-lock.yaml` (or `package-lock.json` for npm).
+
+### Configuration files
+
+- **`svelte.config.js`** — adapter-static config pointing output at `../longbox-web/frontend-dist/`. `fallback: 'index.html'` for SPA routing. `prerender: { entries: [] }` since no routes are statically pre-rendered (everything is client-rendered).
+
+- **`vite.config.ts`** — dev server config including proxy:
+  ```typescript
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: false,
+      },
+    },
+  },
+  ```
+
+- **`tailwind.config.js`** — content paths, theme extension for status colors, plugins (`@tailwindcss/typography` for description rendering).
+
+- **`tsconfig.json`** — strict mode, `noUncheckedIndexedAccess: true`, paths alias `$lib` → `src/lib`.
+
+### Dev workflow
+
+1. Run backend: `cargo run` in `longbox-web/`. Listens on `:3000` with `CORS_PERMISSIVE=true` set (or accept that same-origin works because of the Vite proxy).
+2. Run frontend: `pnpm dev` in `longbox-frontend/`. Listens on `:5173`. Proxies `/api/*` to `:3000`.
+3. Open `http://localhost:5173/` in browser. Hot-reload on save.
+
+For a production-shape test (frontend bundled into binary):
+1. `pnpm build` in `longbox-frontend/` — outputs to `../longbox-web/frontend-dist/`.
+2. `cargo build --release` in `longbox-web/` — rust-embed bakes the static assets in.
+3. Run the binary. Frontend served at `:3000/`. No separate process.
+
+### Test strategy
+
+**Vitest** for unit tests on the API client and stores. Mock `fetch` via `vi.fn()`. Test coverage focuses on:
+
+- `apiFetch` error parsing (well-formed error response, malformed body, network failure)
+- `scanStatus` store interval adjustment (transitions between idle/running)
+- Date and confidence formatters in `lib/format.ts`
+
+**@testing-library/svelte** for component tests where component logic is non-trivial:
+
+- `ConfidenceMeter` color thresholds (test that confidence 0.7 renders amber, 0.9 renders green)
+- `FileRow` action button enablement (test that "Accept Match" is disabled when no suggested match)
+
+**No Playwright / E2E in Phase A.** End-to-end browser testing is real engineering effort and the manual user journey is short. Phase A defers; Phase B can add Playwright once flows stabilize.
+
+Expected test count: ~15-20 unit + component tests. Lighter than the backend's ~135 because much of the frontend is presentational and tested more efficiently by running it.
+
+### Phase A user flows that must work end-to-end
+
+These are the acceptance scenarios for Step 6:
+
+1. **First-run:** Fresh DB, empty library. User lands on `/`. Sees empty dashboard with "Add your first series" CTA. Clicks → `/add`. Searches CV → results appear → clicks "Add" on one → success → navigates to `/series` and sees the new series in the list.
+
+2. **Scan library:** User clicks "Scan library" on dashboard (or navigates to `/scans` and triggers from there). Sees scan-running indicator in nav. Polls show progress. On completion, sees scan report with counts. Series and file states update.
+
+3. **Browse:** From `/series`, click a series card → `/series/[id]`. Sees series detail with issue list, mixed owned/missing/needs_review states. Each issue's state is visually obvious.
+
+4. **Review queue:** From nav, click `/files` (badge shows count of needs_review files). Sees list. For each file, reads suggested match and confidence. Either accepts, changes, or ignores. List updates as items are processed.
+
+5. **Refresh series:** On `/series/[id]`, click "Refresh from ComicVine". Series updates with any new issues from CV. Loading state shown during fetch.
+
+6. **Delete series:** On `/series/[id]`, click delete button. Confirmation modal. On confirm, series is deleted and user navigates back to `/series`. Files matched to that series's issues become unmatched (per Step 4 cascade logic).
+
+### Done definition
+
+End of Step 6: `pnpm build` produces a working static site in `longbox-web/frontend-dist/`. A subsequent `cargo build --release` of longbox-web bakes it into the binary. Running the binary serves a working LongBox UI at `http://localhost:3000/`. All six user flows above are exercisable end-to-end against a real library with a real CV API key. Tests pass via `pnpm test`. Ready for Step 7 (Docker packaging).
+
 ## Kickoff discipline
 
 Before writing any code:
