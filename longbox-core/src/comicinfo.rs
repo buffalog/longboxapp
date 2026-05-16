@@ -1,16 +1,21 @@
 //! Pure ComicInfo.xml parser. Takes XML bytes (the scanner reads the .cbz
-//! archive and hands the bytes in), returns a [`ComicInfo`] struct. URL
-//! extraction for ComicVine and Metron lives here.
+//! archive and hands the bytes in), returns a [`ComicInfo`] struct.
 //!
 //! `<Web>` element handling: a ComicInfo file may have a single `<Web>` with
 //! one URL, a single `<Web>` with multiple whitespace-separated URLs (the
 //! ComicTagger 1.6+ / MetronTagger convention), or multiple `<Web>` elements.
-//! We capture every element's text and split each on whitespace at extraction
-//! time. ComicVine wins over Metron when both are present.
+//! The parser flattens all of them into a single `web_urls: Vec<String>`
+//! where each entry is exactly one URL string — callers iterate without
+//! having to split.
+//!
+//! Issue-ID extraction helpers ([`extract_cv_issue_id_from_url`] and
+//! [`extract_metron_issue_id_from_url`]) operate on a single URL string. They
+//! live here (not in the matcher) because the scanner orchestrates Tier 1
+//! using direct DB lookups against each URL.
 //!
 //! ComicVine URL filter: the entity-type code in the slug must be `4000`
 //! (issue). Volume URLs (`4050-`), character URLs (`4005-`), publisher URLs
-//! (`4010-`), etc. are silently ignored even when present in `<Web>`.
+//! (`4010-`), etc. are silently ignored.
 
 use std::sync::OnceLock;
 
@@ -26,11 +31,16 @@ pub struct ComicInfo {
     pub title: Option<String>,
     pub series: Option<String>,
     pub number: Option<String>,
-    pub volume: Option<i32>,
+    /// Publication year carried by ComicInfo.xml's `<Volume>` element. We use
+    /// the semantic name `year` rather than the XML element name `Volume`
+    /// because ComicInfo overloads "Volume" to mean two different things in
+    /// different communities; year is unambiguous.
+    pub year: Option<i32>,
     pub summary: Option<String>,
-    /// Raw text content of every `<Web>` element in document order. URLs
-    /// inside each entry may be whitespace-separated; extraction handles that.
-    pub web: Vec<String>,
+    /// Every URL pulled from every `<Web>` element, in document order, with
+    /// any whitespace-separated multi-URL strings already split into
+    /// individual entries.
+    pub web_urls: Vec<String>,
 }
 
 impl ComicInfo {
@@ -40,40 +50,40 @@ impl ComicInfo {
         parse_str(text)
     }
 
-    /// Iterate every `<Web>` element's URLs (splitting on whitespace) and
-    /// return the first ComicVine issue ID whose entity-type code is `4000`.
+    /// Convenience: iterate [`web_urls`](Self::web_urls) and return the first
+    /// ComicVine issue ID via [`extract_cv_issue_id_from_url`].
     pub fn cv_issue_id(&self) -> Option<i64> {
-        let re = cv_regex();
-        for raw in &self.web {
-            for token in raw.split_whitespace() {
-                if let Some(caps) = re.captures(token) {
-                    let entity_type = caps.get(1)?.as_str();
-                    let id_str = caps.get(2)?.as_str();
-                    if entity_type == "4000" {
-                        return id_str.parse::<i64>().ok();
-                    }
-                }
-            }
-        }
-        None
+        self.web_urls
+            .iter()
+            .find_map(|url| extract_cv_issue_id_from_url(url))
     }
 
-    /// Iterate every `<Web>` element's URLs (splitting on whitespace) and
-    /// return the first Metron issue slug. Returns the captured slug verbatim
-    /// (e.g. `walking-dead-1-2003`).
+    /// Convenience: iterate [`web_urls`](Self::web_urls) and return the first
+    /// Metron issue slug via [`extract_metron_issue_id_from_url`].
     pub fn metron_issue_slug(&self) -> Option<String> {
-        let re = metron_regex();
-        for raw in &self.web {
-            for token in raw.split_whitespace() {
-                if let Some(caps) = re.captures(token) {
-                    if let Some(m) = caps.get(1) {
-                        return Some(m.as_str().to_owned());
-                    }
-                }
-            }
-        }
-        None
+        self.web_urls
+            .iter()
+            .find_map(|url| extract_metron_issue_id_from_url(url))
     }
+}
+
+/// Extract a ComicVine issue ID from a single URL string. Returns `Some(id)`
+/// only when the entity-type prefix is `4000` (CV's code for "issue"). Volume
+/// (`4050`), character (`4005`), publisher (`4010`) and other entity types
+/// return `None`.
+pub fn extract_cv_issue_id_from_url(url: &str) -> Option<i64> {
+    let caps = cv_regex().captures(url)?;
+    let entity_type = caps.get(1)?.as_str();
+    if entity_type != "4000" {
+        return None;
+    }
+    caps.get(2)?.as_str().parse::<i64>().ok()
+}
+
+/// Extract a Metron issue slug from a single URL string.
+pub fn extract_metron_issue_id_from_url(url: &str) -> Option<String> {
+    let caps = metron_regex().captures(url)?;
+    caps.get(1).map(|m| m.as_str().to_owned())
 }
 
 fn cv_regex() -> &'static Regex {
@@ -86,7 +96,9 @@ fn cv_regex() -> &'static Regex {
 
 fn metron_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"metron\.cloud/issue/([\w-]+)").expect("static Metron regex must compile"))
+    RE.get_or_init(|| {
+        Regex::new(r"metron\.cloud/issue/([\w-]+)").expect("static Metron regex must compile")
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -117,8 +129,6 @@ fn parse_str(xml: &str) -> Result<ComicInfo> {
 
     let mut info = ComicInfo::default();
     let mut current: Option<Field> = None;
-    // Accumulate text + CDATA inside a single element so split text events
-    // (rare but legal) don't get dropped.
     let mut buf = String::new();
 
     loop {
@@ -149,17 +159,21 @@ fn parse_str(xml: &str) -> Result<ComicInfo> {
                             Field::Title => info.title = Some(text),
                             Field::Series => info.series = Some(text),
                             Field::Number => info.number = Some(text),
-                            Field::Volume => info.volume = text.parse().ok(),
+                            Field::Volume => info.year = text.parse().ok(),
                             Field::Summary => info.summary = Some(text),
-                            Field::Web => info.web.push(text),
+                            Field::Web => {
+                                // Split whitespace-separated multi-URL entries
+                                // so each Vec element is exactly one URL.
+                                for token in text.split_whitespace() {
+                                    info.web_urls.push(token.to_owned());
+                                }
+                            }
                         }
                     }
                     buf.clear();
                 }
             }
-            Event::Empty(_) => {
-                // Self-closing element — ignore.
-            }
+            Event::Empty(_) => {}
             Event::Eof => break,
             _ => {}
         }
@@ -188,9 +202,9 @@ mod tests {
         assert_eq!(ci.title.as_deref(), Some("One Small Step"));
         assert_eq!(ci.series.as_deref(), Some("The Walking Dead"));
         assert_eq!(ci.number.as_deref(), Some("1"));
-        assert_eq!(ci.volume, Some(2003));
+        assert_eq!(ci.year, Some(2003));
         assert_eq!(ci.summary.as_deref(), Some("The end of the world."));
-        assert_eq!(ci.web.len(), 1);
+        assert_eq!(ci.web_urls.len(), 1);
         assert_eq!(ci.cv_issue_id(), Some(12345));
         assert!(ci.metron_issue_slug().is_none());
     }
@@ -203,7 +217,7 @@ mod tests {
   <Number>1</Number>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert!(ci.web.is_empty());
+        assert!(ci.web_urls.is_empty());
         assert!(ci.cv_issue_id().is_none());
         assert!(ci.metron_issue_slug().is_none());
     }
@@ -245,14 +259,15 @@ mod tests {
 
     #[test]
     fn cv_wins_when_both_present_in_separate_elements() {
+        // Both URLs are flattened into web_urls in document order. The
+        // matcher decides priority; ComicInfo just exposes both.
         let xml = r#"<?xml version="1.0"?>
 <ComicInfo>
   <Web>https://metron.cloud/issue/walking-dead-1-2003</Web>
   <Web>https://comicvine.gamespot.com/issue/4000-12345/</Web>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert_eq!(ci.web.len(), 2);
-        // Both extractable, but matcher logic (Tier 1) prefers CV.
+        assert_eq!(ci.web_urls.len(), 2);
         assert_eq!(ci.cv_issue_id(), Some(12345));
         assert_eq!(
             ci.metron_issue_slug().as_deref(),
@@ -261,22 +276,19 @@ mod tests {
     }
 
     #[test]
-    fn multiple_urls_in_single_web_element() {
-        // ComicTagger 1.6+ / MetronTagger convention.
+    fn multiple_urls_in_single_web_element_get_split() {
         let xml = r#"<?xml version="1.0"?>
 <ComicInfo>
   <Web>https://comicvine.gamespot.com/issue/4000-12345/ https://metron.cloud/issue/saga-1-2012</Web>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert_eq!(ci.web.len(), 1);
+        assert_eq!(ci.web_urls.len(), 2, "whitespace-separated tokens become separate entries");
         assert_eq!(ci.cv_issue_id(), Some(12345));
         assert_eq!(ci.metron_issue_slug().as_deref(), Some("saga-1-2012"));
     }
 
     #[test]
     fn rejects_non_4000_cv_entity_types() {
-        // 4050 is volume, 4005 is character, 4010 is publisher — all should be
-        // ignored.
         let xml = r#"<?xml version="1.0"?>
 <ComicInfo>
   <Web>https://comicvine.gamespot.com/issue/4050-111/</Web>
@@ -284,7 +296,7 @@ mod tests {
   <Web>https://comicvine.gamespot.com/issue/4010-333/</Web>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert_eq!(ci.web.len(), 3);
+        assert_eq!(ci.web_urls.len(), 3);
         assert!(ci.cv_issue_id().is_none());
     }
 
@@ -300,7 +312,6 @@ mod tests {
 
     #[test]
     fn ignores_non_url_text_in_web() {
-        // Sometimes taggers stuff arbitrary text alongside URLs.
         let xml = r#"<?xml version="1.0"?>
 <ComicInfo>
   <Web>see also https://comicvine.gamespot.com/issue/4000-42/ archived</Web>
@@ -328,7 +339,6 @@ mod tests {
 
     #[test]
     fn non_utf8_errors() {
-        // Invalid UTF-8 byte sequence
         let bytes = [0xff, 0xfe, 0xfd];
         let err = ComicInfo::parse(&bytes).err();
         assert!(err.is_some(), "expected UTF-8 error");
@@ -345,15 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_volume_silently_dropped() {
-        // Volume should be numeric. "Unknown" can't parse to i32.
+    fn invalid_year_silently_dropped() {
         let xml = r#"<?xml version="1.0"?>
 <ComicInfo>
   <Series>Saga</Series>
   <Volume>Unknown</Volume>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert!(ci.volume.is_none());
+        assert!(ci.year.is_none());
     }
 
     #[test]
@@ -367,7 +376,7 @@ mod tests {
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
         assert_eq!(ci.series.as_deref(), Some("Saga"));
         assert!(ci.number.is_none());
-        assert!(ci.web.is_empty());
+        assert!(ci.web_urls.is_empty());
     }
 
     #[test]
@@ -379,5 +388,27 @@ mod tests {
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
         assert_eq!(ci.summary.as_deref(), Some("<p>HTML summary</p>"));
+    }
+
+    #[test]
+    fn extract_cv_helper_rejects_non_4000() {
+        assert_eq!(
+            extract_cv_issue_id_from_url("https://comicvine.gamespot.com/issue/4000-42/"),
+            Some(42)
+        );
+        assert_eq!(
+            extract_cv_issue_id_from_url("https://comicvine.gamespot.com/issue/4050-99/"),
+            None
+        );
+        assert_eq!(extract_cv_issue_id_from_url("not a url"), None);
+    }
+
+    #[test]
+    fn extract_metron_helper() {
+        assert_eq!(
+            extract_metron_issue_id_from_url("https://metron.cloud/issue/saga-1-2012"),
+            Some("saga-1-2012".to_owned())
+        );
+        assert_eq!(extract_metron_issue_id_from_url("not a url"), None);
     }
 }

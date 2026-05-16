@@ -22,7 +22,7 @@ pub struct ParsingPattern {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParsedFilename {
-    pub series: String,
+    pub series_title: String,
     pub number: String,
     pub volume: Option<i32>,
     pub year: Option<i32>,
@@ -47,7 +47,7 @@ pub fn parse(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilena
             continue;
         };
         return Some(ParsedFilename {
-            series: series.as_str().trim().to_owned(),
+            series_title: series.as_str().trim().to_owned(),
             number: number.as_str().trim().to_owned(),
             volume: caps
                 .name("volume")
@@ -64,33 +64,36 @@ pub fn parse(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilena
 /// matching rows; this helper keeps the patterns available for in-process
 /// testing without depending on the DB layer.
 pub fn default_patterns() -> Vec<ParsingPattern> {
+    // Priority order matches the longbox-db migration seed: the volume-aware
+    // pattern runs FIRST (priority 5) so it can claim filenames with volume
+    // markers before the looser patterns absorb them.
     vec![
         ParsingPattern {
             id: 1,
+            name: "Series Vol N #M".into(),
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 5,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 2,
             name: "Series #NNN (YYYY)".into(),
             pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)(?:\s+-\s+(?P<title>.+))?\.(?i:cbz|cbr|cb7)$".into(),
             priority: 10,
             enabled: true,
         },
         ParsingPattern {
-            id: 2,
+            id: 3,
             name: "Series NNN (YYYY)".into(),
             pattern: r"^(?P<series>.+?)\s+(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)\.(?i:cbz|cbr|cb7)$".into(),
             priority: 20,
             enabled: true,
         },
         ParsingPattern {
-            id: 3,
-            name: "Series_NNN".into(),
+            id: 4,
+            name: "Series_NNN or Series NNN".into(),
             pattern: r"^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7)$".into(),
             priority: 30,
-            enabled: true,
-        },
-        ParsingPattern {
-            id: 4,
-            name: "Series Vol N #M".into(),
-            pattern: r"^(?P<series>.+?)\s+(?:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+).*?\.(?i:cbz|cbr|cb7)$".into(),
-            priority: 40,
             enabled: true,
         },
     ]
@@ -107,92 +110,98 @@ mod tests {
     #[test]
     fn matches_series_hash_number_year_title() {
         let p = parse("Saga #1 (2012) - The Beginning.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Saga");
+        assert_eq!(p.series_title, "Saga");
         assert_eq!(p.number, "1");
         assert_eq!(p.year, Some(2012));
         assert_eq!(p.title.as_deref(), Some("The Beginning"));
-        assert_eq!(p.pattern_id, 1);
+        // id=2 = "Series #NNN (YYYY)" at priority 10.
+        assert_eq!(p.pattern_id, 2);
     }
 
     #[test]
     fn matches_series_number_year_no_title() {
         let p = parse("Saga 1 (2012).cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Saga");
+        assert_eq!(p.series_title, "Saga");
         assert_eq!(p.number, "1");
         assert_eq!(p.year, Some(2012));
         assert!(p.title.is_none());
-        // Pattern 1 (with optional title) takes priority over pattern 2.
-        assert_eq!(p.pattern_id, 1);
+        // The #NNN (YYYY) pattern's `#?` makes it match "1 (2012)" too, so
+        // it wins over the NNN (YYYY) pattern (id=3) at higher priority.
+        assert_eq!(p.pattern_id, 2);
     }
 
     #[test]
     fn matches_series_underscore_number() {
         let p = parse("Saga_1.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Saga");
+        assert_eq!(p.series_title, "Saga");
         assert_eq!(p.number, "1");
         assert!(p.year.is_none());
-        assert_eq!(p.pattern_id, 3);
+        // id=4 = "Series_NNN or Series NNN" at priority 30.
+        assert_eq!(p.pattern_id, 4);
     }
 
     #[test]
     fn matches_series_space_number_no_year() {
         let p = parse("Saga 1.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Saga");
+        assert_eq!(p.series_title, "Saga");
         assert_eq!(p.number, "1");
-        assert_eq!(p.pattern_id, 3);
+        assert_eq!(p.pattern_id, 4);
     }
 
     #[test]
-    fn volume_form_falls_into_pattern_3_with_suboptimal_capture() {
-        // Spec quirk surfaced at Step 1 review: pattern 3 (priority 30) with
-        // its permissive `[_\s]+#?\d+\.ext$` tail matches Vol-form filenames
-        // before pattern 4 (priority 40) ever runs. Series ends up including
-        // the "v1" segment. The matcher's similarity comparison still finds
-        // the right series (with reduced confidence → needs_review zone),
-        // and Phase A's disambiguation UI lets the user resolve.
+    fn volume_form_matched_by_priority_5_pattern() {
+        // The Step 4 reordering put the volume-aware pattern at priority 5
+        // (case-insensitive `(?i:v|vol|volume)`), so it claims Vol-form
+        // filenames before the looser patterns absorb them.
         let p = parse("Iron Man v1 #100.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Iron Man v1");
-        assert_eq!(p.number, "100");
-        assert_eq!(p.pattern_id, 3);
-
-        let p = parse("Iron Man volume 2 #1.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Iron Man volume 2");
-        assert_eq!(p.number, "1");
-        assert_eq!(p.pattern_id, 3);
-    }
-
-    #[test]
-    fn pattern_4_fires_when_pattern_3_cannot() {
-        // Trailing non-number-non-extension content (e.g. "Annual") prevents
-        // pattern 3 from matching, leaving pattern 4 reachable. Note: the
-        // spec'd pattern 4 has a case-sensitive `(?:v|vol|volume)` group, so
-        // we use lowercase here. Real-world filenames mostly use capital
-        // "Vol" — see Step 1 review notes about this quirk.
-        let p = parse("Iron Man vol 1 #100 Annual.cbz", &patterns()).unwrap();
-        assert_eq!(p.series, "Iron Man");
+        assert_eq!(p.series_title, "Iron Man");
         assert_eq!(p.volume, Some(1));
         assert_eq!(p.number, "100");
-        assert_eq!(p.pattern_id, 4);
+        assert_eq!(p.pattern_id, 1);
+
+        let p = parse("Iron Man volume 2 #1.cbz", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Iron Man");
+        assert_eq!(p.volume, Some(2));
+        assert_eq!(p.number, "1");
+        assert_eq!(p.pattern_id, 1);
+
+        // Case-insensitivity: capital Vol matches now.
+        let p = parse("Iron Man Vol 1 #100.cbz", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Iron Man");
+        assert_eq!(p.volume, Some(1));
+        assert_eq!(p.pattern_id, 1);
+    }
+
+    #[test]
+    fn volume_form_with_trailing_content_still_matched() {
+        // Trailing content like " Annual" after the issue number is consumed
+        // by the volume pattern's `.*?\.<ext>$` tail.
+        let p = parse("Iron Man Vol 1 #100 Annual.cbz", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Iron Man");
+        assert_eq!(p.volume, Some(1));
+        assert_eq!(p.number, "100");
+        assert_eq!(p.pattern_id, 1);
     }
 
     #[test]
     fn matches_decimal_issue_number() {
         let p = parse("Saga #1.5 (2012).cbz", &patterns()).unwrap();
         assert_eq!(p.number, "1.5");
-        assert_eq!(p.pattern_id, 1);
+        // #NNN (YYYY) pattern (id=2) wins.
+        assert_eq!(p.pattern_id, 2);
     }
 
     #[test]
     fn matches_case_insensitive_extension() {
         let p = parse("Saga 1.CBZ", &patterns()).unwrap();
-        assert_eq!(p.series, "Saga");
+        assert_eq!(p.series_title, "Saga");
         assert_eq!(p.number, "1");
     }
 
     #[test]
     fn matches_cbr_and_cb7_extensions() {
-        assert_eq!(parse("Saga 1.cbr", &patterns()).unwrap().series, "Saga");
-        assert_eq!(parse("Saga 1.cb7", &patterns()).unwrap().series, "Saga");
+        assert_eq!(parse("Saga 1.cbr", &patterns()).unwrap().series_title, "Saga");
+        assert_eq!(parse("Saga 1.cb7", &patterns()).unwrap().series_title, "Saga");
     }
 
     #[test]
@@ -273,7 +282,7 @@ mod tests {
             &patterns(),
         )
         .unwrap();
-        assert_eq!(p.series, "The Walking Dead");
+        assert_eq!(p.series_title, "The Walking Dead");
         assert_eq!(p.number, "1");
         assert_eq!(p.year, Some(2003));
         assert_eq!(p.title.as_deref(), Some("Days Gone Bye"));
