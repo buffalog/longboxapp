@@ -1366,16 +1366,15 @@ Nested `routes/` subdir is appropriate at this file count (~6 route modules + 4 
   Cloned cheaply (Arc + sqlx pool is Arc-internal). Axum `State<AppState>` extractor.
 
 - **`bootstrap.rs`** — Startup orchestration:
-  1. `pool = longbox_db::open(&config.database_url).await?` — NOT bare `SqlitePool::connect`. The `longbox_db::open` function encapsulates the production pragma policy (WAL journal mode, `foreign_keys=ON`, `synchronous=NORMAL`, `busy_timeout=5s`). Skipping this opens the door to silent FK violations and writer-blocks-readers contention under any concurrent load.
-  2. `sqlx::migrate!("../longbox-db/migrations").run(&pool).await?`
-  3. Upsert library_roots from `config.library_root_path`:
+  1. `pool = longbox_db::open(&config.database_url).await?` — NOT bare `SqlitePool::connect`. The `longbox_db::open` function encapsulates the production pragma policy (WAL journal mode, `foreign_keys=ON`, `synchronous=NORMAL`, `busy_timeout=5s`) AND runs migrations. Skipping it opens the door to silent FK violations and writer-blocks-readers contention under any concurrent load.
+  2. Upsert library_roots from `config.library_root_path`:
      - Normalize the configured path: strip trailing slashes (except for the root `/` itself). No symlink resolution, no canonicalization, no component parsing. Same normalizer applied to both the configured value and the stored row before comparing.
      - If row exists with matching normalized path → use its id.
      - If row exists with different normalized path → return error (do NOT silently mutate; this would orphan the file catalog). Error message must include both the configured path and the existing row's path so the user can diagnose without poking the DB.
      - If no row → insert one with the normalized path.
-  4. Construct `ComicVineClient` from config.
-  5. Construct `Scanner` from pool + config.
-  6. Return `AppState` with empty `ScanStatus`.
+  3. Construct `ComicVineClient` from config.
+  4. Construct `Scanner` from pool + config.
+  5. Return `AppState` with empty `ScanStatus`.
 
 - **`frontend.rs`** — `rust-embed` of `frontend-dist/`. Handler serves static files from the embedded bundle. SPA fallback: any GET that doesn't match an API route AND isn't a known static asset returns `index.html` (so client-side routing works for `/series/42` etc.). True 404 only for `.well-known/` and similar reserved paths.
 
@@ -1537,7 +1536,7 @@ Test coverage (~25-30 cases):
 - File list filtered by status
 - File PATCH: rematch sets new issue_id and status
 - File PATCH: mark ignored
-- File PATCH: clear ignored → status becomes needs_review with cleared issue_id; next scan re-classifies normally
+- File PATCH: clear ignored → status becomes `unmatched` with cleared issue_id (NOT `needs_review`; that status implies a candidate exists to review, which isn't true post-ignore-clear). The next scan re-classifies the file normally based on its current ComicInfo/filename.
 - Scan trigger 202; second concurrent trigger 409
 - `/api/scans/current` and `/api/scans/recent` return correct state during and after scan
 - Bootstrap with missing required env var fails cleanly
