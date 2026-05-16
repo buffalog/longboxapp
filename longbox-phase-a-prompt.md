@@ -888,7 +888,7 @@ ALTER TABLE files ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT (datetime('now')
 CREATE INDEX idx_files_root_present ON files(library_root_id, is_present);
 ```
 
-Plus one new repo method in `longbox-db/src/repo/file_repo.rs`:
+Plus one new repo method in `longbox-db/src/file_repo.rs`:
 
 ```rust
 /// Sets is_present = false for all files in this library_root whose
@@ -1075,6 +1075,10 @@ sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
 
 ### Scan algorithm (`scan_full`)
 
+**Tier 1 lives at the scanner, not in `longbox-core::matcher`.** When a `<Web>` URL gives us a definitive CV or Metron issue ID, we trust the ID directly — independent of the file's Series field. A file might have a typo in its Series ("WLAKING DEAD") or reference a renamed series, but if the Web URL points to a valid CV issue, that's the right match. Doing the lookup at the orchestrator layer (where DB access is direct) lets us look up by ID with no similarity scoring involved; confidence 1.0 means what it says.
+
+The matcher (`longbox-core::matcher::match_file`) handles only Tiers 2 and 3 — both legitimately need title-similarity scoring against a candidate pool, which is where the matcher excels. URL-parsing helpers (`extract_cv_issue_id_from_url`, `extract_metron_issue_id_from_url`) are added to `longbox-core::comicinfo` as additive helpers; Step 1's existing `match_file` keeps its signature but narrows its body to Tiers 2/3.
+
 ```
 1. Acquire scan_lock via try_lock(). On contention return AlreadyRunning.
 2. Look up library_roots row by id. If missing: LibraryRootNotFound.
@@ -1135,21 +1139,25 @@ sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
             &candidates,
         );
 
-   h. new_status = if existing_row.status == Some(FileStatus::Ignored) {
-            // preserve user's manual ignore decision
-            FileStatus::Ignored
-        } else {
-            longbox_core::file::classify_status(
-                match_result.issue_id,
-                match_result.confidence,
-                match_result.method,
-                config.match_threshold,
-            )
-        };
+   h. Determine update strategy for Ignored rows:
+      - If existing_row exists AND existing_row.status == FileStatus::Ignored:
+          update_match_columns = false  // user's ignore decision freezes the row's match state
+          new_status = FileStatus::Ignored
+      - Else:
+          update_match_columns = true
+          new_status = longbox_core::file::classify_status(
+              match_result.issue_id,
+              match_result.confidence,
+              match_result.method,
+              config.match_threshold,
+          );
 
    i. Persist:
-      - existing: file_repo::update with new fields, last_seen_at = utc_now(), is_present = true.
-      - new: file_repo::insert with all fields, created_at = utc_now(), last_seen_at = utc_now(), is_present = true.
+      - existing: file_repo::update.
+          Always refresh disk-state columns: last_seen_at = utc_now(), is_present = true, size_bytes, mtime.
+          If update_match_columns: also update status, issue_id, match_method, match_confidence.
+          If !update_match_columns: status/issue_id/match_method/match_confidence are unchanged. The Ignored row is frozen except for disk-state.
+      - new: file_repo::insert with all fields from match_result + status from classifier + created_at = utc_now(), last_seen_at = utc_now(), is_present = true.
       - Increment counters per new_status.
 5. After walk completes:
    marked_missing = file_repo::mark_files_not_seen_since(library_root_id, report.started_at).await?;
@@ -1177,10 +1185,10 @@ sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
 
 ```
 1. Acquire scan_lock.
-2. Look up series by id (and its library_root_id from the series row).
-3. Query files: status = needs_review AND library_root_id = series.library_root_id
+2. Look up series by id. (Series is catalog-global — it has no `library_root_id` column. Files for the same series may live across any number of library_roots.)
+3. Query files: status = needs_review across ALL library_roots
    AND (some title-similarity heuristic between file's known series hint and series.title).
-   For Phase A: fetch all needs_review files in the library and let the matcher decide via candidate scoring. Faster scoping is Phase B optimization.
+   For Phase A: fetch all needs_review files in all library_roots and let the matcher decide via candidate scoring. Faster scoping is Phase B optimization.
 4. For each file: re-run match cascade with `candidates = [series + its issues]` only.
 5. Update rows where status changes from needs_review to owned.
 6. Return report.
