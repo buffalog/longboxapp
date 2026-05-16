@@ -1,24 +1,23 @@
-//! `Issue` domain type and `IssueNumber` newtype with natural ordering.
+//! `Issue` domain type and `IssueNumber` newtype with natural-comparison ordering.
 //!
 //! Issue numbers in the comics industry are not integers. They're strings like
 //! `1`, `1.MU`, `½`, `Annual 2`, `Year One`, `-1`. [`IssueNumber`] wraps a
-//! `String` and provides a natural [`Ord`] implementation per the rules agreed
-//! in the Phase A brief:
+//! `String` and exposes [`IssueNumber::natural_cmp`] (an associated function
+//! suitable for `sort_by`) and [`IssueNumber::matches`] (natural-comparison
+//! equality). [`Ord`] and [`PartialOrd`] are *not* implemented — callers must
+//! pass `IssueNumber::natural_cmp` explicitly. This keeps [`Eq`] / [`Hash`] /
+//! `==` strictly raw-string-based (so `IssueNumber` is safe as a map key or in
+//! a `HashSet`) while letting sort and "is this the same issue?" use the
+//! tolerant natural rules:
 //!
 //! - Bucket A — numeric-leading. Parse leading number (optional sign,
 //!   optional `.digits` decimal). The character `½` (and the ASCII
-//!   approximation `1/2`) is treated as `0.5`. Sort by float value, then by
+//!   approximation `1/2`) is treated as `0.5`. Order by float value, then by
 //!   trailing suffix string.
 //! - Bucket B — non-numeric-leading. Parse as `(prefix, optional_trailing_number,
-//!   optional_trailing_suffix)`. Sort by case-insensitive prefix, then by
+//!   optional_trailing_suffix)`. Order by case-insensitive prefix, then by
 //!   trailing number (`None` < `Some(n)`), then by trailing suffix.
 //! - Bucket A always sorts before Bucket B.
-//!
-//! Note: [`Eq`]/[`Hash`] are derived on the raw underlying string, while
-//! [`Ord`] uses the natural ordering above. This means two issue numbers may
-//! be `cmp`-equal without being `eq` (e.g. `"1"` and `"01"`). This violates
-//! the standard `Ord`/`Eq` consistency contract but is the conventional
-//! shape for "natural sort" types and is fine for `sort_by` / display.
 
 use std::cmp::Ordering;
 use std::sync::OnceLock;
@@ -46,7 +45,8 @@ pub struct Issue {
     pub cover_url: Option<String>,
 }
 
-/// Newtype over a raw issue-number string. Provides natural ordering.
+/// Newtype over a raw issue-number string. `Eq` / `Hash` are raw-string based;
+/// natural ordering is opt-in via [`IssueNumber::natural_cmp`].
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct IssueNumber(String);
@@ -60,11 +60,17 @@ impl IssueNumber {
         &self.0
     }
 
+    /// Natural-comparison ordering. Pass directly as a `sort_by` comparator:
+    /// `nums.sort_by(IssueNumber::natural_cmp);`
+    pub fn natural_cmp(a: &Self, b: &Self) -> Ordering {
+        natural_cmp_str(&a.0, &b.0)
+    }
+
     /// Natural-comparison equality. `IssueNumber::new("01").matches(&IssueNumber::new("1"))`
     /// is `true` even though the raw strings differ. Use this when the matcher
     /// is comparing ComicInfo / filename strings against canonical CV strings.
     pub fn matches(&self, other: &Self) -> bool {
-        self.cmp(other).is_eq()
+        Self::natural_cmp(self, other).is_eq()
     }
 }
 
@@ -89,18 +95,6 @@ impl AsRef<str> for IssueNumber {
 impl std::fmt::Display for IssueNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl PartialOrd for IssueNumber {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for IssueNumber {
-    fn cmp(&self, other: &Self) -> Ordering {
-        natural_cmp(&self.0, &other.0)
     }
 }
 
@@ -192,7 +186,7 @@ fn parse_bucket_b(s: &str) -> Parsed<'_> {
     }
 }
 
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+fn natural_cmp_str(a: &str, b: &str) -> Ordering {
     let pa = parse(a);
     let pb = parse(b);
 
@@ -239,89 +233,100 @@ mod tests {
         IssueNumber::new(s)
     }
 
+    fn lt(a: &str, b: &str) -> bool {
+        IssueNumber::natural_cmp(&n(a), &n(b)).is_lt()
+    }
+
+    fn gt(a: &str, b: &str) -> bool {
+        IssueNumber::natural_cmp(&n(a), &n(b)).is_gt()
+    }
+
+    fn eq(a: &str, b: &str) -> bool {
+        IssueNumber::natural_cmp(&n(a), &n(b)).is_eq()
+    }
+
     #[test]
     fn integer_ordering() {
-        assert!(n("1") < n("2"));
-        assert!(n("2") < n("10"));
-        assert!(n("9") < n("10"));
+        assert!(lt("1", "2"));
+        assert!(lt("2", "10"));
+        assert!(lt("9", "10"));
     }
 
     #[test]
     fn decimal_ordering() {
-        assert!(n("1") < n("1.5"));
-        assert!(n("1.5") < n("2"));
-        assert!(n("1.0") < n("1.5"));
+        assert!(lt("1", "1.5"));
+        assert!(lt("1.5", "2"));
+        assert!(lt("1.0", "1.5"));
     }
 
     #[test]
     fn half_issue_sorts_between_zero_and_one() {
-        assert!(n("0") < n("½"));
-        assert!(n("½") < n("1"));
-        assert_eq!(natural_cmp("½", "1/2"), Ordering::Equal);
+        assert!(lt("0", "½"));
+        assert!(lt("½", "1"));
+        assert!(eq("½", "1/2"));
     }
 
     #[test]
     fn negative_issue_sorts_below_zero() {
-        assert!(n("-1") < n("0"));
-        assert!(n("-1") < n("1"));
+        assert!(lt("-1", "0"));
+        assert!(lt("-1", "1"));
     }
 
     #[test]
     fn decimal_suffix_after_pure_number() {
-        // "1" < "1.MU" because same value, suffix "" < "MU"
-        assert!(n("1") < n("1.MU"));
-        // "1.MU" < "1.5" — same value 1.0, suffix "MU" vs ".5"... wait
-        // "1.5" is value 1.5 (decimal consumed). So "1.MU" (1.0) < "1.5" (1.5).
-        assert!(n("1.MU") < n("1.5"));
+        // "1" < "1.MU" because same value 1.0, suffix "" < "MU"
+        assert!(lt("1", "1.MU"));
+        // "1.MU" < "1.5" because "1.5" parses as value 1.5 (decimal consumed).
+        assert!(lt("1.MU", "1.5"));
     }
 
     #[test]
     fn suffix_letter_variants() {
         // "1A" parses to Numeric { 1.0, "A" }
-        assert!(n("1") < n("1A"));
-        assert!(n("1A") < n("1B"));
-        assert!(n("1B") < n("2"));
+        assert!(lt("1", "1A"));
+        assert!(lt("1A", "1B"));
+        assert!(lt("1B", "2"));
     }
 
     #[test]
     fn numeric_sorts_before_alphabetic() {
-        assert!(n("100") < n("Annual 1"));
-        assert!(n("9999") < n("Annual 1"));
-        assert!(n("Annual 1") > n("0"));
+        assert!(lt("100", "Annual 1"));
+        assert!(lt("9999", "Annual 1"));
+        assert!(gt("Annual 1", "0"));
     }
 
     #[test]
     fn alphabetic_with_trailing_number() {
-        assert!(n("Annual 1") < n("Annual 2"));
-        assert!(n("Annual 2") < n("Annual 10"));
-        assert!(n("Annual 9") < n("Annual 10"));
+        assert!(lt("Annual 1", "Annual 2"));
+        assert!(lt("Annual 2", "Annual 10"));
+        assert!(lt("Annual 9", "Annual 10"));
     }
 
     #[test]
     fn alphabetic_prefix_case_insensitive() {
-        assert_eq!(natural_cmp("annual 1", "Annual 1"), Ordering::Equal);
-        assert_eq!(natural_cmp("ANNUAL 2", "annual 2"), Ordering::Equal);
+        assert!(eq("annual 1", "Annual 1"));
+        assert!(eq("ANNUAL 2", "annual 2"));
     }
 
     #[test]
     fn alphabetic_prefix_alphabetical() {
-        assert!(n("Annual 1") < n("Special 1"));
-        assert!(n("Annual 99") < n("Special 1"));
+        assert!(lt("Annual 1", "Special 1"));
+        assert!(lt("Annual 99", "Special 1"));
     }
 
     #[test]
     fn alphabetic_with_no_trailing_number() {
         // "Year One" — no trailing digits, parses to Alphabetic { "Year One", None, "" }
-        assert!(n("Year One") > n("100"));
-        assert!(n("Annual") < n("Annual 1")); // None < Some(1)
+        assert!(gt("Year One", "100"));
+        assert!(lt("Annual", "Annual 1")); // None < Some(1)
     }
 
     #[test]
     fn alphabetic_trailing_letter_suffix() {
         // "Annual 1A" → prefix "Annual", number 1, suffix "A"
-        assert!(n("Annual 1") < n("Annual 1A"));
-        assert!(n("Annual 1A") < n("Annual 1B"));
-        assert!(n("Annual 1B") < n("Annual 2"));
+        assert!(lt("Annual 1", "Annual 1A"));
+        assert!(lt("Annual 1A", "Annual 1B"));
+        assert!(lt("Annual 1B", "Annual 2"));
     }
 
     #[test]
@@ -342,7 +347,7 @@ mod tests {
         .map(IssueNumber::new)
         .collect();
 
-        nums.sort();
+        nums.sort_by(IssueNumber::natural_cmp);
 
         let order: Vec<&str> = nums.iter().map(IssueNumber::as_str).collect();
         assert_eq!(
@@ -369,8 +374,8 @@ mod tests {
 
     #[test]
     fn whitespace_around_input_ignored_for_ordering() {
-        assert_eq!(natural_cmp(" 1 ", "1"), Ordering::Equal);
-        assert_eq!(natural_cmp("  Annual  2  ", "Annual 2"), Ordering::Equal);
+        assert!(eq(" 1 ", "1"));
+        assert!(eq("  Annual  2  ", "Annual 2"));
     }
 
     #[test]
@@ -385,5 +390,14 @@ mod tests {
         // 1 and 1.MU share a numeric value but differ on suffix.
         assert!(!IssueNumber::new("1").matches(&IssueNumber::new("1.MU")));
         assert!(!IssueNumber::new("1").matches(&IssueNumber::new("1A")));
+    }
+
+    #[test]
+    fn raw_string_eq_independent_of_natural_eq() {
+        // Eq is strict raw-string; natural_cmp is tolerant.
+        let a = IssueNumber::new("01");
+        let b = IssueNumber::new("1");
+        assert_ne!(a, b, "PartialEq must use raw string");
+        assert!(a.matches(&b), "matches must use natural ordering");
     }
 }

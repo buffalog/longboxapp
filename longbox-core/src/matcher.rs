@@ -13,10 +13,9 @@
 //!
 //! No match in any tier → `MatchMethod::Unmatched`, confidence 0.0.
 //!
-//! The `threshold` parameter is accepted for API stability (it appears in the
-//! Phase A spec's signature) but is not consulted by the cascade. Callers
-//! pass the same threshold to [`crate::classify_status`] to derive the
-//! `owned` / `needs_review` status from the returned confidence.
+//! The matcher returns raw confidence only — `owned` vs `needs_review`
+//! classification lives in [`crate::classify_status`], which the caller
+//! invokes with the configured threshold.
 
 use std::cmp::Ordering;
 
@@ -54,7 +53,6 @@ pub fn match_file(
     ctx: &FileContext<'_>,
     series_pool: &[Series],
     issue_pool: &[Issue],
-    _threshold: f64,
 ) -> MatchResult {
     if let Some(ci) = ctx.comicinfo {
         if let Some(result) = tier1_web_url(ci, issue_pool) {
@@ -249,7 +247,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("anything.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("anything.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.issue_id, Some(10));
         assert_eq!(r.method, MatchMethod::ComicInfoWebCv);
         assert_eq!(r.confidence, 1.0);
@@ -264,7 +262,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("anything.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("anything.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.issue_id, Some(10));
         assert_eq!(r.method, MatchMethod::ComicInfoWebMetron);
         assert_eq!(r.confidence, 1.0);
@@ -292,7 +290,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.method, MatchMethod::ComicInfoWebCv);
     }
 
@@ -309,7 +307,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
     }
@@ -327,7 +325,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(r.confidence >= DEFAULT_MATCH_THRESHOLD);
@@ -345,7 +343,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -371,7 +369,6 @@ mod tests {
             &ctx("The Walking Dead 1 (2003).cbz", Some(&ci), &ps),
             &series,
             &issues,
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
@@ -388,7 +385,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("Saga 99.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("Saga 99.cbz", Some(&ci), &ps), &series, &issues);
         // No issue #99 anywhere → unmatched.
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
@@ -411,7 +408,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.issue_id, Some(20), "expected 2014 series to win on volume tie-break");
     }
 
@@ -429,7 +426,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.issue_id, Some(10), "expected lower-id series to win");
     }
 
@@ -443,7 +440,7 @@ mod tests {
             ..Default::default()
         };
         let ps = default_patterns();
-        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues, DEFAULT_MATCH_THRESHOLD);
+        let r = match_file(&ctx("x.cbz", Some(&ci), &ps), &series, &issues);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -458,7 +455,6 @@ mod tests {
             &ctx("Saga 1 (2012).cbz", None, &ps),
             &series,
             &issues,
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
@@ -478,7 +474,6 @@ mod tests {
             &ctx("random gibberish.txt", None, &ps),
             &series,
             &issues,
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
@@ -493,7 +488,6 @@ mod tests {
             &ctx("Some Other Comic 1 (2012).cbz", None, &ps),
             &series,
             &issues,
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::Unmatched);
     }
@@ -507,7 +501,6 @@ mod tests {
             &ctx("Saga 1 (2012).cbz", None, &ps),
             &[],
             &[],
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert_eq!(r.confidence, 0.0);
@@ -545,7 +538,6 @@ mod tests {
             &ctx("Saga 1 (2012).cbz", Some(&ci), &ps),
             &series,
             &issues,
-            DEFAULT_MATCH_THRESHOLD,
         );
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert!(
