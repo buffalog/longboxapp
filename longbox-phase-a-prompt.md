@@ -1366,8 +1366,8 @@ Nested `routes/` subdir is appropriate at this file count (~6 route modules + 4 
   Cloned cheaply (Arc + sqlx pool is Arc-internal). Axum `State<AppState>` extractor.
 
 - **`bootstrap.rs`** — Startup orchestration:
-  1. `SqlitePool::connect(&config.database_url).await`
-  2. `sqlx::migrate!("../longbox-db/migrations").run(&pool).await`
+  1. `pool = longbox_db::open(&config.database_url).await?` — NOT bare `SqlitePool::connect`. The `longbox_db::open` function encapsulates the production pragma policy (WAL journal mode, `foreign_keys=ON`, `synchronous=NORMAL`, `busy_timeout=5s`). Skipping this opens the door to silent FK violations and writer-blocks-readers contention under any concurrent load.
+  2. `sqlx::migrate!("../longbox-db/migrations").run(&pool).await?`
   3. Upsert library_roots from `config.library_root_path`:
      - Normalize the configured path: strip trailing slashes (except for the root `/` itself). No symlink resolution, no canonicalization, no component parsing. Same normalizer applied to both the configured value and the stored row before comparing.
      - If row exists with matching normalized path → use its id.
@@ -1431,8 +1431,12 @@ POST /api/series { "cv_id": 12345 }
    - Fill series_id in each new_issue with inserted.id.
    - issue_repo::bulk_insert(&new_issues).await?
    - Commit.
-7. Fire-and-forget: tokio::spawn(scanner.rematch_for_series(inserted.id))
-   Update scan_status to indicate a RematchForSeries scan is running.
+7. Fire-and-forget: `tokio::spawn(async move { let _ = scanner.rematch_for_series(inserted.id).await; })`.
+
+   This spawn does NOT touch `scan_status`. Add-series-triggered rematch is internal — it does not appear in `/api/scans/current` or `/api/scans/recent` even when it runs successfully. If the scanner is currently running a user-initiated scan, the spawn task gets `ScanError::AlreadyRunning`, logs WARN with the `series_id` and a "rematch deferred" message, and exits. The series insert in step 6 has already succeeded; the 201 response in step 8 is unaffected.
+
+   Phase A treats add-series-triggered rematch as best-effort. Users who want to know whether the auto-rematch ran can manually trigger `rescan_unmatched` after any running scan completes, or wait for the next manual scan to pick up the files. Phase A.5 could add a deferred-rematch queue that auto-runs after each scan completion.
+
 8. Return 201 Created with the inserted series.
 
 Handler timeout: 60s wall-clock budget. Steps 3-4 dominate; rate-limited CV could push past, in which case 503 to client.
