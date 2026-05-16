@@ -1,0 +1,32 @@
+{
+    "status_code": 1,
+    "error": "OK",
+    "limit": 100,
+    "offset": 0,
+    "number_of_page_results": 2,
+    "number_of_total_results": 2,
+    "results": [
+        {
+            "id": 2127,
+            "name": "The Walking Dead",
+            "start_year": "2003",
+            "publisher": { "id": 1859, "name": "Image Comics" },
+            "count_of_issues": 193,
+            "image": {
+                "medium_url": "https://comicvine.gamespot.com/a/uploads/scale_medium/wd.jpg"
+            },
+            "deck": "Apocalyptic horror comic by Robert Kirkman."
+        },
+        {
+            "id": 99999,
+            "name": "Walking Dead Weekly",
+            "start_year": "2011",
+            "publisher": { "id": 1859, "name": "Image Comics" },
+            "count_of_issues": 52,
+            "image": {
+                "medium_url": null
+            },
+            "deck": null
+        }
+    ]
+}

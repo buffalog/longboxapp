@@ -1,0 +1,19 @@
+{
+    "status_code": 1,
+    "error": "OK",
+    "limit": 1,
+    "offset": 0,
+    "number_of_page_results": 1,
+    "number_of_total_results": 1,
+    "results": {
+        "id": 2127,
+        "name": "The Walking Dead",
+        "start_year": "2003",
+        "publisher": { "id": 1859, "name": "Image Comics" },
+        "description": "<p>Apocalyptic horror comic about a small group of survivors trying to live in a world overrun by the undead.</p>",
+        "image": {
+            "medium_url": "https://comicvine.gamespot.com/a/uploads/scale_medium/wd.jpg"
+        },
+        "site_detail_url": "https://comicvine.gamespot.com/the-walking-dead/4050-2127/"
+    }
+}
