@@ -789,11 +789,33 @@ serde_json = "1"
 **Retry policy on 429:**
 
 - CV returns 429 (rare but possible — CV's actual limit may be tighter than documented, or concurrent requests may race).
-- Parse the `Retry-After` header. If absent or unparseable, default to 60 seconds.
+- Parse the `Retry-After` header as integer seconds (RFC 7231 also permits HTTP-date format, but CV/CDN returns integers in practice and we deliberately do not add an `httpdate` dependency for an edge case we've never observed). If the header is absent, non-numeric, or in HTTP-date format, default to 60 seconds.
 - Sleep for that duration via `tokio::time::sleep`.
 - Retry the request **once**. The retry calls `acquire()` again — fresh token from the bucket. Not a free pass.
 - If the retry also returns 429, surface as `CvError::RateLimited { retry_after_seconds: <Retry-After of the second 429, or 60> }`.
 - No further retries. No retry for 5xx errors — those surface immediately as `Http { status: 5xx, body: ... }`. Phase A doesn't auto-retry server errors.
+
+**Error mapping (HTTP first, then envelope):**
+
+CV reports errors at two layers, and either can be canonical depending on where the failure happens. Map in this priority order:
+
+1. **HTTP layer (check first, before parsing the body):**
+   - 401 → `Auth` (API key invalid or revoked at the edge)
+   - 404 → `NotFound` (rare at CV — usually they return 200 + `status_code 101` — but possible at the CDN/edge)
+   - 429 → retry path (sleep `Retry-After`, retry once; if still 429, `RateLimited`)
+   - 5xx → `Http { status, body }` (envelope unlikely to be present or trustworthy)
+   - reqwest network/TLS/DNS error → `Network`
+   - Request exceeds configured timeout → `Timeout`
+
+2. **HTTP 200 — parse the envelope, then map `status_code`:**
+   - 1 → success, return `results`
+   - 100 → `Auth` ("Invalid API Key")
+   - 101 → `NotFound` ("Object Not Found" — the canonical CV way of saying a volume ID doesn't exist)
+   - any other value (102=URL Format Error, 103=Filter Error, 104=Subscriber Only, 105=Object Not Found in filter, 106=Method Not Allowed, 107=Limit Exceeded, etc.) → `Malformed { message: format!("CV status_code {}: {}", status_code, envelope.error), raw_excerpt: Some(<first 200 bytes of body>) }`
+
+3. **HTTP 200 but JSON does not parse as the expected envelope shape** → `Malformed { message: "Response did not match CvResponse<T>", raw_excerpt: Some(...) }`.
+
+Why two layers: some failures arrive as raw HTTP errors (401 from a CloudFlare edge, 5xx from an upstream proxy, 429 from the rate-limit layer) before CV's app code constructs an envelope. Other failures arrive as HTTP 200 with `status_code != 1` because CV's API layer caught them. Treating either layer as the canonical source alone misses real cases. Be defensive at both.
 
 **Test fixture strategy:**
 
@@ -850,6 +872,375 @@ Projection unit tests in `longbox-comicvine/src/projection.rs` `#[cfg(test)]`:
 Roughly **20-25 test cases total.** Integration-style for the client (real wiremock HTTP); unit-style for `rate_limit` and `projection`.
 
 End of Step 3: a fully-tested ComicVine client. Rate limiting verified. Retry policy verified. All three public methods work against realistic CV response shapes. Step 4 (`longbox-scanner`) can build against a stable CV contract.
+
+## Step 4 — Approved file structure for `longbox-scanner`
+
+This is the biggest step yet because the scanner has the most domain logic. It walks the library, reads `ComicInfo.xml` from CBZ archives, runs the three-tier matcher cascade for every file, classifies the result, and persists. It is where day-to-day LongBox value lives. Build it tested, bounded, single-responsibility.
+
+### Schema migration in `longbox-db`
+
+Step 4 adds a new migration to `longbox-db/migrations/` (append-only; do not modify Step 2's migration). Match Step 2's existing naming convention:
+
+```sql
+-- migration: add file presence tracking
+ALTER TABLE files ADD COLUMN is_present BOOLEAN NOT NULL DEFAULT 1;
+ALTER TABLE files ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT (datetime('now'));
+CREATE INDEX idx_files_root_present ON files(library_root_id, is_present);
+```
+
+Plus one new repo method in `longbox-db/src/repo/file_repo.rs`:
+
+```rust
+/// Sets is_present = false for all files in this library_root whose
+/// last_seen_at is older than `cutoff`. Returns the number of rows affected.
+pub async fn mark_files_not_seen_since(
+    pool: &Pool,
+    library_root_id: i64,
+    cutoff: PrimitiveDateTime,
+) -> Result<u64, DbError>;
+```
+
+`is_present` is the source of truth for "is this file still on disk." `last_seen_at` is the timestamp of the most recent scan that touched this row. The scan's final pass marks rows it didn't see as `is_present = false`. Status (`owned`, `needs_review`, `ignored`) remains an independent column — presence and match-classification are different concerns.
+
+Update sqlx offline cache (`.sqlx/`) after the migration lands and the new repo method is implemented.
+
+### Approved file layout
+
+```
+longbox-scanner/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── error.rs
+│   ├── scanner.rs       # Scanner struct + public methods + scan orchestration
+│   ├── walker.rs        # filesystem traversal via walkdir
+│   ├── cbz.rs           # CBZ reading, ComicInfo.xml extraction
+│   ├── candidate.rs     # candidate series lookup from DB
+│   └── report.rs        # ScanReport, ScanFileError
+└── tests/
+    ├── fixtures/
+    │   └── library/     # sample CBZ library committed to repo
+    └── scanner_tests.rs
+```
+
+### File responsibilities
+
+- **`lib.rs`** — Crate root. Re-exports `Scanner`, `ScannerConfig`, `ScanReport`, `ScanFileError`, `ScanError`. Hides `walker`, `cbz`, `candidate` internals.
+
+- **`error.rs`** — `ScanError` enum via `thiserror`:
+  - `Io(#[from] std::io::Error)` — disk read failure
+  - `Db(#[from] longbox_db::DbError)` — repo error
+  - `Walk(String)` — directory traversal error (wraps `walkdir::Error` as string since walkdir's error doesn't implement Clone/Send well)
+  - `LibraryRootNotFound { id: i64 }`
+  - `AlreadyRunning` — another scan is in progress; return immediately, do not block
+  - `InvalidPath { path: PathBuf, reason: String }` — path computed outside library root, symlink loop, etc.
+
+- **`scanner.rs`** — The orchestrator. `Scanner` struct holds:
+
+  ```rust
+  pub struct Scanner {
+      db: longbox_db::Pool,
+      config: ScannerConfig,
+      scan_lock: Arc<tokio::sync::Mutex<()>>,
+  }
+
+  pub struct ScannerConfig {
+      pub match_threshold: f64,  // default 0.85
+  }
+
+  impl Scanner {
+      pub fn new(db: longbox_db::Pool, config: ScannerConfig) -> Self;
+
+      pub async fn scan_full(&self, library_root_id: i64)
+          -> Result<ScanReport, ScanError>;
+
+      pub async fn rescan_unmatched(&self, library_root_id: i64)
+          -> Result<ScanReport, ScanError>;
+
+      pub async fn rematch_for_series(&self, series_id: i64)
+          -> Result<ScanReport, ScanError>;
+  }
+  ```
+
+  - **`scan_full`** — full disk walk, full match cascade for every file found, mark-missing pass at the end.
+  - **`rescan_unmatched`** — query files with `status = needs_review` scoped to this library_root; re-extract ComicInfo from disk; re-run matcher. No mark-missing pass.
+  - **`rematch_for_series`** — query files with `status = needs_review` whose ComicInfo Series or filename Series matches the new series's title or alias; re-run matcher with that series specifically included in candidates. Used by Step 5's "add series" handler to auto-rematch existing files against a newly-added series.
+
+  All three guarded by `scan_lock`. Use `try_lock`; on contention return `ScanError::AlreadyRunning` immediately. Do not block waiting for an in-progress scan.
+
+  Tracing: every method opens a span at `target = "longbox_scanner"` with the library_root_id (or series_id) and scan duration. Per-file decisions log at DEBUG, errors at WARN, scan summary at INFO.
+
+- **`walker.rs`** — Wraps `walkdir`. Yields a sequence of `DiscoveredFile`:
+
+  ```rust
+  pub struct DiscoveredFile {
+      pub path_absolute: PathBuf,
+      pub path_relative: String,  // forward-slash normalized
+      pub size_bytes: u64,
+      pub mtime: PrimitiveDateTime,
+  }
+
+  pub fn walk_library(root: &Path)
+      -> impl Iterator<Item = Result<DiscoveredFile, ScanError>>;
+  ```
+
+  Filters to `.cbz` files (case-insensitive extension match). Skips:
+  - Files starting with `.` (hidden files: `.DS_Store`, `.AppleDouble`)
+  - `Thumbs.db`
+  - `.cbr` files — silently skipped, no error row in DB (CBR is Phase A.5; will require `unrar` system binary in Docker image)
+  - Anything that is not a regular file (sockets, FIFOs, etc.)
+
+  Symlinks: follow, but walkdir's loop detection breaks any infinite recursion. A loop-detection error produces a `ScanError::Walk` that the caller appends to `report.errors`.
+
+  Path normalization: `path_relative` is computed as `path_absolute.strip_prefix(library_root.path)` with all path separators normalized to forward slashes (consistent across macOS/Linux/Docker bind mounts). Stored in DB as-is.
+
+- **`cbz.rs`** — Opens a CBZ archive and extracts `ComicInfo.xml`:
+
+  ```rust
+  pub fn extract_comic_info(cbz_path: &Path) -> Result<Option<String>, ScanError>;
+  ```
+
+  Behavior:
+  - Opens with `zip::ZipArchive::new(File::open(cbz_path)?)`.
+  - Looks for an entry named `ComicInfo.xml` (case-insensitive — some files have `comicinfo.xml`).
+  - Reads its contents as UTF-8 and returns `Ok(Some(string))`.
+  - Returns `Ok(None)` if no `ComicInfo.xml` entry is present (the common case).
+  - Returns `Err(Io)` wrapping the underlying error if the file is not a valid ZIP, if a member is corrupt, or if `ComicInfo.xml` is present but not valid UTF-8.
+  - Does NOT extract images or any other archive contents.
+
+- **`candidate.rs`** — Resolves candidate series given a title hint:
+
+  ```rust
+  pub async fn find_candidates(
+      db: &longbox_db::Pool,
+      series_title_hint: &str,
+      year_hint: Option<i32>,
+  ) -> Result<Vec<Candidate>, ScanError>;
+
+  pub struct Candidate {
+      pub series: Series,
+      pub issues: Vec<Issue>,
+  }
+  ```
+
+  Phase A implementation: fetch ALL series via `series_repo::find_all`, score each by `longbox_core::normalize_title` similarity to `series_title_hint`, return the top 10 by score with each candidate's issues eagerly loaded. With < 500 series in a typical Phase A library, the cost is negligible. For Phase B/C scale, add a SQL similarity index or precomputed search structure — flagged as known scaling work, not Phase A's problem.
+
+  `year_hint` is used as a tiebreaker: candidates with matching `start_year` are preferred over those without. Series with no `start_year` set are not penalized.
+
+- **`report.rs`** — Result types:
+
+  ```rust
+  pub struct ScanReport {
+      pub library_root_id: i64,
+      pub started_at: PrimitiveDateTime,
+      pub completed_at: PrimitiveDateTime,
+      pub duration_ms: u64,
+      pub files_seen: u32,
+      pub files_added: u32,
+      pub files_updated: u32,
+      pub files_marked_missing: u32,
+      pub matched_owned: u32,
+      pub matched_needs_review: u32,
+      pub matched_ignored: u32,    // preserved from prior status; never assigned by classifier
+      pub unmatched: u32,
+      pub errors: Vec<ScanFileError>,
+  }
+
+  pub struct ScanFileError {
+      pub path_relative: String,
+      pub error_message: String,
+  }
+  ```
+
+### Cargo.toml dependencies
+
+```toml
+[dependencies]
+longbox-core = { path = "../longbox-core" }
+longbox-db = { path = "../longbox-db" }
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["macros", "sync", "rt-multi-thread", "fs"] }
+tracing = "0.1"
+thiserror = "1"
+time = { version = "0.3" }
+
+[dev-dependencies]
+tempfile = "3"
+pretty_assertions = "1"
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
+```
+
+`zip` uses `default-features = false` with only `deflate` because CBZ files use deflate compression; bzip2/zstd/xz are not needed and would bloat the binary. **No dependency on `longbox-comicvine`** — the scanner is offline. It works entirely from on-disk files and the local DB.
+
+### Scan algorithm (`scan_full`)
+
+```
+1. Acquire scan_lock via try_lock(). On contention return AlreadyRunning.
+2. Look up library_roots row by id. If missing: LibraryRootNotFound.
+3. report.started_at = utc_now().
+4. For each entry yielded by walker::walk_library(library_root.path):
+   a. If Err: append ScanFileError to report.errors, continue.
+   b. path_relative = computed from path_absolute - library_root.path.
+   c. existing_row = file_repo::find_by_path(library_root_id, &path_relative).await?
+   d. comic_info_xml = cbz::extract_comic_info(&path_absolute):
+      - Ok(Some(xml)): proceed
+      - Ok(None): no ComicInfo, fall through to filename-only
+      - Err(e): append ScanFileError, continue (skip this file)
+   e. comic_info = comic_info_xml.as_ref().and_then(|xml|
+        longbox_core::comicinfo::parse(xml).ok()
+      );
+      Parse failures append ScanFileError but do not skip — fall through to filename-only.
+   f. filename_parse = longbox_core::filename::parse(&path_relative);
+   g. Run match cascade:
+
+      Tier 1 — Web URL extraction (confidence 1.0):
+        if let Some(info) = &comic_info {
+            for web_url in &info.web_urls {
+                if let Some(cv_id) = extract_cv_issue_id(web_url) {
+                    if let Some(issue) = issue_repo::find_by_cv_id(cv_id).await? {
+                        match_result = MatchResult {
+                            issue_id: Some(issue.id),
+                            confidence: 1.0,
+                            method: MatchMethod::WebUrlCv,
+                        };
+                        break;
+                    }
+                }
+                if let Some(metron_id) = extract_metron_issue_id(web_url) {
+                    if let Some(issue) = issue_repo::find_by_metron_id(metron_id).await? {
+                        match_result = MatchResult {
+                            issue_id: Some(issue.id),
+                            confidence: 1.0,
+                            method: MatchMethod::WebUrlMetron,
+                        };
+                        break;
+                    }
+                }
+            }
+        }
+
+      Tier 2 & 3 — only if Tier 1 did not produce a match:
+        let title_hint = comic_info.as_ref()
+            .and_then(|c| c.series.as_deref())
+            .or_else(|| filename_parse.as_ref().and_then(|f| f.series_title.as_deref()));
+        let year_hint = comic_info.as_ref()
+            .and_then(|c| c.year)
+            .or_else(|| filename_parse.as_ref().and_then(|f| f.year));
+
+        let candidates = candidate::find_candidates(&db, title_hint?, year_hint).await?;
+        match_result = longbox_core::matcher::match_file(
+            comic_info.as_ref(),
+            filename_parse.as_ref(),
+            &candidates,
+        );
+
+   h. new_status = if existing_row.status == Some(FileStatus::Ignored) {
+            // preserve user's manual ignore decision
+            FileStatus::Ignored
+        } else {
+            longbox_core::file::classify_status(
+                match_result.issue_id,
+                match_result.confidence,
+                match_result.method,
+                config.match_threshold,
+            )
+        };
+
+   i. Persist:
+      - existing: file_repo::update with new fields, last_seen_at = utc_now(), is_present = true.
+      - new: file_repo::insert with all fields, created_at = utc_now(), last_seen_at = utc_now(), is_present = true.
+      - Increment counters per new_status.
+5. After walk completes:
+   marked_missing = file_repo::mark_files_not_seen_since(library_root_id, report.started_at).await?;
+   report.files_marked_missing = marked_missing;
+6. report.completed_at = utc_now();
+   report.duration_ms = (completed_at - started_at).whole_milliseconds() as u64;
+7. Release scan_lock (automatic via Drop). Return Ok(report).
+```
+
+### Algorithm for `rescan_unmatched`
+
+```
+1. Acquire scan_lock (try_lock).
+2. files = file_repo::find_by_status(library_root_id, FileStatus::NeedsReview).await?;
+3. For each file:
+   a. Re-extract ComicInfo from disk (file.path_absolute = library_root.path + file.path_relative).
+   b. Run match cascade (same as scan_full steps e-g).
+   c. classify_status with threshold. Preserve Ignored if it changed since query (unlikely but defensive).
+   d. Update row if status changed.
+4. NO mark-missing pass. No is_present changes.
+5. Return report.
+```
+
+### Algorithm for `rematch_for_series`
+
+```
+1. Acquire scan_lock.
+2. Look up series by id (and its library_root_id from the series row).
+3. Query files: status = needs_review AND library_root_id = series.library_root_id
+   AND (some title-similarity heuristic between file's known series hint and series.title).
+   For Phase A: fetch all needs_review files in the library and let the matcher decide via candidate scoring. Faster scoping is Phase B optimization.
+4. For each file: re-run match cascade with `candidates = [series + its issues]` only.
+5. Update rows where status changes from needs_review to owned.
+6. Return report.
+```
+
+### Error handling philosophy
+
+- **Per-file errors** (corrupt CBZ, ComicInfo parse failure, invalid UTF-8 in path) → append to `report.errors`, log at WARN with the file path, continue with the next file.
+- **Whole-scan errors** (DB connection lost, library_root row deleted mid-scan, scan_lock poisoned) → bail with `ScanError`, scan aborts. The partial state in the DB is what it is — the next scan will reconcile.
+- **Walkdir errors** at the directory level (permission denied on a subdir, broken symlink) → per-directory error appended to `report.errors`; the walk continues into siblings.
+
+A single bad CBZ does not stop the scan. The user fixes problem files from the needs_review queue or by inspecting `report.errors`.
+
+### Test fixture strategy
+
+Commit a small sample library at `longbox-scanner/tests/fixtures/library/`:
+
+- `Walking Dead (2003)/Walking Dead 001 (2003).cbz` — `ComicInfo.xml` with Series="The Walking Dead", Number="1", Year="2003", `<Web>https://comicvine.gamespot.com/the-walking-dead-1/4000-...</Web>`. Tests Tier 1.
+- `Walking Dead (2003)/Walking Dead 002 (2003).cbz` — no `ComicInfo.xml`. Filename-only. Tests Tier 3.
+- `Walking Dead (2003)/Walking Dead 003 (2003).cbz` — `ComicInfo.xml` with Series and Number but no Web URL. Tests Tier 2.
+- `Saga (2012)/Saga 001 (2012).cbz` — different series, has ComicInfo. Tests cross-series matching doesn't bleed.
+- `Mystery/UnknownComic.cbz` — no ComicInfo, weird filename. Won't match any series. Tests `unmatched` counter.
+- `Walking Dead (2003)/corrupt.cbz` — file with `.cbz` extension but not actually a valid ZIP (e.g., random binary). Tests error handling.
+- `Walking Dead (2003)/.DS_Store` — should be skipped silently.
+- `Walking Dead (2003)/cover.cbr` — should be silently skipped (CBR not supported).
+
+Build the CBZ fixtures by hand with the `zip` CLI once, commit the binaries. Each CBZ is a minimal ZIP containing one 1x1-pixel placeholder JPG plus `ComicInfo.xml` where applicable. Total fixture directory < 1 MB.
+
+### Test coverage expected (~25-30 cases)
+
+Integration tests in `longbox-scanner/tests/scanner_tests.rs` against the fixture library, using an in-memory SQLite seeded via `longbox-db` migrations:
+
+- Full scan, empty DB → all files unmatched, report counters match fixture file count.
+- Full scan, DB pre-seeded with The Walking Dead series + issues → Walking Dead 001 matches Tier 1 (Web URL), 002 matches Tier 3 (filename), 003 matches Tier 2 (ComicInfo).
+- File with Web URL pointing to a CV ID not in DB → falls through to Tier 2 or 3.
+- File with Web URL pointing to a Metron ID → passive Metron ingestion, captured in metron_id column, status set correctly (passive — no API call).
+- File matching Tier 2 with confidence ≥ 0.85 → status = `owned`.
+- File matching Tier 2 with confidence 0.65-0.84 → status = `needs_review`.
+- File matching Tier 3 with confidence ≤ 0.90 (filename ceiling) → respects ceiling.
+- File matching nothing → status = `needs_review`, no issue_id.
+- Corrupt CBZ → `report.errors` contains entry, scan continues.
+- Hidden file (`.DS_Store`) → not present in DB, not counted in files_seen.
+- CBR file → not present in DB, no error.
+- Second scan with unchanged library → `files_added = 0`, `files_updated = N`, all `is_present = true`.
+- Second scan with one file deleted from disk → `files_marked_missing = 1`, that row's `is_present = false`, other fields preserved.
+- Third scan with the deleted file restored → `is_present = true` again, no duplicate row inserted.
+- Concurrent `scan_full` calls → second returns `AlreadyRunning` without blocking.
+- `rescan_unmatched` → only `needs_review` files reprocessed; `owned` and `ignored` files untouched.
+- `rematch_for_series` → scopes correctly to the target series, ignores unrelated needs_review files.
+- File with `Ignored` status, then scanned again → status preserved, not reclassified.
+- File path with Unicode (e.g. emoji, accented characters) → handled without panic, stored correctly.
+- File at deeply nested path → handled.
+- Empty library directory → scan succeeds, all counters 0.
+- `LibraryRootNotFound` → returns ScanError without panicking, no partial DB writes.
+
+Plus unit tests in `cbz.rs` (extract ComicInfo from valid CBZ, return None when missing, error on corrupt zip, handle non-UTF-8 ComicInfo as error), `walker.rs` (skip hidden, skip non-cbz extensions, path-relative computation, symlink loop detection), and `candidate.rs` (similarity ranking, year_hint tiebreaker behavior).
+
+### Done definition
+
+End of Step 4: scanner walks a real library, populates the files table with match results across all three tiers, identifies missing files via `is_present`, surfaces per-file errors without aborting the scan, runs both rematch flows. Single-process scan lock prevents concurrent runs. The migration is applied; `longbox-db` has the new `mark_files_not_seen_since` method. The crate is independent of `longbox-comicvine` (offline). Ready to be invoked from Step 5's web handlers.
 
 ## Kickoff discipline
 
