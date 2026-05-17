@@ -1,8 +1,9 @@
 use std::process::ExitCode;
 
+use longbox_db::scan_run_repo;
 use longbox_web::{bootstrap_run, build_router, config::AppConfig, tracing_setup};
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -34,6 +35,25 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    // Task C startup sweep: any scan_runs row left in `running` belongs
+    // to a previous process that didn't get to update it on the way out
+    // (crash, kill, container restart). Mark them failed so /scans
+    // reflects reality instead of pretending a scan is still in flight.
+    // Best-effort — log but don't fail boot.
+    match scan_run_repo::mark_running_as_failed(&state.db, "interrupted by restart").await {
+        Ok(0) => {}
+        Ok(n) => info!(
+            target: "longbox_web",
+            count = n,
+            "marked stale scan_runs rows as failed"
+        ),
+        Err(e) => warn!(
+            target: "longbox_web",
+            err = %e,
+            "scan_runs startup sweep failed; continuing"
+        ),
+    }
 
     let bind = state.config.bind_addr.clone();
     let listener = match TcpListener::bind(&bind).await {

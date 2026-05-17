@@ -1,11 +1,11 @@
 import { apiFetch } from './client';
-import type { CurrentScan, ScanReport, StartScanResponse } from '../types';
+import type { CurrentScan, ScanRun, StartScanResponse } from '../types';
 
 export function getCurrent(): Promise<CurrentScan | null> {
   return apiFetch('/scans/current');
 }
 
-export function getRecent(): Promise<ScanReport[]> {
+export function getRecent(): Promise<ScanRun[]> {
   return apiFetch('/scans/recent');
 }
 

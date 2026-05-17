@@ -2,7 +2,8 @@ mod common;
 
 use common::fresh_pool;
 use longbox_db::{
-    library_root_repo, scan_run_repo, DbError, NewLibraryRoot, NewScanRun, ScanProgress,
+    library_root_repo, scan_run_repo, DbError, NewLibraryRoot, NewScanRun, ScanCompletion,
+    ScanProgress, ScanRunKind,
 };
 
 async fn seed_root(pool: &sqlx::SqlitePool) -> i64 {
@@ -21,7 +22,13 @@ async fn seed_root(pool: &sqlx::SqlitePool) -> i64 {
 async fn insert_starts_running() {
     let pool = fresh_pool().await;
     let library_root_id = seed_root(&pool).await;
-    let row = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let row = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
     assert_eq!(row.status, "running");
@@ -33,7 +40,13 @@ async fn insert_starts_running() {
 async fn update_progress_idempotent() {
     let pool = fresh_pool().await;
     let library_root_id = seed_root(&pool).await;
-    let row = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let row = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
     let progress = ScanProgress {
@@ -67,7 +80,13 @@ async fn update_progress_idempotent() {
 async fn complete_transitions_status_and_sets_finished_at() {
     let pool = fresh_pool().await;
     let library_root_id = seed_root(&pool).await;
-    let row = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let row = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
     scan_run_repo::complete(&pool, row.id).await.unwrap();
@@ -83,7 +102,13 @@ async fn complete_transitions_status_and_sets_finished_at() {
 async fn fail_records_error_message() {
     let pool = fresh_pool().await;
     let library_root_id = seed_root(&pool).await;
-    let row = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let row = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
     scan_run_repo::fail(&pool, row.id, "permission denied at /comics/X")
@@ -105,16 +130,34 @@ async fn fail_records_error_message() {
 async fn list_recent_orders_descending() {
     let pool = fresh_pool().await;
     let library_root_id = seed_root(&pool).await;
-    let a = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let a = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
-    let b = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let b = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
-    let c = scan_run_repo::insert(&pool, NewScanRun { library_root_id })
+    let c = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
         .await
         .unwrap();
-    let rows = scan_run_repo::list_recent(&pool, 20).await.unwrap();
+    let rows = scan_run_repo::list_recent(&pool, 20, &[]).await.unwrap();
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     assert_eq!(ids, vec![c.id, b.id, a.id]);
 }
@@ -124,4 +167,135 @@ async fn complete_missing_returns_not_found() {
     let pool = fresh_pool().await;
     let err = scan_run_repo::complete(&pool, 999).await.unwrap_err();
     assert!(matches!(err, DbError::NotFound), "got {err:?}");
+}
+
+#[tokio::test]
+async fn list_recent_filters_by_kind() {
+    let pool = fresh_pool().await;
+    let library_root_id = seed_root(&pool).await;
+    let full = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
+    .await
+    .unwrap();
+    let rescan = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::RescanUnmatched,
+        },
+    )
+    .await
+    .unwrap();
+    let rematch = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::RematchForSeries,
+        },
+    )
+    .await
+    .unwrap();
+
+    let only_full = scan_run_repo::list_recent(&pool, 20, &[ScanRunKind::Full])
+        .await
+        .unwrap();
+    assert_eq!(only_full.len(), 1);
+    assert_eq!(only_full[0].id, full.id);
+
+    let user_triggered = scan_run_repo::list_recent(
+        &pool,
+        20,
+        &[ScanRunKind::Full, ScanRunKind::RescanUnmatched],
+    )
+    .await
+    .unwrap();
+    assert_eq!(user_triggered.len(), 2);
+    let ids: Vec<i64> = user_triggered.iter().map(|r| r.id).collect();
+    assert!(ids.contains(&full.id));
+    assert!(ids.contains(&rescan.id));
+    assert!(!ids.contains(&rematch.id));
+}
+
+#[tokio::test]
+async fn complete_with_stats_writes_counters_and_status() {
+    let pool = fresh_pool().await;
+    let library_root_id = seed_root(&pool).await;
+    let row = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
+    .await
+    .unwrap();
+    scan_run_repo::complete_with_stats(
+        &pool,
+        row.id,
+        ScanCompletion {
+            files_seen: 1500,
+            files_added: 1500,
+            files_updated: 0,
+            files_matched: 950,
+            files_needs_review: 50,
+            files_unmatched: 500,
+        },
+    )
+    .await
+    .unwrap();
+    let done = scan_run_repo::find_by_id(&pool, row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.files_seen, 1500);
+    assert_eq!(done.files_matched, 950);
+    assert_eq!(done.kind, "full");
+    assert!(done.finished_at.is_some());
+}
+
+#[tokio::test]
+async fn mark_running_as_failed_sweeps_only_running_rows() {
+    let pool = fresh_pool().await;
+    let library_root_id = seed_root(&pool).await;
+    let running = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
+    .await
+    .unwrap();
+    let done = scan_run_repo::insert(
+        &pool,
+        NewScanRun {
+            library_root_id,
+            kind: ScanRunKind::Full,
+        },
+    )
+    .await
+    .unwrap();
+    scan_run_repo::complete(&pool, done.id).await.unwrap();
+
+    let swept = scan_run_repo::mark_running_as_failed(&pool, "interrupted by restart")
+        .await
+        .unwrap();
+    assert_eq!(swept, 1);
+    let r = scan_run_repo::find_by_id(&pool, running.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.status, "failed");
+    assert_eq!(r.error_message.as_deref(), Some("interrupted by restart"));
+    let d = scan_run_repo::find_by_id(&pool, done.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.status, "completed");
 }
