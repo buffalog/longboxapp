@@ -641,3 +641,257 @@ async fn malformed_json_returns_422() {
     // shape mismatch. Accept either as long as it's a 4xx.
     assert!(resp.status().is_client_error(), "got {}", resp.status());
 }
+
+// -------- POST /api/files/:id/match-from-cv --------
+
+/// Sets up CV wiremock returning a single volume (id `cv_id`) with the
+/// listed issues, then writes one CBZ and runs a full scan to populate the
+/// `files` table. Returns the file id of the first scanned-in row.
+async fn setup_match_from_cv(
+    app: &common::TestApp,
+    cv_id: i64,
+    volume_name: &str,
+    issues: &[(i64, &str)],
+    cbz_relpath: &str,
+    comic_info: Option<&str>,
+) -> i64 {
+    let volume_body = format!(
+        r#"{{
+            "status_code": 1, "error": "OK", "number_of_total_results": 1,
+            "results": {{
+                "id": {cv_id}, "name": {name:?}, "start_year": "2012",
+                "publisher": {{ "id": 1, "name": "Image" }},
+                "description": null,
+                "image": null,
+                "site_detail_url": "https://cv/v/{cv_id}/"
+            }}
+        }}"#,
+        name = volume_name
+    );
+    let issue_results: Vec<String> = issues
+        .iter()
+        .map(|(id, n)| {
+            format!(
+                r#"{{ "id": {id}, "issue_number": "{n}", "name": null,
+                       "cover_date": null, "description": null,
+                       "image": null, "site_detail_url": "https://cv/i/{id}/" }}"#
+            )
+        })
+        .collect();
+    let issues_body = format!(
+        r#"{{
+            "status_code": 1, "error": "OK",
+            "number_of_total_results": {n}, "limit": 100, "offset": 0,
+            "results": [{r}]
+        }}"#,
+        n = issue_results.len(),
+        r = issue_results.join(",")
+    );
+
+    Mock::given(method("GET"))
+        .and(path(format!("/volume/4050-{cv_id}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume_body))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(issues_body))
+        .mount(&app.cv_server)
+        .await;
+
+    write_cbz(&app.library_path().join(cbz_relpath), comic_info);
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    // Return the file id of the first row in the library.
+    let row = sqlx::query!(r#"SELECT id AS "id!: i64" FROM files ORDER BY id LIMIT 1"#)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    row.id
+}
+
+#[tokio::test]
+async fn match_from_cv_resolves_issue_number_from_filename() {
+    let app = build_test_app().await;
+    let file_id = setup_match_from_cv(
+        &app,
+        7777,
+        "Saga",
+        &[(80001, "1"), (80002, "2")],
+        "Saga (2012)/Saga 002 (2012).cbz",
+        None,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK, "body: {:?}", response_json(app.request(empty_request("GET", "/api/files")).await).await);
+    let body = response_json(resp).await;
+    assert_eq!(body["match_method"], "manual");
+    assert_eq!(body["match_confidence"], 1.0);
+    assert_eq!(body["status"], "owned");
+    assert_eq!(body["issue"]["number"], "2");
+    assert_eq!(body["series"]["title"], "Saga");
+}
+
+#[tokio::test]
+async fn match_from_cv_explicit_issue_number_overrides_filename() {
+    let app = build_test_app().await;
+    let file_id = setup_match_from_cv(
+        &app,
+        7777,
+        "Saga",
+        &[(80001, "1"), (80002, "2")],
+        // Filename parses as #2 but the body says #1.
+        "Saga (2012)/Saga 002.cbz",
+        None,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777, "issue_number": "1"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["issue"]["number"], "1");
+}
+
+#[tokio::test]
+async fn match_from_cv_returns_422_when_issue_not_in_series() {
+    let app = build_test_app().await;
+    let file_id = setup_match_from_cv(
+        &app,
+        7777,
+        "Saga",
+        // Only issue #1 exists in CV.
+        &[(80001, "1")],
+        // Filename says #99 — not in the series.
+        "Saga (2012)/Saga 099.cbz",
+        None,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "unprocessable.issue_not_in_series");
+}
+
+#[tokio::test]
+async fn match_from_cv_returns_422_when_number_unresolvable() {
+    let app = build_test_app().await;
+    let file_id = setup_match_from_cv(
+        &app,
+        7777,
+        "Saga",
+        &[(80001, "1")],
+        // No issue number in the filename, no ComicInfo.
+        "Saga (2012)/random-filename.cbz",
+        None,
+    )
+    .await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "unprocessable.issue_number_unresolved");
+}
+
+#[tokio::test]
+async fn match_from_cv_reuses_existing_series_no_cv_call() {
+    let app = build_test_app().await;
+    // Pre-seed a series with cv_id 7777 + issue #1. No CV mock for the
+    // volume endpoint — if the handler tries to call CV, wiremock returns
+    // 404 by default and the test fails.
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(7777),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: Some(80001),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    write_cbz(&app.library_path().join("Saga (2012)/Saga 001.cbz"), None);
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let file_id = sqlx::query!(r#"SELECT id AS "id!: i64" FROM files ORDER BY id LIMIT 1"#)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap()
+        .id;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["issue"]["number"], "1");
+    assert_eq!(body["series"]["id"], series.id);
+}
+
+#[tokio::test]
+async fn match_from_cv_404_for_unknown_file() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/9999/match-from-cv",
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

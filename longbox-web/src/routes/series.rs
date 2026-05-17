@@ -72,10 +72,31 @@ async fn add(
         });
     }
 
-    let volume = state.cv.fetch_volume(body.cv_id).await?;
-    let cv_issues = state.cv.fetch_issues(body.cv_id).await?;
+    let (inserted, _was_new) = add_or_get_from_cv(&state, body.cv_id).await?;
+    spawn_auto_rematch(&state, inserted.id, "add-series");
+    Ok(Json(inserted))
+}
 
-    // Project CV → domain inputs.
+/// Shared series-creation helper used by `POST /api/series` and
+/// `POST /api/files/:id/match-from-cv`. Returns the existing row if a
+/// series with `cv_volume_id` is already in the watchlist (idempotent for
+/// match-from-cv); the caller is responsible for any 409 / conflict policy
+/// that's appropriate for its endpoint.
+///
+/// The `bool` is `true` when this call inserted the series and its issues
+/// from a fresh ComicVine fetch; `false` when an existing series was
+/// returned untouched (no CV calls were made).
+pub(crate) async fn add_or_get_from_cv(
+    state: &AppState,
+    cv_volume_id: i64,
+) -> Result<(SeriesRow, bool), ApiError> {
+    if let Some(existing) = series_repo::find_by_cv_id(&state.db, cv_volume_id).await? {
+        return Ok((existing, false));
+    }
+
+    let volume = state.cv.fetch_volume(cv_volume_id).await?;
+    let cv_issues = state.cv.fetch_issues(cv_volume_id).await?;
+
     let new_series = NewSeries {
         cv_id: Some(volume.cv_id),
         metron_id: None,
@@ -107,34 +128,38 @@ async fn add(
     }
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
-    // Fire-and-forget rematch. Does NOT touch scan_status. If the scanner
-    // is currently busy, the spawned task gets ScanError::AlreadyRunning,
-    // logs WARN, and exits. The series insert above already succeeded.
+    Ok((inserted, true))
+}
+
+/// Fire-and-forget `rematch_for_series` with the standard log triage. Does
+/// not touch scan_status. `caller` is a short tag (`"add-series"`,
+/// `"refresh"`, `"match-from-cv"`) that gets baked into log messages.
+pub(crate) fn spawn_auto_rematch(state: &AppState, series_id: i64, caller: &'static str) {
     let scanner = state.scanner.clone();
-    let series_id = inserted.id;
     tokio::spawn(async move {
         match scanner.rematch_for_series(series_id).await {
             Ok(report) => tracing::info!(
                 target: "longbox_web",
                 series_id,
                 matched = report.matched_owned,
-                "add-series auto-rematch completed"
+                caller,
+                "auto-rematch completed"
             ),
             Err(longbox_scanner::ScanError::AlreadyRunning) => tracing::warn!(
                 target: "longbox_web",
                 series_id,
-                "add-series auto-rematch deferred: another scan is in progress"
+                caller,
+                "auto-rematch deferred: another scan is in progress"
             ),
             Err(e) => tracing::warn!(
                 target: "longbox_web",
                 series_id,
+                caller,
                 error = %e,
-                "add-series auto-rematch failed"
+                "auto-rematch failed"
             ),
         }
     });
-
-    Ok(Json(inserted))
 }
 
 async fn list(State(state): State<AppState>) -> Result<Json<Vec<SeriesWithCounts>>, ApiError> {
@@ -237,35 +262,9 @@ async fn refresh(
     }
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
-    // Fire-and-forget rematch. Same silent-skip pattern as add-series:
-    // refresh can introduce new issues (CV published #194 since last
-    // refresh) and existing needs_review files may now match. If the
-    // scanner is busy, AlreadyRunning logs WARN and exits. Does NOT
-    // touch scan_status.
-    let scanner = state.scanner.clone();
-    let series_id = updated.id;
-    tokio::spawn(async move {
-        match scanner.rematch_for_series(series_id).await {
-            Ok(report) => tracing::info!(
-                target: "longbox_web",
-                series_id,
-                matched = report.matched_owned,
-                "refresh-triggered auto-rematch completed"
-            ),
-            Err(longbox_scanner::ScanError::AlreadyRunning) => tracing::warn!(
-                target: "longbox_web",
-                series_id,
-                "refresh-triggered auto-rematch deferred: another scan is in progress"
-            ),
-            Err(e) => tracing::warn!(
-                target: "longbox_web",
-                series_id,
-                error = %e,
-                "refresh-triggered auto-rematch failed"
-            ),
-        }
-    });
-
+    // Refresh can introduce new issues (CV published #194 since last
+    // refresh) and existing needs_review files may now match.
+    spawn_auto_rematch(&state, updated.id, "refresh");
     Ok(Json(updated))
 }
 

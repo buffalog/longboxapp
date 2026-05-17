@@ -42,3 +42,25 @@ export function clearFileIgnored(id: number): Promise<EnrichedFileRow> {
     body: JSON.stringify({ status: null })
   });
 }
+
+/** POST /api/files/:id/match-from-cv. Adds the CV volume to the watchlist
+ *  (or reuses an existing series), resolves the issue number, and marks
+ *  the file as manually owned. Throws ApiError with code
+ *  `unprocessable.issue_number_unresolved` or
+ *  `unprocessable.issue_not_in_series` when the match can't complete. */
+export function matchFileFromCv(
+  id: number,
+  cvVolumeId: number,
+  issueNumber?: string
+): Promise<EnrichedFileRow> {
+  const body: { cv_volume_id: number; issue_number?: string } = {
+    cv_volume_id: cvVolumeId
+  };
+  if (issueNumber !== undefined && issueNumber.trim() !== '') {
+    body.issue_number = issueNumber.trim();
+  }
+  return apiFetch(`/files/${id}/match-from-cv`, {
+    method: 'POST',
+    body: JSON.stringify(body)
+  });
+}

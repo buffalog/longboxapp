@@ -1,18 +1,20 @@
 use axum::extract::{Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_core::{FileStatus, MatchMethod};
-use longbox_db::{file_repo, issue_repo, FileRow, FileUpdate};
+use longbox_core::{FileStatus, IssueNumber, MatchMethod, ParsingPattern};
+use longbox_db::{file_repo, issue_repo, parsing_pattern_repo, FileRow, FileUpdate};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::error::ApiError;
+use crate::routes::series::{add_or_get_from_cv, spawn_auto_rematch};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/files", get(list))
         .route("/files/:id", get(detail).patch(update))
+        .route("/files/:id/match-from-cv", post(match_from_cv))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -324,4 +326,130 @@ async fn update(
 fn now_utc_primitive() -> time::PrimitiveDateTime {
     let n = OffsetDateTime::now_utc();
     time::PrimitiveDateTime::new(n.date(), n.time())
+}
+
+#[derive(Debug, Deserialize)]
+struct MatchFromCvBody {
+    cv_volume_id: i64,
+    /// Optional override for the issue number. When omitted, the handler
+    /// resolves from the file's cached ComicInfo `<Number>` first, then
+    /// falls back to filename parsing with the stored `parsing_patterns`.
+    issue_number: Option<String>,
+}
+
+/// POST /api/files/:id/match-from-cv
+///
+/// Adds the CV volume to the watchlist (or reuses an existing series),
+/// resolves the issue number, sets the file to manual / owned, and fires
+/// a fire-and-forget series-wide rematch (which picks up sibling files in
+/// the library that should match the just-added series).
+async fn match_from_cv(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<MatchFromCvBody>,
+) -> Result<Json<EnrichedFileRow>, ApiError> {
+    if body.cv_volume_id <= 0 {
+        return Err(ApiError::BadRequest {
+            message: "cv_volume_id must be > 0".into(),
+        });
+    }
+    let file = file_repo::find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "file",
+            id: id.to_string(),
+        })?;
+
+    let (series, _was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
+
+    let raw_number = resolve_issue_number(&state, &file, body.issue_number.as_deref()).await?;
+    let target = IssueNumber::new(raw_number.clone());
+
+    // Series's issue set is small (~25-300 rows) so listing + filtering is
+    // cheaper than adding a new repo method right now.
+    let candidates = issue_repo::list_by_series(&state.db, series.id).await?;
+    let matched_issue = candidates
+        .into_iter()
+        .find(|i| IssueNumber::new(i.number.clone()).matches(&target))
+        .ok_or_else(|| ApiError::Unprocessable {
+            code: "unprocessable.issue_not_in_series",
+            message: format!(
+                "Series {} (cv_volume_id={}) has no issue numbered {:?}",
+                series.id, body.cv_volume_id, raw_number
+            ),
+        })?;
+
+    let now = now_utc_primitive();
+    let patch = FileUpdate {
+        issue_id: Some(matched_issue.id),
+        size_bytes: file.size_bytes,
+        mtime: file.mtime,
+        last_scanned_at: now,
+        match_method: MatchMethod::Manual.as_db_str().to_owned(),
+        match_confidence: 1.0,
+        status: FileStatus::Owned.as_db_str().to_owned(),
+        cached_comicinfo_xml: file.cached_comicinfo_xml.clone(),
+        cached_at: file.cached_at,
+        is_present: file.is_present,
+        last_seen_at: file.last_seen_at,
+    };
+    file_repo::update(&state.db, id, patch).await?;
+
+    // Fires only when the helper actually inserted a new series, OR when
+    // an existing series's siblings might now match — either way, this is
+    // cheap when there's nothing to do.
+    spawn_auto_rematch(&state, series.id, "match-from-cv");
+
+    Ok(Json(fetch_enriched_by_id(&state.db, id).await?))
+}
+
+/// Resolves the issue number for a manual CV match. Priority:
+/// 1. Caller-provided override (body `issue_number`).
+/// 2. The file's cached ComicInfo `<Number>` field.
+/// 3. Filename parsing using the enabled `parsing_patterns`.
+///
+/// Returns 422 `unprocessable.issue_number_unresolved` when none yield a
+/// value.
+async fn resolve_issue_number(
+    state: &AppState,
+    file: &FileRow,
+    override_value: Option<&str>,
+) -> Result<String, ApiError> {
+    if let Some(s) = override_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(s.to_owned());
+    }
+
+    if let Some(xml) = file.cached_comicinfo_xml.as_deref() {
+        if let Ok(info) = longbox_core::ComicInfo::parse(xml.as_bytes()) {
+            if let Some(n) = info.number.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Ok(n.to_owned());
+            }
+        }
+    }
+
+    let pattern_rows = parsing_pattern_repo::list_enabled(&state.db).await?;
+    let patterns: Vec<ParsingPattern> = pattern_rows
+        .into_iter()
+        .map(|r| ParsingPattern {
+            id: r.id,
+            name: r.name,
+            pattern: r.pattern,
+            priority: i32::try_from(r.priority).unwrap_or(i32::MAX),
+            enabled: r.enabled,
+        })
+        .collect();
+    let basename = std::path::Path::new(&file.path_relative)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&file.path_relative);
+    if let Some(parsed) = longbox_core::parse_filename(basename, &patterns) {
+        return Ok(parsed.number);
+    }
+
+    Err(ApiError::Unprocessable {
+        code: "unprocessable.issue_number_unresolved",
+        message: "Could not determine issue number from ComicInfo or filename; \
+                  re-submit with `issue_number` in the request body."
+            .into(),
+    })
 }

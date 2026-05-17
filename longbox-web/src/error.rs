@@ -23,6 +23,12 @@ pub enum ApiError {
     #[error("validation failed: {} errors", errors.len())]
     Validation { errors: Vec<FieldError> },
 
+    #[error("unprocessable ({code}): {message}")]
+    Unprocessable {
+        code: &'static str,
+        message: String,
+    },
+
     #[error("upstream {service} failed (status {status}): {message}")]
     Upstream {
         service: &'static str,
@@ -54,6 +60,7 @@ impl ApiError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Unprocessable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Upstream { .. } => StatusCode::BAD_GATEWAY,
             Self::RateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -66,6 +73,7 @@ impl ApiError {
             Self::NotFound { resource, .. } => format!("not_found.{resource}"),
             Self::Conflict { code, .. } => (*code).to_string(),
             Self::Validation { .. } => "validation".into(),
+            Self::Unprocessable { code, .. } => (*code).to_string(),
             Self::Upstream { service, .. } => format!("upstream.{service}"),
             Self::RateLimited { .. } => "rate_limited".into(),
             Self::Internal { .. } => "internal".into(),
@@ -78,6 +86,7 @@ impl ApiError {
             Self::NotFound { resource, id } => format!("{resource} {id} not found"),
             Self::Conflict { message, .. } => message.clone(),
             Self::Validation { .. } => "Validation failed".into(),
+            Self::Unprocessable { message, .. } => message.clone(),
             Self::Upstream {
                 service, message, ..
             } => format!("Upstream {service} failed: {message}"),
