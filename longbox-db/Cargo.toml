@@ -13,7 +13,7 @@ workspace = true
 longbox-core = { path = "../longbox-core" }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "time"] }
 thiserror = "1"
-time = { version = "0.3", features = ["serde", "macros"] }
+time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }
 

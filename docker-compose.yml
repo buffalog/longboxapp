@@ -1,0 +1,29 @@
+services:
+  longbox:
+    image: longbox:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: longbox
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - longbox-data:/data
+      - ${LIBRARY_PATH}:/library:ro
+    environment:
+      LIBRARY_ROOT_PATH: /library
+      DATABASE_URL: "sqlite:/data/longbox.db?mode=rwc"
+      BIND_ADDR: "0.0.0.0:3000"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.85}
+      COMICVINE_API_KEY: ${COMICVINE_API_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  longbox-data:

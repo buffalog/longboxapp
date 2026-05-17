@@ -68,6 +68,14 @@ describe('formatDateTime / formatDate', () => {
   it('formats ISO timestamps to UTC short form', () => {
     expect(formatDateTime('2026-05-16T12:34:56Z')).toBe('2026-05-16 12:34');
   });
+  it('treats backend PrimitiveDateTime (no TZ) as UTC', () => {
+    // time crate's serde-human-readable serializes via Display, which uses
+    // a space separator and omits the timezone designator.
+    expect(formatDateTime('2026-05-16 12:34:56')).toBe('2026-05-16 12:34');
+    expect(formatDateTime('2026-05-16 12:34:56.789')).toBe('2026-05-16 12:34');
+    // T-separated variant (some endpoints) also normalized as UTC.
+    expect(formatDateTime('2026-05-16T12:34:56')).toBe('2026-05-16 12:34');
+  });
   it('returns dash for null', () => {
     expect(formatDateTime(null)).toBe('—');
     expect(formatDate(null)).toBe('—');
