@@ -2170,8 +2170,6 @@ Known follow-ups, deferred during Phase A, captured here for future reference. N
 
 **Scan progress reporting.** Phase A scans show "scan running" with no granular progress. The scanner doesn't emit progress events mid-scan. Adding a callback-based progress channel (scanner emits `ScanProgress { files_processed, files_total, current_path }` to a watch channel) would let the dashboard show a real progress bar.
 
-**Persisted scan history.** Currently in-memory only; server restart loses history. A `scans` table with start/end/counters/errors columns would survive restarts and enable longer history retention (vs. the in-memory cap of 10 recent scans).
-
 **Deferred-rematch queue.** When a series is added or refreshed during a running scan, the auto-rematch is silently skipped (logged WARN, no retry). A simple deferred queue that runs pending rematches after the current scan completes would close this UX gap.
 
 **Series list scaling.** The Step 6 JOIN refactor handles per-series counts efficiently for hundreds of series. At 10,000+ series the single-query approach may need pagination or virtualized rendering on the frontend.
@@ -2217,6 +2215,36 @@ Surfaced during first-week real-library use. Both gaps trace to the same root: t
 
 **Frontend:** `/files` page gains a `[Flat] [By Folder]` view toggle. Folder view groups unmatched files by dirname, renders one card per folder with file count and "Search ComicVine" button using the folder name as default search query. Reuses the CvSearchInput from Task A.
 
+### C. Persisted scan history
+
+Currently `AppState.scan_status` is in-memory only — container restart wipes it and produces a visible contradiction (dashboard reports a recent scan via library-root metadata while `/scans` reports "No scans yet"). Surfaced during first real-library use.
+
+**Backend:** new SQLite table `scan_history` with columns `id` (PRIMARY KEY), `started_at` (DATETIME NOT NULL), `completed_at` (DATETIME NULL), `kind` (`full` | `rescan_unmatched` | `rematch_for_series`), `status` (`running` | `completed` | `failed`), `error_message` (TEXT NULL), `files_seen`, `files_matched`, `files_unmatched`, `files_needs_review` (INTEGER NULL each), `duration_ms` (INTEGER NULL). New migration in `longbox-db/migrations/`. New `ScanHistoryRepo` with `insert_running`, `mark_completed`, `mark_failed`, `list_recent(limit)`, `latest_completed()`. Scanner writes a `running` row on entry, updates to `completed` or `failed` on exit. On server startup, sweep: any rows in `running` get marked `failed` with `error_message = "interrupted by restart"`.
+
+**Frontend:** dashboard "last scan" pulls from `latest_completed()`. `/scans` page reads from `list_recent(10)`. In-memory tracking remains only for the live mid-scan status pill; persisted rows are the source of truth on page load.
+
+### D. CV description sanitization
+
+CV descriptions arrive as HTML. The current strip removes block tags without inserting whitespace, producing smushed strings like `"EditionsMarvel Universe by Frank Miller OmnibusUncanny X-Men Omnibus Volume 3"`. Visible on real series pages.
+
+**Backend:** in `longbox-core`'s description-strip function, before tag removal, replace `</p>`, `</h1>`–`</h6>`, `</div>`, `</li>`, `<br>`, `<br/>`, `<br />` with `\n`. Then strip remaining tags. Collapse runs of 3+ newlines to 2. Trim. Add a unit test using the live Wolverine 1982 description as the smushed-input fixture; assert the fixed output reads cleanly.
+
+### E. Settings page non-sensitive values
+
+Settings page hides all configured values, including non-sensitive ones (library root, database URL, match threshold, log level, bind address). Operators can't tell what their container is pointed at without shelling in. Only the ComicVine API key warrants hiding.
+
+**Backend:** extend (or add) `GET /api/settings` to return actual values for `library_root_path`, `database_url`, `match_threshold`, `log_level`, `bind_address`, plus `comicvine_api_key_configured` as a boolean. The CV API key value is never serialized to the wire.
+
+**Frontend:** Settings page displays the values inline. The existing "set via `$ENV_VAR`" hint remains as small gray text alongside each value, so the env-var configuration model stays visible. CV API key row shows "configured" / "not configured" pill, no value.
+
+### F. Issue IDs visible on series detail
+
+The Change Match modal's "By Issue ID" fallback (Task A's complement) requires the user to know an issue ID, but no UI surface exposes issue IDs. Users have to scrape network responses to find them.
+
+**Backend:** ensure the issues-list endpoint already includes the `id` field in its response (likely does; verify).
+
+**Frontend:** add a small monospaced gray `ID` column to the issues table on the series detail page, between `#` and `Title / File`. Width: enough for the largest current ID, no more. Clicking the ID copies it to clipboard with a brief toast confirmation.
+
 ### Build order
 
-Task A first (builds shared backend helper + reusable CV search component). Task B is then a wrapper around both plus folder grouping. One commit per task.
+Task A first (builds the shared `series::add_from_cv` helper and the reusable `CvSearchInput.svelte` component). Task B second (wraps both plus folder grouping). Tasks C through F have no inter-dependencies among themselves and may be bundled into a single commit for review efficiency, or split across commits at the implementer's discretion. Task A and Task B are one commit each. The Phase A.5 closeout sequence: A → B → C–F (bundled or split) → manual smoke → declare A.5 done → Phase B kickoff.
