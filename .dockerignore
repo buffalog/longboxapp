@@ -1,0 +1,47 @@
+# Build context exclusions. Keep this aggressive — every excluded byte
+# saves bandwidth between docker CLI and daemon and shortens "Sending build
+# context" time. Note: .sqlx/ is INCLUDED because the offline sqlx cache is
+# what enables compile-time-checked queries without a live DB.
+
+# Rust build artifacts.
+target/
+
+# JS / SvelteKit build artifacts and dependencies.
+node_modules/
+longbox-frontend/.svelte-kit/
+longbox-frontend/build/
+longbox-frontend/node_modules/
+
+# The pre-built bundle in the repo is the placeholder — stage 1 in the
+# Dockerfile rebuilds it from source. Skipping it saves time and avoids
+# stale-bundle confusion.
+longbox-web/frontend-dist/_app/
+
+# VCS.
+.git/
+.gitignore
+.gitattributes
+
+# Editor / IDE state.
+.idea/
+.vscode/
+.zed/
+.DS_Store
+*.swp
+
+# Local environment.
+.env
+.env.*
+!.env.example
+
+# Docs not needed inside the image.
+*.md
+!deploy/README.md
+longbox-phase-a-prompt.md
+
+# Test fixtures (CBZ payloads, large JSON).
+longbox-scanner/tests/fixtures/
+longbox-comicvine/tests/fixtures/
+
+# Claude Code workspace state.
+.claude/

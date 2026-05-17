@@ -1,9 +1,20 @@
 // Display formatters. All pure functions; no DOM or fetch dependencies.
 
+// Backend serializes time::PrimitiveDateTime via the Display impl, which
+// produces "YYYY-MM-DD HH:MM:SS[.fff]" (space separator, no timezone).
+// SQLite stores values in UTC, so we normalize: replace the space with "T"
+// and append "Z" if there's no offset, then parse. Without this, Safari
+// rejects the string outright and Chrome interprets it as local time.
+function parseUtc(s: string): Date {
+  const tIso = s.replace(' ', 'T');
+  const hasTz = /Z$|[+\-]\d{2}:?\d{2}$/.test(tIso);
+  return new Date(hasTz ? tIso : `${tIso}Z`);
+}
+
 /** Format an ISO 8601 timestamp as a short, human-friendly "YYYY-MM-DD HH:MM" UTC. */
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
-  const d = new Date(iso);
+  const d = parseUtc(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const pad = (n: number) => n.toString().padStart(2, '0');
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
@@ -17,7 +28,7 @@ export function formatDate(s: string | null | undefined): string {
 /** Relative time: "5m ago", "3h ago", "2d ago". Falls back to ISO. */
 export function formatRelative(iso: string | null | undefined): string {
   if (!iso) return '—';
-  const d = new Date(iso);
+  const d = parseUtc(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const diff = Date.now() - d.getTime();
   if (diff < 0) return formatDateTime(iso);

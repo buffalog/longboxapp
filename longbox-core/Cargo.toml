@@ -14,4 +14,4 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 quick-xml = { version = "0.31", features = ["serialize"] }
 regex = "1"
-time = { version = "0.3", features = ["serde", "macros"] }
+time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
