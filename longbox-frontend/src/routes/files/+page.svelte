@@ -1,18 +1,21 @@
 <script lang="ts">
   import { goto, invalidate } from '$app/navigation';
-  import { Files } from 'lucide-svelte';
+  import { Files, LayoutGrid, List } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
     clearFileIgnored,
     markFileIgnored,
     matchFileFromCv,
-    setFileIssue
+    matchFolderFromCv,
+    setFileIssue,
+    type FolderMatchResponse
   } from '$lib/api/files';
   import Button from '$lib/components/Button.svelte';
   import CvSearchInput from '$lib/components/CvSearchInput.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import FileRow from '$lib/components/FileRow.svelte';
+  import FolderCard from '$lib/components/FolderCard.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { searchHintFromPath } from '$lib/match_hint';
   import type { EnrichedFileRow, FileStatus, SeriesSearchResult } from '$lib/types';
@@ -28,6 +31,14 @@
   let cvIssueNumberInput = $state('');
   let cvSubmitting = $state(false);
 
+  // Folder-grouped view state.
+  let view = $state<'flat' | 'folder'>('flat');
+  let folderModalFolder = $state<string | null>(null);
+  let folderCvSelected = $state<SeriesSearchResult | null>(null);
+  let folderSubmitting = $state(false);
+  let folderBusyFolder = $state<string | null>(null);
+  let lastFolderResult = $state<{ folder: string; result: FolderMatchResponse } | null>(null);
+
   const statusOptions: Array<{ value: FileStatus | 'all'; label: string }> = [
     { value: 'needs_review', label: 'Needs review' },
     { value: 'unmatched', label: 'Unmatched' },
@@ -36,9 +47,39 @@
     { value: 'all', label: 'All' }
   ];
 
+  // Folder grouping has actionable value only on filters where files can
+  // be bulk-matched. On owned/ignored/all it would just be visual chrome
+  // with no useful action; keep the toggle hidden there.
+  const folderViewAllowed = $derived(
+    data.status === 'unmatched' || data.status === 'needs_review'
+  );
+  const effectiveView = $derived(folderViewAllowed ? view : 'flat');
+
+  const folderGroups = $derived.by(() => {
+    if (effectiveView !== 'folder') return [];
+    const m = new Map<string, EnrichedFileRow[]>();
+    for (const f of data.files) {
+      const i = f.path_relative.lastIndexOf('/');
+      const dir = i === -1 ? '' : f.path_relative.slice(0, i);
+      const list = m.get(dir) ?? [];
+      list.push(f);
+      m.set(dir, list);
+    }
+    return Array.from(m.entries())
+      .map(([folder, files]) => ({ folder, files, count: files.length }))
+      .sort((a, b) => a.folder.localeCompare(b.folder));
+  });
+
   const initialHint = $derived(
     pendingChange ? searchHintFromPath(pendingChange.path_relative) : ''
   );
+  const folderHint = $derived(
+    folderModalFolder ? searchHintFromPath(`${folderModalFolder}/_.cbz`) : ''
+  );
+  const folderActionableCount = $derived.by(() => {
+    if (!folderModalFolder) return 0;
+    return folderGroups.find((g) => g.folder === folderModalFolder)?.count ?? 0;
+  });
 
   function setStatus(s: FileStatus | 'all'): void {
     const url = new URL(window.location.href);
@@ -131,6 +172,39 @@
       cvSubmitting = false;
     }
   }
+
+  function openFolderMatch(folder: string): void {
+    folderModalFolder = folder;
+    folderCvSelected = null;
+    folderSubmitting = false;
+  }
+
+  function closeFolderMatch(): void {
+    folderModalFolder = null;
+    folderCvSelected = null;
+    folderSubmitting = false;
+  }
+
+  async function submitFolderMatch(): Promise<void> {
+    if (!folderModalFolder || !folderCvSelected) return;
+    const folder = folderModalFolder;
+    const cvVolumeId = folderCvSelected.cv_id;
+
+    folderSubmitting = true;
+    folderBusyFolder = folder;
+    error = null;
+    try {
+      const result = await matchFolderFromCv(folder, cvVolumeId);
+      lastFolderResult = { folder, result };
+      closeFolderMatch();
+      await invalidate(() => true);
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      folderSubmitting = false;
+      folderBusyFolder = null;
+    }
+  }
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">Files</h1>
@@ -139,24 +213,99 @@
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}
 
-<div class="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="File status filter">
-  {#each statusOptions as opt (opt.value)}
-    <button
-      type="button"
-      role="tab"
-      aria-selected={data.status === opt.value}
-      onclick={() => setStatus(opt.value)}
-      class="rounded-full border px-3 py-1 text-sm transition"
-      class:border-slate-900={data.status === opt.value}
-      class:bg-slate-900={data.status === opt.value}
-      class:text-white={data.status === opt.value}
-      class:border-slate-300={data.status !== opt.value}
-      class:bg-white={data.status !== opt.value}
-      class:hover:bg-slate-50={data.status !== opt.value}
+{#if lastFolderResult}
+  <div
+    class="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm"
+    role="status"
+  >
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="font-medium text-emerald-900">
+          Matched {lastFolderResult.result.matched_count}
+          file{lastFolderResult.result.matched_count === 1 ? '' : 's'} in
+          <span class="font-mono">{lastFolderResult.folder}</span>
+        </div>
+        {#if lastFolderResult.result.skipped.length > 0}
+          <details class="mt-1 text-emerald-800">
+            <summary class="cursor-pointer text-xs">
+              Skipped {lastFolderResult.result.skipped.length} —
+              click for details
+            </summary>
+            <ul class="mt-1 max-h-40 space-y-0.5 overflow-y-auto text-xs">
+              {#each lastFolderResult.result.skipped as s (s.path)}
+                <li class="font-mono">
+                  <span class="text-emerald-600">[{s.reason}]</span> {s.path}
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+      </div>
+      <button
+        type="button"
+        class="rounded p-1 text-emerald-700 hover:bg-emerald-100"
+        onclick={() => (lastFolderResult = null)}
+        aria-label="Dismiss"
+      >×</button>
+    </div>
+  </div>
+{/if}
+
+<div class="mb-4 flex flex-wrap items-center gap-2">
+  <div class="flex flex-wrap gap-2" role="tablist" aria-label="File status filter">
+    {#each statusOptions as opt (opt.value)}
+      <button
+        type="button"
+        role="tab"
+        aria-selected={data.status === opt.value}
+        onclick={() => setStatus(opt.value)}
+        class="rounded-full border px-3 py-1 text-sm transition"
+        class:border-slate-900={data.status === opt.value}
+        class:bg-slate-900={data.status === opt.value}
+        class:text-white={data.status === opt.value}
+        class:border-slate-300={data.status !== opt.value}
+        class:bg-white={data.status !== opt.value}
+        class:hover:bg-slate-50={data.status !== opt.value}
+      >
+        {opt.label}
+      </button>
+    {/each}
+  </div>
+
+  {#if folderViewAllowed}
+    <div
+      class="ml-auto inline-flex rounded-md border border-slate-300 bg-white p-0.5 text-sm"
+      role="tablist"
+      aria-label="View mode"
     >
-      {opt.label}
-    </button>
-  {/each}
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'flat'}
+        onclick={() => (view = 'flat')}
+        class="inline-flex items-center gap-1 rounded px-2.5 py-1 transition"
+        class:bg-slate-900={view === 'flat'}
+        class:text-white={view === 'flat'}
+        class:text-slate-600={view !== 'flat'}
+        class:hover:bg-slate-50={view !== 'flat'}
+      >
+        <List class="size-3.5" aria-hidden="true" />Flat
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'folder'}
+        onclick={() => (view = 'folder')}
+        class="inline-flex items-center gap-1 rounded px-2.5 py-1 transition"
+        class:bg-slate-900={view === 'folder'}
+        class:text-white={view === 'folder'}
+        class:text-slate-600={view !== 'folder'}
+        class:hover:bg-slate-50={view !== 'folder'}
+      >
+        <LayoutGrid class="size-3.5" aria-hidden="true" />By folder
+      </button>
+    </div>
+  {/if}
 </div>
 
 {#if data.files.length === 0}
@@ -165,6 +314,19 @@
     title={data.status === 'needs_review' ? 'Nothing needs review' : 'No files in this view'}
     message="Run a scan to populate the catalog, or pick a different filter."
   />
+{:else if effectiveView === 'folder'}
+  <ul class="space-y-2">
+    {#each folderGroups as g (g.folder)}
+      <li>
+        <FolderCard
+          folder={g.folder || '(library root)'}
+          count={g.count}
+          busy={folderBusyFolder === g.folder}
+          onOpen={() => openFolderMatch(g.folder)}
+        />
+      </li>
+    {/each}
+  </ul>
 {:else}
   <ul class="space-y-3">
     {#each data.files as file (file.id)}
@@ -268,6 +430,53 @@
         <Button variant="ghost" onclick={closeChange}>Cancel</Button>
         <Button onclick={submitIssueId}>Save</Button>
       </div>
+    {/if}
+  {/if}
+</Modal>
+
+<Modal open={folderModalFolder !== null} title="Match folder to ComicVine" onClose={closeFolderMatch}>
+  {#if folderModalFolder !== null}
+    <p class="mb-1 text-xs text-slate-500">Folder</p>
+    <p class="mb-3 truncate font-mono text-sm" title={folderModalFolder}>
+      {folderModalFolder || '(library root)'}
+    </p>
+    <p class="mb-4 text-xs text-slate-500">
+      {folderActionableCount} actionable file{folderActionableCount === 1 ? '' : 's'} —
+      already-owned and ignored files are skipped automatically.
+    </p>
+
+    {#if folderCvSelected}
+      <div class="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+        <div class="font-medium">
+          {folderCvSelected.name}{#if folderCvSelected.start_year} <span class="text-slate-500">({folderCvSelected.start_year})</span>{/if}
+        </div>
+        <div class="text-xs text-slate-500">
+          {folderCvSelected.publisher ?? 'Unknown publisher'} ·
+          {folderCvSelected.issue_count} issue{folderCvSelected.issue_count === 1 ? '' : 's'}
+        </div>
+        <button
+          type="button"
+          class="mt-1 text-xs text-blue-700 hover:underline"
+          onclick={() => (folderCvSelected = null)}
+        >Change selection</button>
+      </div>
+      <div class="flex justify-end gap-2">
+        <Button variant="ghost" onclick={closeFolderMatch}>Cancel</Button>
+        <Button onclick={submitFolderMatch} loading={folderSubmitting}>
+          Match {folderActionableCount} file{folderActionableCount === 1 ? '' : 's'}
+        </Button>
+      </div>
+    {:else}
+      <CvSearchInput
+        initialQuery={folderHint}
+        onSelect={(r) => {
+          folderCvSelected = r;
+        }}
+      />
+      <p class="mt-3 text-xs text-slate-500">
+        Adding a series will also queue a series-wide rematch — sibling files outside this folder
+        may pick up the match too.
+      </p>
     {/if}
   {/if}
 </Modal>

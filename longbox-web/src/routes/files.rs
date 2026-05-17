@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
         .route("/files", get(list))
         .route("/files/:id", get(detail).patch(update))
         .route("/files/:id/match-from-cv", post(match_from_cv))
+        .route("/files/match-folder-from-cv", post(match_folder_from_cv))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -362,7 +363,14 @@ async fn match_from_cv(
 
     let (series, _was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
 
-    let raw_number = resolve_issue_number(&state, &file, body.issue_number.as_deref()).await?;
+    let patterns = load_enabled_patterns(&state).await?;
+    let raw_number = try_resolve_issue_number(&file, body.issue_number.as_deref(), &patterns)
+        .ok_or_else(|| ApiError::Unprocessable {
+            code: "unprocessable.issue_number_unresolved",
+            message: "Could not determine issue number from ComicInfo or filename; \
+                      re-submit with `issue_number` in the request body."
+                .into(),
+        })?;
     let target = IssueNumber::new(raw_number.clone());
 
     // Series's issue set is small (~25-300 rows) so listing + filtering is
@@ -403,32 +411,11 @@ async fn match_from_cv(
     Ok(Json(fetch_enriched_by_id(&state.db, id).await?))
 }
 
-/// Resolves the issue number for a manual CV match. Priority:
-/// 1. Caller-provided override (body `issue_number`).
-/// 2. The file's cached ComicInfo `<Number>` field.
-/// 3. Filename parsing using the enabled `parsing_patterns`.
-///
-/// Returns 422 `unprocessable.issue_number_unresolved` when none yield a
-/// value.
-async fn resolve_issue_number(
-    state: &AppState,
-    file: &FileRow,
-    override_value: Option<&str>,
-) -> Result<String, ApiError> {
-    if let Some(s) = override_value.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(s.to_owned());
-    }
-
-    if let Some(xml) = file.cached_comicinfo_xml.as_deref() {
-        if let Ok(info) = longbox_core::ComicInfo::parse(xml.as_bytes()) {
-            if let Some(n) = info.number.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                return Ok(n.to_owned());
-            }
-        }
-    }
-
-    let pattern_rows = parsing_pattern_repo::list_enabled(&state.db).await?;
-    let patterns: Vec<ParsingPattern> = pattern_rows
+/// Loads enabled parsing_patterns once for callers that resolve issue
+/// numbers across many files (e.g. the folder-match endpoint).
+async fn load_enabled_patterns(state: &AppState) -> Result<Vec<ParsingPattern>, ApiError> {
+    let rows = parsing_pattern_repo::list_enabled(&state.db).await?;
+    Ok(rows
         .into_iter()
         .map(|r| ParsingPattern {
             id: r.id,
@@ -437,19 +424,206 @@ async fn resolve_issue_number(
             priority: i32::try_from(r.priority).unwrap_or(i32::MAX),
             enabled: r.enabled,
         })
-        .collect();
+        .collect())
+}
+
+/// Resolves the issue number for a manual CV match. Priority:
+/// 1. Caller-provided override.
+/// 2. The file's cached ComicInfo `<Number>` field.
+/// 3. Filename parsing using the supplied patterns.
+///
+/// `None` when no source yields a value. Callers map that to whatever
+/// behaviour suits them (422 for single-file, skip-with-reason for the
+/// folder endpoint).
+fn try_resolve_issue_number(
+    file: &FileRow,
+    override_value: Option<&str>,
+    patterns: &[ParsingPattern],
+) -> Option<String> {
+    if let Some(s) = override_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(s.to_owned());
+    }
+
+    if let Some(xml) = file.cached_comicinfo_xml.as_deref() {
+        if let Ok(info) = longbox_core::ComicInfo::parse(xml.as_bytes()) {
+            if let Some(n) = info.number.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(n.to_owned());
+            }
+        }
+    }
+
     let basename = std::path::Path::new(&file.path_relative)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&file.path_relative);
-    if let Some(parsed) = longbox_core::parse_filename(basename, &patterns) {
-        return Ok(parsed.number);
+    longbox_core::parse_filename(basename, patterns).map(|p| p.number)
+}
+
+#[derive(Debug, Deserialize)]
+struct MatchFolderBody {
+    /// Directory relative to the library root, no leading or trailing
+    /// slash. Match-folder operates on files whose `path_relative` starts
+    /// with `{directory}/`.
+    directory: String,
+    cv_volume_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchFolderResponse {
+    matched_count: u32,
+    skipped: Vec<SkippedFile>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkippedFile {
+    path: String,
+    reason: SkipReason,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SkipReason {
+    /// Could not extract an issue number from ComicInfo or the filename.
+    IssueNumberUnresolved,
+    /// Issue number resolved, but the chosen series doesn't contain it.
+    IssueNotInSeries,
+}
+
+/// POST /api/files/match-folder-from-cv
+///
+/// Bulk-match every unmatched / needs-review file under `directory` to
+/// the same CV volume. Adds the series to the watchlist if not already
+/// present (one CV fetch for the whole batch). Skips files whose issue
+/// number can't be resolved or isn't in the series, surfacing both in
+/// the response so the UI can prompt the user for overrides.
+async fn match_folder_from_cv(
+    State(state): State<AppState>,
+    Json(body): Json<MatchFolderBody>,
+) -> Result<Json<MatchFolderResponse>, ApiError> {
+    if body.cv_volume_id <= 0 {
+        return Err(ApiError::BadRequest {
+            message: "cv_volume_id must be > 0".into(),
+        });
+    }
+    let directory = body.directory.trim().trim_matches('/').to_owned();
+    if directory.is_empty() {
+        return Err(ApiError::BadRequest {
+            message: "directory must be a non-empty path relative to the library root".into(),
+        });
     }
 
-    Err(ApiError::Unprocessable {
-        code: "unprocessable.issue_number_unresolved",
-        message: "Could not determine issue number from ComicInfo or filename; \
-                  re-submit with `issue_number` in the request body."
-            .into(),
-    })
+    let (series, _was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
+    let candidates = issue_repo::list_by_series(&state.db, series.id).await?;
+
+    // Substring-equality prefix match avoids the LIKE-wildcard escaping
+    // gymnastics that a `LIKE 'dir/%'` query would require. Treats
+    // `_` / `%` in folder names as literals.
+    //
+    // The `instr(...) = 0` clause restricts results to files immediately
+    // in `directory` — no further descent. This keeps the backend's
+    // file set aligned with the frontend's by-immediate-parent grouping
+    // (so `directory: "Saga"` does not pick up `Saga/Annual/Annual 1.cbz`).
+    let prefix = format!("{directory}/");
+    let prefix_len = prefix.len() as i64;
+    let library_root_id = state.library_root_id;
+    let rows = sqlx::query!(
+        r#"SELECT
+             id AS "id!: i64",
+             issue_id,
+             library_root_id AS "library_root_id!: i64",
+             path_relative,
+             size_bytes AS "size_bytes!: i64",
+             mtime AS "mtime!: time::PrimitiveDateTime",
+             last_scanned_at AS "last_scanned_at!: time::PrimitiveDateTime",
+             match_method, match_confidence, status,
+             cached_comicinfo_xml,
+             cached_at AS "cached_at: time::PrimitiveDateTime",
+             is_present AS "is_present!: bool",
+             last_seen_at AS "last_seen_at!: time::PrimitiveDateTime"
+           FROM files
+           WHERE library_root_id = ?1
+             AND status IN ('unmatched', 'needs_review')
+             AND is_present = 1
+             AND substr(path_relative, 1, ?2) = ?3
+             AND instr(substr(path_relative, ?2 + 1), '/') = 0
+           ORDER BY path_relative"#,
+        library_root_id,
+        prefix_len,
+        prefix,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("folder-match query failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+
+    let patterns = load_enabled_patterns(&state).await?;
+    let now = now_utc_primitive();
+    let mut matched_count: u32 = 0;
+    let mut skipped: Vec<SkippedFile> = Vec::new();
+
+    for r in rows {
+        let file = FileRow {
+            id: r.id,
+            issue_id: r.issue_id,
+            library_root_id: r.library_root_id,
+            path_relative: r.path_relative,
+            size_bytes: r.size_bytes,
+            mtime: r.mtime,
+            last_scanned_at: r.last_scanned_at,
+            match_method: r.match_method,
+            match_confidence: r.match_confidence,
+            status: r.status,
+            cached_comicinfo_xml: r.cached_comicinfo_xml,
+            cached_at: r.cached_at,
+            is_present: r.is_present,
+            last_seen_at: r.last_seen_at,
+        };
+
+        let Some(raw_number) = try_resolve_issue_number(&file, None, &patterns) else {
+            skipped.push(SkippedFile {
+                path: file.path_relative,
+                reason: SkipReason::IssueNumberUnresolved,
+            });
+            continue;
+        };
+        let target = IssueNumber::new(raw_number);
+        let Some(issue) = candidates
+            .iter()
+            .find(|i| IssueNumber::new(i.number.clone()).matches(&target))
+        else {
+            skipped.push(SkippedFile {
+                path: file.path_relative,
+                reason: SkipReason::IssueNotInSeries,
+            });
+            continue;
+        };
+
+        let patch = FileUpdate {
+            issue_id: Some(issue.id),
+            size_bytes: file.size_bytes,
+            mtime: file.mtime,
+            last_scanned_at: now,
+            match_method: MatchMethod::Manual.as_db_str().to_owned(),
+            match_confidence: 1.0,
+            status: FileStatus::Owned.as_db_str().to_owned(),
+            cached_comicinfo_xml: file.cached_comicinfo_xml.clone(),
+            cached_at: file.cached_at,
+            is_present: file.is_present,
+            last_seen_at: file.last_seen_at,
+        };
+        file_repo::update(&state.db, file.id, patch).await?;
+        matched_count += 1;
+    }
+
+    // Even when matched_count is 0, fire the rematch: a newly-added
+    // series's sibling files in other folders may now match via the
+    // normal scanner pipeline (CV URL / ComicInfo etc.).
+    spawn_auto_rematch(&state, series.id, "match-folder-from-cv");
+
+    Ok(Json(MatchFolderResponse {
+        matched_count,
+        skipped,
+    }))
 }

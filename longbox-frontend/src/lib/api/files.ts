@@ -64,3 +64,23 @@ export function matchFileFromCv(
     body: JSON.stringify(body)
   });
 }
+
+export type FolderMatchSkipReason = 'issue_number_unresolved' | 'issue_not_in_series';
+
+export interface FolderMatchResponse {
+  matched_count: number;
+  skipped: Array<{ path: string; reason: FolderMatchSkipReason }>;
+}
+
+/** POST /api/files/match-folder-from-cv. Bulk-match every unmatched /
+ *  needs-review file under `directory` to the same CV volume. Surfaces
+ *  per-file skip reasons so the UI can prompt for overrides. */
+export function matchFolderFromCv(
+  directory: string,
+  cvVolumeId: number
+): Promise<FolderMatchResponse> {
+  return apiFetch('/files/match-folder-from-cv', {
+    method: 'POST',
+    body: JSON.stringify({ directory, cv_volume_id: cvVolumeId })
+  });
+}
