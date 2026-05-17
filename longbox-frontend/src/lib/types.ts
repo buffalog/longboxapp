@@ -153,3 +153,9 @@ export interface StartScanResponse {
   scan_id: string;
   status: 'started';
 }
+
+export interface LibraryRoot {
+  id: number;
+  path: string;
+  created_at: string;
+}

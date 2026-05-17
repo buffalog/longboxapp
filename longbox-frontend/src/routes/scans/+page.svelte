@@ -9,21 +9,21 @@
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
   import { formatRelative } from '$lib/format';
 
+  let { data } = $props();
+
   let error = $state<ApiError | null>(null);
   let triggeringFull = $state(false);
   let triggeringRescan = $state(false);
 
-  const libraryRootId = $derived(() => {
-    if (scanStatus.recent.length > 0) return scanStatus.recent[0]!.library_root_id;
-    if (scanStatus.current) return scanStatus.current.library_root_id;
-    return 1;
-  });
+  // libraryRoot comes from the layout's load(); see /+layout.ts.
+  const libraryRootId = $derived(data.libraryRoot?.id ?? null);
 
   async function handleFull(): Promise<void> {
+    if (libraryRootId === null) return;
     triggeringFull = true;
     error = null;
     try {
-      await triggerFullScan(libraryRootId());
+      await triggerFullScan(libraryRootId);
       await scanStatus.refresh();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
@@ -33,10 +33,11 @@
   }
 
   async function handleRescan(): Promise<void> {
+    if (libraryRootId === null) return;
     triggeringRescan = true;
     error = null;
     try {
-      await triggerRescanUnmatched(libraryRootId());
+      await triggerRescanUnmatched(libraryRootId);
       await scanStatus.refresh();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
