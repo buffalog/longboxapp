@@ -236,6 +236,36 @@ async fn refresh(
         .await?;
     }
     tx.commit().await.map_err(longbox_db::DbError::from)?;
+
+    // Fire-and-forget rematch. Same silent-skip pattern as add-series:
+    // refresh can introduce new issues (CV published #194 since last
+    // refresh) and existing needs_review files may now match. If the
+    // scanner is busy, AlreadyRunning logs WARN and exits. Does NOT
+    // touch scan_status.
+    let scanner = state.scanner.clone();
+    let series_id = updated.id;
+    tokio::spawn(async move {
+        match scanner.rematch_for_series(series_id).await {
+            Ok(report) => tracing::info!(
+                target: "longbox_web",
+                series_id,
+                matched = report.matched_owned,
+                "refresh-triggered auto-rematch completed"
+            ),
+            Err(longbox_scanner::ScanError::AlreadyRunning) => tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                "refresh-triggered auto-rematch deferred: another scan is in progress"
+            ),
+            Err(e) => tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                error = %e,
+                "refresh-triggered auto-rematch failed"
+            ),
+        }
+    });
+
     Ok(Json(updated))
 }
 

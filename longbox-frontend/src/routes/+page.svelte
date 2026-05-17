@@ -3,7 +3,6 @@
   import { ApiError } from '$lib/api/client';
   import { getStats } from '$lib/api/stats';
   import { triggerFullScan } from '$lib/api/scans';
-  import { listSeries } from '$lib/api/series';
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
   import { formatRelative } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
@@ -11,31 +10,21 @@
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import type { Stats } from '$lib/types';
 
+  let { data } = $props();
+
   let stats = $state<Stats | null>(null);
-  let libraryRootId = $state<number | null>(null);
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
 
+  // libraryRoot comes from the layout's load(). It's null only if
+  // /api/library-roots failed at boot — which would have also surfaced
+  // via the global ErrorBanner.
+  const libraryRootId = $derived(data.libraryRoot?.id ?? null);
+
   onMount(async () => {
     try {
       stats = await getStats();
-      // Phase A has at most one library root. We discover its id from the
-      // most-recent scan report (if any), or by hitting /api/scans/recent
-      // which the layout store has already populated. Fallback to a probe
-      // via listSeries (cheap) — but really we just need any id; in Phase
-      // A there's exactly one and any scan/file uses it.
-      if (scanStatus.recent.length > 0) {
-        libraryRootId = scanStatus.recent[0]!.library_root_id;
-      } else if (scanStatus.current) {
-        libraryRootId = scanStatus.current.library_root_id;
-      } else {
-        // Probe: trigger a 404 scan with id 1 to confirm it exists? Too
-        // heavy. Default to 1 for Phase A; bootstrap ensures id 1 exists.
-        libraryRootId = 1;
-      }
-      // Touch listSeries so an empty library shows a useful CTA.
-      await listSeries();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {

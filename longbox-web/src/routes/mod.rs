@@ -11,6 +11,7 @@ use crate::state::AppState;
 pub mod cv_search;
 pub mod files;
 pub mod health;
+pub mod library_roots;
 pub mod scan;
 pub mod series;
 pub mod stats;
@@ -31,7 +32,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(series::router())
         .merge(files::router())
         .merge(scan::router())
-        .merge(stats::router());
+        .merge(stats::router())
+        .merge(library_roots::router());
 
     Router::new()
         .nest("/api", api)
