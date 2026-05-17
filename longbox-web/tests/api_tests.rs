@@ -895,3 +895,323 @@ async fn match_from_cv_404_for_unknown_file() {
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// -------- POST /api/files/match-folder-from-cv --------
+
+/// Mounts wiremock for a single CV volume with the given issues, then
+/// writes the given CBZs (each as `(relpath, comic_info_xml?)`) into the
+/// library and runs a full scan to populate `files`.
+async fn setup_folder_match(
+    app: &common::TestApp,
+    cv_id: i64,
+    volume_name: &str,
+    issues: &[(i64, &str)],
+    files: &[(&str, Option<&str>)],
+) {
+    let volume_body = format!(
+        r#"{{
+            "status_code": 1, "error": "OK", "number_of_total_results": 1,
+            "results": {{
+                "id": {cv_id}, "name": {name:?}, "start_year": "2012",
+                "publisher": {{ "id": 1, "name": "Image" }},
+                "description": null,
+                "image": null,
+                "site_detail_url": "https://cv/v/{cv_id}/"
+            }}
+        }}"#,
+        name = volume_name
+    );
+    let issue_results: Vec<String> = issues
+        .iter()
+        .map(|(id, n)| {
+            format!(
+                r#"{{ "id": {id}, "issue_number": "{n}", "name": null,
+                       "cover_date": null, "description": null,
+                       "image": null, "site_detail_url": "https://cv/i/{id}/" }}"#
+            )
+        })
+        .collect();
+    let issues_body = format!(
+        r#"{{
+            "status_code": 1, "error": "OK",
+            "number_of_total_results": {n}, "limit": 100, "offset": 0,
+            "results": [{r}]
+        }}"#,
+        n = issue_results.len(),
+        r = issue_results.join(",")
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/volume/4050-{cv_id}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume_body))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(issues_body))
+        .mount(&app.cv_server)
+        .await;
+
+    for (relpath, comic_info) in files {
+        write_cbz(&app.library_path().join(relpath), *comic_info);
+    }
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn match_folder_happy_path_matches_all_resolvable() {
+    let app = build_test_app().await;
+    setup_folder_match(
+        &app,
+        9001,
+        "Saga",
+        &[(91, "1"), (92, "2"), (93, "3")],
+        &[
+            ("Saga (2012)/Saga 001.cbz", None),
+            ("Saga (2012)/Saga 002.cbz", None),
+            ("Saga (2012)/Saga 003.cbz", None),
+        ],
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga (2012)", "cv_volume_id": 9001}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["matched_count"], 3);
+    assert_eq!(body["skipped"].as_array().unwrap().len(), 0);
+
+    // Sibling files in a different folder must not be touched.
+    write_cbz(
+        &app.library_path().join("Other Series/Other 001.cbz"),
+        None,
+    );
+}
+
+#[tokio::test]
+async fn match_folder_skips_unresolvable_and_out_of_series() {
+    let app = build_test_app().await;
+    // Only #1 and #2 exist in the CV volume. Folder has four files:
+    //  - 001 → matches
+    //  - 002 → matches
+    //  - 099 → resolvable but not in series (skip: issue_not_in_series)
+    //  - mystery → no parseable number (skip: issue_number_unresolved)
+    setup_folder_match(
+        &app,
+        9002,
+        "Saga",
+        &[(91, "1"), (92, "2")],
+        &[
+            ("Saga (2012)/Saga 001.cbz", None),
+            ("Saga (2012)/Saga 002.cbz", None),
+            ("Saga (2012)/Saga 099.cbz", None),
+            ("Saga (2012)/mystery.cbz", None),
+        ],
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga (2012)", "cv_volume_id": 9002}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["matched_count"], 2);
+    let skipped = body["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2);
+    let reasons: Vec<&str> = skipped
+        .iter()
+        .map(|s| s["reason"].as_str().unwrap())
+        .collect();
+    assert!(reasons.contains(&"issue_not_in_series"));
+    assert!(reasons.contains(&"issue_number_unresolved"));
+}
+
+#[tokio::test]
+async fn match_folder_does_not_touch_owned_files() {
+    let app = build_test_app().await;
+    setup_folder_match(
+        &app,
+        9003,
+        "Saga",
+        &[(91, "1"), (92, "2")],
+        &[
+            ("Saga (2012)/Saga 001.cbz", None),
+            ("Saga (2012)/Saga 002.cbz", None),
+        ],
+    )
+    .await;
+
+    // Manually mark #1 owned by an unrelated issue first.
+    let pre_series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(8888),
+            metron_id: None,
+            title: "Decoy".into(),
+            sort_title: "decoy".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let pre_issue = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: pre_series.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let file_001 = sqlx::query!(
+        r#"SELECT id AS "id!: i64" FROM files
+           WHERE path_relative = 'Saga (2012)/Saga 001.cbz'"#
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap()
+    .id;
+    let resp = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/files/{file_001}"),
+            &format!(r#"{{"issue_id": {}}}"#, pre_issue.id),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Folder match should now leave #1 alone (status=owned, not in
+    // unmatched/needs_review) and match only #2.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga (2012)", "cv_volume_id": 9003}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["matched_count"], 1);
+    assert_eq!(body["skipped"].as_array().unwrap().len(), 0);
+
+    // #1 still points at the Decoy issue.
+    let row = sqlx::query!(
+        r#"SELECT issue_id AS "issue_id?: i64" FROM files WHERE id = ?"#,
+        file_001
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(row.issue_id, Some(pre_issue.id));
+}
+
+#[tokio::test]
+async fn match_folder_400_for_empty_directory() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "  ", "cv_volume_id": 9001}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn match_folder_400_for_invalid_cv_volume_id() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga", "cv_volume_id": 0}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn match_folder_excludes_nested_subdirectories() {
+    let app = build_test_app().await;
+    setup_folder_match(
+        &app,
+        9005,
+        "Saga",
+        &[(91, "1"), (92, "2")],
+        &[
+            // Direct child — should be matched.
+            ("Saga (2012)/Saga 001.cbz", None),
+            // Nested under Saga (2012)/Annual/ — must NOT be picked up
+            // by a directory: "Saga (2012)" request; the frontend would
+            // group this under "Saga (2012)/Annual".
+            ("Saga (2012)/Annual/Annual 1.cbz", None),
+        ],
+    )
+    .await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga (2012)", "cv_volume_id": 9005}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["matched_count"], 1);
+    assert_eq!(body["skipped"].as_array().unwrap().len(), 0);
+
+    // The nested file is still unmatched.
+    let nested = sqlx::query!(
+        r#"SELECT status FROM files
+           WHERE path_relative = 'Saga (2012)/Annual/Annual 1.cbz'"#
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(nested.status, "unmatched");
+}
+
+#[tokio::test]
+async fn match_folder_strips_trailing_slash() {
+    let app = build_test_app().await;
+    setup_folder_match(
+        &app,
+        9004,
+        "Saga",
+        &[(91, "1")],
+        &[("Saga (2012)/Saga 001.cbz", None)],
+    )
+    .await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/files/match-folder-from-cv",
+            r#"{"directory": "Saga (2012)/", "cv_volume_id": 9004}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["matched_count"], 1);
+}
