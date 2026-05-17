@@ -103,20 +103,27 @@ export interface EnrichedFileRow extends FileRow {
   series: SeriesSnippet | null;
 }
 
-export interface ScanReport {
+/** A row from the persisted `scan_runs` table. Returned by
+ *  `/api/scans/recent` (filtered to user-triggered kinds). Phase A.5
+ *  Task C: this replaced the in-memory `ScanReport` shape returned by
+ *  the prior endpoint. Per-file error list and added/updated/missing
+ *  counts that were on the in-memory shape are not persisted; the
+ *  `files_added`/`files_updated` columns survive on the row but per-file
+ *  errors live only in logs now. */
+export interface ScanRun {
+  id: number;
   library_root_id: number;
   started_at: string;
-  completed_at: string;
-  duration_ms: number;
+  finished_at: string | null;
   files_seen: number;
   files_added: number;
   files_updated: number;
-  files_marked_missing: number;
-  matched_owned: number;
-  matched_needs_review: number;
-  matched_ignored: number;
-  unmatched: number;
-  errors: Array<{ path_relative: string; error_message: string }>;
+  files_matched: number;
+  files_needs_review: number;
+  files_unmatched: number;
+  status: 'running' | 'completed' | 'failed';
+  error_message: string | null;
+  kind: 'full' | 'rescan_unmatched' | 'rematch_for_series';
 }
 
 export interface CurrentScan {

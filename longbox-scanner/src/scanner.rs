@@ -7,7 +7,8 @@ use longbox_core::{
     ParsingPattern,
 };
 use longbox_db::{
-    file_repo, issue_repo, library_root_repo, parsing_pattern_repo, FileUpdate, NewFile, Pool,
+    file_repo, issue_repo, library_root_repo, parsing_pattern_repo, scan_run_repo, FileUpdate,
+    NewFile, NewScanRun, Pool, ScanCompletion, ScanRunKind,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
@@ -61,7 +62,30 @@ impl Scanner {
                 id: library_root_id,
             })?;
 
+        let scan_run_id = scan_run_repo::insert(
+            &self.db,
+            NewScanRun {
+                library_root_id,
+                kind: ScanRunKind::Full,
+            },
+        )
+        .await?
+        .id;
+
         let started_at = utc_now();
+        let result = self
+            .scan_full_body(&library_root, library_root_id, started_at)
+            .await;
+        record_outcome(&self.db, scan_run_id, &result).await;
+        result
+    }
+
+    async fn scan_full_body(
+        &self,
+        library_root: &longbox_db::LibraryRootRow,
+        library_root_id: i64,
+        started_at: PrimitiveDateTime,
+    ) -> Result<ScanReport, ScanError> {
         let mut report = ScanReport::new(library_root_id, started_at);
         let patterns = load_patterns(&self.db).await?;
 
@@ -118,7 +142,30 @@ impl Scanner {
                 id: library_root_id,
             })?;
 
+        let scan_run_id = scan_run_repo::insert(
+            &self.db,
+            NewScanRun {
+                library_root_id,
+                kind: ScanRunKind::RescanUnmatched,
+            },
+        )
+        .await?
+        .id;
+
         let started_at = utc_now();
+        let result = self
+            .rescan_unmatched_body(&library_root, library_root_id, started_at)
+            .await;
+        record_outcome(&self.db, scan_run_id, &result).await;
+        result
+    }
+
+    async fn rescan_unmatched_body(
+        &self,
+        library_root: &longbox_db::LibraryRootRow,
+        library_root_id: i64,
+        started_at: PrimitiveDateTime,
+    ) -> Result<ScanReport, ScanError> {
         let mut report = ScanReport::new(library_root_id, started_at);
         let patterns = load_patterns(&self.db).await?;
 
@@ -548,4 +595,33 @@ fn utc_now() -> PrimitiveDateTime {
 fn duration_ms(start: PrimitiveDateTime, end: PrimitiveDateTime) -> u64 {
     let duration = end.assume_utc() - start.assume_utc();
     u64::try_from(duration.whole_milliseconds().max(0)).unwrap_or(0)
+}
+
+/// Persists the final outcome of a scan into the `scan_runs` row that was
+/// inserted at the start. Best-effort: a DB failure here is logged WARN
+/// and swallowed so the caller's `Result` reflects the scan's outcome,
+/// not the bookkeeping write's.
+async fn record_outcome(db: &Pool, scan_run_id: i64, result: &Result<ScanReport, ScanError>) {
+    match result {
+        Ok(report) => {
+            let stats = ScanCompletion {
+                files_seen: i64::from(report.files_seen),
+                files_added: i64::from(report.files_added),
+                files_updated: i64::from(report.files_updated),
+                files_matched: i64::from(report.matched_owned + report.matched_needs_review),
+                files_needs_review: i64::from(report.matched_needs_review),
+                files_unmatched: i64::from(report.unmatched),
+            };
+            if let Err(e) = scan_run_repo::complete_with_stats(db, scan_run_id, stats).await {
+                warn!(target: "longbox_scanner", scan_run_id, err = %e,
+                      "failed to persist scan_runs complete row");
+            }
+        }
+        Err(e) => {
+            if let Err(write_err) = scan_run_repo::fail(db, scan_run_id, &e.to_string()).await {
+                warn!(target: "longbox_scanner", scan_run_id, err = %write_err,
+                      "failed to persist scan_runs fail row");
+            }
+        }
+    }
 }

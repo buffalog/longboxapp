@@ -1,12 +1,9 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
-
-const RECENT_SCAN_CAP: usize = 10;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,11 +17,13 @@ pub struct AppState {
     pub library_root_id: i64,
 }
 
+/// In-memory mid-scan status. The "current" pill in the UI reads from
+/// this; persisted scan history lives in the `scan_runs` table (read via
+/// `scan_run_repo::list_recent`). Per Task C: in-memory state is only for
+/// the live in-flight indicator, never for history rendering.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ScanStatus {
     pub current: Option<CurrentScan>,
-    /// Last 10 completed scan reports, newest first.
-    pub recent: VecDeque<longbox_scanner::ScanReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,14 +41,4 @@ pub enum ScanKind {
     Full,
     RescanUnmatched,
     RematchForSeries,
-}
-
-impl ScanStatus {
-    /// Push a completed scan onto the recent ring, truncating to the cap.
-    pub fn record(&mut self, report: longbox_scanner::ScanReport) {
-        self.recent.push_front(report);
-        while self.recent.len() > RECENT_SCAN_CAP {
-            self.recent.pop_back();
-        }
-    }
 }

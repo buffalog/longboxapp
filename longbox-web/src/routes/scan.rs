@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_db::library_root_repo;
+use longbox_db::{library_root_repo, scan_run_repo, ScanRunKind, ScanRunRow};
 use serde::Serialize;
 use time::OffsetDateTime;
 use tracing::error;
@@ -86,11 +86,11 @@ async fn start_scan(
             // RematchForSeries is not exposed via this endpoint path.
             ScanKind::RematchForSeries => unreachable!("invalid kind for HTTP-triggered scan"),
         };
-        let mut status = status_lock.write().await;
-        status.current = None;
-        match result {
-            Ok(report) => status.record(report),
-            Err(e) => error!(target: "longbox_web", err = %e, "background scan failed"),
+        // Drop the in-memory "current" indicator. Persistent history is
+        // written by the scanner itself into scan_runs (see record_outcome).
+        status_lock.write().await.current = None;
+        if let Err(e) = result {
+            error!(target: "longbox_web", err = %e, "background scan failed");
         }
     });
 
@@ -109,8 +109,19 @@ async fn current(
     Json(state.scan_status.read().await.current.clone())
 }
 
+/// Newest-first recent scans, excluding internal `rematch_for_series` rows
+/// (auto-rematches spawned by series-add / refresh / match-from-cv /
+/// match-folder-from-cv). The mid-scan pill (`/api/scans/current`) keeps
+/// surfacing those while they're in flight; they just don't pollute
+/// history.
 async fn recent(
     State(state): State<AppState>,
-) -> Json<Vec<longbox_scanner::ScanReport>> {
-    Json(state.scan_status.read().await.recent.iter().cloned().collect())
+) -> Result<Json<Vec<ScanRunRow>>, ApiError> {
+    let rows = scan_run_repo::list_recent(
+        &state.db,
+        10,
+        &[ScanRunKind::Full, ScanRunKind::RescanUnmatched],
+    )
+    .await?;
+    Ok(Json(rows))
 }

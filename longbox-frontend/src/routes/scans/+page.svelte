@@ -80,7 +80,7 @@
   <EmptyState icon={History} title="No scans yet" />
 {:else}
   <ul class="space-y-3">
-    {#each scanStatus.recent as report (report.started_at + '-' + report.library_root_id)}
+    {#each scanStatus.recent as report (report.id)}
       <li><ScanReportCard {report} /></li>
     {/each}
   </ul>

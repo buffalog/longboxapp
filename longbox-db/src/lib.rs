@@ -26,6 +26,8 @@ pub use pool::open;
 /// so that future re-implementations or pool wrappers don't ripple through
 /// every caller.
 pub type Pool = sqlx::SqlitePool;
-pub use scan_run_repo::{NewScanRun, ScanProgress, ScanRunRow, ScanRunStatus};
+pub use scan_run_repo::{
+    NewScanRun, ScanCompletion, ScanProgress, ScanRunKind, ScanRunRow, ScanRunStatus,
+};
 pub use series_repo::{NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts};
 pub use settings_repo::{KEY_LIBRARY_ROOT_PATH, KEY_MATCH_CONFIDENCE_THRESHOLD};

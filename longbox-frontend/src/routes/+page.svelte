@@ -46,7 +46,11 @@
     }
   }
 
-  const lastScanTime = $derived(scanStatus.recent[0]?.completed_at ?? null);
+  // Most recent completed/failed scan from the persisted history. The
+  // `recent` list already excludes auto-rematches at the API layer.
+  const lastScanTime = $derived(
+    scanStatus.recent.find((r) => r.status === 'completed')?.finished_at ?? null
+  );
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">Dashboard</h1>

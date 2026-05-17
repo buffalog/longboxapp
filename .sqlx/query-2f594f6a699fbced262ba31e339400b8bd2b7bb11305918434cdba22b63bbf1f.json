@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO scan_runs (library_root_id) VALUES (?)\n           RETURNING id AS \"id!: i64\", library_root_id AS \"library_root_id!: i64\",\n                     started_at AS \"started_at: _\", finished_at AS \"finished_at: _\",\n                     files_seen AS \"files_seen!: i64\",\n                     files_added AS \"files_added!: i64\",\n                     files_updated AS \"files_updated!: i64\",\n                     files_matched AS \"files_matched!: i64\",\n                     files_needs_review AS \"files_needs_review!: i64\",\n                     files_unmatched AS \"files_unmatched!: i64\",\n                     status, error_message",
+  "query": "SELECT id AS \"id!: i64\", library_root_id AS \"library_root_id!: i64\",\n                  started_at AS \"started_at: _\", finished_at AS \"finished_at: _\",\n                  files_seen AS \"files_seen!: i64\",\n                  files_added AS \"files_added!: i64\",\n                  files_updated AS \"files_updated!: i64\",\n                  files_matched AS \"files_matched!: i64\",\n                  files_needs_review AS \"files_needs_review!: i64\",\n                  files_unmatched AS \"files_unmatched!: i64\",\n                  status, error_message, kind\n           FROM scan_runs WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -62,6 +62,11 @@
         "name": "error_message",
         "ordinal": 11,
         "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 12,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -79,8 +84,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "43fe421d0cdbb2339a4b1c020b812b1df76bf3035c7355c74246d4786c6b4308"
+  "hash": "2f594f6a699fbced262ba31e339400b8bd2b7bb11305918434cdba22b63bbf1f"
 }

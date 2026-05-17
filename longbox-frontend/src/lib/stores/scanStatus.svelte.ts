@@ -5,14 +5,14 @@
 
 import { ApiError } from '../api/client';
 import * as scansApi from '../api/scans';
-import type { CurrentScan, ScanReport } from '../types';
+import type { CurrentScan, ScanRun } from '../types';
 
 const ACTIVE_INTERVAL_MS = 2000;
 const IDLE_INTERVAL_MS = 30000;
 
 class ScanStatusStore {
   current = $state<CurrentScan | null>(null);
-  recent = $state<ScanReport[]>([]);
+  recent = $state<ScanRun[]>([]);
   error = $state<ApiError | null>(null);
 
   private timer: ReturnType<typeof setTimeout> | null = null;
