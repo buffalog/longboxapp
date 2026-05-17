@@ -2200,3 +2200,23 @@ Phase C is the full pipeline: Prowlarr integration for indexer queries, SAB inte
 - **Built-in reader.** Same reasoning.
 - **Multi-user.** Single-user is a feature, not a limitation. Keeping it that way avoids real complexity (auth, sessions, per-user state).
 - **Public hosting.** Designed for self-hosting on your own hardware. Not a SaaS.
+
+## Phase A.5 feature additions — disk-driven catalog discovery
+
+Surfaced during first-week real-library use. Both gaps trace to the same root: the catalog and disk are independent sources of truth, and the current matching flow assumes catalog-first. Real workflow inverts this — the disk often tells you what catalog entries you should have. CV is the bridge.
+
+### A. CV search in the Change Match modal
+
+**Backend:** new endpoint `POST /api/files/:id/match-from-cv` taking `{ cv_volume_id, issue_number? }`. Extract the CV-fetch-and-insert from `POST /api/series` into a shared `series::add_from_cv(db, cv, cv_volume_id) -> Result<Series>` helper; both endpoints use it. The match endpoint: looks up the file, adds series if needed via the helper, resolves issue number from body or file's parsed metadata, sets `match_method='manual'`, `match_confidence=1.0`, spawns rematch_for_series. Returns 422 if issue number can't be resolved.
+
+**Frontend:** new reusable `CvSearchInput.svelte` (debounced search against `/api/cv/search`, results as selectable cards). Change Match modal becomes two-mode: "Search ComicVine" (default, pre-populated with file's best title hint via parsed-series → ComicInfo-Series → parent-directory cascade) and "By Issue ID" (current behavior kept as fallback). Loading state during the multi-second CV fetch shown clearly.
+
+### B. Folder-grouped matching
+
+**Backend:** new endpoint `POST /api/files/match-folder-from-cv` taking `{ directory, cv_volume_id }`. Finds all files in the directory (path_relative prefix match) with status unmatched/needs_review and is_present=true. Adds series via shared helper. Resolves each file's issue number, matches what can be matched, skips what can't. Returns `{ matched_count, skipped_count, skipped_paths }`.
+
+**Frontend:** `/files` page gains a `[Flat] [By Folder]` view toggle. Folder view groups unmatched files by dirname, renders one card per folder with file count and "Search ComicVine" button using the folder name as default search query. Reuses the CvSearchInput from Task A.
+
+### Build order
+
+Task A first (builds shared backend helper + reusable CV search component). Task B is then a wrapper around both plus folder grouping. One commit per task.
