@@ -19,6 +19,7 @@ async fn migration_creates_all_tables() {
             "issues".to_string(),
             "library_roots".to_string(),
             "parsing_patterns".to_string(),
+            "publisher_filters".to_string(),
             "scan_runs".to_string(),
             "series".to_string(),
             "settings".to_string(),
