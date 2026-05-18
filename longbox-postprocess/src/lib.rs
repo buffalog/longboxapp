@@ -22,6 +22,7 @@
 pub mod config;
 pub mod error;
 pub mod intervention;
+pub mod processor;
 pub mod skip;
 
 use std::path::PathBuf;
@@ -64,10 +65,16 @@ pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()
         }
     })?;
 
+    // Resolve library_root_id from the catalog. Spec'd signature is
+    // `start(config, db)`, so this can't be a parameter — derive by
+    // matching the configured library_root against existing rows.
+    let library_root_id = resolve_library_root_id(&config.library_root, &db).await?;
+
     tracing::info!(
         target: "longbox_postprocess",
         watch_path = %config.watch_path.display(),
         library_root = %config.library_root.display(),
+        library_root_id,
         "phase_b.started"
     );
 
@@ -76,7 +83,10 @@ pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()
     // 1. Consumer first so it's draining by the time the sweep starts
     //    pushing — keeps the bounded channel from backpressuring the
     //    sweep on a large pre-existing folder.
-    spawn_supervised("consumer", consumer_task(rx, db));
+    spawn_supervised(
+        "consumer",
+        consumer_task(rx, db, config.library_root.clone(), library_root_id),
+    );
 
     // 2. Sweep pre-existing files. Spawned (not awaited) so start()
     //    returns promptly even on a large folder; the consumer drains
@@ -91,6 +101,22 @@ pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()
     spawn_watcher(config.watch_path.clone(), tx)?;
 
     Ok(())
+}
+
+/// Match the configured library root against the catalog's existing
+/// library_roots rows. Trailing-slash-tolerant: callers may have
+/// normalized differently than the row stored. Phase A's bootstrap
+/// inserts/finds the row by path; here we only look up.
+async fn resolve_library_root_id(library_root: &PathBuf, db: &longbox_db::Pool) -> Result<i64> {
+    let rows = longbox_db::library_root_repo::list_all(db).await?;
+    let configured = library_root.to_string_lossy();
+    let configured_trimmed = configured.trim_end_matches('/');
+    for row in rows {
+        if row.path.trim_end_matches('/') == configured_trimmed {
+            return Ok(row.id);
+        }
+    }
+    Err(PostprocessError::LibraryRootNotInCatalog(library_root.clone()))
 }
 
 /// Walk the watch folder once at startup, enqueueing every CBZ that
@@ -248,16 +274,41 @@ fn spawn_watcher(watch_path: PathBuf, tx: mpsc::Sender<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Consume detected paths and log each one. Step 6 replaces this body
-/// with the real processing pipeline; the detection plumbing above is
-/// unchanged.
-async fn consumer_task(mut rx: mpsc::Receiver<PathBuf>, _db: longbox_db::Pool) {
+/// Consume detected paths and run the processing pipeline on each.
+/// Per-file errors are logged at WARN and the loop continues — one bad
+/// file must not stall the queue. Returning errors from this task body
+/// would have the supervisor log a panic; per-file failures are not
+/// panic-worthy.
+async fn consumer_task(
+    mut rx: mpsc::Receiver<PathBuf>,
+    db: longbox_db::Pool,
+    library_root: PathBuf,
+    library_root_id: i64,
+) {
     while let Some(path) = rx.recv().await {
-        tracing::info!(
-            target: "longbox_postprocess",
-            path = %path.display(),
-            "phase_b.detected (step 5: would process — no-op pipeline)"
-        );
+        // Skip-filter is run at the producer side (sweep + watcher),
+        // but a path that's been removed between detection and now
+        // would show up here. Re-checking the filter is cheap.
+        if let Some(reason) = skip::should_skip(&path) {
+            tracing::debug!(
+                target: "longbox_postprocess",
+                path = %path.display(),
+                reason = ?reason,
+                "phase_b.skipped (post-detection re-check)"
+            );
+            continue;
+        }
+        match processor::process_one(&path, &library_root, library_root_id, &db).await {
+            Ok(_outcome) => {} // process_one logs its own outcome
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_postprocess",
+                    path = %path.display(),
+                    err = %e,
+                    "phase_b.failed"
+                );
+            }
+        }
     }
     tracing::info!(
         target: "longbox_postprocess",
@@ -326,11 +377,36 @@ mod tests {
     async fn start_succeeds_on_readable_empty_dir() {
         let pool = longbox_db::open(":memory:").await.unwrap();
         let tmp = TempDir::new().unwrap();
+        // Phase B's start() resolves library_root_id by matching the
+        // configured library_root path against catalog rows; seed one.
+        longbox_db::library_root_repo::insert(
+            &pool,
+            longbox_db::NewLibraryRoot {
+                path: tmp.path().to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
         let config = PostprocessConfig {
             watch_path: tmp.path().to_path_buf(),
             library_root: tmp.path().to_path_buf(),
         };
         start(config, pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_errors_when_library_root_not_in_catalog() {
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let tmp = TempDir::new().unwrap();
+        let config = PostprocessConfig {
+            watch_path: tmp.path().to_path_buf(),
+            library_root: tmp.path().to_path_buf(),
+        };
+        let err = start(config, pool).await.unwrap_err();
+        assert!(
+            matches!(err, PostprocessError::LibraryRootNotInCatalog(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]

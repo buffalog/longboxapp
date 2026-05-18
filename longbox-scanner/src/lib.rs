@@ -12,7 +12,6 @@ pub mod error;
 pub mod report;
 pub mod scanner;
 
-mod candidate;
 mod cbz;
 mod walker;
 

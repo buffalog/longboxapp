@@ -4,6 +4,7 @@
 //! `sqlx::SqliteExecutor`, so callers pass `&SqlitePool` for single
 //! statements or `&mut Transaction<'_, Sqlite>` for transactional work.
 
+pub mod candidate;
 pub mod error;
 pub mod file_repo;
 pub mod issue_repo;
@@ -15,6 +16,7 @@ pub mod scan_run_repo;
 pub mod series_repo;
 pub mod settings_repo;
 
+pub use candidate::{find_candidates, row_to_issue, row_to_series};
 pub use error::{DbError, Result};
 pub use file_repo::{FileRow, FileUpdate, NewFile};
 pub use issue_repo::{IssueRow, IssueUpdate, NewIssue};

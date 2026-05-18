@@ -23,6 +23,18 @@ pub enum PostprocessError {
 
     #[error("filesystem watcher init failed: {0}")]
     WatcherInit(#[from] notify::Error),
+
+    #[error("library root {0:?} is not in the catalog (no matching library_roots row)")]
+    LibraryRootNotInCatalog(PathBuf),
+
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("cbz read/write failed: {0}")]
+    Cbz(#[from] zip::result::ZipError),
+
+    #[error("catalog row not found: {what}")]
+    CatalogNotFound { what: String },
 }
 
 pub type Result<T> = std::result::Result<T, PostprocessError>;

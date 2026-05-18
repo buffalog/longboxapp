@@ -7,14 +7,14 @@ use longbox_core::{
     ParsingPattern,
 };
 use longbox_db::{
-    file_repo, issue_repo, library_root_repo, parsing_pattern_repo, scan_run_repo, FileUpdate,
-    NewFile, NewScanRun, Pool, ScanCompletion, ScanRunKind,
+    file_repo, find_candidates, issue_repo, library_root_repo, parsing_pattern_repo,
+    row_to_issue, row_to_series, scan_run_repo, FileUpdate, NewFile, NewScanRun, Pool,
+    ScanCompletion, ScanRunKind,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
-use crate::candidate::{find_candidates, row_to_issue, row_to_series};
 use crate::cbz::extract_comic_info;
 use crate::error::ScanError;
 use crate::report::{ScanFileError, ScanReport};
