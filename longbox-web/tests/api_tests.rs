@@ -67,8 +67,11 @@ async fn cv_search_happy_path() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
-    assert_eq!(body[0]["cv_id"], 2127);
-    assert_eq!(body[0]["name"], "The Walking Dead");
+    // Task 4 wraps the response. Seeded blocklist doesn't include Image,
+    // so Image-published Walking Dead survives.
+    assert_eq!(body["results"][0]["cv_id"], 2127);
+    assert_eq!(body["results"][0]["name"], "The Walking Dead");
+    assert_eq!(body["filtered_count"], 0);
 }
 
 #[tokio::test]
@@ -90,6 +93,204 @@ async fn cv_search_upstream_500_maps_to_502() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let body = response_json(resp).await;
     assert_eq!(body["error"]["code"], "upstream.comicvine");
+}
+
+#[tokio::test]
+async fn cv_search_blocks_seeded_reprint_publishers() {
+    let app = build_test_app().await;
+    // Three "Batman" hits: DC original, a Panini reprint (default-
+    // blocked), and a custom publisher we'll add to the blocklist.
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("query", "batman"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 3, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 1, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 20,
+                      "image": null, "deck": null },
+                    { "id": 2, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 11, "name": "Panini Comics" },
+                      "count_of_issues": 5,
+                      "image": null, "deck": null },
+                    { "id": 3, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 12, "name": "Custom Reprint Co" },
+                      "count_of_issues": 5,
+                      "image": null, "deck": null }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    // Add a custom blocklist entry on top of the seeded defaults.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters",
+            r#"{"publisher_name": "Custom Reprint Co"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app.request(empty_request("GET", "/api/cv/search?q=batman")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["publisher"], "DC Comics");
+    assert_eq!(body["filtered_count"], 2);
+}
+
+#[tokio::test]
+async fn cv_search_show_filtered_bypasses_blocklist() {
+    let app = build_test_app().await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 2, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 1, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 1, "image": null, "deck": null },
+                    { "id": 2, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 11, "name": "Panini Comics" },
+                      "count_of_issues": 1, "image": null, "deck": null }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=batman&show_filtered=true"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["results"].as_array().unwrap().len(), 2);
+    assert_eq!(body["filtered_count"], 0);
+}
+
+// -------- /api/publishers/filters --------
+
+#[tokio::test]
+async fn publisher_filters_list_returns_seeded_defaults() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/publishers/filters"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["publisher_name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Panini Comics"));
+    assert!(names.contains(&"Éditions Glénat"));
+    assert!(names.contains(&"Arnoldo Mondadori Editore"));
+}
+
+#[tokio::test]
+async fn publisher_filters_create_then_delete() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters",
+            r#"{"publisher_name": "TestCo Reprints"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let id = body["id"].as_i64().unwrap();
+    assert_eq!(body["publisher_name"], "TestCo Reprints");
+    assert_eq!(body["mode"], "block");
+
+    let resp = app
+        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn publisher_filters_create_case_insensitive_conflict() {
+    let app = build_test_app().await;
+    // "panini comics" (lowercase) collides with the seeded "Panini Comics".
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters",
+            r#"{"publisher_name": "panini comics"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "conflict.publisher_filter_exists");
+}
+
+#[tokio::test]
+async fn publisher_filters_create_empty_returns_400() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters",
+            r#"{"publisher_name": "   "}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn publisher_filters_reset_reinserts_missing_defaults() {
+    let app = build_test_app().await;
+    // Delete one of the seeded defaults.
+    let list = response_json(
+        app.request(empty_request("GET", "/api/publishers/filters"))
+            .await,
+    )
+    .await;
+    let target = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["publisher_name"] == "Salvat")
+        .unwrap();
+    let id = target["id"].as_i64().unwrap();
+    let resp = app
+        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .request(empty_request("POST", "/api/publishers/filters/reset-defaults"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["inserted"], 1);
+
+    // After reset, Salvat is back.
+    let list = response_json(
+        app.request(empty_request("GET", "/api/publishers/filters"))
+            .await,
+    )
+    .await;
+    assert!(list
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["publisher_name"] == "Salvat"));
 }
 
 // -------- POST /api/series --------

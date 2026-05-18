@@ -1,10 +1,20 @@
 <script lang="ts">
-  // Phase A settings UI is read-only. Editing requires restarting the
-  // backend binary with new env vars; values shown here are reflected
-  // from /api/settings.
+  // Phase A settings UI is read-only for env vars. Editing requires
+  // restarting the backend binary; values shown here are reflected from
+  // /api/settings. Publisher filters are the one editable surface.
+  import { invalidateAll } from '$app/navigation';
+  import { Trash2, RotateCcw } from 'lucide-svelte';
+  import { ApiError } from '$lib/api/client';
+  import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
+  import Button from '$lib/components/Button.svelte';
+  import ErrorBanner from '$lib/components/ErrorBanner.svelte';
 
   let { data } = $props();
   const s = $derived(data.settings);
+
+  let newPublisher = $state('');
+  let busy = $state(false);
+  let error = $state<ApiError | null>(null);
 
   interface Row {
     label: string;
@@ -43,6 +53,36 @@
       envVar: 'LOG_LEVEL'
     }
   ]);
+
+  async function withBusy(fn: () => Promise<unknown>): Promise<void> {
+    busy = true;
+    error = null;
+    try {
+      await fn();
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleAdd(): Promise<void> {
+    const name = newPublisher.trim();
+    if (!name) return;
+    await withBusy(async () => {
+      await addFilter(name);
+      newPublisher = '';
+    });
+  }
+
+  function handleDelete(id: number): Promise<void> {
+    return withBusy(() => deleteFilter(id));
+  }
+
+  function handleReset(): Promise<void> {
+    return withBusy(() => resetFiltersToDefaults());
+  }
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">Settings</h1>
@@ -80,6 +120,65 @@
         <span class="font-mono text-slate-900">{s.version}</span>
       </dd>
     </dl>
+  </section>
+
+  <section class="rounded-lg border border-slate-200 bg-white p-4">
+    <header class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="text-base font-semibold">Publisher filters</h2>
+      <Button variant="ghost" size="sm" onclick={handleReset} disabled={busy}>
+        <RotateCcw class="size-3.5" aria-hidden="true" />Reset to defaults
+      </Button>
+    </header>
+    <p class="mb-3 text-sm text-slate-600">
+      ComicVine search excludes results whose publisher matches any name below.
+      Reprint publishers like Panini and Planeta are blocked by default so a
+      search for "Batman" returns the DC original, not the French/Spanish
+      reprints. Add your own, remove any that aren't useful.
+    </p>
+
+    {#if error}
+      <div class="mb-3"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
+    {/if}
+
+    <form
+      class="mb-3 flex gap-2"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void handleAdd();
+      }}
+    >
+      <input
+        type="text"
+        bind:value={newPublisher}
+        placeholder="Publisher name (case-insensitive)"
+        class="flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        disabled={busy}
+      />
+      <Button type="submit" disabled={busy || newPublisher.trim() === ''}>Add</Button>
+    </form>
+
+    {#if data.publisherFilters.length === 0}
+      <p class="text-sm text-slate-500">
+        No publisher filters. Click "Reset to defaults" to restore the curated blocklist.
+      </p>
+    {:else}
+      <ul class="divide-y divide-slate-100 rounded-md border border-slate-200">
+        {#each data.publisherFilters as f (f.id)}
+          <li class="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+            <span>{f.publisher_name}</span>
+            <button
+              type="button"
+              class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              aria-label={`Remove filter ${f.publisher_name}`}
+              onclick={() => handleDelete(f.id)}
+              disabled={busy}
+            >
+              <Trash2 class="size-4" aria-hidden="true" />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">

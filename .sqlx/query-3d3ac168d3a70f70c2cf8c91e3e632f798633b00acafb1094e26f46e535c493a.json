@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT publisher_name FROM publisher_filters WHERE mode = 'block'",
+  "describe": {
+    "columns": [
+      {
+        "name": "publisher_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3d3ac168d3a70f70c2cf8c91e3e632f798633b00acafb1094e26f46e535c493a"
+}

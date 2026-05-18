@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO publisher_filters (publisher_name, mode)\n               VALUES (?, 'block')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "39a12c25a81cb775b8b6fdec4460ad8f78d6690cf170bace09a895de19ed545f"
+}

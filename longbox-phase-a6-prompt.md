@@ -112,11 +112,11 @@ defaults is the right shape.
 - New migration: table `publisher_filters` with columns `id` (PK),
   `publisher_name` (TEXT NOT NULL UNIQUE, case-insensitive),
   `mode` (TEXT NOT NULL CHECK in `('block', 'allow')`), `created_at`.
-- Seed migration with a curated default blocklist (verify exact names
-  against CV's actual records before seeding): Panini Comics, Panini
-  France, Panini Brasil, Planeta DeAgostini, Editorial Televisa, ECC
-  Ediciones, Norma Editorial, Glénat Éditions, Mondadori, Salvat. Add
-  others as discovered.
+- Seed migration with a curated default blocklist (names verified
+  against CV's actual records during Task 4 implementation): Panini
+  Comics, Panini France, Panini Brasil, Planeta DeAgostini, Editorial
+  Televisa, ECC Ediciones, Norma Editorial, Éditions Glénat, Arnoldo
+  Mondadori Editore, Salvat. Add others as discovered.
 - New endpoints: `GET /api/publishers/filters`, `POST
   /api/publishers/filters` (with body `{publisher_name, mode}`),
   `DELETE /api/publishers/filters/:id`.

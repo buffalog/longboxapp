@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publisher_filters (publisher_name, mode)\n           VALUES (?, ?)\n           RETURNING id AS \"id!: i64\", publisher_name, mode,\n                     created_at AS \"created_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "mode",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "71a864d924c3147467d7739afbc911b3b65fdb362b1fe6f982d547f7af78e7d3"
+}
