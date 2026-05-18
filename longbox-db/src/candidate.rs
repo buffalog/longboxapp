@@ -1,19 +1,24 @@
-//! Candidate series lookup.
+//! Candidate series lookup for the matcher.
 //!
-//! Phase A strategy: fetch all series, rank by similarity to the title hint,
-//! return the top N with their issues eagerly loaded. Trivial against the
-//! ~hundreds of series Phase A users will have. Phase B/C scale will swap
-//! this for a SQL similarity index — flagged as known scaling work, not
-//! Phase A's problem.
+//! Lifted from `longbox-scanner` during Phase B step 6 so both the
+//! walker-driven scanner and the watcher-driven post-process pipeline
+//! can call it without duplicating logic or coupling postprocess to
+//! scanner. Behavior is byte-identical to the prior scanner-local
+//! version; scanner's existing integration tests preserve coverage.
+//!
+//! Phase A strategy: fetch all series, rank by similarity to the title
+//! hint, return the top N with their issues eagerly loaded. Trivial
+//! against the ~hundreds of series Phase A users will have. Phase B/C
+//! scale will swap this for a SQL similarity index — known scaling
+//! work, not Phase A/B's problem.
 
 use std::cmp::Ordering;
 
 use longbox_core::{
     matcher::Candidate, normalize_title, similarity::similarity, Issue, IssueNumber, Series,
 };
-use longbox_db::{issue_repo, series_repo, IssueRow, Pool, SeriesRow};
 
-use crate::error::ScanError;
+use crate::{error::Result, issue_repo, series_repo, IssueRow, Pool, SeriesRow};
 
 const TOP_N_CANDIDATES: usize = 10;
 
@@ -21,7 +26,7 @@ pub async fn find_candidates(
     db: &Pool,
     series_title_hint: &str,
     year_hint: Option<i32>,
-) -> Result<Vec<Candidate>, ScanError> {
+) -> Result<Vec<Candidate>> {
     let normalized_hint = normalize_title(series_title_hint);
     let all = series_repo::find_all(db).await?;
 
@@ -63,7 +68,7 @@ pub async fn find_candidates(
     Ok(candidates)
 }
 
-pub(crate) fn row_to_series(row: SeriesRow) -> Series {
+pub fn row_to_series(row: SeriesRow) -> Series {
     Series {
         id: row.id,
         cv_id: row.cv_id,
@@ -77,7 +82,7 @@ pub(crate) fn row_to_series(row: SeriesRow) -> Series {
     }
 }
 
-pub(crate) fn row_to_issue(row: IssueRow) -> Issue {
+pub fn row_to_issue(row: IssueRow) -> Issue {
     Issue {
         id: row.id,
         series_id: row.series_id,
