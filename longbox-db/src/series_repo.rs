@@ -185,6 +185,82 @@ where
         .collect())
 }
 
+/// Like [`find_all_with_counts`] but newest-first by `created_at` and
+/// limited. Used by the dashboard activity feed's "Recently added series"
+/// section.
+pub async fn list_recent_with_counts<'e, E>(
+    executor: E,
+    limit: u32,
+) -> Result<Vec<SeriesWithCounts>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let limit_i64 = i64::from(limit);
+    let rows = sqlx::query!(
+        r#"SELECT
+             s.id AS "id!: i64",
+             s.cv_id, s.metron_id, s.title, s.sort_title, s.start_year,
+             s.publisher, s.description, s.cover_url,
+             s.created_at AS "created_at: time::PrimitiveDateTime",
+             s.updated_at AS "updated_at: time::PrimitiveDateTime",
+             COUNT(DISTINCT i.id) AS "total_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN f.status = 'owned' AND f.is_present = 1
+               THEN i.id END) AS "owned_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN f.status = 'needs_review' AND f.is_present = 1
+               THEN i.id END) AS "needs_review_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN f.status = 'ignored' AND f.is_present = 1
+               THEN i.id END) AS "ignored_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN f.status = 'unmatched' AND f.is_present = 1
+               THEN i.id END) AS "unmatched_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN NOT EXISTS (
+                 SELECT 1 FROM files f2
+                 WHERE f2.issue_id = i.id
+                   AND f2.status = 'owned'
+                   AND f2.is_present = 1
+               )
+               THEN i.id END) AS "missing_count!: i64"
+           FROM series s
+           LEFT JOIN issues i ON i.series_id = s.id
+           LEFT JOIN files f ON f.issue_id = i.id
+           GROUP BY s.id
+           ORDER BY s.created_at DESC, s.id DESC
+           LIMIT ?"#,
+        limit_i64
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| SeriesWithCounts {
+            series: SeriesRow {
+                id: r.id,
+                cv_id: r.cv_id,
+                metron_id: r.metron_id,
+                title: r.title,
+                sort_title: r.sort_title,
+                start_year: r.start_year,
+                publisher: r.publisher,
+                description: r.description,
+                cover_url: r.cover_url,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            },
+            total_count: r.total_count,
+            owned_count: r.owned_count,
+            needs_review_count: r.needs_review_count,
+            ignored_count: r.ignored_count,
+            unmatched_count: r.unmatched_count,
+            missing_count: r.missing_count,
+        })
+        .collect())
+}
+
 pub async fn find_all<'e, E>(executor: E) -> Result<Vec<SeriesRow>>
 where
     E: SqliteExecutor<'e>,

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { BookOpen, FileImage } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
+  import { getActivity, type DashboardActivity } from '$lib/api/dashboard';
   import { getStats } from '$lib/api/stats';
   import { triggerFullScan } from '$lib/api/scans';
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
@@ -13,6 +15,7 @@
   let { data } = $props();
 
   let stats = $state<Stats | null>(null);
+  let activity = $state<DashboardActivity | null>(null);
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
@@ -24,7 +27,7 @@
 
   onMount(async () => {
     try {
-      stats = await getStats();
+      [stats, activity] = await Promise.all([getStats(), getActivity(6)]);
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -112,7 +115,7 @@
     {/if}
   </section>
 
-  <section class="flex flex-wrap gap-3">
+  <section class="mb-6 flex flex-wrap gap-3">
     <Button onclick={() => (window.location.href = '/add')}>Add series</Button>
     <Button
       variant="secondary"
@@ -123,4 +126,91 @@
       {scanStatus.current ? 'Scanning…' : 'Scan library'}
     </Button>
   </section>
+
+  {#if activity}
+    <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <h2 class="mb-3 text-base font-semibold">Recently added series</h2>
+        {#if activity.recent_series.length === 0}
+          <p class="text-sm text-slate-500">
+            No series in the watchlist yet.
+            <a class="text-blue-600 hover:underline" href="/add">Add one</a>.
+          </p>
+        {:else}
+          <ul class="space-y-2">
+            {#each activity.recent_series as s (s.id)}
+              <li>
+                <a
+                  href={`/series/${s.id}`}
+                  class="flex items-center gap-3 rounded-md p-1 hover:bg-slate-50"
+                >
+                  <div class="size-12 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+                    {#if s.cover_url}
+                      <img src={s.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+                    {:else}
+                      <div class="flex size-full items-center justify-center text-slate-400">
+                        <BookOpen class="size-5" aria-hidden="true" />
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="truncate text-sm font-medium">{s.title}</div>
+                    <div class="truncate text-xs text-slate-500">
+                      {s.start_year ?? '—'}{s.publisher ? ` · ${s.publisher}` : ''}
+                    </div>
+                  </div>
+                  <span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium">
+                    {s.owned_count}/{s.total_count}
+                  </span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+
+      <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <h2 class="mb-3 text-base font-semibold">Recently completed issues</h2>
+        {#if activity.recent_matches.length === 0}
+          <p class="text-sm text-slate-500">
+            No recent matches yet. Match files via
+            <a class="text-blue-600 hover:underline" href="/files">/files</a>
+            to populate this.
+          </p>
+        {:else}
+          <ul class="space-y-2">
+            {#each activity.recent_matches as m (m.file_id)}
+              <li>
+                <a
+                  href={`/series/${m.series.id}`}
+                  class="flex items-center gap-3 rounded-md p-1 hover:bg-slate-50"
+                >
+                  <div class="size-12 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+                    {#if m.issue.cover_url}
+                      <img src={m.issue.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+                    {:else}
+                      <div class="flex size-full items-center justify-center text-slate-400">
+                        <FileImage class="size-5" aria-hidden="true" />
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="truncate text-sm font-medium">
+                      {m.series.title} <span class="font-mono text-slate-500">#{m.issue.number}</span>
+                    </div>
+                    <div class="truncate font-mono text-xs text-slate-500" title={m.path_relative}>
+                      {m.path_relative}
+                    </div>
+                  </div>
+                  <span class="whitespace-nowrap text-xs text-slate-500">
+                    {formatRelative(m.matched_at)}
+                  </span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </section>
+  {/if}
 {/if}

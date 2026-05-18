@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                  is_present AS \"is_present!: bool\",\n                  last_seen_at AS \"last_seen_at: _\"\n           FROM files WHERE library_root_id = ? ORDER BY path_relative",
+  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                  is_present AS \"is_present!: bool\",\n                  last_seen_at AS \"last_seen_at: _\",\n                  matched_at AS \"matched_at: _\"\n           FROM files WHERE library_root_id = ? AND status = ?\n           ORDER BY path_relative",
   "describe": {
     "columns": [
       {
@@ -72,10 +72,15 @@
         "name": "last_seen_at: _",
         "ordinal": 13,
         "type_info": "Text"
+      },
+      {
+        "name": "matched_at: _",
+        "ordinal": 14,
+        "type_info": "Datetime"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       true,
@@ -91,8 +96,9 @@
       true,
       true,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "2c34a077ff39f94bbdd89bf2fbba05613ad671d3a85f46f55afacd363c27ed35"
+  "hash": "ba468059dfad6b1bdb198229b8f83d5228087e9cb9dd177fb1430f0f66120c67"
 }

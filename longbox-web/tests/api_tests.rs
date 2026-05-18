@@ -896,6 +896,111 @@ async fn match_from_cv_404_for_unknown_file() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// -------- GET /api/dashboard/activity --------
+
+#[tokio::test]
+async fn dashboard_activity_empty_on_fresh_catalog() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/dashboard/activity"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["recent_series"].as_array().unwrap().len(), 0);
+    assert_eq!(body["recent_matches"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn dashboard_activity_lists_recent_series_and_matches() {
+    let app = build_test_app().await;
+    // Seed a series + issue, then create a file matched to it.
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(101),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let issue = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: Some(8001),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: Some("Saga #1".into()),
+            cover_date: None,
+            summary: None,
+            cover_url: Some("https://example.com/saga-1.jpg".into()),
+        },
+    )
+    .await
+    .unwrap();
+    write_cbz(&app.library_path().join("Saga (2012)/Saga 001.cbz"), None);
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let file_id = sqlx::query!(
+        r#"SELECT id AS "id!: i64" FROM files
+           WHERE path_relative = 'Saga (2012)/Saga 001.cbz'"#
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap()
+    .id;
+    // Manually flip it to matched via the PATCH path — that exercises
+    // the matched_at update rule end-to-end.
+    let resp = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/files/{file_id}"),
+            &format!(r#"{{"issue_id": {}}}"#, issue.id),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .request(empty_request("GET", "/api/dashboard/activity?limit=6"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+
+    let series_list = body["recent_series"].as_array().unwrap();
+    assert_eq!(series_list.len(), 1);
+    assert_eq!(series_list[0]["title"], "Saga");
+    assert_eq!(series_list[0]["owned_count"], 1);
+    assert_eq!(series_list[0]["total_count"], 1);
+
+    let match_list = body["recent_matches"].as_array().unwrap();
+    assert_eq!(match_list.len(), 1);
+    assert_eq!(match_list[0]["path_relative"], "Saga (2012)/Saga 001.cbz");
+    assert_eq!(match_list[0]["issue"]["number"], "1");
+    assert_eq!(match_list[0]["issue"]["title"], "Saga #1");
+    assert_eq!(match_list[0]["series"]["title"], "Saga");
+    assert!(match_list[0]["matched_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn dashboard_activity_validates_limit() {
+    let app = build_test_app().await;
+    for bad in ["0", "51", "9999"] {
+        let resp = app
+            .request(empty_request("GET", &format!("/api/dashboard/activity?limit={bad}")))
+            .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "limit={bad}");
+    }
+}
+
 // -------- GET /api/settings --------
 
 #[tokio::test]

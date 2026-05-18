@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n             id AS \"id!: i64\",\n             issue_id,\n             library_root_id AS \"library_root_id!: i64\",\n             path_relative,\n             size_bytes AS \"size_bytes!: i64\",\n             mtime AS \"mtime!: time::PrimitiveDateTime\",\n             last_scanned_at AS \"last_scanned_at!: time::PrimitiveDateTime\",\n             match_method, match_confidence, status,\n             cached_comicinfo_xml,\n             cached_at AS \"cached_at: time::PrimitiveDateTime\",\n             is_present AS \"is_present!: bool\",\n             last_seen_at AS \"last_seen_at!: time::PrimitiveDateTime\"\n           FROM files\n           WHERE library_root_id = ?1\n             AND status IN ('unmatched', 'needs_review')\n             AND is_present = 1\n             AND substr(path_relative, 1, ?2) = ?3\n             AND instr(substr(path_relative, ?2 + 1), '/') = 0\n           ORDER BY path_relative",
+  "query": "INSERT INTO files (issue_id, library_root_id, path_relative,\n                              size_bytes, mtime, last_scanned_at,\n                              match_method, match_confidence, status,\n                              cached_comicinfo_xml, cached_at,\n                              is_present, last_seen_at, matched_at)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                     path_relative, size_bytes AS \"size_bytes!: i64\",\n                     mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                     match_method, match_confidence, status,\n                     cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                     is_present AS \"is_present!: bool\",\n                     last_seen_at AS \"last_seen_at: _\",\n                     matched_at AS \"matched_at: _\"",
   "describe": {
     "columns": [
       {
@@ -29,12 +29,12 @@
         "type_info": "Int64"
       },
       {
-        "name": "mtime!: time::PrimitiveDateTime",
+        "name": "mtime: _",
         "ordinal": 5,
         "type_info": "Datetime"
       },
       {
-        "name": "last_scanned_at!: time::PrimitiveDateTime",
+        "name": "last_scanned_at: _",
         "ordinal": 6,
         "type_info": "Datetime"
       },
@@ -59,7 +59,7 @@
         "type_info": "Text"
       },
       {
-        "name": "cached_at: time::PrimitiveDateTime",
+        "name": "cached_at: _",
         "ordinal": 11,
         "type_info": "Datetime"
       },
@@ -69,30 +69,36 @@
         "type_info": "Bool"
       },
       {
-        "name": "last_seen_at!: time::PrimitiveDateTime",
+        "name": "last_seen_at: _",
         "ordinal": 13,
         "type_info": "Text"
+      },
+      {
+        "name": "matched_at: _",
+        "ordinal": 14,
+        "type_info": "Datetime"
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 14
     },
     "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       true,
       true,
       false,
       false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-      true,
-      false,
-      false
+      true
     ]
   },
-  "hash": "77c1c9fc95e4f7925efec7b42df0b29303bbb773856d8438f6d97e4b5577c762"
+  "hash": "75e7974b9d281738a4909d9041d0862200160595ef66006b02a431afddf2c3ee"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n             f.id AS \"id!: i64\",\n             f.issue_id,\n             f.library_root_id AS \"library_root_id!: i64\",\n             f.path_relative,\n             f.size_bytes AS \"size_bytes!: i64\",\n             f.mtime AS \"mtime: time::PrimitiveDateTime\",\n             f.last_scanned_at AS \"last_scanned_at: time::PrimitiveDateTime\",\n             f.match_method, f.match_confidence, f.status,\n             f.cached_comicinfo_xml,\n             f.cached_at AS \"cached_at: time::PrimitiveDateTime\",\n             f.is_present AS \"is_present!: bool\",\n             f.last_seen_at AS \"last_seen_at: time::PrimitiveDateTime\",\n             i.id AS \"issue_inner_id?: i64\",\n             i.number AS \"issue_number?\",\n             i.title AS \"issue_title?\",\n             i.cover_date AS \"issue_cover_date?\",\n             s.id AS \"series_inner_id?: i64\",\n             s.title AS \"series_title?\",\n             s.start_year AS \"series_start_year?: i64\"\n           FROM files f\n           LEFT JOIN issues i ON f.issue_id = i.id\n           LEFT JOIN series s ON i.series_id = s.id\n           WHERE f.library_root_id = ?\n             AND (?2 IS NULL OR f.status = ?2)\n           ORDER BY f.path_relative",
+  "query": "SELECT\n             f.id AS \"id!: i64\",\n             f.issue_id,\n             f.library_root_id AS \"library_root_id!: i64\",\n             f.path_relative,\n             f.size_bytes AS \"size_bytes!: i64\",\n             f.mtime AS \"mtime: time::PrimitiveDateTime\",\n             f.last_scanned_at AS \"last_scanned_at: time::PrimitiveDateTime\",\n             f.match_method, f.match_confidence, f.status,\n             f.cached_comicinfo_xml,\n             f.cached_at AS \"cached_at: time::PrimitiveDateTime\",\n             f.is_present AS \"is_present!: bool\",\n             f.last_seen_at AS \"last_seen_at: time::PrimitiveDateTime\",\n             f.matched_at AS \"matched_at: time::PrimitiveDateTime\",\n             i.id AS \"issue_inner_id?: i64\",\n             i.number AS \"issue_number?\",\n             i.title AS \"issue_title?\",\n             i.cover_date AS \"issue_cover_date?\",\n             s.id AS \"series_inner_id?: i64\",\n             s.title AS \"series_title?\",\n             s.start_year AS \"series_start_year?: i64\"\n           FROM files f\n           LEFT JOIN issues i ON f.issue_id = i.id\n           LEFT JOIN series s ON i.series_id = s.id\n           WHERE f.library_root_id = ?\n             AND (?2 IS NULL OR f.status = ?2)\n           ORDER BY f.path_relative",
   "describe": {
     "columns": [
       {
@@ -74,38 +74,43 @@
         "type_info": "Text"
       },
       {
-        "name": "issue_inner_id?: i64",
+        "name": "matched_at: time::PrimitiveDateTime",
         "ordinal": 14,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "issue_inner_id?: i64",
+        "ordinal": 15,
         "type_info": "Int64"
       },
       {
         "name": "issue_number?",
-        "ordinal": 15,
-        "type_info": "Text"
-      },
-      {
-        "name": "issue_title?",
         "ordinal": 16,
         "type_info": "Text"
       },
       {
-        "name": "issue_cover_date?",
+        "name": "issue_title?",
         "ordinal": 17,
         "type_info": "Text"
       },
       {
-        "name": "series_inner_id?: i64",
+        "name": "issue_cover_date?",
         "ordinal": 18,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_inner_id?: i64",
+        "ordinal": 19,
         "type_info": "Int64"
       },
       {
         "name": "series_title?",
-        "ordinal": 19,
+        "ordinal": 20,
         "type_info": "Text"
       },
       {
         "name": "series_start_year?: i64",
-        "ordinal": 20,
+        "ordinal": 21,
         "type_info": "Int64"
       }
     ],
@@ -127,6 +132,7 @@
       true,
       false,
       false,
+      true,
       false,
       true,
       true,
@@ -136,5 +142,5 @@
       true
     ]
   },
-  "hash": "b6a4d398de6a6144f4fe845ee1d781114a0db674eedbaeb31d1803c98c3c5bec"
+  "hash": "71feca92d0665d7b05feaa9e58577dd9f9eaee8869528bcb34a69b484950bd78"
 }

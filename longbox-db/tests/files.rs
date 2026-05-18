@@ -71,6 +71,7 @@ fn new_file(library_root_id: i64, path: &str, status: &str, issue_id: Option<i64
         cached_at: None,
         is_present: true,
         last_seen_at: fixed_ts(),
+        matched_at: if issue_id.is_some() { Some(fixed_ts()) } else { None },
     }
 }
 
@@ -242,6 +243,7 @@ async fn update_can_set_issue_id_to_null_for_ignore_flow() {
             cached_at: None,
             is_present: row.is_present,
             last_seen_at: row.last_seen_at,
+            matched_at: None,
         },
     )
     .await
