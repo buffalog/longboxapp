@@ -7,6 +7,7 @@
 //! built from the per-URL extraction helpers in [`comicinfo`].
 
 pub mod comicinfo;
+pub mod comicinfo_writer;
 pub mod error;
 pub mod file;
 pub mod filename;
@@ -19,6 +20,7 @@ pub mod similarity;
 pub use comicinfo::{
     extract_cv_issue_id_from_url, extract_metron_issue_id_from_url, ComicInfo,
 };
+pub use comicinfo_writer::{ComicInfoMetadata, CoverDate};
 pub use error::{CoreError, Result};
 pub use file::{classify_status, FileStatus, LocalFile, MatchMethod};
 pub use filename::{ParsedFilename, ParsingPattern};
