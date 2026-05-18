@@ -1,0 +1,177 @@
+<script lang="ts">
+  import { goto } from '$app/navigation';
+  import { CircleSlash, FileImage } from 'lucide-svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import type { MissingSort } from '$lib/api/missing';
+
+  let { data } = $props();
+
+  function setSort(s: MissingSort): void {
+    const url = new URL(window.location.href);
+    if (s === 'series') url.searchParams.delete('sort');
+    else url.searchParams.set('sort', s);
+    void goto(url.pathname + url.search, { replaceState: true });
+  }
+
+  function setSeriesFilter(value: string): void {
+    const url = new URL(window.location.href);
+    if (value === '') url.searchParams.delete('series_id');
+    else url.searchParams.set('series_id', value);
+    void goto(url.pathname + url.search, { replaceState: true });
+  }
+
+  // "Missing for X" — best-effort age from cover_date. Real comics have
+  // future cover dates ("solicited" issues that haven't shipped yet), in
+  // which case we show "Solicited" rather than a nonsense negative age.
+  // Null cover_date renders as "—".
+  function missingAge(coverDate: string | null): string {
+    if (!coverDate) return '—';
+    const cover = Date.parse(coverDate + 'T00:00:00Z');
+    if (Number.isNaN(cover)) return '—';
+    const diffMs = Date.now() - cover;
+    if (diffMs < 0) return 'Solicited';
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (days < 31) return `${days}d`;
+    const months = Math.floor(days / 30);
+    if (months < 24) return `${months}mo`;
+    const years = (months / 12).toFixed(1).replace(/\.0$/, '');
+    return `${years}y`;
+  }
+
+  // Grouped render only makes sense for sort=series. When sort=cover_date
+  // we render a single flat table.
+  const groups = $derived.by(() => {
+    if (data.sort !== 'series') return [];
+    const out: Array<{ series_id: number; series_title: string; start_year: number | null; rows: typeof data.missing.missing }> = [];
+    for (const m of data.missing.missing) {
+      const last = out[out.length - 1];
+      if (last && last.series_id === m.series.id) {
+        last.rows.push(m);
+      } else {
+        out.push({
+          series_id: m.series.id,
+          series_title: m.series.title,
+          start_year: m.series.start_year,
+          rows: [m]
+        });
+      }
+    }
+    return out;
+  });
+</script>
+
+<header class="mb-4 flex flex-wrap items-baseline justify-between gap-3">
+  <h1 class="text-2xl font-bold">Missing</h1>
+  <span class="text-sm text-slate-500">
+    {data.missing.total} missing issue{data.missing.total === 1 ? '' : 's'}
+  </span>
+</header>
+
+{#if data.missing.total === 0 && data.seriesIdFilter === null}
+  <EmptyState
+    icon={CircleSlash}
+    title="Nothing missing"
+    message="Every issue your catalog knows about is matched to a file. Add more series via /add to see gaps to fill."
+  />
+{:else}
+  <div class="mb-4 flex flex-wrap items-center gap-3 text-sm">
+    <label class="inline-flex items-center gap-2">
+      <span class="text-slate-600">Series</span>
+      <select
+        class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        value={data.seriesIdFilter !== null ? String(data.seriesIdFilter) : ''}
+        onchange={(e) => setSeriesFilter((e.target as HTMLSelectElement).value)}
+      >
+        <option value="">All series</option>
+        {#each data.allSeries as s (s.id)}
+          <option value={String(s.id)}>
+            {s.title}{s.start_year ? ` (${s.start_year})` : ''}
+          </option>
+        {/each}
+      </select>
+    </label>
+
+    <label class="inline-flex items-center gap-2">
+      <span class="text-slate-600">Sort</span>
+      <select
+        class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        value={data.sort}
+        onchange={(e) => setSort((e.target as HTMLSelectElement).value as MissingSort)}
+      >
+        <option value="series">Series</option>
+        <option value="cover_date">Cover date</option>
+      </select>
+    </label>
+  </div>
+
+  {#if data.missing.total === 0}
+    <p class="text-sm text-slate-500">No missing issues in this view.</p>
+  {:else if data.sort === 'cover_date'}
+    <ul class="space-y-2">
+      {#each data.missing.missing as m (m.issue_id)}
+        <li>
+          <a
+            href={`/series/${m.series.id}`}
+            class="flex items-center gap-3 rounded-md border border-slate-200 bg-white p-2 hover:bg-slate-50"
+          >
+            <div class="size-12 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+              {#if m.cover_url}
+                <img src={m.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+              {:else}
+                <div class="flex size-full items-center justify-center text-slate-400">
+                  <FileImage class="size-5" aria-hidden="true" />
+                </div>
+              {/if}
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-sm font-medium">
+                {m.series.title}
+                <span class="font-mono text-slate-500">#{m.number}</span>
+              </div>
+              <div class="truncate text-xs text-slate-500">
+                {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
+              </div>
+            </div>
+            <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m.cover_date)}</span>
+          </a>
+        </li>
+      {/each}
+    </ul>
+  {:else}
+    <div class="space-y-4">
+      {#each groups as g (g.series_id)}
+        <section class="rounded-lg border border-slate-200 bg-white p-3">
+          <h2 class="mb-2 text-sm font-semibold">
+            <a class="hover:underline" href={`/series/${g.series_id}`}>
+              {g.series_title}{g.start_year ? ` (${g.start_year})` : ''}
+            </a>
+            <span class="font-normal text-slate-500">· {g.rows.length} missing</span>
+          </h2>
+          <ul class="divide-y divide-slate-100">
+            {#each g.rows as m (m.issue_id)}
+              <li class="flex items-center gap-3 py-1.5">
+                <div class="size-10 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+                  {#if m.cover_url}
+                    <img src={m.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+                  {:else}
+                    <div class="flex size-full items-center justify-center text-slate-400">
+                      <FileImage class="size-4" aria-hidden="true" />
+                    </div>
+                  {/if}
+                </div>
+                <span class="w-16 font-mono text-sm">#{m.number}</span>
+                <span class="min-w-0 flex-1 truncate text-sm">{m.title ?? '—'}</span>
+                <span class="w-24 whitespace-nowrap text-xs text-slate-500">
+                  {m.cover_date ?? '—'}
+                </span>
+                <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
+                  {missingAge(m.cover_date)}
+                </span>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/each}
+    </div>
+  {/if}
+{/if}

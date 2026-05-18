@@ -154,6 +154,9 @@ export interface Stats {
    *  `total_issues - owned_files` because that conflates with
    *  needs_review and ignored states. */
   missing_issues: number;
+  /** Distinct series with at least one missing issue. Always
+   *  `<= total_series`. */
+  series_with_missing: number;
 }
 
 export interface StartScanResponse {

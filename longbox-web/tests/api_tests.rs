@@ -896,6 +896,256 @@ async fn match_from_cv_404_for_unknown_file() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// -------- GET /api/missing --------
+
+#[tokio::test]
+async fn missing_empty_on_fresh_catalog() {
+    let app = build_test_app().await;
+    let resp = app.request(empty_request("GET", "/api/missing")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["missing"].as_array().unwrap().len(), 0);
+    assert_eq!(body["total"], 0);
+}
+
+#[tokio::test]
+async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
+    let app = build_test_app().await;
+    // Two series. Saga has issues 1, 2, 10, "Annual 1"; 1 is owned, the
+    // rest missing. Wolverine has issue 1 missing.
+    let saga = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(1),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let wolverine = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2),
+            metron_id: None,
+            title: "Wolverine".into(),
+            sort_title: "wolverine".into(),
+            start_year: Some(1982),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut saga_issue_ids = Vec::new();
+    for n in ["1", "2", "10", "Annual 1"] {
+        let row = issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: saga.id,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: n.into(),
+                title: None,
+                cover_date: None,
+                summary: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        saga_issue_ids.push(row.id);
+    }
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: wolverine.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Mark Saga #1 as owned via a real scan: write a CBZ matched by
+    // filename, then PATCH it onto the issue.
+    write_cbz(&app.library_path().join("Saga (2012)/Saga 001.cbz"), None);
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let file_id = sqlx::query!(
+        r#"SELECT id AS "id!: i64" FROM files
+           WHERE path_relative = 'Saga (2012)/Saga 001.cbz'"#
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap()
+    .id;
+    app.request(json_request(
+        "PATCH",
+        &format!("/api/files/{file_id}"),
+        &format!(r#"{{"issue_id": {}}}"#, saga_issue_ids[0]),
+    ))
+    .await;
+
+    // Unfiltered: 3 missing in Saga + 1 missing in Wolverine. Default
+    // sort = series. Saga before Wolverine (sort_title), and issues
+    // within Saga in natural order: 2, 10, Annual 1.
+    let resp = app.request(empty_request("GET", "/api/missing")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["total"], 4);
+    let numbers: Vec<&str> = body["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["number"].as_str().unwrap())
+        .collect();
+    assert_eq!(numbers, vec!["2", "10", "Annual 1", "1"]);
+    let series_titles: Vec<&str> = body["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["series"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(series_titles, vec!["Saga", "Saga", "Saga", "Wolverine"]);
+}
+
+#[tokio::test]
+async fn missing_filters_by_series_id() {
+    let app = build_test_app().await;
+    let saga = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(1),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let wolverine = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2),
+            metron_id: None,
+            title: "Wolverine".into(),
+            sort_title: "wolverine".into(),
+            start_year: Some(1982),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: saga.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: wolverine.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(empty_request("GET", &format!("/api/missing?series_id={}", saga.id)))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["missing"][0]["series"]["title"], "Saga");
+}
+
+#[tokio::test]
+async fn missing_sorts_by_cover_date_when_requested() {
+    let app = build_test_app().await;
+    let s = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(1),
+            metron_id: None,
+            title: "Test".into(),
+            sort_title: "test".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    for (n, d) in [("3", "2024-03-01"), ("1", "2024-01-01"), ("2", "2024-02-01")] {
+        issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: s.id,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: n.into(),
+                title: None,
+                cover_date: Some(d.into()),
+                summary: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let resp = app
+        .request(empty_request("GET", "/api/missing?sort=cover_date"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let dates: Vec<&str> = body["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["cover_date"].as_str().unwrap())
+        .collect();
+    assert_eq!(dates, vec!["2024-01-01", "2024-02-01", "2024-03-01"]);
+}
+
 // -------- GET /api/dashboard/activity --------
 
 #[tokio::test]

@@ -13,6 +13,7 @@ pub mod dashboard;
 pub mod files;
 pub mod health;
 pub mod library_roots;
+pub mod missing;
 pub mod scan;
 pub mod series;
 pub mod settings;
@@ -37,7 +38,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(stats::router())
         .merge(library_roots::router())
         .merge(settings::router())
-        .merge(dashboard::router());
+        .merge(dashboard::router())
+        .merge(missing::router());
 
     Router::new()
         .nest("/api", api)

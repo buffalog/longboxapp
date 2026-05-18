@@ -7,11 +7,46 @@
   let { data } = $props();
 
   let filter = $state('');
+  // Sort dropdown — Task 5a. "completion" surfaces almost-complete series
+  // at the top (natural prioritization signal for what to acquire next).
+  // Client-side sort: the typical Phase A library has tens of series;
+  // server-side sort is on the future-scaling deferred queue.
+  type Sort = 'name' | 'year' | 'added' | 'completion';
+  let sort = $state<Sort>('name');
 
-  const filtered = $derived.by(() => {
+  function completionPct(total: number, owned: number): number {
+    if (total === 0) return 0;
+    return (owned / total) * 100;
+  }
+
+  const visible = $derived.by(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return data.series;
-    return data.series.filter((s) => s.title.toLowerCase().includes(q));
+    const list = q ? data.series.filter((s) => s.title.toLowerCase().includes(q)) : data.series;
+    const sorted = [...list];
+    switch (sort) {
+      case 'year':
+        sorted.sort((a, b) => (b.start_year ?? 0) - (a.start_year ?? 0));
+        break;
+      case 'added':
+        // Newest first by created_at.
+        sorted.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+        break;
+      case 'completion':
+        // Descending completion %. Series with no total go to the
+        // bottom so the high-signal "missing one or two issues" rows
+        // bubble up.
+        sorted.sort((a, b) => {
+          const ap = completionPct(a.total_count, a.owned_count);
+          const bp = completionPct(b.total_count, b.owned_count);
+          return bp - ap;
+        });
+        break;
+      case 'name':
+      default:
+        sorted.sort((a, b) => a.sort_title.localeCompare(b.sort_title));
+        break;
+    }
+    return sorted;
   });
 </script>
 
@@ -33,19 +68,31 @@
     {/snippet}
   </EmptyState>
 {:else}
-  <div class="mb-4">
+  <div class="mb-4 flex flex-wrap gap-3">
     <input
       type="search"
-      class="w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      class="flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
       placeholder="Filter by title…"
       bind:value={filter}
     />
+    <label class="inline-flex items-center gap-2 text-sm">
+      <span class="text-slate-600">Sort</span>
+      <select
+        class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        bind:value={sort}
+      >
+        <option value="name">Name</option>
+        <option value="year">Year</option>
+        <option value="added">Added</option>
+        <option value="completion">Completion %</option>
+      </select>
+    </label>
   </div>
-  {#if filtered.length === 0}
+  {#if visible.length === 0}
     <p class="text-sm text-slate-500">No series match "{filter}".</p>
   {:else}
     <ul class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-      {#each filtered as series (series.id)}
+      {#each visible as series (series.id)}
         <li><SeriesCard {series} /></li>
       {/each}
     </ul>

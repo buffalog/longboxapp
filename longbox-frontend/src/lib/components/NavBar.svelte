@@ -7,6 +7,7 @@
     { href: '/series', label: 'Series' },
     { href: '/add', label: 'Add' },
     { href: '/files', label: 'Files' },
+    { href: '/missing', label: 'Missing' },
     { href: '/scans', label: 'Scans' },
     { href: '/settings', label: 'Settings' }
   ];

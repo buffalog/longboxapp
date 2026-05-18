@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             (SELECT COUNT(*) FROM series) AS \"total_series!: i64\",\n             (SELECT COUNT(*) FROM issues) AS \"total_issues!: i64\",\n             (SELECT COUNT(*) FROM files\n              WHERE status = 'owned' AND is_present = 1) AS \"owned_files!: i64\",\n             (SELECT COUNT(*) FROM files\n              WHERE status = 'needs_review' AND is_present = 1) AS \"needs_review_files!: i64\",\n             (SELECT COUNT(*) FROM files\n              WHERE status = 'ignored' AND is_present = 1) AS \"ignored_files!: i64\",\n             (SELECT COUNT(*) FROM files\n              WHERE status = 'unmatched' AND is_present = 1) AS \"unmatched_files!: i64\",\n             (SELECT COUNT(*) FROM issues i\n              WHERE NOT EXISTS (\n                SELECT 1 FROM files f\n                WHERE f.issue_id = i.id\n                  AND f.status = 'owned'\n                  AND f.is_present = 1\n              )) AS \"missing_issues!: i64\",\n             (SELECT COUNT(DISTINCT i.series_id) FROM issues i\n              WHERE NOT EXISTS (\n                SELECT 1 FROM files f\n                WHERE f.issue_id = i.id\n                  AND f.status = 'owned'\n                  AND f.is_present = 1\n              )) AS \"series_with_missing!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "total_series!: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      },
+      {
+        "name": "total_issues!: i64",
+        "ordinal": 1,
+        "type_info": "Int"
+      },
+      {
+        "name": "owned_files!: i64",
+        "ordinal": 2,
+        "type_info": "Int"
+      },
+      {
+        "name": "needs_review_files!: i64",
+        "ordinal": 3,
+        "type_info": "Int"
+      },
+      {
+        "name": "ignored_files!: i64",
+        "ordinal": 4,
+        "type_info": "Int"
+      },
+      {
+        "name": "unmatched_files!: i64",
+        "ordinal": 5,
+        "type_info": "Int"
+      },
+      {
+        "name": "missing_issues!: i64",
+        "ordinal": 6,
+        "type_info": "Int"
+      },
+      {
+        "name": "series_with_missing!: i64",
+        "ordinal": 7,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "1913869fbee6cd5ddc4980bb57276d4a190a874a3ad2b8c724cb2a12dc862868"
+}
