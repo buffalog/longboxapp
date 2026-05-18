@@ -14,11 +14,19 @@
   import CvSearchInput from '$lib/components/CvSearchInput.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
-  import FileRow from '$lib/components/FileRow.svelte';
+  import FileRow, { type ExitStage } from '$lib/components/FileRow.svelte';
   import FolderCard from '$lib/components/FolderCard.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { searchHintFromPath } from '$lib/match_hint';
   import type { EnrichedFileRow, FileStatus, SeriesSearchResult } from '$lib/types';
+
+  // Triage workflow (keyboard shortcuts, optimistic remove, focus jump)
+  // applies only to Needs Review. Unmatched (2,998+ rows in the real
+  // library) uses the folder-grouped modal as its primary triage surface;
+  // j/k navigation across the flat list isn't practical there. Owned and
+  // Ignored are terminal states, no triage needed.
+  const TRIAGE_DURATION_MS = 500;
+  const TRIAGE_SUCCESS_PHASE_MS = 300;
 
   let { data } = $props();
 
@@ -41,6 +49,18 @@
   let folderSubmitting = $state(false);
   let folderBusyFolder = $state<string | null>(null);
   let lastFolderResult = $state<{ folder: string; result: FolderMatchResponse } | null>(null);
+
+  // Triage state (Needs Review only). pendingExit keyed by file id; the
+  // FileRow renders the success overlay during 'success' phase, then
+  // collapses during 'fading'. After fade completes we invalidate so the
+  // server-fresh list (which no longer contains the row) replaces ours.
+  let pendingExit = $state<Record<number, ExitStage>>({});
+  let shortcutsOpen = $state(false);
+
+  const triageEnabled = $derived(data.status === 'needs_review');
+  const anyModalOpen = $derived(
+    pendingChange !== null || folderModalFolder !== null || shortcutsOpen
+  );
 
   const statusOptions: Array<{ value: FileStatus | 'all'; label: string }> = [
     { value: 'needs_review', label: 'Needs review' },
@@ -165,6 +185,161 @@
     });
   }
 
+  // --- Needs Review triage handlers ---------------------------------
+  //
+  // Optimistic remove + fade-out + focus jump. Replaces the busyId
+  // pattern only on the Needs Review tab; other tabs still use
+  // handleAccept/handleIgnore via the buttons.
+  //
+  // Flow:
+  //   t=0     : start the API call AND set pendingExit['success']
+  //             FileRow renders the green checkmark overlay.
+  //   t=300ms : pendingExit -> 'fading'
+  //             FileRow CSS-transitions max-height + opacity to 0.
+  //   t=500ms : invalidate() pulls fresh data (row gone), pendingExit
+  //             cleared, focus jumps to the captured next-file id.
+  //
+  // On API failure (anytime in 0-500ms window): pendingExit cleared
+  // immediately, error banner shown, focus stays where it was.
+  function nextFileIdAfter(id: number): number | null {
+    const idx = data.files.findIndex((f) => f.id === id);
+    return idx >= 0 && idx < data.files.length - 1 ? data.files[idx + 1].id : null;
+  }
+
+  function focusPrimaryButton(fileId: number): void {
+    const sel = `[data-triage-primary="true"][data-triage-row-id="${fileId}"]`;
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLButtonElement>(sel);
+      el?.focus();
+    });
+  }
+
+  async function runTriageAction(
+    file: EnrichedFileRow,
+    kind: 'matched' | 'ignored',
+    apiCall: () => Promise<unknown>
+  ): Promise<void> {
+    const fileId = file.id;
+    const nextId = nextFileIdAfter(fileId);
+    pendingExit[fileId] = { kind, phase: 'success' };
+
+    let apiOk = false;
+    try {
+      await apiCall();
+      apiOk = true;
+    } catch (e) {
+      delete pendingExit[fileId];
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      return;
+    }
+
+    // Hold the success overlay briefly, then switch to fading.
+    setTimeout(() => {
+      if (!apiOk) return;
+      if (pendingExit[fileId]) {
+        pendingExit[fileId] = { kind, phase: 'fading' };
+      }
+    }, TRIAGE_SUCCESS_PHASE_MS);
+
+    // After full duration, refresh the server view and move focus.
+    setTimeout(async () => {
+      delete pendingExit[fileId];
+      await invalidate(() => true);
+      if (nextId !== null) {
+        focusPrimaryButton(nextId);
+      }
+    }, TRIAGE_DURATION_MS);
+  }
+
+  function triageAccept(file: EnrichedFileRow): void {
+    if (!file.issue) return; // 'a' shouldn't fire on rows without a suggestion
+    const issueId = file.issue.id;
+    void runTriageAction(file, 'matched', () => setFileIssue(file.id, issueId));
+  }
+
+  function triageIgnore(file: EnrichedFileRow): void {
+    void runTriageAction(file, 'ignored', () => markFileIgnored(file.id));
+  }
+
+  function focusedTriageRowId(): number | null {
+    if (typeof document === 'undefined') return null;
+    const el = document.activeElement as HTMLElement | null;
+    const id = el?.getAttribute?.('data-triage-row-id');
+    return id ? Number(id) : null;
+  }
+
+  function focusNeighbor(direction: 1 | -1): void {
+    if (data.files.length === 0) return;
+    const focusedId = focusedTriageRowId();
+    let nextIdx: number;
+    if (focusedId === null) {
+      // First j or k from page body lands on row 0.
+      nextIdx = 0;
+    } else {
+      const cur = data.files.findIndex((f) => f.id === focusedId);
+      nextIdx = Math.max(0, Math.min(data.files.length - 1, cur + direction));
+    }
+    const nextId = data.files[nextIdx]?.id;
+    if (nextId !== undefined) focusPrimaryButton(nextId);
+  }
+
+  function onKeydown(e: KeyboardEvent): void {
+    if (!triageEnabled) return;
+    if (anyModalOpen) return; // modal Esc handlers do their own thing
+    // Bail when focus is in an editable element so typing in inputs
+    // (search boxes, future text fields) doesn't trigger shortcuts.
+    const target = e.target as HTMLElement | null;
+    if (target) {
+      const tag = target.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    const focusedId = focusedTriageRowId();
+    const focusedFile =
+      focusedId !== null ? (data.files.find((f) => f.id === focusedId) ?? null) : null;
+
+    switch (e.key) {
+      case 'j':
+        e.preventDefault();
+        focusNeighbor(1);
+        break;
+      case 'k':
+        e.preventDefault();
+        focusNeighbor(-1);
+        break;
+      case 'a':
+        if (focusedFile?.issue) {
+          e.preventDefault();
+          triageAccept(focusedFile);
+        }
+        break;
+      case 'i':
+        if (focusedFile) {
+          e.preventDefault();
+          triageIgnore(focusedFile);
+        }
+        break;
+      case 'm':
+        if (focusedFile) {
+          e.preventDefault();
+          openChange(focusedFile);
+        }
+        break;
+      case '?':
+        e.preventDefault();
+        shortcutsOpen = true;
+        break;
+    }
+  }
+
   function openChange(file: EnrichedFileRow): void {
     pendingChange = file;
     mode = 'cv';
@@ -248,6 +423,8 @@
     }
   }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <h1 class="mb-4 text-2xl font-bold">Files</h1>
 
@@ -350,6 +527,20 @@
   {/if}
 </div>
 
+{#if triageEnabled}
+  <p class="mb-3 text-xs text-slate-500">
+    <span class="font-mono">a</span> accept ·
+    <span class="font-mono">m</span> match ·
+    <span class="font-mono">i</span> ignore ·
+    <span class="font-mono">j/k</span> navigate ·
+    <button
+      type="button"
+      class="font-mono text-blue-600 hover:underline"
+      onclick={() => (shortcutsOpen = true)}
+    >?</button> for help
+  </p>
+{/if}
+
 {#if folderViewAllowed && effectiveView === 'folder'}
   <div class="mb-4">
     <div class="relative max-w-md">
@@ -414,8 +605,9 @@
         <FileRow
           {file}
           busy={busyId === file.id}
-          onAccept={handleAccept}
-          onIgnore={handleIgnore}
+          exitStage={pendingExit[file.id] ?? null}
+          onAccept={triageEnabled ? triageAccept : handleAccept}
+          onIgnore={triageEnabled ? triageIgnore : handleIgnore}
           onClearIgnore={handleClearIgnore}
           onChange={openChange}
         />
@@ -559,4 +751,29 @@
       </p>
     {/if}
   {/if}
+</Modal>
+
+<Modal open={shortcutsOpen} title="Keyboard shortcuts" onClose={() => (shortcutsOpen = false)}>
+  <p class="mb-3 text-sm text-slate-600">
+    Available on the Needs Review tab when no modal is open.
+  </p>
+  <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">a</kbd></dt>
+    <dd>Accept Match (when a suggestion exists)</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">m</kbd></dt>
+    <dd>Change Match — open ComicVine search</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">i</kbd></dt>
+    <dd>Mark Ignored</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">j</kbd></dt>
+    <dd>Focus next row</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">k</kbd></dt>
+    <dd>Focus previous row</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">?</kbd></dt>
+    <dd>Show this list</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">Esc</kbd></dt>
+    <dd>Close any open dialog</dd>
+  </dl>
+  <p class="mt-4 text-xs text-slate-500">
+    Shortcuts pause while a modal is open and while focus is in a text input.
+  </p>
 </Modal>
