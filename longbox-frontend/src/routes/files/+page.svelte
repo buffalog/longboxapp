@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { goto, invalidate } from '$app/navigation';
+  import { goto, invalidateAll } from '$app/navigation';
   import { Files, LayoutGrid, List } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
@@ -154,7 +154,7 @@
     error = null;
     try {
       await fn();
-      await invalidate(() => true);
+      await invalidateAll();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -241,10 +241,19 @@
       }
     }, TRIAGE_SUCCESS_PHASE_MS);
 
-    // After full duration, refresh the server view and move focus.
+    // After full duration: refresh the server view BEFORE dropping the
+    // exit state. Order matters — clearing pendingExit first leaves a
+    // frame where the row has no overlay but is still in data.files
+    // (it would pop back to full visibility just before vanishing).
+    // With invalidate first, the row is gone from data.files by the
+    // time pendingExit clears, so the FileRow simply unmounts.
+    //
+    // The early-return-on-error above this setTimeout-schedule site
+    // means the timer is only scheduled on the success path, so no
+    // explicit `apiOk` guard is needed here.
     setTimeout(async () => {
+      await invalidateAll();
       delete pendingExit[fileId];
-      await invalidate(() => true);
       if (nextId !== null) {
         focusPrimaryButton(nextId);
       }
@@ -382,7 +391,7 @@
     try {
       await matchFileFromCv(fileId, cvVolumeId, issueNumber);
       closeChange();
-      await invalidate(() => true);
+      await invalidateAll();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -414,7 +423,7 @@
       const result = await matchFolderFromCv(folder, cvVolumeId);
       lastFolderResult = { folder, result };
       closeFolderMatch();
-      await invalidate(() => true);
+      await invalidateAll();
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
