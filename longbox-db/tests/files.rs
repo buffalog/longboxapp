@@ -410,3 +410,250 @@ async fn mark_files_not_seen_since_is_scoped_to_library_root() {
         .unwrap();
     assert!(other_row.is_present, "other library root's row must remain untouched");
 }
+
+// ----- upsert_imported (Phase B step 3) -----
+
+fn now_offset() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+}
+
+#[tokio::test]
+async fn upsert_imported_fresh_row_sets_phase_b_owned() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, issue_id) = seed(&pool).await;
+    let row = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+        series_id,
+        issue_id,
+        17_823_412,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.issue_id, Some(issue_id));
+    assert_eq!(row.status, "owned");
+    assert_eq!(row.match_method, "phase_b");
+    assert!((row.match_confidence - 1.0).abs() < f64::EPSILON);
+    assert!(row.is_present);
+    assert!(row.matched_at.is_some(), "matched_at must be set on first import");
+}
+
+#[tokio::test]
+async fn upsert_imported_same_issue_preserves_matched_at() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, issue_id) = seed(&pool).await;
+    let first = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+        series_id,
+        issue_id,
+        1000,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+
+    // Sleep enough that "now" measurably differs at second-of-day
+    // granularity (the column stores PrimitiveDateTime; second precision
+    // is enough to detect a change if the rule went wrong).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let second = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+        series_id,
+        issue_id, // same issue
+        1000,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(second.id, first.id, "should be an UPDATE, not a fresh INSERT");
+    assert_eq!(
+        second.matched_at, first.matched_at,
+        "same issue_id must preserve matched_at (per Task 3 rule)"
+    );
+    assert_ne!(
+        second.last_seen_at, first.last_seen_at,
+        "last_seen_at should bump on every upsert"
+    );
+}
+
+#[tokio::test]
+async fn upsert_imported_changed_issue_bumps_matched_at() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, first_issue) = seed(&pool).await;
+    let second_issue = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: Some(102),
+            metron_issue_id: None,
+            number: "2".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let first = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+        series_id,
+        first_issue,
+        1000,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let second = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+        series_id,
+        second_issue, // different issue
+        1000,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.issue_id, Some(second_issue));
+    assert!(
+        second.matched_at > first.matched_at,
+        "different issue_id must bump matched_at to now"
+    );
+}
+
+#[tokio::test]
+async fn upsert_imported_promotes_lower_confidence_match_methods() {
+    // Codifies "Phase B is the higher-confidence path." A row that was
+    // matched via filename or ComicInfo earlier must be unconditionally
+    // promoted to match_method='phase_b' when Phase B re-imports it.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+
+    for prior_method in ["filename_regex", "comicinfo_xml", "web_url_cv"] {
+        let path = format!("seed-{prior_method}.cbz");
+        file_repo::insert(
+            &pool,
+            NewFile {
+                issue_id: Some(issue_id),
+                library_root_id,
+                path_relative: path.clone(),
+                size_bytes: 999,
+                mtime: fixed_ts(),
+                last_scanned_at: fixed_ts(),
+                match_method: prior_method.to_string(),
+                match_confidence: 0.85,
+                status: "owned".to_string(),
+                cached_comicinfo_xml: None,
+                cached_at: None,
+                is_present: true,
+                last_seen_at: fixed_ts(),
+                matched_at: Some(fixed_ts()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = file_repo::upsert_imported(
+            &pool,
+            library_root_id,
+            &path,
+            1,
+            issue_id,
+            999,
+            now_offset(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            after.match_method, "phase_b",
+            "prior method {prior_method:?} must be promoted to phase_b"
+        );
+        assert!(
+            (after.match_confidence - 1.0).abs() < f64::EPSILON,
+            "confidence must be 1.0 after phase_b promotion (was {})",
+            after.match_confidence
+        );
+    }
+}
+
+#[tokio::test]
+async fn upsert_imported_clears_stale_comicinfo_cache() {
+    // Phase B writes a fresh ComicInfo into the file as part of its
+    // pipeline; any prior cached XML in the DB is now stale.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+    file_repo::insert(
+        &pool,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id,
+            path_relative: "stale.cbz".into(),
+            size_bytes: 100,
+            mtime: fixed_ts(),
+            last_scanned_at: fixed_ts(),
+            match_method: "comicinfo_xml".into(),
+            match_confidence: 0.9,
+            status: "owned".into(),
+            cached_comicinfo_xml: Some("<ComicInfo>stale data</ComicInfo>".into()),
+            cached_at: Some(fixed_ts()),
+            is_present: true,
+            last_seen_at: fixed_ts(),
+            matched_at: Some(fixed_ts()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let after = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "stale.cbz",
+        1,
+        issue_id,
+        100,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.cached_comicinfo_xml, None);
+    assert_eq!(after.cached_at, None);
+}
+
+#[tokio::test]
+async fn upsert_imported_with_invalid_issue_id_errors() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, _) = seed(&pool).await;
+    let err = file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        "nope.cbz",
+        series_id,
+        9999, // FK doesn't exist
+        100,
+        now_offset(),
+    )
+    .await
+    .unwrap_err();
+    // SQLite FK violations surface as Other (no special-casing in the
+    // current error enum); the important property is that we don't
+    // silently succeed.
+    assert!(matches!(err, DbError::Other(_)), "got {err:?}");
+}

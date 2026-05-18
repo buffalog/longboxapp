@@ -20,6 +20,12 @@ pub enum MatchMethod {
     FilenameRegex,
     /// User resolved via the disambiguation UI.
     Manual,
+    /// Phase B's post-process pipeline imported the file with full
+    /// caller-supplied identity (series_id + issue_id known at import
+    /// time). Highest-confidence path — Phase B upserts override
+    /// lower-confidence matches from the scanner's filename / ComicInfo
+    /// tiers without prompting.
+    PhaseB,
     /// No plausible match found in any tier.
     Unmatched,
     /// User-marked as not-a-comic; not surfaced in catalog views.
@@ -34,6 +40,7 @@ impl MatchMethod {
             Self::ComicInfoXml => "comicinfo_xml",
             Self::FilenameRegex => "filename_regex",
             Self::Manual => "manual",
+            Self::PhaseB => "phase_b",
             Self::Unmatched => "unmatched",
             Self::Ignored => "ignored",
         }
@@ -46,6 +53,7 @@ impl MatchMethod {
             "comicinfo_xml" => Self::ComicInfoXml,
             "filename_regex" => Self::FilenameRegex,
             "manual" => Self::Manual,
+            "phase_b" => Self::PhaseB,
             "unmatched" => Self::Unmatched,
             "ignored" => Self::Ignored,
             _ => return None,
@@ -142,6 +150,7 @@ mod tests {
             MatchMethod::ComicInfoXml,
             MatchMethod::FilenameRegex,
             MatchMethod::Manual,
+            MatchMethod::PhaseB,
             MatchMethod::Unmatched,
             MatchMethod::Ignored,
         ] {

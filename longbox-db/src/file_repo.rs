@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteExecutor;
-use time::PrimitiveDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 use crate::error::{DbError, Result};
 
@@ -345,6 +345,98 @@ where
         return Err(DbError::NotFound);
     }
     Ok(())
+}
+
+/// Phase B's "I just imported a file and I know exactly which issue it is"
+/// path. Single repo method, idempotent on `(library_root_id,
+/// path_relative)`; intended to be called from `longbox-postprocess`
+/// after the .cbz has been written to its final library location.
+///
+/// Always sets:
+/// - `status = 'owned'`
+/// - `match_method = 'phase_b'` (overrides any prior lower-confidence
+///   match like `'filename_regex'` or `'comicinfo_xml'` — Phase B is
+///   the higher-confidence path)
+/// - `match_confidence = 1.0`
+/// - `is_present = true`
+/// - `last_scanned_at = now` / `last_seen_at = now`
+///
+/// `matched_at` follows the policy enforced by [`next_matched_at`]:
+/// fresh on first match or re-mapped issue, preserved when the same
+/// `issue_id` is re-confirmed.
+///
+/// `cached_comicinfo_xml` / `cached_at` are cleared because Phase B's
+/// own writer just produced a fresh ComicInfo embedded in the file;
+/// the scanner can re-cache from disk on the next scan if needed.
+pub async fn upsert_imported<'e, E>(
+    executor: E,
+    library_root_id: i64,
+    path_relative: &str,
+    series_id: i64, // currently informational; FK is via issue_id
+    issue_id: i64,
+    size: i64,
+    mtime: OffsetDateTime,
+) -> Result<FileRow>
+where
+    E: SqliteExecutor<'e> + Copy,
+{
+    // series_id is accepted for clarity at the call site (Phase B's
+    // pipeline holds both ids) and to keep the brief's signature
+    // honest, but the `files` table only stores `issue_id` — the join
+    // path to series is via the issues table.
+    let _ = series_id;
+
+    let mtime_p = PrimitiveDateTime::new(mtime.date(), mtime.time());
+    let now_p = {
+        let now = OffsetDateTime::now_utc();
+        PrimitiveDateTime::new(now.date(), now.time())
+    };
+
+    let existing = find_by_path(executor, library_root_id, path_relative).await?;
+    let matched_at = next_matched_at(
+        existing.as_ref().and_then(|r| r.issue_id),
+        Some(issue_id),
+        existing.as_ref().and_then(|r| r.matched_at),
+        now_p,
+    );
+
+    if let Some(row) = existing {
+        let patch = FileUpdate {
+            issue_id: Some(issue_id),
+            size_bytes: size,
+            mtime: mtime_p,
+            last_scanned_at: now_p,
+            match_method: longbox_core::MatchMethod::PhaseB.as_db_str().to_owned(),
+            match_confidence: 1.0,
+            status: longbox_core::FileStatus::Owned.as_db_str().to_owned(),
+            // Phase B wrote a fresh ComicInfo into the file; drop any
+            // stale cache so the next scan re-reads from disk.
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: now_p,
+            matched_at,
+        };
+        update(executor, row.id, patch).await
+    } else {
+        let new = NewFile {
+            issue_id: Some(issue_id),
+            library_root_id,
+            path_relative: path_relative.to_owned(),
+            size_bytes: size,
+            mtime: mtime_p,
+            last_scanned_at: now_p,
+            match_method: longbox_core::MatchMethod::PhaseB.as_db_str().to_owned(),
+            match_confidence: 1.0,
+            status: longbox_core::FileStatus::Owned.as_db_str().to_owned(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: now_p,
+            matched_at,
+        };
+        insert(executor, new).await
+    }
 }
 
 /// Mark `is_present = false` for every file in `library_root_id` whose
