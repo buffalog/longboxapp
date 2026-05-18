@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 
 pub mod cv_search;
+pub mod dashboard;
 pub mod files;
 pub mod health;
 pub mod library_roots;
@@ -35,7 +36,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(scan::router())
         .merge(stats::router())
         .merge(library_roots::router())
-        .merge(settings::router());
+        .merge(settings::router())
+        .merge(dashboard::router());
 
     Router::new()
         .nest("/api", api)

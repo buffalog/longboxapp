@@ -25,6 +25,10 @@ pub struct FileRow {
     pub is_present: bool,
     /// Timestamp of the most recent scan that visited this row.
     pub last_seen_at: PrimitiveDateTime,
+    /// Wall-clock time when `issue_id` was most recently set to its current
+    /// value. NULL when `issue_id` is NULL, and on pre-Task-3 rows that
+    /// were matched before the column existed (no backfill).
+    pub matched_at: Option<PrimitiveDateTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +46,9 @@ pub struct NewFile {
     pub cached_at: Option<PrimitiveDateTime>,
     pub is_present: bool,
     pub last_seen_at: PrimitiveDateTime,
+    /// Caller-supplied; should be `Some(now)` when `issue_id.is_some()`,
+    /// `None` otherwise. Use [`next_matched_at`] when in doubt.
+    pub matched_at: Option<PrimitiveDateTime>,
 }
 
 /// All fields except identity (`id`, `library_root_id`, `path_relative`) are
@@ -59,6 +66,33 @@ pub struct FileUpdate {
     pub cached_at: Option<PrimitiveDateTime>,
     pub is_present: bool,
     pub last_seen_at: PrimitiveDateTime,
+    /// See [`next_matched_at`]. Repo persists the value verbatim — the
+    /// caller is responsible for computing it correctly relative to the
+    /// existing row's issue_id and matched_at.
+    pub matched_at: Option<PrimitiveDateTime>,
+}
+
+/// Computes the new `matched_at` for a file write, per Task 3 rule:
+///
+/// - `None -> Some(_)`            : the file just became matched -> `Some(now)`
+/// - `Some(a) -> Some(b)`, a != b : remapped to a different issue -> `Some(now)`
+/// - `Some(a) -> Some(a)`         : same match, just re-confirmed -> `old`
+/// - `_ -> None`                  : cleared (mark-ignored / revert)  -> `None`
+///
+/// `old_issue_id` and `old_matched_at` come from the existing row; the
+/// caller has them in scope at every site that mutates a file row.
+pub fn next_matched_at(
+    old_issue_id: Option<i64>,
+    new_issue_id: Option<i64>,
+    old_matched_at: Option<PrimitiveDateTime>,
+    now: PrimitiveDateTime,
+) -> Option<PrimitiveDateTime> {
+    match (old_issue_id, new_issue_id) {
+        (_, None) => None,
+        (None, Some(_)) => Some(now),
+        (Some(a), Some(b)) if a != b => Some(now),
+        (Some(_), Some(_)) => old_matched_at,
+    }
 }
 
 pub async fn find_by_id<'e, E>(executor: E, id: i64) -> Result<Option<FileRow>>
@@ -73,7 +107,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files WHERE id = ?"#,
         id
     )
@@ -100,7 +135,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files WHERE library_root_id = ? AND path_relative = ?"#,
         library_root_id,
         path_relative
@@ -125,7 +161,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files WHERE library_root_id = ? ORDER BY path_relative"#,
         library_root_id
     )
@@ -152,7 +189,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files WHERE library_root_id = ? AND status = ?
            ORDER BY path_relative"#,
         library_root_id,
@@ -180,7 +218,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files
            WHERE library_root_id = ? AND status = 'unmatched'
            ORDER BY path_relative"#,
@@ -203,7 +242,8 @@ where
                   match_method, match_confidence, status,
                   cached_comicinfo_xml, cached_at AS "cached_at: _",
                   is_present AS "is_present!: bool",
-                  last_seen_at AS "last_seen_at: _"
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
            FROM files WHERE issue_id = ? ORDER BY path_relative"#,
         issue_id
     )
@@ -223,15 +263,16 @@ where
                               size_bytes, mtime, last_scanned_at,
                               match_method, match_confidence, status,
                               cached_comicinfo_xml, cached_at,
-                              is_present, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              is_present, last_seen_at, matched_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id AS "id!: i64", issue_id, library_root_id AS "library_root_id!: i64",
                      path_relative, size_bytes AS "size_bytes!: i64",
                      mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
                      match_method, match_confidence, status,
                      cached_comicinfo_xml, cached_at AS "cached_at: _",
                      is_present AS "is_present!: bool",
-                     last_seen_at AS "last_seen_at: _""#,
+                     last_seen_at AS "last_seen_at: _",
+                     matched_at AS "matched_at: _""#,
         input.issue_id,
         input.library_root_id,
         input.path_relative,
@@ -245,6 +286,7 @@ where
         input.cached_at,
         is_present,
         input.last_seen_at,
+        input.matched_at,
     )
     .fetch_one(executor)
     .await?;
@@ -262,7 +304,7 @@ where
            SET issue_id = ?, size_bytes = ?, mtime = ?, last_scanned_at = ?,
                match_method = ?, match_confidence = ?, status = ?,
                cached_comicinfo_xml = ?, cached_at = ?,
-               is_present = ?, last_seen_at = ?
+               is_present = ?, last_seen_at = ?, matched_at = ?
            WHERE id = ?
            RETURNING id AS "id!: i64", issue_id, library_root_id AS "library_root_id!: i64",
                      path_relative, size_bytes AS "size_bytes!: i64",
@@ -270,7 +312,8 @@ where
                      match_method, match_confidence, status,
                      cached_comicinfo_xml, cached_at AS "cached_at: _",
                      is_present AS "is_present!: bool",
-                     last_seen_at AS "last_seen_at: _""#,
+                     last_seen_at AS "last_seen_at: _",
+                     matched_at AS "matched_at: _""#,
         patch.issue_id,
         patch.size_bytes,
         patch.mtime,
@@ -282,6 +325,7 @@ where
         patch.cached_at,
         is_present,
         patch.last_seen_at,
+        patch.matched_at,
         id
     )
     .fetch_optional(executor)
@@ -326,4 +370,45 @@ where
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    #[test]
+    fn matched_at_first_match() {
+        let now = datetime!(2026-05-18 10:00:00);
+        // None -> Some(1) → fresh match, set to now.
+        assert_eq!(next_matched_at(None, Some(1), None, now), Some(now));
+    }
+
+    #[test]
+    fn matched_at_changed_match() {
+        let earlier = datetime!(2026-05-18 09:00:00);
+        let now = datetime!(2026-05-18 10:00:00);
+        // Some(1) -> Some(2) → user remapped, set to now.
+        assert_eq!(next_matched_at(Some(1), Some(2), Some(earlier), now), Some(now));
+    }
+
+    #[test]
+    fn matched_at_unchanged_match() {
+        let earlier = datetime!(2026-05-18 09:00:00);
+        let now = datetime!(2026-05-18 10:00:00);
+        // Some(1) -> Some(1) → same match, keep the old timestamp.
+        assert_eq!(
+            next_matched_at(Some(1), Some(1), Some(earlier), now),
+            Some(earlier)
+        );
+    }
+
+    #[test]
+    fn matched_at_cleared() {
+        let earlier = datetime!(2026-05-18 09:00:00);
+        let now = datetime!(2026-05-18 10:00:00);
+        // Any -> None → clear.
+        assert_eq!(next_matched_at(Some(1), None, Some(earlier), now), None);
+        assert_eq!(next_matched_at(None, None, None, now), None);
+    }
 }

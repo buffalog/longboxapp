@@ -424,12 +424,13 @@ impl Scanner {
             // columns (mtime, size, last_scanned_at, last_seen_at, is_present).
             let preserve_ignored = new_status == FileStatus::Ignored
                 && row.status == FileStatus::Ignored.as_db_str();
+            let new_issue_id = if preserve_ignored {
+                row.issue_id
+            } else {
+                match_result.issue_id
+            };
             let patch = FileUpdate {
-                issue_id: if preserve_ignored {
-                    row.issue_id
-                } else {
-                    match_result.issue_id
-                },
+                issue_id: new_issue_id,
                 size_bytes: i64::try_from(discovered.size_bytes).unwrap_or(i64::MAX),
                 mtime: discovered.mtime,
                 last_scanned_at: now,
@@ -449,6 +450,12 @@ impl Scanner {
                 cached_at: cached_at.or(row.cached_at),
                 is_present: true,
                 last_seen_at: now,
+                matched_at: file_repo::next_matched_at(
+                    row.issue_id,
+                    new_issue_id,
+                    row.matched_at,
+                    now,
+                ),
             };
             file_repo::update(&self.db, row.id, patch).await?;
         } else {
@@ -466,6 +473,7 @@ impl Scanner {
                 cached_at,
                 is_present: true,
                 last_seen_at: now,
+                matched_at: match_result.issue_id.map(|_| now),
             };
             file_repo::insert(&self.db, new).await?;
         }

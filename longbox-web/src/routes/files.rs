@@ -66,6 +66,7 @@ struct FileEnrichedJoinRow {
     cached_at: Option<time::PrimitiveDateTime>,
     is_present: bool,
     last_seen_at: time::PrimitiveDateTime,
+    matched_at: Option<time::PrimitiveDateTime>,
     issue_inner_id: Option<i64>,
     issue_number: Option<String>,
     issue_title: Option<String>,
@@ -91,6 +92,7 @@ fn enrich(r: FileEnrichedJoinRow) -> EnrichedFileRow {
         cached_at: r.cached_at,
         is_present: r.is_present,
         last_seen_at: r.last_seen_at,
+        matched_at: r.matched_at,
     };
     let issue = match (r.issue_inner_id, r.issue_number) {
         (Some(id), Some(number)) => Some(IssueSnippet {
@@ -135,6 +137,7 @@ async fn fetch_enriched_by_id(
              f.cached_at AS "cached_at: time::PrimitiveDateTime",
              f.is_present AS "is_present!: bool",
              f.last_seen_at AS "last_seen_at: time::PrimitiveDateTime",
+             f.matched_at AS "matched_at: time::PrimitiveDateTime",
              i.id AS "issue_inner_id?: i64",
              i.number AS "issue_number?",
              i.title AS "issue_title?",
@@ -197,6 +200,7 @@ async fn list(
              f.cached_at AS "cached_at: time::PrimitiveDateTime",
              f.is_present AS "is_present!: bool",
              f.last_seen_at AS "last_seen_at: time::PrimitiveDateTime",
+             f.matched_at AS "matched_at: time::PrimitiveDateTime",
              i.id AS "issue_inner_id?: i64",
              i.number AS "issue_number?",
              i.title AS "issue_title?",
@@ -275,6 +279,8 @@ async fn update(
         cached_at: existing.cached_at,
         is_present: existing.is_present,
         last_seen_at: existing.last_seen_at,
+        // Placeholder; recomputed below once `patch.issue_id` is final.
+        matched_at: existing.matched_at,
     };
 
     match (&body.issue_id, &body.status) {
@@ -320,6 +326,8 @@ async fn update(
         }
     }
 
+    patch.matched_at =
+        file_repo::next_matched_at(existing.issue_id, patch.issue_id, existing.matched_at, now);
     file_repo::update(&state.db, id, patch).await?;
     Ok(Json(fetch_enriched_by_id(&state.db, id).await?))
 }
@@ -388,8 +396,9 @@ async fn match_from_cv(
         })?;
 
     let now = now_utc_primitive();
+    let new_issue_id = Some(matched_issue.id);
     let patch = FileUpdate {
-        issue_id: Some(matched_issue.id),
+        issue_id: new_issue_id,
         size_bytes: file.size_bytes,
         mtime: file.mtime,
         last_scanned_at: now,
@@ -400,6 +409,7 @@ async fn match_from_cv(
         cached_at: file.cached_at,
         is_present: file.is_present,
         last_seen_at: file.last_seen_at,
+        matched_at: file_repo::next_matched_at(file.issue_id, new_issue_id, file.matched_at, now),
     };
     file_repo::update(&state.db, id, patch).await?;
 
@@ -539,7 +549,8 @@ async fn match_folder_from_cv(
              cached_comicinfo_xml,
              cached_at AS "cached_at: time::PrimitiveDateTime",
              is_present AS "is_present!: bool",
-             last_seen_at AS "last_seen_at!: time::PrimitiveDateTime"
+             last_seen_at AS "last_seen_at!: time::PrimitiveDateTime",
+             matched_at AS "matched_at: time::PrimitiveDateTime"
            FROM files
            WHERE library_root_id = ?1
              AND status IN ('unmatched', 'needs_review')
@@ -579,6 +590,7 @@ async fn match_folder_from_cv(
             cached_at: r.cached_at,
             is_present: r.is_present,
             last_seen_at: r.last_seen_at,
+            matched_at: r.matched_at,
         };
 
         let Some(raw_number) = try_resolve_issue_number(&file, None, &patterns) else {
@@ -600,8 +612,9 @@ async fn match_folder_from_cv(
             continue;
         };
 
+        let new_issue_id = Some(issue.id);
         let patch = FileUpdate {
-            issue_id: Some(issue.id),
+            issue_id: new_issue_id,
             size_bytes: file.size_bytes,
             mtime: file.mtime,
             last_scanned_at: now,
@@ -612,6 +625,12 @@ async fn match_folder_from_cv(
             cached_at: file.cached_at,
             is_present: file.is_present,
             last_seen_at: file.last_seen_at,
+            matched_at: file_repo::next_matched_at(
+                file.issue_id,
+                new_issue_id,
+                file.matched_at,
+                now,
+            ),
         };
         file_repo::update(&state.db, file.id, patch).await?;
         matched_count += 1;
