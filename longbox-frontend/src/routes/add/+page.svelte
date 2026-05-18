@@ -11,6 +11,8 @@
 
   let query = $state('');
   let results = $state<SeriesSearchResult[]>([]);
+  let filteredCount = $state(0);
+  let showFiltered = $state(false);
   let searching = $state(false);
   let addingId = $state<number | null>(null);
   let addedIds = $state<Set<number>>(new Set());
@@ -24,6 +26,7 @@
     const q = query.trim();
     if (!q) {
       results = [];
+      filteredCount = 0;
       return;
     }
     debounce = setTimeout(() => {
@@ -35,13 +38,22 @@
     searching = true;
     error = null;
     try {
-      results = await searchVolumes(q);
+      const r = await searchVolumes(q, { showFiltered });
+      results = r.results;
+      filteredCount = r.filtered_count;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
       results = [];
+      filteredCount = 0;
     } finally {
       searching = false;
     }
+  }
+
+  function toggleShowFiltered(): void {
+    showFiltered = !showFiltered;
+    const q = query.trim();
+    if (q !== '') void runSearch(q);
   }
 
   async function handleAdd(cvId: number, name: string): Promise<void> {
@@ -74,15 +86,31 @@
   </div>
 {/if}
 
-<div class="relative mb-4">
-  <Search class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-  <input
-    type="search"
-    class="w-full rounded-md border border-slate-300 py-1.5 pl-9 pr-3 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-    placeholder="Search ComicVine…"
-    bind:value={query}
-    oninput={handleInput}
-  />
+<div class="mb-4">
+  <div class="relative">
+    <Search class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+    <input
+      type="search"
+      class="w-full rounded-md border border-slate-300 py-1.5 pl-9 pr-3 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      placeholder="Search ComicVine…"
+      bind:value={query}
+      oninput={handleInput}
+    />
+  </div>
+  {#if filteredCount > 0 || showFiltered}
+    <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-600">
+      <input
+        type="checkbox"
+        checked={showFiltered}
+        onchange={toggleShowFiltered}
+        class="rounded border-slate-300"
+      />
+      Show filtered results
+      {#if filteredCount > 0}
+        <span class="text-slate-500">({filteredCount} hidden by publisher blocklist)</span>
+      {/if}
+    </label>
+  {/if}
 </div>
 
 {#if searching}

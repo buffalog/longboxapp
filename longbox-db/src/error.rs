@@ -58,6 +58,7 @@ fn parse_unique_violation(msg: &str) -> Option<&'static str> {
         "files.library_root_id, files.path_relative" => {
             "files_library_root_id_path_relative"
         }
+        "publisher_filters.publisher_name" => "publisher_name",
         _ => return None,
     })
 }

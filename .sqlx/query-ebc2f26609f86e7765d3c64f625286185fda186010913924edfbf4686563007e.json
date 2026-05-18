@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", publisher_name, mode,\n                  created_at AS \"created_at: _\"\n           FROM publisher_filters\n           ORDER BY publisher_name COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "mode",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ebc2f26609f86e7765d3c64f625286185fda186010913924edfbf4686563007e"
+}

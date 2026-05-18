@@ -15,6 +15,8 @@
 
   let query = $state(initialQuery);
   let results = $state<SeriesSearchResult[]>([]);
+  let filteredCount = $state(0);
+  let showFiltered = $state(false);
   let loading = $state(false);
   let error = $state<string | null>(null);
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -29,6 +31,7 @@
     const trimmed = next.trim();
     if (trimmed === '') {
       results = [];
+      filteredCount = 0;
       error = null;
       loading = false;
       return;
@@ -42,17 +45,25 @@
 
   async function run(q: string): Promise<void> {
     try {
-      const r = await searchVolumes(q);
+      const r = await searchVolumes(q, { showFiltered });
       // Drop the result if the query has changed since we kicked off.
       if (q !== query.trim()) return;
-      results = r;
+      results = r.results;
+      filteredCount = r.filtered_count;
       error = null;
     } catch (e) {
       results = [];
+      filteredCount = 0;
       error = e instanceof ApiError ? e.message : String(e);
     } finally {
       if (q === query.trim()) loading = false;
     }
+  }
+
+  function toggleShowFiltered(): void {
+    showFiltered = !showFiltered;
+    const q = query.trim();
+    if (q !== '') void run(q);
   }
 
   function onInput(e: Event): void {
@@ -83,6 +94,21 @@
 
   {#if error}
     <p class="mt-2 text-sm text-red-700">{error}</p>
+  {/if}
+
+  {#if filteredCount > 0 || showFiltered}
+    <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-600">
+      <input
+        type="checkbox"
+        checked={showFiltered}
+        onchange={toggleShowFiltered}
+        class="rounded border-slate-300"
+      />
+      Show filtered results
+      {#if filteredCount > 0}
+        <span class="text-slate-500">({filteredCount} hidden by publisher blocklist)</span>
+      {/if}
+    </label>
   {/if}
 
   {#if loading}
