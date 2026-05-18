@@ -37,8 +37,13 @@ describe('formatMatchMethod', () => {
 });
 
 describe('formatDuration', () => {
-  it('handles sub-second', () => {
-    expect(formatDuration(500)).toBe('500ms');
+  it('clamps sub-second durations to <1s (no-op rescans render as <1s, not 0ms)', () => {
+    expect(formatDuration(0)).toBe('<1s');
+    expect(formatDuration(500)).toBe('<1s');
+    expect(formatDuration(999)).toBe('<1s');
+  });
+  it('switches to seconds at 1000ms', () => {
+    expect(formatDuration(1000)).toBe('1s');
   });
   it('handles seconds', () => {
     expect(formatDuration(2500)).toBe('2s');

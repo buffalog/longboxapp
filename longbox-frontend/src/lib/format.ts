@@ -69,9 +69,12 @@ export function formatMatchMethod(m: string): string {
   }
 }
 
-/** Format a duration in ms as "Xs" or "Xm Ys" or "Xh Ym". */
+/** Format a duration in ms as "<1s", "Xs", "Xm Ys", or "Xh Ym". Sub-second
+ *  durations clamp to "<1s" — a no-op rescan rendering as "0ms" reads as
+ *  a bug, and exact-millisecond resolution doesn't carry useful signal on
+ *  a scan card. */
 export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) return '<1s';
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
