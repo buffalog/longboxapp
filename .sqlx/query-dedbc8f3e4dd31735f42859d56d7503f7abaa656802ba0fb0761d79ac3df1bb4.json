@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                 i.id AS \"issue_id!: i64\",\n                 i.number AS \"number!\",\n                 i.title AS \"title?\",\n                 i.cover_url AS \"cover_url?\",\n                 i.cover_date AS \"cover_date?\",\n                 i.created_at AS \"issue_created_at!: time::PrimitiveDateTime\",\n                 s.id AS \"series_id!: i64\",\n                 s.title AS \"series_title!\",\n                 s.sort_title AS \"series_sort_title!\",\n                 s.start_year AS \"series_start_year?: i64\"\n               FROM issues i\n               JOIN series s ON i.series_id = s.id\n               WHERE NOT EXISTS (\n                 SELECT 1 FROM files f\n                 WHERE f.issue_id = i.id\n                   AND f.status = 'owned'\n                   AND f.is_present = 1\n               )\n               ORDER BY s.sort_title ASC, i.id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "number!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title?",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url?",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_date?",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "issue_created_at!: time::PrimitiveDateTime",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_title!",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_sort_title!",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_start_year?: i64",
+        "ordinal": 9,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "dedbc8f3e4dd31735f42859d56d7503f7abaa656802ba0fb0761d79ac3df1bb4"
+}

@@ -24,6 +24,10 @@ struct Stats {
     ignored_files: i64,
     unmatched_files: i64,
     missing_issues: i64,
+    /// Distinct series with at least one missing issue. Used by the
+    /// dashboard's "missing" card to compose "X issues missing across Y
+    /// series." Always ≤ total_series.
+    series_with_missing: i64,
 }
 
 async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError> {
@@ -45,7 +49,14 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
                 WHERE f.issue_id = i.id
                   AND f.status = 'owned'
                   AND f.is_present = 1
-              )) AS "missing_issues!: i64""#
+              )) AS "missing_issues!: i64",
+             (SELECT COUNT(DISTINCT i.series_id) FROM issues i
+              WHERE NOT EXISTS (
+                SELECT 1 FROM files f
+                WHERE f.issue_id = i.id
+                  AND f.status = 'owned'
+                  AND f.is_present = 1
+              )) AS "series_with_missing!: i64""#
     )
     .fetch_one(&state.db)
     .await
@@ -61,5 +72,6 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
         ignored_files: row.ignored_files,
         unmatched_files: row.unmatched_files,
         missing_issues: row.missing_issues,
+        series_with_missing: row.series_with_missing,
     }))
 }

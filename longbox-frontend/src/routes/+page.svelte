@@ -127,6 +127,25 @@
     </Button>
   </section>
 
+  {#if stats.missing_issues > 0}
+    <section class="mb-6">
+      <a
+        href="/missing"
+        class="block rounded-lg border border-slate-200 bg-white p-3 hover:bg-slate-50"
+      >
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-sm">
+            <span class="font-semibold text-status-missing">{stats.missing_issues}</span>
+            issue{stats.missing_issues === 1 ? '' : 's'} missing across
+            <span class="font-semibold">{stats.series_with_missing}</span>
+            series
+          </div>
+          <span class="text-xs font-medium text-blue-600">view all →</span>
+        </div>
+      </a>
+    </section>
+  {/if}
+
   {#if activity}
     <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <div class="rounded-lg border border-slate-200 bg-white p-4">
