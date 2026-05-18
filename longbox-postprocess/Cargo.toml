@@ -1,0 +1,21 @@
+[package]
+name = "longbox-postprocess"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox Phase B post-process pipeline: watch-folder import."
+
+[lints]
+workspace = true
+
+# Phase B step 4 — skeleton only. `notify` (watcher), `zip` (CBZ I/O),
+# and `longbox-core` (matcher + ComicInfo writer + LibraryPath) arrive
+# in Steps 5 / 6 / 6 respectively, when their consumers land.
+[dependencies]
+longbox-db = { path = "../longbox-db" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
+thiserror = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
