@@ -12,6 +12,10 @@ pub struct AppConfig {
     pub log_level: String,
     pub match_threshold: f64,
     pub cors_permissive: bool,
+    /// Phase B watch folder. When set + readable, the web layer
+    /// starts the post-process watcher at boot. Unset = Phase B not
+    /// enabled; unreadable = warn-and-skip.
+    pub download_watch_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +66,8 @@ impl AppConfig {
             None => false,
         };
 
+        let download_watch_path = optional("DOWNLOAD_WATCH_PATH");
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -70,6 +76,7 @@ impl AppConfig {
             log_level,
             match_threshold,
             cors_permissive,
+            download_watch_path,
         })
     }
 }

@@ -115,6 +115,17 @@
         </span>
       </dd>
 
+      <dt class="font-medium text-slate-700">Watch folder</dt>
+      <dd>
+        {#if s.download_watch_path}
+          <span class="font-mono text-slate-900">{s.download_watch_path}</span>
+          <span class="ml-2 text-xs text-emerald-700">(Phase B enabled)</span>
+        {:else}
+          <span class="text-slate-500">— (Phase B disabled)</span>
+        {/if}
+        <span class="ml-2 text-xs text-slate-500">set via <code>DOWNLOAD_WATCH_PATH</code></span>
+      </dd>
+
       <dt class="font-medium text-slate-700">Version</dt>
       <dd>
         <span class="font-mono text-slate-900">{s.version}</span>
