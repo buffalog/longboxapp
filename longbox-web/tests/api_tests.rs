@@ -896,6 +896,42 @@ async fn match_from_cv_404_for_unknown_file() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// -------- GET /api/settings --------
+
+#[tokio::test]
+async fn settings_returns_configured_values() {
+    let app = build_test_app().await;
+    let resp = app.request(empty_request("GET", "/api/settings")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    // Mirrors the test harness in common/mod.rs.
+    assert_eq!(body["match_threshold"], 0.85);
+    assert_eq!(body["log_level"], "info");
+    assert_eq!(body["bind_address"], "0.0.0.0:0");
+    assert_eq!(body["database_url"], "sqlite::memory:");
+    assert!(body["library_root_path"].as_str().unwrap().contains("/"));
+    // `comicvine_api_key_configured` is structurally always true today
+    // (boot fails without a key); shape contract only.
+    assert_eq!(body["comicvine_api_key_configured"], true);
+    // Bare value sanity, not a literal version assertion.
+    assert!(body["version"].as_str().unwrap().starts_with("0."));
+}
+
+#[tokio::test]
+async fn settings_never_exposes_the_cv_api_key() {
+    let app = build_test_app().await;
+    let resp = app.request(empty_request("GET", "/api/settings")).await;
+    let body = response_json(resp).await;
+    let raw = serde_json::to_string(&body).unwrap();
+    // The test harness sets the key to "test-key" — assert no string in
+    // the response body contains it. Belt-and-suspenders against an
+    // accidental future field rename that leaks the value.
+    assert!(
+        !raw.contains("test-key"),
+        "response leaked the CV API key: {raw}"
+    );
+}
+
 // -------- POST /api/files/match-folder-from-cv --------
 
 /// Mounts wiremock for a single CV volume with the given issues, then

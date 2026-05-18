@@ -14,6 +14,7 @@ pub mod health;
 pub mod library_roots;
 pub mod scan;
 pub mod series;
+pub mod settings;
 pub mod stats;
 
 pub fn build_router(state: AppState) -> Router {
@@ -33,7 +34,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(files::router())
         .merge(scan::router())
         .merge(stats::router())
-        .merge(library_roots::router());
+        .merge(library_roots::router())
+        .merge(settings::router());
 
     Router::new()
         .nest("/api", api)
