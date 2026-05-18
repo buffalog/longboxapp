@@ -2229,7 +2229,7 @@ Reusing `scan_runs` (vs. the original `scan_history` proposal) keeps `files_adde
 
 CV descriptions arrive as HTML. The current strip removes block tags without inserting whitespace, producing smushed strings like `"EditionsMarvel Universe by Frank Miller OmnibusUncanny X-Men Omnibus Volume 3"`. Visible on real series pages.
 
-**Backend:** in `longbox-core`'s description-strip function, before tag removal, replace `</p>`, `</h1>`–`</h6>`, `</div>`, `</li>`, `<br>`, `<br/>`, `<br />` with `\n`. Then strip remaining tags. Collapse runs of 3+ newlines to 2. Trim. Add a unit test using the live Wolverine 1982 description as the smushed-input fixture; assert the fixed output reads cleanly.
+**Frontend:** in `longbox-frontend/src/lib/text.ts`, called from `SeriesHeader.svelte`'s collapsed-preview path (the only consumer in Phase A). Before tag removal, replace `</p>`, `</h1>`–`</h6>`, `</div>`, `</li>`, `<br>`, `<br/>`, `<br />` with `\n`. Then strip remaining tags. Decode `&amp;`/`&lt;`/`&gt;`/`&quot;`/`&#39;`/`&apos;`/`&nbsp;` — skip generic numeric entities until a real fixture surfaces one. Collapse runs of 3+ newlines to 2. Trim. The DB column keeps raw CV HTML; the expanded view continues to render via `{@html}`. No Rust-side strip — Phase B's ComicInfo Summary will write CV's raw HTML straight through (the ComicInfo standard tolerates HTML in Summary; readers render it). Unit test uses a realistic CV-style multi-paragraph fixture modeled on the Wolverine 1982 smushed-input example.
 
 ### E. Settings page non-sensitive values
 

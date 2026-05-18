@@ -2,6 +2,7 @@
   import { BookOpen } from 'lucide-svelte';
   import type { Snippet } from 'svelte';
   import type { SeriesDetail } from '$lib/types';
+  import { htmlToPlainText } from '$lib/text';
 
   interface Props {
     series: SeriesDetail;
@@ -13,6 +14,9 @@
   let { series, ownedCount, totalCount, actions }: Props = $props();
   let descExpanded = $state(false);
   const isLongDesc = $derived((series.description?.length ?? 0) > 240);
+  const collapsedPreview = $derived(
+    series.description ? htmlToPlainText(series.description) : ''
+  );
 </script>
 
 <header class="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:flex-row">
@@ -54,7 +58,7 @@
             >Show less</button>
           {/if}
         {:else}
-          <p class="line-clamp-3">{series.description.replace(/<[^>]*>/g, '')}</p>
+          <p class="line-clamp-3 whitespace-pre-line">{collapsedPreview}</p>
           <button
             type="button"
             class="mt-1 text-xs font-medium text-blue-600 hover:underline"
