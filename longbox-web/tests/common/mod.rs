@@ -79,6 +79,7 @@ pub async fn build_test_app() -> TestApp {
         log_level: "info".into(),
         match_threshold: 0.85,
         cors_permissive: false,
+        download_watch_path: None,
     };
 
     let state = AppState {

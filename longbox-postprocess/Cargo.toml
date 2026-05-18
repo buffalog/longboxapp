@@ -9,13 +9,18 @@ description = "LongBox Phase B post-process pipeline: watch-folder import."
 [lints]
 workspace = true
 
-# Phase B step 4 — skeleton only. `notify` (watcher), `zip` (CBZ I/O),
+# Phase B step 5 adds the watcher: notify + walkdir. `zip` (CBZ I/O)
 # and `longbox-core` (matcher + ComicInfo writer + LibraryPath) arrive
-# in Steps 5 / 6 / 6 respectively, when their consumers land.
+# in Step 6 when the per-file processing pipeline lands.
 [dependencies]
 longbox-db = { path = "../longbox-db" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
 thiserror = "1"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
+notify = "8"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

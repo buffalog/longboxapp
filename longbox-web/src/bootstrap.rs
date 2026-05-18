@@ -101,7 +101,14 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         },
     );
 
-    // 6. Compose state.
+    // 6. Phase B post-process watcher (enabled implicitly via env).
+    //    `DOWNLOAD_WATCH_PATH` set + dir is readable  -> start watcher.
+    //    Unset                                        -> single info log, skip.
+    //    Set but unreadable / start() failure         -> warn, skip.
+    //    Web boot is unaffected either way — Phase B is best-effort.
+    start_phase_b(&config, &db).await;
+
+    // 7. Compose state.
     Ok(AppState {
         db,
         cv: Arc::new(cv),
@@ -110,4 +117,30 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         library_root_id,
     })
+}
+
+/// Phase B startup. Best-effort: a watch-folder misconfiguration must
+/// not prevent the web layer from booting.
+async fn start_phase_b(config: &AppConfig, db: &longbox_db::Pool) {
+    let Some(raw) = config.download_watch_path.as_deref() else {
+        info!(target: "longbox_web", "phase_b.disabled (DOWNLOAD_WATCH_PATH not set)");
+        return;
+    };
+    let watch_path = std::path::PathBuf::from(crate::config::normalize_path(raw));
+    let library_root = std::path::PathBuf::from(&config.library_root_path);
+    let postprocess_config = longbox_postprocess::PostprocessConfig {
+        watch_path: watch_path.clone(),
+        library_root,
+    };
+    match longbox_postprocess::start(postprocess_config, db.clone()).await {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_web",
+                err = %e,
+                watch_path = %watch_path.display(),
+                "phase_b.skipped_at_boot"
+            );
+        }
+    }
 }

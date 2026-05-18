@@ -41,6 +41,7 @@ COPY longbox-core/ ./longbox-core/
 COPY longbox-db/ ./longbox-db/
 COPY longbox-comicvine/ ./longbox-comicvine/
 COPY longbox-scanner/ ./longbox-scanner/
+COPY longbox-postprocess/ ./longbox-postprocess/
 COPY longbox-web/ ./longbox-web/
 
 # Replace any tracked frontend-dist placeholder with the freshly-built

@@ -25,6 +25,10 @@ struct SettingsResponse {
     log_level: String,
     match_threshold: f64,
     comicvine_api_key_configured: bool,
+    /// Phase B's `DOWNLOAD_WATCH_PATH`. `None` = Phase B not
+    /// configured for this deployment; otherwise the configured path
+    /// (whether currently readable or not).
+    download_watch_path: Option<String>,
     version: &'static str,
 }
 
@@ -38,6 +42,7 @@ async fn handler(State(state): State<AppState>) -> Json<SettingsResponse> {
         // Boot fails without it, so this is always `true` today. Boolean
         // shape kept for future-proofing.
         comicvine_api_key_configured: !state.config.comicvine_api_key.is_empty(),
+        download_watch_path: state.config.download_watch_path.clone(),
         version: env!("CARGO_PKG_VERSION"),
     })
 }

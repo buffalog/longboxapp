@@ -10,6 +10,9 @@ export interface Settings {
    *  Boolean shape preserved for forward-compat if an in-app key flow
    *  ever ships. */
   comicvine_api_key_configured: boolean;
+  /** Phase B's `DOWNLOAD_WATCH_PATH`. `null` = Phase B not enabled
+   *  on this deployment. */
+  download_watch_path: string | null;
   version: string;
 }
 
