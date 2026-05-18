@@ -46,10 +46,16 @@
     }
   }
 
-  // Most recent completed/failed scan from the persisted history. The
-  // `recent` list already excludes auto-rematches at the API layer.
+  // "Last scan" on the dashboard means: most recent successfully-completed
+  // scan that did real work. A no-op rescan-unmatched against a zero-
+  // needs-review catalog still gets a `completed` row with files_seen=0;
+  // surfacing it as "Last scan completed Xs ago" misrepresents activity.
+  // Full scans always count even if they processed nothing, since the
+  // disk walk itself is the work.
   const lastScanTime = $derived(
-    scanStatus.recent.find((r) => r.status === 'completed')?.finished_at ?? null
+    scanStatus.recent.find(
+      (r) => r.status === 'completed' && (r.files_seen > 0 || r.kind === 'full')
+    )?.finished_at ?? null
   );
 </script>
 

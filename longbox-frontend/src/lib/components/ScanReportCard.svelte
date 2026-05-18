@@ -49,13 +49,37 @@
     {/if}
   </header>
 
+  <!--
+    Three columns of Label: Value pairs. Each pair is one grid item with
+    flex internally — the prior `display: contents` wrapper made dt/dd
+    flow as twelve independent grid items, which interleaved labels and
+    values across rows. Two columns on narrow widths, three on >=sm.
+  -->
   <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-3">
-    <div class="contents"><dt class="text-slate-500">Seen</dt><dd>{report.files_seen}</dd></div>
-    <div class="contents"><dt class="text-slate-500">Added</dt><dd>{report.files_added}</dd></div>
-    <div class="contents"><dt class="text-slate-500">Updated</dt><dd>{report.files_updated}</dd></div>
-    <div class="contents"><dt class="text-slate-500">Matched</dt><dd>{report.files_matched}</dd></div>
-    <div class="contents"><dt class="text-slate-500">Needs review</dt><dd>{report.files_needs_review}</dd></div>
-    <div class="contents"><dt class="text-slate-500">Unmatched</dt><dd>{report.files_unmatched}</dd></div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Seen</dt>
+      <dd class="font-medium">{report.files_seen}</dd>
+    </div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Added</dt>
+      <dd class="font-medium">{report.files_added}</dd>
+    </div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Updated</dt>
+      <dd class="font-medium">{report.files_updated}</dd>
+    </div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Matched</dt>
+      <dd class="font-medium">{report.files_matched}</dd>
+    </div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Needs review</dt>
+      <dd class="font-medium">{report.files_needs_review}</dd>
+    </div>
+    <div class="flex items-baseline gap-1.5">
+      <dt class="text-slate-500">Unmatched</dt>
+      <dd class="font-medium">{report.files_unmatched}</dd>
+    </div>
   </dl>
 
   {#if report.error_message}
