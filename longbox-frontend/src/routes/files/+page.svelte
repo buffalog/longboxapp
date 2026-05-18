@@ -31,8 +31,11 @@
   let cvIssueNumberInput = $state('');
   let cvSubmitting = $state(false);
 
-  // Folder-grouped view state.
-  let view = $state<'flat' | 'folder'>('flat');
+  // Folder-grouped view state. `view` and `folderFilter` are URL-synced
+  // (?view=flat|folder, ?folder_filter=…) so a shared link reproduces the
+  // sender's exact view. Filter only applies in folder view.
+  let view = $state<'flat' | 'folder'>(data.view);
+  let folderFilter = $state<string>(data.folderFilter);
   let folderModalFolder = $state<string | null>(null);
   let folderCvSelected = $state<SeriesSearchResult | null>(null);
   let folderSubmitting = $state(false);
@@ -55,7 +58,7 @@
   );
   const effectiveView = $derived(folderViewAllowed ? view : 'flat');
 
-  const folderGroups = $derived.by(() => {
+  const allFolderGroups = $derived.by(() => {
     if (effectiveView !== 'folder') return [];
     const m = new Map<string, EnrichedFileRow[]>();
     for (const f of data.files) {
@@ -68,6 +71,12 @@
     return Array.from(m.entries())
       .map(([folder, files]) => ({ folder, files, count: files.length }))
       .sort((a, b) => a.folder.localeCompare(b.folder));
+  });
+
+  const folderGroups = $derived.by(() => {
+    const q = folderFilter.trim().toLowerCase();
+    if (!q) return allFolderGroups;
+    return allFolderGroups.filter((g) => g.folder.toLowerCase().includes(q));
   });
 
   const initialHint = $derived(
@@ -85,6 +94,39 @@
     const url = new URL(window.location.href);
     url.searchParams.set('status', s);
     void goto(url.pathname + url.search, { replaceState: true });
+  }
+
+  function setView(next: 'flat' | 'folder'): void {
+    if (next === view) return;
+    view = next;
+    const url = new URL(window.location.href);
+    if (next === 'folder') {
+      url.searchParams.set('view', 'folder');
+      // Honor any folder_filter already in the URL (shared link).
+      // Otherwise start with an empty filter.
+      const pasted = url.searchParams.get('folder_filter') ?? '';
+      folderFilter = pasted;
+    } else {
+      url.searchParams.delete('view');
+      url.searchParams.delete('folder_filter');
+      folderFilter = '';
+    }
+    void goto(url.pathname + url.search, { replaceState: true });
+  }
+
+  // Filter input updates URL via history.replaceState rather than goto(),
+  // because goto() would re-run load() (and re-fire listFiles) on every
+  // keystroke. The data is already loaded; folder filtering is purely a
+  // $derived transformation of allFolderGroups.
+  function setFolderFilter(next: string): void {
+    folderFilter = next;
+    const url = new URL(window.location.href);
+    if (next.trim() === '') {
+      url.searchParams.delete('folder_filter');
+    } else {
+      url.searchParams.set('folder_filter', next);
+    }
+    window.history.replaceState(null, '', url.pathname + url.search);
   }
 
   async function withBusy(id: number, fn: () => Promise<void>): Promise<void> {
@@ -282,7 +324,7 @@
         type="button"
         role="tab"
         aria-selected={view === 'flat'}
-        onclick={() => (view = 'flat')}
+        onclick={() => setView('flat')}
         class="inline-flex items-center gap-1 rounded px-2.5 py-1 transition"
         class:bg-slate-900={view === 'flat'}
         class:text-white={view === 'flat'}
@@ -295,7 +337,7 @@
         type="button"
         role="tab"
         aria-selected={view === 'folder'}
-        onclick={() => (view = 'folder')}
+        onclick={() => setView('folder')}
         class="inline-flex items-center gap-1 rounded px-2.5 py-1 transition"
         class:bg-slate-900={view === 'folder'}
         class:text-white={view === 'folder'}
@@ -308,6 +350,32 @@
   {/if}
 </div>
 
+{#if folderViewAllowed && effectiveView === 'folder'}
+  <div class="mb-4">
+    <div class="relative max-w-md">
+      <input
+        type="search"
+        placeholder="Filter folders…"
+        value={folderFilter}
+        oninput={(e) => setFolderFilter((e.target as HTMLInputElement).value)}
+        class="w-full rounded-md border border-slate-300 py-1.5 pl-3 pr-8 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        aria-label="Filter folders by name"
+      />
+      {#if folderFilter !== ''}
+        <button
+          type="button"
+          onclick={() => setFolderFilter('')}
+          aria-label="Clear folder filter"
+          class="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >×</button>
+      {/if}
+    </div>
+    <p class="mt-1 text-xs text-slate-500">
+      Showing {folderGroups.length} of {allFolderGroups.length} folder{allFolderGroups.length === 1 ? '' : 's'}
+    </p>
+  </div>
+{/if}
+
 {#if data.files.length === 0}
   <EmptyState
     icon={Files}
@@ -315,18 +383,30 @@
     message="Run a scan to populate the catalog, or pick a different filter."
   />
 {:else if effectiveView === 'folder'}
-  <ul class="space-y-2">
-    {#each folderGroups as g (g.folder)}
-      <li>
-        <FolderCard
-          folder={g.folder || '(library root)'}
-          count={g.count}
-          busy={folderBusyFolder === g.folder}
-          onOpen={() => openFolderMatch(g.folder)}
-        />
-      </li>
-    {/each}
-  </ul>
+  {#if folderGroups.length === 0}
+    <div class="rounded-lg border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+      No folders match
+      <span class="font-mono text-slate-700">"{folderFilter}"</span>.
+      <button
+        type="button"
+        class="ml-1 text-blue-600 hover:underline"
+        onclick={() => setFolderFilter('')}
+      >Clear filter</button>
+    </div>
+  {:else}
+    <ul class="space-y-2">
+      {#each folderGroups as g (g.folder)}
+        <li>
+          <FolderCard
+            folder={g.folder || '(library root)'}
+            count={g.count}
+            busy={folderBusyFolder === g.folder}
+            onOpen={() => openFolderMatch(g.folder)}
+          />
+        </li>
+      {/each}
+    </ul>
+  {/if}
 {:else}
   <ul class="space-y-3">
     {#each data.files as file (file.id)}
