@@ -11,6 +11,7 @@ export type MatchMethod =
   | 'comicinfo_xml'
   | 'filename_regex'
   | 'manual'
+  | 'phase_b'
   | 'unmatched'
   | 'ignored';
 

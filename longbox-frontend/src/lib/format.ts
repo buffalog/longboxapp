@@ -60,6 +60,8 @@ export function formatMatchMethod(m: string): string {
       return 'Filename';
     case 'manual':
       return 'Manual';
+    case 'phase_b':
+      return 'Imported';
     case 'unmatched':
       return 'Unmatched';
     case 'ignored':
