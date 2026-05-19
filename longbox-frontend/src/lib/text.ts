@@ -38,3 +38,23 @@ export function htmlToPlainText(html: string): string {
   const decoded = tagsStripped.replace(ENTITY_RE, (m) => ENTITIES[m] ?? m);
   return decoded.replace(MULTI_NEWLINE_RE, '\n\n').trim();
 }
+
+// CV's description HTML carries anchors with path-only hrefs
+// (`<a href="/absolute-batman/4050-167340/">`). The browser resolves
+// those against the current origin and turns the "Collected in" link
+// into a broken LongBox-internal route. Rewrite to absolute at render
+// time rather than mutate on ingest: the source data stays byte-for-byte
+// as CV delivered it, and the single render site stays the single point
+// where any fix-up happens.
+//
+// Only rewrites hrefs that begin with a single `/` followed by anything
+// other than `/` — that's the shape CV uses. Already-absolute URLs
+// (`http://`, `https://`), protocol-relative (`//cdn…`), fragment
+// (`#…`), `mailto:`, and `tel:` are passed through untouched.
+const CV_BASE = 'https://comicvine.gamespot.com';
+const CV_RELATIVE_HREF_RE = /\bhref\s*=\s*(["'])(\/[^/][^"']*)\1/gi;
+
+export function absolutizeCvLinks(html: string): string {
+  if (!html) return '';
+  return html.replace(CV_RELATIVE_HREF_RE, (_m, quote, path) => `href=${quote}${CV_BASE}${path}${quote}`);
+}
