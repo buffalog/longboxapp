@@ -10,7 +10,7 @@ services:
       - "3000:3000"
     volumes:
       - longbox-data:/data
-      - ${LIBRARY_PATH}:/library:ro
+      - ${LIBRARY_PATH}:/library
       # Phase B watch folder. Bind-mounted as writable (Step 6 will
       # move files out of it). Optional — when DOWNLOAD_WATCH_HOST is
       # unset the mount is just an empty in-container directory, and
