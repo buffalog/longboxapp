@@ -2,9 +2,11 @@
   import { goto } from '$app/navigation';
   import { CircleSlash, FileImage } from 'lucide-svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
+  import AlphaScrubber from '$lib/components/AlphaScrubber.svelte';
   import type { MissingSort } from '$lib/api/missing';
 
   let { data } = $props();
+  let groupsEl: HTMLElement | null = $state(null);
 
   function setSort(s: MissingSort): void {
     const url = new URL(window.location.href);
@@ -40,9 +42,17 @@
 
   // Grouped render only makes sense for sort=series. When sort=cover_date
   // we render a single flat table.
-  const groups = $derived.by(() => {
+  interface MissingGroup {
+    series_id: number;
+    series_title: string;
+    series_sort_title: string;
+    start_year: number | null;
+    rows: typeof data.missing.missing;
+  }
+
+  const groups = $derived.by<MissingGroup[]>(() => {
     if (data.sort !== 'series') return [];
-    const out: Array<{ series_id: number; series_title: string; start_year: number | null; rows: typeof data.missing.missing }> = [];
+    const out: MissingGroup[] = [];
     for (const m of data.missing.missing) {
       const last = out[out.length - 1];
       if (last && last.series_id === m.series.id) {
@@ -51,6 +61,7 @@
         out.push({
           series_id: m.series.id,
           series_title: m.series.title,
+          series_sort_title: m.series.sort_title,
           start_year: m.series.start_year,
           rows: [m]
         });
@@ -138,9 +149,13 @@
       {/each}
     </ul>
   {:else}
-    <div class="space-y-4">
+    <div bind:this={groupsEl} class="space-y-4">
       {#each groups as g (g.series_id)}
-        <section class="rounded-lg border border-slate-200 bg-white p-3">
+        <section
+          id={`missing-series-${g.series_id}`}
+          style="scroll-margin-top: var(--sticky-nav-height, 0);"
+          class="rounded-lg border border-slate-200 bg-white p-3"
+        >
           <h2 class="mb-2 text-sm font-semibold">
             <a class="hover:underline" href={`/series/${g.series_id}`}>
               {g.series_title}{g.start_year ? ` (${g.start_year})` : ''}
@@ -173,5 +188,14 @@
         </section>
       {/each}
     </div>
+    <!-- Scrubber only renders for sort=series (group headers double as
+         anchors). Cover-date sort doesn't expose alphabetical structure
+         per brief; the {#if} above hides this entire branch then. -->
+    <AlphaScrubber
+      items={groups}
+      getSortKey={(g: MissingGroup) => g.series_sort_title}
+      getElementId={(g: MissingGroup) => `missing-series-${g.series_id}`}
+      listEl={groupsEl}
+    />
   {/if}
 {/if}

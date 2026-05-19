@@ -2,8 +2,10 @@
   import { BookOpen } from 'lucide-svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import SeriesCard from '$lib/components/SeriesCard.svelte';
+  import AlphaScrubber from '$lib/components/AlphaScrubber.svelte';
   import Button from '$lib/components/Button.svelte';
   import type { SeriesSort } from './+page';
+  import type { SeriesWithCounts } from '$lib/types';
 
   let { data } = $props();
 
@@ -19,6 +21,7 @@
   // (not goto) — sort is a pure client-side $derived transform, no need
   // to re-run load().
   let sort = $state<SeriesSort>(data.sort);
+  let listEl: HTMLElement | null = $state(null);
 
   function setSort(next: SeriesSort): void {
     sort = next;
@@ -109,10 +112,25 @@
   {#if visible.length === 0}
     <p class="text-sm text-slate-500">No series match "{filter}".</p>
   {:else}
-    <ul class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+    <ul
+      bind:this={listEl}
+      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
+    >
       {#each visible as series (series.id)}
-        <li><SeriesCard {series} /></li>
+        <!-- scroll-margin-top reserves space for the (future, Task 3)
+             sticky nav. The CSS variable is declared by the nav when it
+             lands; falls back to 0 here so Task 2 works standalone. -->
+        <li
+          id={`series-${series.id}`}
+          style="scroll-margin-top: var(--sticky-nav-height, 0);"
+        ><SeriesCard {series} /></li>
       {/each}
     </ul>
+    <AlphaScrubber
+      items={visible}
+      getSortKey={(s: SeriesWithCounts) => s.sort_title}
+      getElementId={(s: SeriesWithCounts) => `series-${s.id}`}
+      {listEl}
+    />
   {/if}
 {/if}
