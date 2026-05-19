@@ -15,6 +15,12 @@ pub struct AppState {
     /// The library root row id created or matched at bootstrap. Phase A
     /// has exactly one; cached here so handlers don't re-query.
     pub library_root_id: i64,
+    /// Phase B's pending-intervention cache. Read by the dashboard
+    /// counter and the `/files/pending-intervention` list view; written
+    /// by the postprocess consumer task and the notify watcher. Always
+    /// present (empty when Phase B is disabled or no files are stuck)
+    /// so handlers don't need to special-case the absent state.
+    pub pending_cache: Arc<longbox_postprocess::PendingInterventionsCache>,
 }
 
 /// In-memory mid-scan status. The "current" pill in the UI reads from

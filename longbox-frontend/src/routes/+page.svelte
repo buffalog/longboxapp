@@ -4,6 +4,7 @@
   import { ApiError } from '$lib/api/client';
   import { getActivity, type DashboardActivity } from '$lib/api/dashboard';
   import { getStats } from '$lib/api/stats';
+  import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
   import { formatRelative } from '$lib/format';
@@ -16,6 +17,10 @@
 
   let stats = $state<Stats | null>(null);
   let activity = $state<DashboardActivity | null>(null);
+  // Phase B pending-intervention counter. Reads the in-memory cache;
+  // empty (zero) when Phase B is disabled or no files are stuck. Always
+  // rendered as a tile so it sits next to the DB-derived stats tiles.
+  let pendingCount = $state(0);
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
@@ -27,7 +32,14 @@
 
   onMount(async () => {
     try {
-      [stats, activity] = await Promise.all([getStats(), getActivity(6)]);
+      const [s, a, p] = await Promise.all([
+        getStats(),
+        getActivity(6),
+        getPendingInterventions()
+      ]);
+      stats = s;
+      activity = a;
+      pendingCount = p.count;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -71,7 +83,7 @@
 {#if loading}
   <LoadingSpinner />
 {:else if stats}
-  <section class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+  <section class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
     <div class="rounded-lg border border-slate-200 bg-white p-3">
       <div class="text-xs uppercase text-slate-500">Series</div>
       <div class="text-2xl font-semibold">{stats.total_series}</div>
@@ -96,6 +108,14 @@
       <div class="text-xs uppercase text-status-missing">Missing</div>
       <div class="text-2xl font-semibold">{stats.missing_issues}</div>
     </div>
+    <a
+      href="/files/pending-intervention"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+      title="Files Phase B couldn't process automatically"
+    >
+      <div class="text-xs uppercase text-status-needs_review">Pending</div>
+      <div class="text-2xl font-semibold">{pendingCount}</div>
+    </a>
   </section>
 
   <section class="mb-6 rounded-lg border border-slate-200 bg-white p-4">

@@ -101,14 +101,19 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         },
     );
 
-    // 6. Phase B post-process watcher (enabled implicitly via env).
+    // 6. Phase B pending-intervention cache. Created here so it exists
+    //    even when the watcher is disabled — the dashboard handler
+    //    reads from it unconditionally and returns 0 when empty.
+    let pending_cache = Arc::new(longbox_postprocess::PendingInterventionsCache::new());
+
+    // 7. Phase B post-process watcher (enabled implicitly via env).
     //    `DOWNLOAD_WATCH_PATH` set + dir is readable  -> start watcher.
     //    Unset                                        -> single info log, skip.
     //    Set but unreadable / start() failure         -> warn, skip.
     //    Web boot is unaffected either way — Phase B is best-effort.
-    start_phase_b(&config, &db).await;
+    start_phase_b(&config, &db, Arc::clone(&pending_cache)).await;
 
-    // 7. Compose state.
+    // 8. Compose state.
     Ok(AppState {
         db,
         cv: Arc::new(cv),
@@ -116,12 +121,17 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         config: Arc::new(config),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         library_root_id,
+        pending_cache,
     })
 }
 
 /// Phase B startup. Best-effort: a watch-folder misconfiguration must
 /// not prevent the web layer from booting.
-async fn start_phase_b(config: &AppConfig, db: &longbox_db::Pool) {
+async fn start_phase_b(
+    config: &AppConfig,
+    db: &longbox_db::Pool,
+    cache: Arc<longbox_postprocess::PendingInterventionsCache>,
+) {
     let Some(raw) = config.download_watch_path.as_deref() else {
         info!(target: "longbox_web", "phase_b.disabled (DOWNLOAD_WATCH_PATH not set)");
         return;
@@ -132,7 +142,7 @@ async fn start_phase_b(config: &AppConfig, db: &longbox_db::Pool) {
         watch_path: watch_path.clone(),
         library_root,
     };
-    match longbox_postprocess::start(postprocess_config, db.clone()).await {
+    match longbox_postprocess::start(postprocess_config, db.clone(), cache).await {
         Ok(()) => {}
         Err(e) => {
             tracing::warn!(

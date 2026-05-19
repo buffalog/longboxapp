@@ -268,7 +268,7 @@ async fn conflict_leaves_source_untouched() {
         .await
         .unwrap();
     match outcome {
-        Outcome::Conflict { target } => assert_eq!(target, existing_target),
+        Outcome::Conflict { target, .. } => assert_eq!(target, existing_target),
         other => panic!("expected Conflict, got {other:?}"),
     }
 
@@ -316,4 +316,61 @@ async fn idempotent_reprocessing() {
     // important property: no destructive change.
     assert!(matches!(outcome2, Outcome::Conflict { .. }));
     assert!(target.exists());
+}
+
+#[tokio::test]
+async fn rewrite_failure_surfaces_as_outcome_failed() {
+    // Engineer a deterministic stage-1 (rewrite) failure: pre-create a
+    // regular file where the series subdirectory should go. `create_dir_all`
+    // inside rewrite_to_temp will fail because the path exists as a file,
+    // and the failure must surface as Outcome::Failed{ ComicInfoWriteFailed }
+    // — not as Err, not as Conflict (target_abs itself doesn't exist).
+    let f = seed_basic_fixture().await;
+
+    // Library convention: library_root/Saga (2012)/Saga (2012) 001.cbz
+    // Block the directory creation by planting a regular file at
+    // library_root/Saga (2012).
+    let blocker = f.library.path().join("Saga (2012)");
+    std::fs::write(&blocker, b"blocking the directory").unwrap();
+
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db)
+        .await
+        .unwrap();
+
+    match outcome {
+        Outcome::Failed { reason, size, target } => {
+            use longbox_postprocess::InterventionReason;
+            assert!(
+                matches!(reason, InterventionReason::ComicInfoWriteFailed(_)),
+                "stage-1 failure should be ComicInfoWriteFailed, got {reason:?}"
+            );
+            assert!(size > 0, "size should reflect source file");
+            assert!(
+                target.to_string_lossy().contains("Saga (2012)"),
+                "target should point at the intended library path: {}",
+                target.display()
+            );
+        }
+        other => panic!("expected Outcome::Failed, got {other:?}"),
+    }
+
+    // Source must stay in the watch folder on failure — that's the
+    // whole point of pending intervention. User decides what to do.
+    assert!(source.exists(), "source must remain on failure");
+
+    // No catalog row was written.
+    let row = longbox_db::file_repo::find_by_path(
+        &f.db,
+        f.library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+    )
+    .await
+    .unwrap();
+    assert!(row.is_none(), "no catalog row expected on Outcome::Failed");
+
+    // Suppress unused-field warnings for fixture handles.
+    let _ = (f.series_id, f.issue_id);
 }

@@ -170,3 +170,25 @@ export interface LibraryRoot {
   path: string;
   created_at: string;
 }
+
+// Phase B pending-intervention surface. Backed by an in-memory cache in
+// longbox-postprocess; mirrors the InterventionReason serde shape
+// (`#[serde(tag = "kind", content = "detail")]`).
+
+export type InterventionReason =
+  | { kind: 'conflict' }
+  | { kind: 'comic_info_write_failed'; detail: string }
+  | { kind: 'move_failed'; detail: string };
+
+export interface PendingIntervention {
+  source_path: string;
+  target_path: string;
+  reason: InterventionReason;
+  size: number;
+  last_attempt: string;
+}
+
+export interface PendingResponse {
+  count: number;
+  items: PendingIntervention[];
+}

@@ -25,6 +25,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::PostprocessError;
+use crate::intervention::InterventionReason;
 use crate::Result;
 
 /// Stability check: skip files whose mtime is within this many seconds
@@ -133,6 +134,12 @@ pub async fn process_one(
 
 /// What happened to the file. Returned so callers (and tests) can
 /// assert on the result without scraping logs.
+///
+/// `Imported` and `Unsorted` are success outcomes; the consumer task
+/// evicts any matching cache entry for the source path on these.
+/// `Conflict` and `Failed` are stuck outcomes; the consumer task pushes
+/// a `PendingIntervention` into the cache. `size` rides along on the
+/// stuck variants so the consumer doesn't have to re-stat the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Matched + moved + catalogued as owned.
@@ -145,8 +152,17 @@ pub enum Outcome {
     /// No match (or sub-threshold match); moved to `_unsorted/`.
     Unsorted { target: PathBuf, file_id: i64 },
     /// Target path already existed; source left in watch folder for
-    /// manual intervention (Step 7 will surface this via the dashboard).
-    Conflict { target: PathBuf },
+    /// manual intervention. Surfaces in the pending-intervention cache
+    /// with `InterventionReason::Conflict`.
+    Conflict { target: PathBuf, size: i64 },
+    /// Stage-specific failure during the import/move flow. `reason`
+    /// distinguishes ComicInfoWriteFailed vs MoveFailed; the source file
+    /// stays in the watch folder for manual intervention.
+    Failed {
+        reason: InterventionReason,
+        target: PathBuf,
+        size: i64,
+    },
 }
 
 async fn wait_for_stability(source: &Path) {
@@ -229,20 +245,55 @@ async fn import_as_owned(
     let target_abs = library_path.full(library_root);
 
     if target_abs.exists() {
-        return Ok(Outcome::Conflict { target: target_abs });
+        return Ok(Outcome::Conflict {
+            target: target_abs,
+            size,
+        });
     }
 
     let metadata = compose_metadata(&series, &issue);
     let xml = metadata.to_xml();
 
-    // Synchronous CBZ rewrite + filesystem move. Offload via
-    // spawn_blocking so the async runtime stays unblocked even for
-    // large archives.
+    // Two-stage move so the consumer can distinguish ComicInfo-write
+    // failures from move failures in the pending-intervention list.
+    // Stage 1: rewrite source CBZ into a temp file in the target dir
+    // (no rename yet). Stage 2: persist the temp to the final path and
+    // unlink the source. Each stage is its own spawn_blocking so the
+    // failure surface is precise.
     let source_owned = source.to_path_buf();
     let target_owned = target_abs.clone();
-    tokio::task::spawn_blocking(move || rewrite_and_move(&source_owned, &target_owned, &xml))
-        .await
-        .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))??;
+    let rewrite_res = tokio::task::spawn_blocking(move || {
+        rewrite_to_temp(&source_owned, &target_owned, &xml)
+    })
+    .await
+    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+
+    let temp = match rewrite_res {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Outcome::Failed {
+                reason: InterventionReason::ComicInfoWriteFailed(e.to_string()),
+                target: target_abs,
+                size,
+            });
+        }
+    };
+
+    let source_owned = source.to_path_buf();
+    let target_owned = target_abs.clone();
+    let commit_res = tokio::task::spawn_blocking(move || {
+        commit_move(temp, &target_owned, &source_owned)
+    })
+    .await
+    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+
+    if let Err(e) = commit_res {
+        return Ok(Outcome::Failed {
+            reason: InterventionReason::MoveFailed(e.to_string()),
+            target: target_abs,
+            size,
+        });
+    }
 
     let path_relative = target_abs
         .strip_prefix(library_root)
@@ -288,22 +339,35 @@ async fn move_to_unsorted(
     let target_abs = unsorted_dir.join(basename);
 
     if target_abs.exists() {
-        return Ok(Outcome::Conflict { target: target_abs });
+        return Ok(Outcome::Conflict {
+            target: target_abs,
+            size,
+        });
     }
 
     // No ComicInfo rewrite — just move the file as-is. The scanner's
     // future passes might enrich it, but Phase B's job for unmatched
     // is "get it out of the watch folder without claiming a match."
+    // Filesystem failures here surface as MoveFailed; there's no
+    // ComicInfo stage in the unmatched path.
     let source_owned = source.to_path_buf();
     let target_owned = target_abs.clone();
-    tokio::task::spawn_blocking(move || {
+    let move_res = tokio::task::spawn_blocking(move || {
         if let Some(parent) = target_owned.parent() {
             std::fs::create_dir_all(parent)?;
         }
         copy_then_unlink(&source_owned, &target_owned)
     })
     .await
-    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))??;
+    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+
+    if let Err(e) = move_res {
+        return Ok(Outcome::Failed {
+            reason: InterventionReason::MoveFailed(e.to_string()),
+            target: target_abs,
+            size,
+        });
+    }
 
     let path_relative = format!("{UNSORTED_DIR}/{}", basename.to_string_lossy());
     let row = upsert_unmatched(db, library_root_id, &path_relative, size, mtime).await?;
@@ -413,11 +477,20 @@ fn parse_cover_date(raw: Option<&str>) -> Option<CoverDate> {
     })
 }
 
-/// Rewrite source CBZ to `target` with a new ComicInfo.xml, then
-/// delete source. Atomic at the rename step (temp in target_dir →
-/// target via same-fs rename); on any failure prior to rename the
-/// temp file is cleaned up by tempfile's Drop and source stays put.
-fn rewrite_and_move(source: &Path, target: &Path, comic_info_xml: &str) -> Result<()> {
+/// Stage 1 of the rewrite-and-move flow: read source CBZ, re-emit
+/// every entry except ComicInfo.xml into a fresh temp archive sited
+/// next to the target (so the eventual rename is same-filesystem),
+/// then append the regenerated ComicInfo payload. Returns the
+/// `NamedTempFile` for stage 2 to persist.
+///
+/// All errors here are "ComicInfoWriteFailed" semantically — we
+/// couldn't produce the rewritten archive. The temp drops on Err and
+/// the source stays where it was.
+fn rewrite_to_temp(
+    source: &Path,
+    target: &Path,
+    comic_info_xml: &str,
+) -> Result<tempfile::NamedTempFile> {
     let target_dir = target.parent().ok_or_else(|| {
         PostprocessError::Io(std::io::Error::other("target has no parent directory"))
     })?;
@@ -426,8 +499,6 @@ fn rewrite_and_move(source: &Path, target: &Path, comic_info_xml: &str) -> Resul
     let src_file = std::fs::File::open(source)?;
     let mut archive = ZipArchive::new(src_file)?;
 
-    // Build the new archive next to the target so the final rename
-    // is same-filesystem and atomic.
     let temp = tempfile::Builder::new()
         .prefix(".longbox-phase-b-")
         .suffix(".cbz.tmp")
@@ -450,13 +521,16 @@ fn rewrite_and_move(source: &Path, target: &Path, comic_info_xml: &str) -> Resul
         writer.finish()?;
     }
 
-    // Persist the temp file to the final path. NamedTempFile::persist
-    // returns the temp on error so it Drops and cleans up; on success
-    // the temp is renamed atomically (same fs) and the handle is
-    // consumed.
-    temp.persist(target).map_err(|e| PostprocessError::Io(e.error))?;
+    Ok(temp)
+}
 
-    // Source is no longer needed.
+/// Stage 2 of the rewrite-and-move flow: rename the temp into place,
+/// then unlink the source. `NamedTempFile::persist` is an atomic
+/// same-fs rename; on error the temp drops and cleans itself up.
+///
+/// All errors here are "MoveFailed" semantically.
+fn commit_move(temp: tempfile::NamedTempFile, target: &Path, source: &Path) -> Result<()> {
+    temp.persist(target).map_err(|e| PostprocessError::Io(e.error))?;
     std::fs::remove_file(source)?;
     Ok(())
 }
@@ -519,13 +593,23 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
                 "phase_b.unmatched (moved to _unsorted)"
             );
         }
-        Outcome::Conflict { target } => {
+        Outcome::Conflict { target, .. } => {
             tracing::warn!(
                 target: "longbox_postprocess",
                 source = %source.display(),
                 target = %target.display(),
                 reason = "conflict",
                 "phase_b.skipped"
+            );
+        }
+        Outcome::Failed { reason, target, .. } => {
+            tracing::warn!(
+                target: "longbox_postprocess",
+                source = %source.display(),
+                target = %target.display(),
+                reason = ?reason,
+                duration_ms,
+                "phase_b.failed"
             );
         }
     }

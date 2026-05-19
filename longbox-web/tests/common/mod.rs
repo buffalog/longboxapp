@@ -89,6 +89,7 @@ pub async fn build_test_app() -> TestApp {
         config: Arc::new(config),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         library_root_id,
+        pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
     };
 
     let router = build_router(state.clone());
