@@ -526,8 +526,9 @@
           // Focused card still in the visible set; leave it.
           return;
         }
-        if (folderGroups.length === 0) return;
-        focusFolderCard(folderGroups[0].folder);
+        const first = folderGroups[0];
+        if (first === undefined) return;
+        focusFolderCard(first.folder);
       })();
     }
     lastFolderGroupsLength = len;
