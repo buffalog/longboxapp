@@ -50,9 +50,11 @@ async fn search_indexer_parses_a_valid_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[
-            ("Wolverine 005.cbz", "g1", 10),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "Wolverine 005.cbz",
+            "g1",
+            10,
+        )])))
         .mount(&server)
         .await;
 
@@ -80,9 +82,11 @@ async fn find_release_returns_best_from_first_indexer_with_results() {
     let second = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[
-            ("Wolverine 005 from-second.cbz", "second", 500),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "Wolverine 005 from-second.cbz",
+            "second",
+            500,
+        )])))
         .mount(&second)
         .await;
 
@@ -106,18 +110,22 @@ async fn find_release_respects_priority_order() {
     let low_pri = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[
-            ("from-priority-0.cbz", "p0", 1),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "from-priority-0.cbz",
+            "p0",
+            1,
+        )])))
         .mount(&low_pri)
         .await;
 
     let high_pri = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[
-            ("from-priority-9.cbz", "p9", 1),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "from-priority-9.cbz",
+            "p9",
+            1,
+        )])))
         .mount(&high_pri)
         .await;
 
@@ -126,7 +134,10 @@ async fn find_release_respects_priority_order() {
         indexer(2, "high", &high_pri.uri(), 9),
         indexer(1, "low", &low_pri.uri(), 0),
     ];
-    let chosen = find_release(&indexers, "X", "1", None).await.unwrap().unwrap();
+    let chosen = find_release(&indexers, "X", "1", None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(chosen.title, "from-priority-0.cbz");
 }
 
@@ -144,9 +155,11 @@ async fn find_release_retries_unpadded_when_padded_is_empty() {
     Mock::given(method("GET"))
         .and(path("/api"))
         .and(query_param("q", "Wolverine 5"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[
-            ("Wolverine 5 unpadded.cbz", "u1", 7),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "Wolverine 5 unpadded.cbz",
+            "u1",
+            7,
+        )])))
         .mount(&server)
         .await;
 
@@ -188,9 +201,10 @@ async fn find_release_all_errored_returns_structured_failure() {
     let bad_key = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"<error code="100" description="Incorrect user credentials"/>"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<error code="100" description="Incorrect user credentials"/>"#),
+        )
         .mount(&bad_key)
         .await;
 
@@ -202,12 +216,23 @@ async fn find_release_all_errored_returns_structured_failure() {
     let NewznabError::AllIndexersFailed(failures) = err;
     assert_eq!(failures.len(), 2);
 
-    let down_failure = &failures.iter().find(|(id, _)| *id == IndexerId(1)).unwrap().1;
+    let down_failure = &failures
+        .iter()
+        .find(|(id, _)| *id == IndexerId(1))
+        .unwrap()
+        .1;
     assert!(matches!(down_failure, IndexerError::HttpFailure(_)));
     assert!(!down_failure.is_permanent());
 
-    let key_failure = &failures.iter().find(|(id, _)| *id == IndexerId(2)).unwrap().1;
-    assert!(matches!(key_failure, IndexerError::BadCredentials { code: 100, .. }));
+    let key_failure = &failures
+        .iter()
+        .find(|(id, _)| *id == IndexerId(2))
+        .unwrap()
+        .1;
+    assert!(matches!(
+        key_failure,
+        IndexerError::BadCredentials { code: 100, .. }
+    ));
     assert!(key_failure.is_permanent());
 }
 
