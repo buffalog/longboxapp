@@ -1211,6 +1211,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "longbox-downloader"
+version = "0.0.1"
+dependencies = [
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "longbox-newznab"
 version = "0.0.1"
 dependencies = [

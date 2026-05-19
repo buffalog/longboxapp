@@ -75,22 +75,37 @@ mod tests {
 
     #[test]
     fn padded_zero_pads_numeric_issues() {
-        assert_eq!(build_search_term("Wolverine", "5", None, true), "Wolverine 005");
+        assert_eq!(
+            build_search_term("Wolverine", "5", None, true),
+            "Wolverine 005"
+        );
         assert_eq!(build_search_term("Saga", "12", None, true), "Saga 012");
         assert_eq!(build_search_term("X", "100", None, true), "X 100");
     }
 
     #[test]
     fn unpadded_leaves_issue_as_is() {
-        assert_eq!(build_search_term("Wolverine", "5", None, false), "Wolverine 5");
+        assert_eq!(
+            build_search_term("Wolverine", "5", None, false),
+            "Wolverine 5"
+        );
         assert_eq!(build_search_term("Saga", "12", None, false), "Saga 12");
     }
 
     #[test]
     fn non_numeric_issues_pass_through_both_variations() {
-        assert_eq!(build_search_term("Bone", "Annual 1", None, true), "Bone Annual 1");
-        assert_eq!(build_search_term("Bone", "Annual 1", None, false), "Bone Annual 1");
-        assert_eq!(build_search_term("Promethea", "½", None, true), "Promethea ½");
+        assert_eq!(
+            build_search_term("Bone", "Annual 1", None, true),
+            "Bone Annual 1"
+        );
+        assert_eq!(
+            build_search_term("Bone", "Annual 1", None, false),
+            "Bone Annual 1"
+        );
+        assert_eq!(
+            build_search_term("Promethea", "½", None, true),
+            "Promethea ½"
+        );
     }
 
     #[test]
