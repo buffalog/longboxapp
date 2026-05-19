@@ -3,6 +3,7 @@
   import type { IssueWithFile } from '$lib/types';
   import { cvIssueUrl, formatDate } from '$lib/format';
   import { sanitizeCvSynopsis } from '$lib/text';
+  import { toast } from '$lib/stores/toast.svelte';
 
   interface Props {
     issue: IssueWithFile;
@@ -30,33 +31,21 @@
     }
   });
 
-  // Component-local click-to-copy feedback. We don't have a global toast
-  // system; for one button on one table it's not worth standing one up.
-  // The label swaps to "Copied!" (or "Copy failed") for ~1.5s then back.
-  let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
-  let resetTimer: ReturnType<typeof setTimeout> | null = null;
-
+  // Click-to-copy feedback goes through the shared toast store
+  // (Task 5). The button label stays the issue id permanently;
+  // success / failure surface as corner toasts.
   async function copyId(): Promise<void> {
     const text = String(issue.id);
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard API unavailable');
       await navigator.clipboard.writeText(text);
-      copyState = 'copied';
+      toast.success(`Issue ID ${text} copied`);
     } catch {
-      // Plain-HTTP over LAN or older browsers — `navigator.clipboard` may
-      // not exist in non-secure contexts. Surface inline so the user can
-      // still select-copy from the column.
-      copyState = 'failed';
+      // Plain-HTTP over LAN or older browsers — `navigator.clipboard`
+      // may not exist in non-secure contexts.
+      toast.error('Copy failed — clipboard needs HTTPS or a modern browser');
     }
-    if (resetTimer !== null) clearTimeout(resetTimer);
-    resetTimer = setTimeout(() => {
-      copyState = 'idle';
-    }, 1500);
   }
-
-  const idLabel = $derived(
-    copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : String(issue.id)
-  );
 
   // --- Row expand state (Task 1) ---
   //
@@ -110,9 +99,7 @@
       title="Copy issue id to clipboard"
       aria-label={`Copy issue id ${issue.id}`}
       class="inline-flex rounded font-mono text-xs tabular-nums text-slate-500 hover:text-slate-800 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500"
-      class:text-emerald-700={copyState === 'copied'}
-      class:text-red-700={copyState === 'failed'}
-    >{idLabel}</button>
+    >{issue.id}</button>
   </td>
   <td class="px-3 py-2 align-top">
     <button

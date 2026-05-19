@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import NavBar from '$lib/components/NavBar.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import Toast from '$lib/components/Toast.svelte';
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
 
   let { children } = $props();
@@ -21,3 +22,7 @@
   {/if}
   {@render children?.()}
 </main>
+
+<!-- App-global toast stack. Fixed-positioned, so DOM placement is
+     cosmetic; lives at layout root as app-global chrome. -->
+<Toast />
