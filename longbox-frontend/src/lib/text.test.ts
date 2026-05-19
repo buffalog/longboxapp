@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { htmlToPlainText } from './text';
+import { absolutizeCvLinks, htmlToPlainText } from './text';
 
 describe('htmlToPlainText', () => {
   it('inserts a line break between adjacent <p> tags', () => {
@@ -77,5 +77,50 @@ describe('htmlToPlainText', () => {
     expect(out).not.toMatch(/<[^>]+>/);
     // No more than two consecutive newlines anywhere.
     expect(out).not.toMatch(/\n{3,}/);
+  });
+});
+
+describe('absolutizeCvLinks', () => {
+  it('prepends the CV origin to path-only hrefs', () => {
+    expect(
+      absolutizeCvLinks('<a href="/absolute-batman/4050-167340/">Absolute Batman</a>')
+    ).toBe(
+      '<a href="https://comicvine.gamespot.com/absolute-batman/4050-167340/">Absolute Batman</a>'
+    );
+  });
+
+  it('handles single-quoted hrefs', () => {
+    expect(absolutizeCvLinks("<a href='/foo/123/'>x</a>")).toBe(
+      "<a href='https://comicvine.gamespot.com/foo/123/'>x</a>"
+    );
+  });
+
+  it('leaves already-absolute hrefs untouched', () => {
+    const input = '<a href="https://example.com/foo">x</a>';
+    expect(absolutizeCvLinks(input)).toBe(input);
+  });
+
+  it('leaves protocol-relative, fragment, mailto, tel hrefs untouched', () => {
+    const input =
+      '<a href="//cdn.example.com/img">a</a>' +
+      '<a href="#top">b</a>' +
+      '<a href="mailto:x@y.com">c</a>' +
+      '<a href="tel:+15551234">d</a>';
+    expect(absolutizeCvLinks(input)).toBe(input);
+  });
+
+  it('rewrites every relative href in a CV-style description', () => {
+    const input =
+      '<p>Featured in <a href="/absolute-batman/4050-167340/">Absolute Batman</a> ' +
+      'and <a href="/dark-knight/4050-12345/">The Dark Knight</a>.</p>';
+    const out = absolutizeCvLinks(input);
+    expect(out).toContain('https://comicvine.gamespot.com/absolute-batman/4050-167340/');
+    expect(out).toContain('https://comicvine.gamespot.com/dark-knight/4050-12345/');
+    // Verify no remaining bare-relative hrefs.
+    expect(out).not.toMatch(/href=["']\/[^/]/);
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(absolutizeCvLinks('')).toBe('');
   });
 });

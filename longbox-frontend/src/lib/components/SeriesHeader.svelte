@@ -2,7 +2,7 @@
   import { BookOpen } from 'lucide-svelte';
   import type { Snippet } from 'svelte';
   import type { SeriesDetail } from '$lib/types';
-  import { htmlToPlainText } from '$lib/text';
+  import { absolutizeCvLinks, htmlToPlainText } from '$lib/text';
 
   interface Props {
     series: SeriesDetail;
@@ -16,6 +16,11 @@
   const isLongDesc = $derived((series.description?.length ?? 0) > 240);
   const collapsedPreview = $derived(
     series.description ? htmlToPlainText(series.description) : ''
+  );
+  // CV's description HTML uses path-only hrefs that would otherwise
+  // resolve against LongBox's origin (broken "Collected in" link).
+  const expandedHtml = $derived(
+    series.description ? absolutizeCvLinks(series.description) : ''
   );
 </script>
 
@@ -49,7 +54,7 @@
     {#if series.description}
       <div class="text-sm text-slate-700">
         {#if descExpanded || !isLongDesc}
-          <div class="prose prose-sm max-w-none">{@html series.description}</div>
+          <div class="prose prose-sm max-w-none">{@html expandedHtml}</div>
           {#if isLongDesc}
             <button
               type="button"
