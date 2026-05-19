@@ -96,3 +96,19 @@ export function formatBytes(n: number): string {
   if (mb < 1024) return `${mb.toFixed(1)} MB`;
   return `${(mb / 1024).toFixed(2)} GB`;
 }
+
+// ComicVine canonical URL construction. CV's permalinks use numeric
+// prefixes per resource type — 4000 for issues, 4050 for volumes
+// (their term for what we call series). Matches the same pattern
+// Phase B's processor writes into ComicInfo `<Web>` (see
+// longbox-postprocess/src/processor.rs::compose_metadata).
+
+/** Canonical ComicVine URL for an issue. */
+export function cvIssueUrl(cv_issue_id: number): string {
+  return `https://comicvine.gamespot.com/issue/4000-${cv_issue_id}/`;
+}
+
+/** Canonical ComicVine URL for a series (CV's "volume" resource). */
+export function cvSeriesUrl(cv_id: number): string {
+  return `https://comicvine.gamespot.com/volume/4050-${cv_id}/`;
+}

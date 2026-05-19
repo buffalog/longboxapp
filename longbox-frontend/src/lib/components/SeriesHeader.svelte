@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { BookOpen } from 'lucide-svelte';
+  import { BookOpen, ExternalLink } from 'lucide-svelte';
   import type { Snippet } from 'svelte';
   import type { SeriesDetail } from '$lib/types';
   import { absolutizeCvLinks, htmlToPlainText } from '$lib/text';
+  import { cvSeriesUrl } from '$lib/format';
 
   interface Props {
     series: SeriesDetail;
@@ -18,10 +19,14 @@
     series.description ? htmlToPlainText(series.description) : ''
   );
   // CV's description HTML uses path-only hrefs that would otherwise
-  // resolve against LongBox's origin (broken "Collected in" link).
+  // resolve against LongBox's origin. Series-level CV link in the
+  // header (below) is the deliberate, always-present affordance; the
+  // description's embedded links remain absolutized but aren't a
+  // design surface we control.
   const expandedHtml = $derived(
     series.description ? absolutizeCvLinks(series.description) : ''
   );
+  const cvUrl = $derived(series.cv_id ? cvSeriesUrl(series.cv_id) : null);
 </script>
 
 <header class="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:flex-row">
@@ -42,9 +47,19 @@
           {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
         </div>
       </div>
-      {#if actions}
-        <div class="flex items-center gap-2">{@render actions()}</div>
-      {/if}
+      <div class="flex items-center gap-2">
+        {#if cvUrl}
+          <a
+            href={cvUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline"
+          >View on ComicVine <ExternalLink class="size-3.5" aria-hidden="true" /></a>
+        {/if}
+        {#if actions}
+          {@render actions()}
+        {/if}
+      </div>
     </div>
     <div class="text-sm">
       <span class="rounded bg-slate-100 px-1.5 py-0.5 font-medium">
