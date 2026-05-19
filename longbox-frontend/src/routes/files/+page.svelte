@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
   import { goto, invalidateAll } from '$app/navigation';
   import { Files, LayoutGrid, List } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
@@ -277,6 +278,40 @@
     return id ? Number(id) : null;
   }
 
+  // Folder-card focus + keyboard. Mirrors the triage j/k pattern but
+  // keyed on `data-folder-card` instead of `data-triage-row-id`. The
+  // `s` shortcut opens Search ComicVine on the focused card — same
+  // effect as clicking the card's button.
+  function focusedFolderName(): string | null {
+    if (typeof document === 'undefined') return null;
+    const el = document.activeElement as HTMLElement | null;
+    if (!el) return null;
+    const card = el.closest<HTMLElement>('[data-folder-card="true"]');
+    return card?.getAttribute('data-folder-name') ?? null;
+  }
+
+  function focusFolderCard(folderName: string): void {
+    const sel = `[data-folder-card="true"][data-folder-name="${CSS.escape(folderName)}"]`;
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(sel);
+      el?.focus();
+    });
+  }
+
+  function focusFolderNeighbor(direction: 1 | -1): void {
+    if (folderGroups.length === 0) return;
+    const focused = focusedFolderName();
+    let nextIdx: number;
+    if (focused === null) {
+      nextIdx = 0;
+    } else {
+      const cur = folderGroups.findIndex((g) => g.folder === focused);
+      nextIdx = Math.max(0, Math.min(folderGroups.length - 1, cur + direction));
+    }
+    const next = folderGroups[nextIdx]?.folder;
+    if (next !== undefined) focusFolderCard(next);
+  }
+
   function focusNeighbor(direction: 1 | -1): void {
     if (data.files.length === 0) return;
     const focusedId = focusedTriageRowId();
@@ -293,7 +328,6 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
-    if (!triageEnabled) return;
     if (anyModalOpen) return; // modal Esc handlers do their own thing
     // Bail when focus is in an editable element so typing in inputs
     // (search boxes, future text fields) doesn't trigger shortcuts.
@@ -310,6 +344,34 @@
       }
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    // Folder-card surface: bulk-match keyboard workflow on /files?view=folder.
+    if (effectiveView === 'folder') {
+      const focusedFolder = focusedFolderName();
+      switch (e.key) {
+        case 'j':
+          e.preventDefault();
+          focusFolderNeighbor(1);
+          return;
+        case 'k':
+          e.preventDefault();
+          focusFolderNeighbor(-1);
+          return;
+        case 's':
+          if (focusedFolder !== null) {
+            e.preventDefault();
+            openFolderMatch(focusedFolder);
+          }
+          return;
+        case '?':
+          e.preventDefault();
+          shortcutsOpen = true;
+          return;
+      }
+      return;
+    }
+
+    if (!triageEnabled) return;
 
     const focusedId = focusedTriageRowId();
     const focusedFile =
@@ -404,6 +466,72 @@
     folderCvSelected = null;
     folderSubmitting = false;
   }
+
+  // Auto-focus bundle (Sub-B). Lands a sensible initial focus so j/k
+  // works without a click-to-prime first. Skipped when nothing's there.
+  //
+  // - On Needs Review mount: first triage row when N>0
+  // - On folder view mount: first folder card when N>0
+  // - On filter narrowing in either surface: first surviving target
+  //   (and no-op if the focused element is still visible)
+  //
+  // tick() ensures the DOM has the post-mount/post-filter rows rendered
+  // before we try to focus. document.activeElement check prevents
+  // stealing focus the user has placed somewhere else.
+  function shouldAutoFocusBody(): boolean {
+    if (typeof document === 'undefined') return false;
+    if (anyModalOpen) return false;
+    const ae = document.activeElement;
+    return ae === null || ae === document.body;
+  }
+
+  async function autoFocusFirstTriageRow(): Promise<void> {
+    await tick();
+    if (!triageEnabled || data.files.length === 0) return;
+    if (!shouldAutoFocusBody()) return;
+    const firstId = data.files[0]?.id;
+    if (firstId !== undefined) focusPrimaryButton(firstId);
+  }
+
+  async function autoFocusFirstFolderCard(): Promise<void> {
+    await tick();
+    if (effectiveView !== 'folder' || folderGroups.length === 0) return;
+    if (!shouldAutoFocusBody()) return;
+    const first = folderGroups[0]?.folder;
+    if (first !== undefined) focusFolderCard(first);
+  }
+
+  onMount(() => {
+    void autoFocusFirstTriageRow();
+    void autoFocusFirstFolderCard();
+  });
+
+  // Filter-narrowing reactivity for the folder view: when the folder
+  // filter shrinks the visible list and the previously-focused card
+  // disappears, re-focus the first surviving card. Triggered by changes
+  // to `folderGroups.length` (the post-filter list size). No-op when the
+  // focused card is still present.
+  let lastFolderGroupsLength = $state(0);
+  $effect(() => {
+    const len = folderGroups.length;
+    if (effectiveView !== 'folder') {
+      lastFolderGroupsLength = len;
+      return;
+    }
+    if (len < lastFolderGroupsLength) {
+      void (async () => {
+        await tick();
+        const focused = focusedFolderName();
+        if (focused !== null && folderGroups.some((g) => g.folder === focused)) {
+          // Focused card still in the visible set; leave it.
+          return;
+        }
+        if (folderGroups.length === 0) return;
+        focusFolderCard(folderGroups[0].folder);
+      })();
+    }
+    lastFolderGroupsLength = len;
+  });
 
   function closeFolderMatch(): void {
     folderModalFolder = null;
@@ -542,6 +670,35 @@
     <span class="font-mono">m</span> match ·
     <span class="font-mono">i</span> ignore ·
     <span class="font-mono">j/k</span> navigate ·
+    <button
+      type="button"
+      class="font-mono text-blue-600 hover:underline"
+      onclick={() => (shortcutsOpen = true)}
+    >?</button> for help
+  </p>
+{/if}
+
+<!-- Sub-A: point flat-view users at bulk-match via folder view. Only
+     shows on Unmatched flat view with at least one file — that's the
+     status where folder grouping is allowed AND bulk-match is most
+     valuable. No dismissibility (brief: always-visible nudge, no
+     banner-X state to persist). -->
+{#if effectiveView === 'flat' && data.status === 'unmatched' && data.files.length > 0}
+  <p class="mb-3 text-xs text-slate-500">
+    Tip: try
+    <button
+      type="button"
+      onclick={() => setView('folder')}
+      class="font-medium text-blue-600 hover:underline"
+    >By folder</button>
+    for bulk match.
+  </p>
+{/if}
+
+{#if effectiveView === 'folder'}
+  <p class="mb-3 text-xs text-slate-500">
+    <span class="font-mono">j/k</span> navigate ·
+    <span class="font-mono">s</span> search ComicVine ·
     <button
       type="button"
       class="font-mono text-blue-600 hover:underline"
@@ -763,9 +920,7 @@
 </Modal>
 
 <Modal open={shortcutsOpen} title="Keyboard shortcuts" onClose={() => (shortcutsOpen = false)}>
-  <p class="mb-3 text-sm text-slate-600">
-    Available on the Needs Review tab when no modal is open.
-  </p>
+  <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Needs Review</h3>
   <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
     <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">a</kbd></dt>
     <dd>Accept Match (when a suggestion exists)</dd>
@@ -777,6 +932,18 @@
     <dd>Focus next row</dd>
     <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">k</kbd></dt>
     <dd>Focus previous row</dd>
+  </dl>
+  <h3 class="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Folder cards</h3>
+  <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">j</kbd></dt>
+    <dd>Focus next folder card</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">k</kbd></dt>
+    <dd>Focus previous folder card</dd>
+    <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">s</kbd></dt>
+    <dd>Open Search ComicVine for the focused folder</dd>
+  </dl>
+  <h3 class="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Anywhere on /files</h3>
+  <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
     <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">?</kbd></dt>
     <dd>Show this list</dd>
     <dt><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">Esc</kbd></dt>
