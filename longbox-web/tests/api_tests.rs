@@ -1807,3 +1807,65 @@ async fn match_folder_strips_trailing_slash() {
     let body = response_json(resp).await;
     assert_eq!(body["matched_count"], 1);
 }
+
+
+// -------- /api/postprocess/pending --------
+
+#[tokio::test]
+async fn pending_endpoint_returns_empty_on_fresh_cache() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/postprocess/pending"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["count"], 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn pending_endpoint_reflects_cache_contents() {
+    use longbox_postprocess::{InterventionReason, PendingIntervention};
+    let app = build_test_app().await;
+
+    // Seed the shared cache directly — the test bypasses the consumer
+    // task because it's verifying the HTTP shape, not the wiring (the
+    // wiring is covered by lib-level tests in longbox-postprocess).
+    app.state.pending_cache.push(PendingIntervention {
+        source_path: std::path::PathBuf::from("/watch/Saga 001.cbz"),
+        target_path: std::path::PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+        reason: InterventionReason::Conflict,
+        size: 4096,
+        last_attempt: time::OffsetDateTime::now_utc(),
+    });
+    app.state.pending_cache.push(PendingIntervention {
+        source_path: std::path::PathBuf::from("/watch/Hellboy 002.cbz"),
+        target_path: std::path::PathBuf::from("/lib/Hellboy (1994)/Hellboy (1994) 002.cbz"),
+        reason: InterventionReason::MoveFailed("EXDEV cross-device".into()),
+        size: 8192,
+        last_attempt: time::OffsetDateTime::now_utc(),
+    });
+
+    let resp = app
+        .request(empty_request("GET", "/api/postprocess/pending"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["count"], 2);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+
+    let saga = items
+        .iter()
+        .find(|i| i["source_path"].as_str().unwrap().ends_with("Saga 001.cbz"))
+        .expect("Saga item missing");
+    assert_eq!(saga["reason"]["kind"], "conflict");
+    assert_eq!(saga["size"], 4096);
+
+    let hellboy = items
+        .iter()
+        .find(|i| i["source_path"].as_str().unwrap().ends_with("Hellboy 002.cbz"))
+        .expect("Hellboy item missing");
+    assert_eq!(hellboy["reason"]["kind"], "move_failed");
+    assert_eq!(hellboy["reason"]["detail"], "EXDEV cross-device");
+}

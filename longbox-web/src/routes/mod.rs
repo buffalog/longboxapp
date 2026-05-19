@@ -14,6 +14,7 @@ pub mod files;
 pub mod health;
 pub mod library_roots;
 pub mod missing;
+pub mod postprocess;
 pub mod publishers;
 pub mod scan;
 pub mod series;
@@ -41,6 +42,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(settings::router())
         .merge(dashboard::router())
         .merge(missing::router())
+        .merge(postprocess::router())
         .merge(publishers::router());
 
     Router::new()

@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 
 pub use config::PostprocessConfig;
 pub use error::{PostprocessError, Result};
-pub use intervention::{InterventionReason, PendingIntervention};
+pub use intervention::{InterventionReason, PendingIntervention, PendingInterventionsCache};
 
 /// Channel capacity for the watcher → consumer queue. Bounded so a
 /// runaway producer (e.g., SAB dumping thousands of files at once)
@@ -55,7 +55,11 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// filter gets one `phase_b.detected` log line and nothing else.
 /// Step 6 replaces the consumer's per-path action with real
 /// processing.
-pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()> {
+pub async fn start(
+    config: PostprocessConfig,
+    db: longbox_db::Pool,
+    cache: Arc<PendingInterventionsCache>,
+) -> Result<()> {
     // Fail fast on a bad config; web layer decides whether to
     // continue without Phase B (warn-and-skip semantics).
     std::fs::read_dir(&config.watch_path).map_err(|source| {
@@ -85,7 +89,13 @@ pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()
     //    sweep on a large pre-existing folder.
     spawn_supervised(
         "consumer",
-        consumer_task(rx, db, config.library_root.clone(), library_root_id),
+        consumer_task(
+            rx,
+            db,
+            config.library_root.clone(),
+            library_root_id,
+            Arc::clone(&cache),
+        ),
     );
 
     // 2. Sweep pre-existing files. Spawned (not awaited) so start()
@@ -97,8 +107,10 @@ pub async fn start(config: PostprocessConfig, db: longbox_db::Pool) -> Result<()
 
     // 3. Attach the watcher. Returns a Watcher handle that must
     //    outlive the watching period; park it inside a task that
-    //    holds it for the program's lifetime.
-    spawn_watcher(config.watch_path.clone(), tx)?;
+    //    holds it for the program's lifetime. The cache clone lets
+    //    the watcher callback evict entries on Remove / Rename-From
+    //    events without going through the bounded channel.
+    spawn_watcher(config.watch_path.clone(), tx, Arc::clone(&cache))?;
 
     Ok(())
 }
@@ -206,9 +218,38 @@ fn paths_from_event(event: &notify::Event) -> Vec<PathBuf> {
     }
 }
 
+/// Per-event filter for cache eviction: source paths that have
+/// disappeared from the watch folder. Covers user manually deleting
+/// the conflicting file (Remove) and user manually moving it elsewhere
+/// (Modify::Name::From, sometimes Rename::Both with paths[0]). This is
+/// *separate* from `paths_from_event` because the processing pipeline
+/// must keep ignoring these kinds — Step 5's reasoning is unchanged.
+/// Eviction is a cleanup signal that lives next to the watcher, not in
+/// the processing channel.
+fn eviction_paths_from_event(event: &notify::Event) -> Vec<PathBuf> {
+    use notify::event::{ModifyKind, RenameMode};
+    use notify::EventKind;
+    match &event.kind {
+        EventKind::Remove(_) => event.paths.clone(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => event.paths.clone(),
+        // Rename::Both reports source as paths[0] and dest as paths[1].
+        // The source needs eviction (user moved the conflicting file
+        // away); the dest will hit the normal processing channel via
+        // paths_from_event.
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            event.paths.first().cloned().into_iter().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Stand up the `notify` watcher. The returned `Watcher` is parked
 /// inside a long-lived task because dropping it stops the watch.
-fn spawn_watcher(watch_path: PathBuf, tx: mpsc::Sender<PathBuf>) -> Result<()> {
+fn spawn_watcher(
+    watch_path: PathBuf,
+    tx: mpsc::Sender<PathBuf>,
+    cache: Arc<PendingInterventionsCache>,
+) -> Result<()> {
     // notify's callback runs on its own thread; we hand events to the
     // tokio channel via `try_send`. `Arc<Sender>` lets the closure
     // own a clone without lifetime gymnastics.
@@ -227,6 +268,16 @@ fn spawn_watcher(watch_path: PathBuf, tx: mpsc::Sender<PathBuf>) -> Result<()> {
                 return;
             }
         };
+
+        // Eviction first: a Remove/Rename-From for a path that's in the
+        // pending-intervention cache must clear that entry, even if
+        // skip::should_skip would filter the path out of processing.
+        // The cache is a per-source-path map; eviction is keyed on the
+        // path string, not on whether it's currently CBZ-shaped.
+        for path in eviction_paths_from_event(&event) {
+            cache.remove_by_source_path(&path);
+        }
+
         for path in paths_from_event(&event) {
             if let Some(reason) = skip::should_skip(&path) {
                 tracing::debug!(
@@ -279,11 +330,20 @@ fn spawn_watcher(watch_path: PathBuf, tx: mpsc::Sender<PathBuf>) -> Result<()> {
 /// file must not stall the queue. Returning errors from this task body
 /// would have the supervisor log a panic; per-file failures are not
 /// panic-worthy.
+///
+/// Cache discipline: a successful `Imported` or `Unsorted` evicts any
+/// stale entry for the same source path (self-healing — user resolved
+/// a prior conflict and the file re-fired through notify). `Conflict`
+/// and `Failed` push into the cache so the dashboard counter reflects
+/// stuck files. Bubbled-up `Err` (DB failures, source read errors
+/// before classification) are logged but not cached — the brief
+/// scopes the dashboard to Conflict / ComicInfo-write / Move failures.
 async fn consumer_task(
     mut rx: mpsc::Receiver<PathBuf>,
     db: longbox_db::Pool,
     library_root: PathBuf,
     library_root_id: i64,
+    cache: Arc<PendingInterventionsCache>,
 ) {
     while let Some(path) = rx.recv().await {
         // Skip-filter is run at the producer side (sweep + watcher),
@@ -299,7 +359,9 @@ async fn consumer_task(
             continue;
         }
         match processor::process_one(&path, &library_root, library_root_id, &db).await {
-            Ok(_outcome) => {} // process_one logs its own outcome
+            Ok(outcome) => {
+                apply_outcome_to_cache(&cache, &path, outcome);
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "longbox_postprocess",
@@ -314,6 +376,40 @@ async fn consumer_task(
         target: "longbox_postprocess",
         "phase_b.consumer_exited (channel closed)"
     );
+}
+
+/// Translate an `Outcome` into the right cache mutation. Pulled out
+/// of `consumer_task` so tests can drive cache transitions directly
+/// without standing up the channel + processor.
+fn apply_outcome_to_cache(
+    cache: &PendingInterventionsCache,
+    source: &std::path::Path,
+    outcome: processor::Outcome,
+) {
+    use processor::Outcome;
+    match outcome {
+        Outcome::Imported { .. } | Outcome::Unsorted { .. } => {
+            cache.remove_by_source_path(source);
+        }
+        Outcome::Conflict { target, size } => {
+            cache.push(PendingIntervention {
+                source_path: source.to_path_buf(),
+                target_path: target,
+                reason: InterventionReason::Conflict,
+                size,
+                last_attempt: time::OffsetDateTime::now_utc(),
+            });
+        }
+        Outcome::Failed { reason, target, size } => {
+            cache.push(PendingIntervention {
+                source_path: source.to_path_buf(),
+                target_path: target,
+                reason,
+                size,
+                last_attempt: time::OffsetDateTime::now_utc(),
+            });
+        }
+    }
 }
 
 /// Spawn a future as a tokio task and log on completion. Detached
@@ -366,7 +462,9 @@ mod tests {
             watch_path: PathBuf::from("/nonexistent-longbox-test-path"),
             library_root: PathBuf::from("/tmp/longbox-test-library"),
         };
-        let err = start(config, pool).await.unwrap_err();
+        let err = start(config, pool, Arc::new(PendingInterventionsCache::new()))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, PostprocessError::WatchPathUnreadable { .. }),
             "got {err:?}"
@@ -391,7 +489,9 @@ mod tests {
             watch_path: tmp.path().to_path_buf(),
             library_root: tmp.path().to_path_buf(),
         };
-        start(config, pool).await.unwrap();
+        start(config, pool, Arc::new(PendingInterventionsCache::new()))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -402,11 +502,150 @@ mod tests {
             watch_path: tmp.path().to_path_buf(),
             library_root: tmp.path().to_path_buf(),
         };
-        let err = start(config, pool).await.unwrap_err();
+        let err = start(config, pool, Arc::new(PendingInterventionsCache::new()))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, PostprocessError::LibraryRootNotInCatalog(_)),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn apply_outcome_caches_conflict() {
+        use processor::Outcome;
+        let cache = PendingInterventionsCache::new();
+        let source = PathBuf::from("/watch/saga 001.cbz");
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Conflict {
+                target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+                size: 4096,
+            },
+        );
+        let snap = cache.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].source_path, source);
+        assert_eq!(snap[0].reason, InterventionReason::Conflict);
+        assert_eq!(snap[0].size, 4096);
+    }
+
+    #[test]
+    fn apply_outcome_caches_failed_with_stage_reason() {
+        use processor::Outcome;
+        let cache = PendingInterventionsCache::new();
+        let source = PathBuf::from("/watch/saga 001.cbz");
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Failed {
+                reason: InterventionReason::MoveFailed("EXDEV".into()),
+                target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+                size: 4096,
+            },
+        );
+        let snap = cache.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert!(matches!(
+            snap[0].reason,
+            InterventionReason::MoveFailed(ref m) if m == "EXDEV"
+        ));
+    }
+
+    #[test]
+    fn apply_outcome_evicts_on_imported() {
+        use processor::Outcome;
+        let cache = PendingInterventionsCache::new();
+        let source = PathBuf::from("/watch/saga 001.cbz");
+        // Pre-seed a stuck entry, then run a successful import for the
+        // same source path — self-healing behavior.
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Conflict {
+                target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+                size: 4096,
+            },
+        );
+        assert_eq!(cache.len(), 1);
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Imported {
+                target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+                series_id: 1,
+                issue_id: 2,
+                file_id: 3,
+            },
+        );
+        assert!(cache.is_empty(), "Imported should evict the stale entry");
+    }
+
+    #[test]
+    fn apply_outcome_evicts_on_unsorted() {
+        use processor::Outcome;
+        let cache = PendingInterventionsCache::new();
+        let source = PathBuf::from("/watch/mystery.cbz");
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Failed {
+                reason: InterventionReason::ComicInfoWriteFailed("permission".into()),
+                target: PathBuf::from("/lib/Unknown.cbz"),
+                size: 1,
+            },
+        );
+        apply_outcome_to_cache(
+            &cache,
+            &source,
+            Outcome::Unsorted {
+                target: PathBuf::from("/lib/_unsorted/mystery.cbz"),
+                file_id: 7,
+            },
+        );
+        assert!(cache.is_empty(), "Unsorted should evict the stale entry");
+    }
+
+    #[test]
+    fn eviction_paths_from_event_catches_remove_and_rename_from() {
+        use notify::event::{Event, EventKind, ModifyKind, RenameMode, RemoveKind};
+        let with_paths = |kind: EventKind, paths: Vec<PathBuf>| Event {
+            kind,
+            paths,
+            attrs: Default::default(),
+        };
+
+        assert_eq!(
+            eviction_paths_from_event(&with_paths(
+                EventKind::Remove(RemoveKind::File),
+                vec![PathBuf::from("/x.cbz")],
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            eviction_paths_from_event(&with_paths(
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                vec![PathBuf::from("/from.cbz")],
+            ))
+            .len(),
+            1
+        );
+        // Rename::Both: source path is paths[0]; we evict that.
+        assert_eq!(
+            eviction_paths_from_event(&with_paths(
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                vec![PathBuf::from("/from.cbz"), PathBuf::from("/to.cbz")],
+            )),
+            vec![PathBuf::from("/from.cbz")]
+        );
+        // Create events do not evict.
+        assert!(eviction_paths_from_event(&with_paths(
+            EventKind::Create(notify::event::CreateKind::File),
+            vec![PathBuf::from("/x.cbz")],
+        ))
+        .is_empty());
     }
 
     #[test]
