@@ -3,6 +3,7 @@
   import EmptyState from '$lib/components/EmptyState.svelte';
   import SeriesCard from '$lib/components/SeriesCard.svelte';
   import Button from '$lib/components/Button.svelte';
+  import type { SeriesSort } from './+page';
 
   let { data } = $props();
 
@@ -11,8 +12,24 @@
   // at the top (natural prioritization signal for what to acquire next).
   // Client-side sort: the typical Phase A library has tens of series;
   // server-side sort is on the future-scaling deferred queue.
-  type Sort = 'name' | 'year' | 'added' | 'completion';
-  let sort = $state<Sort>('name');
+  //
+  // Initialized from `?sort=` (validated in +page.ts) so a shared link
+  // like /series?sort=completion lands with the right view. On change
+  // we mirror the new value back into the URL via history.replaceState
+  // (not goto) — sort is a pure client-side $derived transform, no need
+  // to re-run load().
+  let sort = $state<SeriesSort>(data.sort);
+
+  function setSort(next: SeriesSort): void {
+    sort = next;
+    const url = new URL(window.location.href);
+    if (next === 'name') {
+      url.searchParams.delete('sort');
+    } else {
+      url.searchParams.set('sort', next);
+    }
+    window.history.replaceState(null, '', url.pathname + url.search);
+  }
 
   function completionPct(total: number, owned: number): number {
     if (total === 0) return 0;
@@ -79,7 +96,8 @@
       <span class="text-slate-600">Sort</span>
       <select
         class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-        bind:value={sort}
+        value={sort}
+        onchange={(e) => setSort((e.currentTarget as HTMLSelectElement).value as SeriesSort)}
       >
         <option value="name">Name</option>
         <option value="year">Year</option>
