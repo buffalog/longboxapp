@@ -7,3 +7,13 @@
   outline: 2px solid theme('colors.blue.500');
   outline-offset: 2px;
 }
+
+/* Page-level CSS variables. Consumed via `var(--name, fallback)` so
+   surfaces that depend on them work even before the producer mounts
+   (e.g., Task 2's scroll-margin-top falls back to 0 if the nav isn't
+   present on a given page). */
+:root {
+  /* Vertical space the sticky top nav occupies. NavBar is py-3 + a
+     text-base link row, ~48px total. Update here if the nav grows. */
+  --sticky-nav-height: 3rem;
+}
