@@ -25,6 +25,14 @@
         ? 'Rescan needs-review'
         : 'Rematch (series)'
   );
+
+  // Walked + New only make sense on full scans. rescan_unmatched and
+  // rematch_for_series both route through code paths that never reach
+  // the disk-walk counter or the catalog-insert branch, so those fields
+  // are structurally always 0. Hiding avoids the "Seen 0 / Added 0
+  // looks broken" confusion the Phase B smoke surfaced (per A.7 brief
+  // Sub-item C).
+  const showWalkedAndNew = $derived(report.kind === 'full');
 </script>
 
 <article class="rounded-lg border border-slate-200 bg-white p-4">
@@ -56,16 +64,18 @@
     values across rows. Two columns on narrow widths, three on >=sm.
   -->
   <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-3">
+    {#if showWalkedAndNew}
+      <div class="flex items-baseline gap-1.5">
+        <dt class="text-slate-500" title="CBZ files walked during disk traversal">Walked</dt>
+        <dd class="font-medium">{report.files_seen}</dd>
+      </div>
+      <div class="flex items-baseline gap-1.5">
+        <dt class="text-slate-500" title="New catalog rows created">New</dt>
+        <dd class="font-medium">{report.files_added}</dd>
+      </div>
+    {/if}
     <div class="flex items-baseline gap-1.5">
-      <dt class="text-slate-500">Seen</dt>
-      <dd class="font-medium">{report.files_seen}</dd>
-    </div>
-    <div class="flex items-baseline gap-1.5">
-      <dt class="text-slate-500">Added</dt>
-      <dd class="font-medium">{report.files_added}</dd>
-    </div>
-    <div class="flex items-baseline gap-1.5">
-      <dt class="text-slate-500">Updated</dt>
+      <dt class="text-slate-500" title="Existing catalog rows re-examined">Re-checked</dt>
       <dd class="font-medium">{report.files_updated}</dd>
     </div>
     <div class="flex items-baseline gap-1.5">
