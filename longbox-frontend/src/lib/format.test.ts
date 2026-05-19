@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cvIssueUrl,
+  cvSeriesUrl,
   formatBytes,
   formatConfidence,
   formatDate,
@@ -101,5 +103,17 @@ describe('formatRelative', () => {
   it('falls back to absolute for future timestamps', () => {
     const future = new Date(Date.now() + 60_000).toISOString();
     expect(formatRelative(future)).toMatch(/^\d{4}-/);
+  });
+});
+
+describe('cvIssueUrl', () => {
+  it('builds the canonical /issue/4000-… form', () => {
+    expect(cvIssueUrl(364354)).toBe('https://comicvine.gamespot.com/issue/4000-364354/');
+  });
+});
+
+describe('cvSeriesUrl', () => {
+  it('builds the canonical /volume/4050-… form (CV calls series "volumes")', () => {
+    expect(cvSeriesUrl(167340)).toBe('https://comicvine.gamespot.com/volume/4050-167340/');
   });
 });

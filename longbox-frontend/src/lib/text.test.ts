@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { absolutizeCvLinks, htmlToPlainText } from './text';
+import { absolutizeCvLinks, htmlToPlainText, sanitizeCvSynopsis } from './text';
 
 describe('htmlToPlainText', () => {
   it('inserts a line break between adjacent <p> tags', () => {
@@ -122,5 +122,89 @@ describe('absolutizeCvLinks', () => {
 
   it('returns empty string for empty input', () => {
     expect(absolutizeCvLinks('')).toBe('');
+  });
+});
+
+describe('sanitizeCvSynopsis', () => {
+  it('preserves benign CV-style markup', () => {
+    const out = sanitizeCvSynopsis(
+      '<p>Wolverine returns. <i>Logan</i> faces <b>Sabretooth</b>.</p>' +
+      '<ul><li>Issue 1: arrival</li><li>Issue 2: confrontation</li></ul>'
+    );
+    expect(out).toContain('<p>');
+    expect(out).toContain('<i>Logan</i>');
+    expect(out).toContain('<b>Sabretooth</b>');
+    expect(out).toContain('<ul>');
+    expect(out).toContain('<li>Issue 1: arrival</li>');
+  });
+
+  it('strips <script> tags entirely', () => {
+    const out = sanitizeCvSynopsis(
+      '<p>Hello</p><script>alert("xss")</script><p>World</p>'
+    );
+    expect(out).not.toContain('<script>');
+    expect(out).not.toContain('alert');
+    expect(out).toContain('Hello');
+    expect(out).toContain('World');
+  });
+
+  it('strips event handler attributes (onerror, onclick, etc.)', () => {
+    const out = sanitizeCvSynopsis(
+      '<p onclick="alert(1)">click me</p><img src=x onerror="alert(2)">'
+    );
+    expect(out).not.toMatch(/onclick/i);
+    expect(out).not.toMatch(/onerror/i);
+    expect(out).not.toMatch(/alert/);
+  });
+
+  it('strips javascript: URLs from hrefs', () => {
+    const out = sanitizeCvSynopsis('<a href="javascript:alert(1)">click</a>');
+    expect(out).not.toMatch(/javascript:/i);
+    expect(out).not.toMatch(/alert/);
+  });
+
+  it('absolutizes relative anchor hrefs before sanitizing', () => {
+    const out = sanitizeCvSynopsis('<p>See <a href="/wolverine/4050-1234/">vol</a></p>');
+    expect(out).toContain('https://comicvine.gamespot.com/wolverine/4050-1234/');
+  });
+
+  it('forces target=_blank rel=noopener noreferrer on every anchor', () => {
+    const out = sanitizeCvSynopsis(
+      '<a href="https://comicvine.gamespot.com/x">A</a>' +
+      '<a href="/y/4050-1/">B</a>'
+    );
+    // Every anchor that survives sanitization must have safe target+rel.
+    const anchors = out.match(/<a[^>]*>/gi) ?? [];
+    expect(anchors.length).toBe(2);
+    for (const a of anchors) {
+      expect(a).toMatch(/target="_blank"/);
+      expect(a).toMatch(/rel="noopener noreferrer"/);
+    }
+  });
+
+  it('replaces existing target / rel attrs rather than duplicating', () => {
+    const out = sanitizeCvSynopsis(
+      '<a href="/x/4050-1/" target="_self" rel="opener">B</a>'
+    );
+    expect(out).not.toMatch(/target="_self"/);
+    expect(out).not.toMatch(/rel="opener"/);
+    expect(out).toMatch(/target="_blank"/);
+    expect(out).toMatch(/rel="noopener noreferrer"/);
+    // And only one of each, no duplicate attribute.
+    expect((out.match(/target=/g) ?? []).length).toBe(1);
+    expect((out.match(/rel=/g) ?? []).length).toBe(1);
+  });
+
+  it('drops unexpected tags not on the allow-list', () => {
+    const out = sanitizeCvSynopsis(
+      '<p>Hello</p><iframe src="https://evil.com"></iframe><object data="x"></object>'
+    );
+    expect(out).not.toContain('<iframe');
+    expect(out).not.toContain('<object');
+    expect(out).toContain('Hello');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(sanitizeCvSynopsis('')).toBe('');
   });
 });

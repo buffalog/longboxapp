@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { CheckCircle2, Circle, AlertCircle, XCircle } from 'lucide-svelte';
+  import { CheckCircle2, Circle, AlertCircle, XCircle, ExternalLink, FileImage } from 'lucide-svelte';
   import type { IssueWithFile } from '$lib/types';
-  import { formatDate } from '$lib/format';
+  import { cvIssueUrl, formatDate } from '$lib/format';
+  import { sanitizeCvSynopsis } from '$lib/text';
 
   interface Props {
     issue: IssueWithFile;
@@ -56,9 +57,49 @@
   const idLabel = $derived(
     copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : String(issue.id)
   );
+
+  // --- Row expand state (Task 1) ---
+  //
+  // `expanded` toggles the inline detail section below the row. The
+  // title cell is the click target (brief: not whole-row, not chevron)
+  // so other interactive cells (Copy ID, status pill) keep their own
+  // click semantics. Esc on the focused title button collapses.
+  //
+  // `cachedSanitizedSynopsis` is the lazy-sanitization seam: DOMPurify
+  // runs on first expand and the result sticks for subsequent
+  // expand/collapse cycles on the same row.
+  let expanded = $state(false);
+  let cachedSanitizedSynopsis = $state<string | null>(null);
+
+  function toggleExpand(): void {
+    expanded = !expanded;
+    if (expanded && cachedSanitizedSynopsis === null && issue.summary) {
+      cachedSanitizedSynopsis = sanitizeCvSynopsis(issue.summary);
+    }
+  }
+
+  function onTitleKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && expanded) {
+      e.preventDefault();
+      expanded = false;
+    }
+  }
+
+  const cvUrl = $derived(issue.cv_issue_id ? cvIssueUrl(issue.cv_issue_id) : null);
 </script>
 
 <tr class="border-b border-slate-100 last:border-b-0">
+  <td class="px-3 py-2 align-top">
+    <div class="size-12 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+      {#if issue.cover_url}
+        <img src={issue.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+      {:else}
+        <div class="flex size-full items-center justify-center text-slate-400">
+          <FileImage class="size-5" aria-hidden="true" />
+        </div>
+      {/if}
+    </div>
+  </td>
   <td class="px-3 py-2 align-top font-mono text-sm tabular-nums text-slate-700">
     #{issue.number}
   </td>
@@ -74,7 +115,14 @@
     >{idLabel}</button>
   </td>
   <td class="px-3 py-2 align-top">
-    <div class="text-sm font-medium text-slate-900">{issue.title ?? '—'}</div>
+    <button
+      type="button"
+      data-issue-title
+      onclick={toggleExpand}
+      onkeydown={onTitleKey}
+      aria-expanded={expanded}
+      class="rounded text-left text-sm font-medium text-slate-900 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+    >{issue.title ?? '—'}</button>
     {#if issue.file?.path_relative}
       <div class="font-mono text-xs text-slate-500">{issue.file.path_relative}</div>
     {/if}
@@ -85,5 +133,53 @@
       <statusMeta.Icon class="size-4" aria-hidden="true" />
       <span class="text-xs font-medium">{statusMeta.label}</span>
     </span>
+  </td>
+</tr>
+
+<tr aria-hidden={!expanded}>
+  <td colspan="6" class="p-0">
+    <!-- Accordion via max-height transition (brief: 200-300ms). 600px
+         is a generous cap for typical CV synopses; longer ones still
+         render but scroll naturally within the row in practice. -->
+    <div
+      class="overflow-hidden transition-[max-height] duration-300 ease-in-out"
+      style:max-height={expanded ? '600px' : '0px'}
+    >
+      <div class="border-t border-slate-100 bg-slate-50 px-3 py-3">
+        <div class="flex gap-4">
+          <!-- Larger cover (~80x120). 2:3 aspect is standard for comic
+               covers; w-20 h-30 → exact 80×120 isn't a Tailwind stock
+               size, w-20 h-[7.5rem] gets us 80×120 at base font. -->
+          <div class="h-[7.5rem] w-20 flex-shrink-0 overflow-hidden rounded bg-slate-100">
+            {#if issue.cover_url}
+              <img src={issue.cover_url} alt="" class="size-full object-cover" loading="lazy" />
+            {:else}
+              <div class="flex size-full items-center justify-center text-slate-400">
+                <FileImage class="size-8" aria-hidden="true" />
+              </div>
+            {/if}
+          </div>
+          <div class="min-w-0 flex-1">
+            {#if cachedSanitizedSynopsis}
+              <div class="prose prose-sm max-w-none text-sm text-slate-700">
+                {@html cachedSanitizedSynopsis}
+              </div>
+            {:else}
+              <p class="text-sm italic text-slate-500">No synopsis available.</p>
+            {/if}
+            {#if cvUrl}
+              <div class="mt-3">
+                <a
+                  href={cvUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline"
+                >View on ComicVine <ExternalLink class="size-3.5" aria-hidden="true" /></a>
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
   </td>
 </tr>
