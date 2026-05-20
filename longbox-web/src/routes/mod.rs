@@ -19,6 +19,7 @@ pub mod missing;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
+pub mod reconcile;
 pub mod scan;
 pub mod series;
 pub mod settings;
@@ -51,7 +52,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(indexers::router())
         .merge(downloader::router())
         .merge(webhooks::router())
-        .merge(pull::router());
+        .merge(pull::router())
+        .merge(reconcile::router());
 
     Router::new()
         .nest("/api", api)

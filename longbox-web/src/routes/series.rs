@@ -268,11 +268,18 @@ async fn refresh(
     Ok(Json(updated))
 }
 
-async fn remove(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if series_repo::find_by_id(&state.db, id).await?.is_none() {
+/// Delete a single series, enforcing the owned-files guard. Shared by
+/// `DELETE /api/series/:id` and the Library Tidy phantom-delete routes
+/// (`routes/reconcile.rs`) so both enforce identical semantics from one
+/// place.
+///
+/// Returns `NotFound` for an unknown id and `Conflict` when owned files
+/// still match the series. For a phantom delete the conflict is a real
+/// time-of-check/time-of-use guard — a series can regain files between
+/// the tidy view loading and the delete being clicked. On success the
+/// `series` row is deleted; dependent `issues`/`files` rows cascade.
+pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), ApiError> {
+    if series_repo::find_by_id(db, id).await?.is_none() {
         return Err(ApiError::NotFound {
             resource: "series",
             id: id.to_string(),
@@ -286,7 +293,7 @@ async fn remove(
            WHERE i.series_id = ? AND f.status = 'owned'"#,
         id
     )
-    .fetch_one(&state.db)
+    .fetch_one(db)
     .await
     .map_err(|e| ApiError::Internal {
         message: format!("owned-file count failed: {e}"),
@@ -302,11 +309,19 @@ async fn remove(
         });
     }
     sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)
-        .execute(&state.db)
+        .execute(db)
         .await
         .map_err(|e| ApiError::Internal {
             message: format!("delete failed: {e}"),
             source: anyhow::anyhow!(e),
         })?;
+    Ok(())
+}
+
+async fn remove(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    delete_series(&state.db, id).await?;
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
