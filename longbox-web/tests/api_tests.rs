@@ -2773,3 +2773,31 @@ async fn reconcile_bulk_delete_phantoms_removes_all_given() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn reconcile_keep_phantom_resets_last_matched_count() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Kept Series").await;
+    // Bump into transition state (last_matched_count > 0).
+    series_repo::update_last_matched_count(&app.state.db, sid, 7)
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/reconcile/phantom/{sid}/keep"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["kept"], sid);
+
+    // Reset to 0 -> still zero-owned, but no longer a transition phantom.
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["with_transition"].as_array().unwrap().len(), 0);
+    assert_eq!(body["all_zero_owned"].as_array().unwrap().len(), 1);
+}
