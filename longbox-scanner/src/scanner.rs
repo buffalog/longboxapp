@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,13 +8,13 @@ use longbox_core::{
     ParsingPattern,
 };
 use longbox_db::{
-    file_repo, find_candidates, issue_repo, library_root_repo, parsing_pattern_repo, row_to_issue,
-    row_to_series, scan_run_repo, FileUpdate, NewFile, NewScanRun, Pool, ScanCompletion,
-    ScanRunKind,
+    discovered_folders_repo, file_repo, find_candidates, issue_repo, library_root_repo,
+    parsing_pattern_repo, row_to_issue, row_to_series, scan_run_repo, series_repo,
+    DiscoveredFolder, FileUpdate, NewFile, NewScanRun, Pool, ScanCompletion, ScanRunKind,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::cbz::extract_comic_info;
 use crate::error::ScanError;
@@ -117,6 +118,19 @@ impl Scanner {
         let marked =
             file_repo::mark_files_not_seen_since(&self.db, library_root_id, started_at).await?;
         report.files_marked_missing = u32::try_from(marked).unwrap_or(u32::MAX);
+
+        // Library Tidy reconciliation, after the mark-missing pass so the
+        // `files` rows reflect this scan's disk reality: refresh every
+        // series' matched count (the phantom-transition signal), then
+        // detect top-level folders that resolved to no tracked series.
+        let series_refreshed = series_repo::refresh_last_matched_counts(&self.db).await?;
+        let folders_discovered = detect_discovered_folders(&self.db, library_root_id).await?;
+        info!(
+            target: "longbox_scanner",
+            series_refreshed,
+            folders_discovered,
+            "library_tidy.reconcile_complete"
+        );
 
         let completed_at = utc_now();
         report.completed_at = completed_at;
@@ -471,6 +485,65 @@ impl Scanner {
             file_repo::insert(&self.db, new).await?;
         }
         Ok(())
+    }
+}
+
+/// Scan-end reconciliation pass: group the library root's present
+/// files by their top-level folder and upsert any folder whose CBZs
+/// all failed to resolve to a tracked series into `discovered_folders`
+/// for user review. Returns the count of folders upserted.
+///
+/// See `longbox-library-tidy-prompt.md` §2 — the predicate is
+/// match-result-based, and publisher-grouped library layouts are a
+/// documented non-goal (a publisher tier would collapse every series
+/// under one top-level folder).
+async fn detect_discovered_folders(db: &Pool, library_root_id: i64) -> Result<u32, ScanError> {
+    let files = file_repo::list_by_library_root(db, library_root_id).await?;
+
+    // top-level folder -> (present file count, any file resolved to a series)
+    let mut folders: HashMap<String, (i64, bool)> = HashMap::new();
+    for file in &files {
+        if !file.is_present {
+            continue;
+        }
+        let Some(folder) = top_level_folder(&file.path_relative) else {
+            continue; // a file loose in the library root is not a series folder
+        };
+        let entry = folders.entry(folder).or_insert((0, false));
+        entry.0 += 1;
+        if file.issue_id.is_some() {
+            entry.1 = true;
+        }
+    }
+
+    let mut discovered: u32 = 0;
+    for (folder_name, (file_count, any_resolved)) in folders {
+        if any_resolved {
+            continue; // a resolved file means this is a tracked series's folder
+        }
+        discovered_folders_repo::upsert(
+            db,
+            DiscoveredFolder {
+                folder_name,
+                file_count,
+            },
+        )
+        .await?;
+        discovered += 1;
+    }
+    Ok(discovered)
+}
+
+/// The first path component of a relative path, when the path has a
+/// containing folder. `None` for a file sitting loose in the library
+/// root (no folder component).
+fn top_level_folder(path_relative: &str) -> Option<String> {
+    let mut components = Path::new(path_relative).components();
+    let first = components.next()?;
+    components.next()?; // require at least one more component (the file itself)
+    match first {
+        std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+        _ => None,
     }
 }
 

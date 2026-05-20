@@ -36,7 +36,9 @@ Three concerns:
 
 ### 2. Series identity for untracked folder discovery
 
-The scanner walks disk and identifies "series-shaped folders" — top-level subfolders of `LIBRARY_ROOT_PATH` containing CBZ files that don't match any tracked series's expected folder pattern. Folder name carries series identity per the "series launch year is identity" principle (e.g., `Wolverine (1982)`, `Amazing Spider-Man (1963)`).
+The scanner walks disk and identifies "series-shaped folders" — **top-level** subfolders of `LIBRARY_ROOT_PATH`. A top-level folder is a *discovered (untracked) folder* when it contains ≥1 CBZ file **and no CBZ in it resolved to a tracked series during the scan**. The signal is match-result-based, not folder-name-pattern-based: a tracked series's folder is recognised by its files resolving to that series. (A tracked series whose folder holds only unmatchable files is a rare false positive — the user dismisses it.) Folder name still carries series identity for the user's review per the "series launch year is identity" principle (e.g., `Wolverine (1982)`, `Amazing Spider-Man (1963)`) — it is what gets stored and shown for CV resolution.
+
+**Known limitation — publisher-grouped layouts.** Discovery assumes top-level subfolders *are* series folders (`Library/Wolverine (1982)/…`). A library with a publisher tier (`Library/Marvel/Wolverine (1982)/…`) is unsupported: the top-level folder is then the publisher, real series folders sit one level deeper, and detection collapses every series under the publisher folder. Out of scope for Library Tidy; revisit only if a real publisher-grouped library surfaces.
 
 **Do not auto-resolve to CV.** Folder-name-to-CV mapping requires user disambiguation (multiple CV volumes can match the same title). Store discovered folders in a `discovered_folders` table for user review:
 
