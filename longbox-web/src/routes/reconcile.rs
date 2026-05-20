@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/reconcile/phantoms", get(phantoms))
         .route("/reconcile/untracked", get(untracked))
+        .route("/reconcile/counts", get(counts))
         .route("/reconcile/add", post(add))
         .route("/reconcile/dismiss", post(dismiss))
         .route("/reconcile/phantom/:series_id", delete(delete_phantom))
@@ -44,6 +45,15 @@ pub fn router() -> Router<AppState> {
 struct PhantomsResponse {
     with_transition: Vec<PhantomSeries>,
     all_zero_owned: Vec<PhantomSeries>,
+}
+
+/// Lightweight reconciliation counts for the dashboard banner — just
+/// the two numbers, so the landing page never pulls the full phantom
+/// or untracked lists.
+#[derive(Debug, Serialize)]
+struct ReconcileCounts {
+    phantoms_with_transition: i64,
+    untracked_folders: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +130,21 @@ async fn untracked(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DiscoveredFolderRow>>, ApiError> {
     Ok(Json(discovered_folders_repo::list(&state.db).await?))
+}
+
+/// Reconciliation counts for the dashboard banner. Reuses the list
+/// repos and counts in Rust rather than running dedicated `COUNT`
+/// queries — the phantom and untracked sets are small enough that the
+/// extra rows are cheap, and it keeps this endpoint free of new SQL.
+async fn counts(State(state): State<AppState>) -> Result<Json<ReconcileCounts>, ApiError> {
+    let phantoms = series_repo::list_phantoms(&state.db).await?;
+    let untracked = discovered_folders_repo::list(&state.db).await?;
+    let phantoms_with_transition =
+        phantoms.iter().filter(|p| p.last_matched_count > 0).count() as i64;
+    Ok(Json(ReconcileCounts {
+        phantoms_with_transition,
+        untracked_folders: untracked.len() as i64,
+    }))
 }
 
 /// Add one or more discovered folders to the catalog. Per-row

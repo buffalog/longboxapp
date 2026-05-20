@@ -2801,3 +2801,32 @@ async fn reconcile_keep_phantom_resets_last_matched_count() {
     assert_eq!(body["with_transition"].as_array().unwrap().len(), 0);
     assert_eq!(body["all_zero_owned"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn reconcile_counts_reports_transition_and_untracked() {
+    let app = build_test_app().await;
+    // One transition phantom, one steady-state phantom, one untracked
+    // folder. Counts should report 1 transition + 1 untracked.
+    let transition = seed_pull_series(&app, "Transition").await;
+    series_repo::update_last_matched_count(&app.state.db, transition, 3)
+        .await
+        .unwrap();
+    seed_pull_series(&app, "Steady").await;
+    discovered_folders_repo::upsert(
+        &app.state.db,
+        DiscoveredFolder {
+            folder_name: "Invincible (2003)".into(),
+            file_count: 4,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/counts"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["phantoms_with_transition"], 1);
+    assert_eq!(body["untracked_folders"], 1);
+}

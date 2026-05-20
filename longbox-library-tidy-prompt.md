@@ -144,9 +144,10 @@ Temporary flat `/library/tidy` nav link (with `// TODO Step 12 (A.8): fold into 
 
 ### Step 6 — Dashboard reconciliation banner
 
-- Banner at top of `/dashboard` rendered when `phantoms_with_transition > 0` OR `untracked_folders > 0` (non-dismissed).
-- Copy: "*N series lost their files. M untracked folders detected.* [Review →](/library/tidy)"
-- Dismissable for the current session (localStorage flag — banner returns next visit if state persists). Dismiss does **not** clear the underlying state, only the banner.
+- `GET /api/reconcile/counts` → `{ phantoms_with_transition, untracked_folders }` — a lightweight counts endpoint (reuses the list repos and counts in Rust; no new SQL, no `.sqlx` entry) so the dashboard never pulls the full phantom/untracked lists onto the landing page.
+- `ReconciliationBanner.svelte` rendered at the top of the dashboard (route `/`) when `phantoms_with_transition > 0` OR `untracked_folders > 0`. The counts are fetched failure-tolerantly — a failure means no banner, never a page error.
+- Copy assembled conditionally — one sentence per non-zero count, singular/plural-aware: "*N series lost their files. M untracked folders detected.*" + a "Review →" link to `/library/tidy`.
+- **Dismissal — localStorage count-signature model.** Dismissing stores the current `transition:untracked` count signature in `localStorage`. The banner stays hidden while the live counts still match the stored signature, and reappears when either count changes. Dismiss is cosmetic — it never clears the underlying reconciliation state. (Brief amendment, folded into the Step 6 commit: this replaces the original draft's ambiguous "current session / localStorage flag / returns next visit" wording, which was internally inconsistent — the count-signature model is the concrete behavior.)
 
 ### Step 7 — Tests
 
