@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO indexer_configs\n               (name, base_url, api_key, enabled, priority, maxage_days)\n           VALUES (?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", name, base_url, api_key,\n                     enabled AS \"enabled!: bool\", priority AS \"priority!: i64\",\n                     maxage_days AS \"maxage_days!: i64\", created_at AS \"created_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "base_url",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "api_key",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "priority!: i64",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "maxage_days!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 7,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0f778c6bacce7abf724cea2c94f0b3c31678f9cbcfb53276b05f371bdb13596b"
+}

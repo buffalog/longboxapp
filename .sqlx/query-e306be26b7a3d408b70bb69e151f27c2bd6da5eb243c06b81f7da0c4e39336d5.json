@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_list SET paused = ? WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e306be26b7a3d408b70bb69e151f27c2bd6da5eb243c06b81f7da0c4e39336d5"
+}

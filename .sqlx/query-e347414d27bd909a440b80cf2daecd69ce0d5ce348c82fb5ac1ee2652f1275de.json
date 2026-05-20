@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"count!: i64\"\n           FROM pull_attempts\n           WHERE series_id = ? AND issue_id = ?\n             AND status IN ('pending', 'submitted')",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e347414d27bd909a440b80cf2daecd69ce0d5ce348c82fb5ac1ee2652f1275de"
+}

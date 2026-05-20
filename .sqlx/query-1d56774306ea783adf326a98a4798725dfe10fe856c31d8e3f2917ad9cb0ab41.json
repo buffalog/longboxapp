@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  added_at AS \"added_at: _\", start_issue,\n                  paused AS \"paused!: bool\",\n                  last_pull_attempt_at AS \"last_pull_attempt_at: _\",\n                  last_successful_pull_at AS \"last_successful_pull_at: _\",\n                  failure_count AS \"failure_count!: i64\"\n           FROM pull_list WHERE paused = 0 ORDER BY added_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "added_at: _",
+        "ordinal": 2,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "start_issue",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "paused!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "last_pull_attempt_at: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "last_successful_pull_at: _",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "failure_count!: i64",
+        "ordinal": 7,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "1d56774306ea783adf326a98a4798725dfe10fe856c31d8e3f2917ad9cb0ab41"
+}

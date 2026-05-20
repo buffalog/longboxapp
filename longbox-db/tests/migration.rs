@@ -18,14 +18,20 @@ async fn migration_creates_all_tables() {
     assert_eq!(
         names,
         vec![
+            "cv_release_cache".to_string(),
+            "downloader_config".to_string(),
             "files".to_string(),
+            "indexer_configs".to_string(),
             "issues".to_string(),
             "library_roots".to_string(),
             "parsing_patterns".to_string(),
             "publisher_filters".to_string(),
+            "pull_attempts".to_string(),
+            "pull_list".to_string(),
             "scan_runs".to_string(),
             "series".to_string(),
             "settings".to_string(),
+            "webhook_configs".to_string(),
         ]
     );
 }

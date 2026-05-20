@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE webhook_configs\n           SET name = ?, url = ?, event_mask = ?, enabled = ?\n           WHERE id = ?\n           RETURNING id AS \"id!: i64\", name, url, event_mask AS \"event_mask!: i64\",\n                     enabled AS \"enabled!: bool\", created_at AS \"created_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "url",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "event_mask!: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "af6b8950392e4524c74a0f11384af10329a22df12ae88f4b3ea6ea10bc9fee18"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pull_list WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b4e1f3d169d07be909cf2e92b5c0ef183163ca1de8b073fbd5ed2d2d986b99c3"
+}

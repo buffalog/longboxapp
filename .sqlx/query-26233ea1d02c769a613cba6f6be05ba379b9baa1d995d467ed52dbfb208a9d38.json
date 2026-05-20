@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_list\n           SET last_pull_attempt_at = CURRENT_TIMESTAMP,\n               failure_count = failure_count + 1\n           WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "26233ea1d02c769a613cba6f6be05ba379b9baa1d995d467ed52dbfb208a9d38"
+}

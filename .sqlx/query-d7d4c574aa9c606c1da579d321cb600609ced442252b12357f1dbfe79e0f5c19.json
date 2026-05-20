@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cv_release_cache\n               (date_from, date_to, publisher, payload_json, cached_at)\n           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)\n           ON CONFLICT(date_from, date_to, publisher) DO UPDATE SET\n               payload_json = excluded.payload_json,\n               cached_at = CURRENT_TIMESTAMP\n           RETURNING id AS \"id!: i64\", date_from, date_to, publisher,\n                     payload_json, cached_at AS \"cached_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "date_from",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "date_to",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_at: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d7d4c574aa9c606c1da579d321cb600609ced442252b12357f1dbfe79e0f5c19"
+}

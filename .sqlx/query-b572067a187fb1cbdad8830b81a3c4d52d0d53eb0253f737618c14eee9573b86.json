@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM cv_release_cache WHERE cached_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b572067a187fb1cbdad8830b81a3c4d52d0d53eb0253f737618c14eee9573b86"
+}

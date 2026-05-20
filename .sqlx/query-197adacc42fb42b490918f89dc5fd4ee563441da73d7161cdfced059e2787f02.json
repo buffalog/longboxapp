@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", date_from, date_to, publisher,\n                  payload_json, cached_at AS \"cached_at: _\"\n           FROM cv_release_cache\n           WHERE date_from = ? AND date_to = ? AND publisher = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "date_from",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "date_to",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_at: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "197adacc42fb42b490918f89dc5fd4ee563441da73d7161cdfced059e2787f02"
+}

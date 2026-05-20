@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_attempts\n           SET status = 'grabbed'\n           WHERE series_id = ? AND issue_id = ?\n             AND status IN ('pending', 'submitted')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a2f6980b1974770335d53e2bcc9cf3be14155ad72663cf5d52965c74013f6410"
+}
