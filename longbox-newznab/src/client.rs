@@ -32,6 +32,17 @@ pub async fn search_indexer(
     search_with(&http_client(), indexer, search_term).await
 }
 
+/// Probe an indexer: confirm it is reachable and the API key is
+/// accepted, without committing to a real search. Implemented as a
+/// minimal `t=search` — the lightest call that actually exercises the
+/// apikey (`t=caps`, the obvious alternative, is served unauthenticated
+/// by many indexers). `Ok(())` means reachable *and* authenticated; on
+/// failure the [`IndexerError`] variant distinguishes a rejected key
+/// (`BadCredentials`) from an unreachable host (`HttpFailure`).
+pub async fn test_connection(indexer: &IndexerConfig) -> Result<(), IndexerError> {
+    search_indexer(indexer, "test").await.map(|_| ())
+}
+
 /// The real single-request implementation, parameterized on a shared
 /// `reqwest::Client` so `find_release` can reuse one connection pool
 /// across its indexer loop.
@@ -151,5 +162,63 @@ pub async fn find_release(
         Err(NewznabError::AllIndexersFailed(failures))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn cfg(base_url: String) -> IndexerConfig {
+        IndexerConfig {
+            id: IndexerId(1),
+            name: "test-indexer".into(),
+            base_url,
+            api_key: "KEY".into(),
+            priority: 0,
+            maxage_days: 1500,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_ok_on_well_formed_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("t", "search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<rss><channel></channel></rss>"),
+            )
+            .mount(&server)
+            .await;
+        // A zero-result search is still a successful, authenticated probe.
+        assert!(test_connection(&cfg(server.uri())).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_connection_surfaces_bad_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"<error code="100" description="Incorrect user credentials"/>"#,
+                ),
+            )
+            .mount(&server)
+            .await;
+        match test_connection(&cfg(server.uri())).await {
+            Err(IndexerError::BadCredentials { code, .. }) => assert_eq!(code, 100),
+            other => panic!("expected BadCredentials, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_unreachable_host_is_http_failure() {
+        // Nothing listening — connection refused, not a timeout.
+        let result = test_connection(&cfg("http://127.0.0.1:1".into())).await;
+        assert!(matches!(result, Err(IndexerError::HttpFailure(_))));
     }
 }

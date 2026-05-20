@@ -10,8 +10,10 @@ use crate::state::AppState;
 
 pub mod cv_search;
 pub mod dashboard;
+pub mod downloader;
 pub mod files;
 pub mod health;
+pub mod indexers;
 pub mod library_roots;
 pub mod missing;
 pub mod postprocess;
@@ -20,6 +22,7 @@ pub mod scan;
 pub mod series;
 pub mod settings;
 pub mod stats;
+pub mod webhooks;
 
 pub fn build_router(state: AppState) -> Router {
     let cors = if state.config.cors_permissive {
@@ -43,7 +46,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(dashboard::router())
         .merge(missing::router())
         .merge(postprocess::router())
-        .merge(publishers::router());
+        .merge(publishers::router())
+        .merge(indexers::router())
+        .merge(downloader::router())
+        .merge(webhooks::router());
 
     Router::new()
         .nest("/api", api)

@@ -1916,3 +1916,467 @@ async fn pending_endpoint_reflects_cache_contents() {
     assert_eq!(hellboy["reason"]["kind"], "move_failed");
     assert_eq!(hellboy["reason"]["detail"], "EXDEV cross-device");
 }
+
+// -------- indexers (Phase A.8 Step 5) --------
+
+#[tokio::test]
+async fn indexers_create_lists_and_masks_the_api_key() {
+    let app = build_test_app().await;
+
+    let empty = response_json(app.request(empty_request("GET", "/api/indexers")).await).await;
+    assert_eq!(empty.as_array().unwrap().len(), 0);
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/indexers",
+            r#"{"name":"NZBgeek","base_url":"https://api.nzbgeek.info","api_key":"SECRET","enabled":true,"priority":0,"maxage_days":1500}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["name"], "NZBgeek");
+    assert_eq!(body["has_api_key"], true);
+    // The key value is never serialized — only its presence.
+    assert!(body.get("api_key").is_none());
+
+    let list = response_json(app.request(empty_request("GET", "/api/indexers")).await).await;
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["has_api_key"], true);
+    assert!(rows[0].get("api_key").is_none());
+}
+
+#[tokio::test]
+async fn indexers_create_requires_an_api_key() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/indexers",
+            r#"{"name":"NZBgeek","base_url":"https://x","api_key":"  "}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn indexers_create_duplicate_name_is_409() {
+    let app = build_test_app().await;
+    let make = || {
+        json_request(
+            "POST",
+            "/api/indexers",
+            r#"{"name":"NZBgeek","base_url":"https://x","api_key":"K"}"#,
+        )
+    };
+    assert_eq!(app.request(make()).await.status(), StatusCode::OK);
+    let resp = app.request(make()).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "conflict.indexer_exists");
+}
+
+#[tokio::test]
+async fn indexers_update_with_blank_key_keeps_the_stored_key() {
+    let app = build_test_app().await;
+    let created = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/indexers",
+            r#"{"name":"NZBgeek","base_url":"https://x","api_key":"ORIGINAL"}"#,
+        ))
+        .await,
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+
+    // PUT with a blank api_key — the stored key must survive untouched.
+    let resp = app
+        .request(json_request(
+            "PUT",
+            &format!("/api/indexers/{id}"),
+            r#"{"name":"NZBgeek Renamed","base_url":"https://x","api_key":"","enabled":false,"priority":2,"maxage_days":900}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = longbox_db::indexer_config_repo::get(&app.state.db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.api_key, "ORIGINAL");
+    assert_eq!(stored.name, "NZBgeek Renamed");
+    assert!(!stored.enabled);
+}
+
+#[tokio::test]
+async fn indexers_update_unknown_id_is_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/indexers/9999",
+            r#"{"name":"x","base_url":"https://x","api_key":"K"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn indexers_delete_then_delete_again_is_404() {
+    let app = build_test_app().await;
+    let created = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/indexers",
+            r#"{"name":"NZBgeek","base_url":"https://x","api_key":"K"}"#,
+        ))
+        .await,
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+
+    let del = app
+        .request(empty_request("DELETE", &format!("/api/indexers/{id}")))
+        .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let again = app
+        .request(empty_request("DELETE", &format!("/api/indexers/{id}")))
+        .await;
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn indexers_test_reports_ok_against_a_reachable_indexer() {
+    let app = build_test_app().await;
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<rss><channel></channel></rss>"))
+        .mount(&server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/indexers/test",
+            format!(
+                r#"{{"base_url":"{}","api_key":"K","name":"probe"}}"#,
+                server.uri()
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn indexers_test_reports_bad_credentials() {
+    let app = build_test_app().await;
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<error code="100" description="Incorrect user credentials"/>"#),
+        )
+        .mount(&server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/indexers/test",
+            format!(r#"{{"base_url":"{}","api_key":"BAD"}}"#, server.uri()),
+        ))
+        .await;
+    // A failed connection is a *successful* test reporting ok:false.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["ok"], false);
+    assert!(body["message"].as_str().unwrap().contains("credentials"));
+}
+
+#[tokio::test]
+async fn indexers_test_a_new_indexer_requires_a_key() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/indexers/test",
+            r#"{"base_url":"https://x","api_key":""}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// -------- downloader (Phase A.8 Step 5) --------
+
+#[tokio::test]
+async fn downloader_get_is_null_until_configured_then_masks_the_secret() {
+    let app = build_test_app().await;
+
+    let unconfigured =
+        response_json(app.request(empty_request("GET", "/api/downloader")).await).await;
+    assert!(unconfigured.is_null());
+
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/downloader",
+            r#"{"kind":"sab","base_url":"http://localhost:8080","secret":"APIKEY","category":"comics","enabled":true}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["kind"], "sab");
+    assert_eq!(body["has_secret"], true);
+    assert!(body.get("secret").is_none());
+
+    let fetched = response_json(app.request(empty_request("GET", "/api/downloader")).await).await;
+    assert_eq!(fetched["kind"], "sab");
+    assert_eq!(fetched["has_secret"], true);
+    assert!(fetched.get("secret").is_none());
+}
+
+#[tokio::test]
+async fn downloader_nzbget_requires_a_username() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/downloader",
+            r#"{"kind":"nzbget","base_url":"http://localhost:6789","secret":"pw"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn downloader_rejects_an_unknown_kind() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/downloader",
+            r#"{"kind":"transmission","base_url":"http://x","secret":"s"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn downloader_update_with_blank_secret_keeps_the_stored_secret() {
+    let app = build_test_app().await;
+    app.request(json_request(
+        "PUT",
+        "/api/downloader",
+        r#"{"kind":"sab","base_url":"http://localhost:8080","secret":"FIRSTKEY"}"#,
+    ))
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/downloader",
+            r#"{"kind":"sab","base_url":"http://localhost:9090","secret":"","category":"x"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = longbox_db::downloader_config_repo::get(&app.state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.secret, "FIRSTKEY");
+    assert_eq!(stored.base_url, "http://localhost:9090");
+}
+
+#[tokio::test]
+async fn downloader_delete_clears_the_config() {
+    let app = build_test_app().await;
+    app.request(json_request(
+        "PUT",
+        "/api/downloader",
+        r#"{"kind":"sab","base_url":"http://x","secret":"K"}"#,
+    ))
+    .await;
+
+    let del = app
+        .request(empty_request("DELETE", "/api/downloader"))
+        .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let after = response_json(app.request(empty_request("GET", "/api/downloader")).await).await;
+    assert!(after.is_null());
+}
+
+#[tokio::test]
+async fn downloader_test_reports_ok_against_a_reachable_sab() {
+    let app = build_test_app().await;
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue":{"slots":[]}}"#))
+        .mount(&server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/test",
+            format!(
+                r#"{{"kind":"sab","base_url":"{}","secret":"K"}}"#,
+                server.uri()
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["ok"], true);
+}
+
+#[tokio::test]
+async fn downloader_test_reports_a_bad_api_key() {
+    let app = build_test_app().await;
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("error: API Key Incorrect"))
+        .mount(&server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/test",
+            format!(
+                r#"{{"kind":"sab","base_url":"{}","secret":"BAD"}}"#,
+                server.uri()
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["ok"], false);
+}
+
+// -------- webhooks (Phase A.8 Step 5) --------
+
+#[tokio::test]
+async fn webhooks_create_list_and_update() {
+    let app = build_test_app().await;
+
+    let created = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/webhooks",
+            r#"{"name":"Slack","url":"https://hooks.slack.com/services/x","event_mask":5,"enabled":true}"#,
+        ))
+        .await,
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!(created["event_mask"], 5);
+
+    let list = response_json(app.request(empty_request("GET", "/api/webhooks")).await).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    let updated = app
+        .request(json_request(
+            "PUT",
+            &format!("/api/webhooks/{id}"),
+            r#"{"name":"Slack prod","url":"https://hooks.slack.com/services/y","event_mask":15,"enabled":false}"#,
+        ))
+        .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let body = response_json(updated).await;
+    assert_eq!(body["name"], "Slack prod");
+    assert_eq!(body["event_mask"], 15);
+    assert_eq!(body["enabled"], false);
+}
+
+#[tokio::test]
+async fn webhooks_create_duplicate_name_is_409() {
+    let app = build_test_app().await;
+    let make = || {
+        json_request(
+            "POST",
+            "/api/webhooks",
+            r#"{"name":"Slack","url":"https://hooks.slack.com/x","event_mask":1}"#,
+        )
+    };
+    assert_eq!(app.request(make()).await.status(), StatusCode::OK);
+    let resp = app.request(make()).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(resp).await["error"]["code"],
+        "conflict.webhook_exists"
+    );
+}
+
+#[tokio::test]
+async fn webhooks_reject_unknown_event_bits() {
+    let app = build_test_app().await;
+    // bit 16 is outside the known event mask (1|2|4|8 = 15).
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/webhooks",
+            r#"{"name":"Bad","url":"https://x","event_mask":16}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn webhooks_reject_a_non_http_url() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/webhooks",
+            r#"{"name":"Bad","url":"ftp://x","event_mask":1}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn webhooks_update_unknown_id_is_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/webhooks/9999",
+            r#"{"name":"x","url":"https://x","event_mask":1}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn webhooks_delete_removes_the_row() {
+    let app = build_test_app().await;
+    let created = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/webhooks",
+            r#"{"name":"Slack","url":"https://hooks.slack.com/x","event_mask":1}"#,
+        ))
+        .await,
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+
+    let del = app
+        .request(empty_request("DELETE", &format!("/api/webhooks/{id}")))
+        .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let list = response_json(app.request(empty_request("GET", "/api/webhooks")).await).await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+}

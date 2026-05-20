@@ -11,6 +11,12 @@ export default defineConfig({
       }
     }
   },
+  // Under Vitest, resolve the browser build of Svelte so component
+  // tests can `mount()`. Without this the SvelteKit plugin serves the
+  // SSR build and @testing-library/svelte's render() throws
+  // `lifecycle_function_unavailable` ("mount is not available on the
+  // server").
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : {},
   test: {
     include: ['src/**/*.{test,spec}.{js,ts}'],
     environment: 'jsdom',

@@ -1285,6 +1285,8 @@ dependencies = [
  "longbox-comicvine",
  "longbox-core",
  "longbox-db",
+ "longbox-downloader",
+ "longbox-newznab",
  "longbox-postprocess",
  "longbox-scanner",
  "mime_guess",
