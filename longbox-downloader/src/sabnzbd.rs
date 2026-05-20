@@ -115,6 +115,15 @@ impl Downloader for SabnzbdClient {
 
         Ok(DownloadStatus::Unknown)
     }
+
+    async fn test_connection(&self) -> Result<(), DownloaderError> {
+        // `mode=queue` requires the apikey (unlike the public
+        // `mode=version`), so it verifies auth, not just reachability.
+        // `limit=0` keeps the response body tiny.
+        self.get(&[("mode", "queue"), ("limit", "0")])
+            .await
+            .map(|_| ())
+    }
 }
 
 /// Active-queue status → common status. Anything in the queue that
@@ -189,6 +198,37 @@ struct SabHistorySlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_connection_ok_when_queue_responds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue":{"slots":[]}}"#))
+            .mount(&server)
+            .await;
+        let client = SabnzbdClient::new(server.uri(), "KEY".into(), String::new());
+        assert!(client.test_connection().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_connection_rejects_bad_api_key() {
+        let server = MockServer::start().await;
+        // SABnzbd reports a bad apikey as a plain-text body, not JSON.
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("error: API Key Incorrect"))
+            .mount(&server)
+            .await;
+        let client = SabnzbdClient::new(server.uri(), "BAD".into(), String::new());
+        assert!(matches!(
+            client.test_connection().await,
+            Err(DownloaderError::AuthFailed(_))
+        ));
+    }
 
     #[test]
     fn queue_status_mapping() {

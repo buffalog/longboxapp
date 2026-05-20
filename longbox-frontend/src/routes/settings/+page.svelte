@@ -7,7 +7,10 @@
   import { ApiError } from '$lib/api/client';
   import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
   import Button from '$lib/components/Button.svelte';
+  import DownloaderSettings from '$lib/components/DownloaderSettings.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import IndexerSettings from '$lib/components/IndexerSettings.svelte';
+  import WebhookSettings from '$lib/components/WebhookSettings.svelte';
 
   let { data } = $props();
   const s = $derived(data.settings);
@@ -191,6 +194,12 @@
       </ul>
     {/if}
   </section>
+
+  <IndexerSettings indexers={data.indexers} />
+
+  <DownloaderSettings downloader={data.downloader} />
+
+  <WebhookSettings webhooks={data.webhooks} />
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">About</h2>

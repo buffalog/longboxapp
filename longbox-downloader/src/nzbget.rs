@@ -143,6 +143,12 @@ impl Downloader for NzbgetClient {
 
         Ok(DownloadStatus::Unknown)
     }
+
+    async fn test_connection(&self) -> Result<(), DownloaderError> {
+        // Every NZBGet JSON-RPC call requires Basic auth; `version` is
+        // the lightest, and a 401 surfaces as AuthFailed.
+        self.rpc("version", json!([])).await.map(|_| ())
+    }
 }
 
 /// listgroups `Status` → common status. `QUEUED`/`PAUSED` are waiting;
@@ -200,6 +206,37 @@ struct NzbgetHistoryItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_connection_ok_when_version_responds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/jsonrpc"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"result":"24.3","error":null}"#),
+            )
+            .mount(&server)
+            .await;
+        let client = NzbgetClient::new(server.uri(), "user".into(), "pass".into(), String::new());
+        assert!(client.test_connection().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_connection_rejects_bad_basic_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/jsonrpc"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let client = NzbgetClient::new(server.uri(), "user".into(), "bad".into(), String::new());
+        assert!(matches!(
+            client.test_connection().await,
+            Err(DownloaderError::AuthFailed(_))
+        ));
+    }
 
     #[test]
     fn group_status_mapping() {

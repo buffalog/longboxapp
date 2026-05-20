@@ -19,6 +19,8 @@ longbox-db = { path = "../longbox-db" }
 longbox-comicvine = { path = "../longbox-comicvine" }
 longbox-scanner = { path = "../longbox-scanner" }
 longbox-postprocess = { path = "../longbox-postprocess" }
+longbox-newznab = { path = "../longbox-newznab" }
+longbox-downloader = { path = "../longbox-downloader" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

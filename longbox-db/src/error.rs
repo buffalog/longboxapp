@@ -57,6 +57,8 @@ fn parse_unique_violation(msg: &str) -> Option<&'static str> {
         "library_roots.path" => "path",
         "files.library_root_id, files.path_relative" => "files_library_root_id_path_relative",
         "publisher_filters.publisher_name" => "publisher_name",
+        "indexer_configs.name" => "indexer_name",
+        "webhook_configs.name" => "webhook_name",
         _ => return None,
     })
 }
@@ -78,6 +80,14 @@ mod tests {
         assert_eq!(
             parse_unique_violation("UNIQUE constraint failed: issues.series_id, issues.number"),
             Some("issues_series_id_number")
+        );
+        assert_eq!(
+            parse_unique_violation("UNIQUE constraint failed: indexer_configs.name"),
+            Some("indexer_name")
+        );
+        assert_eq!(
+            parse_unique_violation("UNIQUE constraint failed: webhook_configs.name"),
+            Some("webhook_name")
         );
     }
 

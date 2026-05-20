@@ -27,6 +27,11 @@ pub trait Downloader {
         &self,
         handle: &DownloadHandle,
     ) -> impl Future<Output = Result<DownloadStatus, DownloaderError>> + Send;
+
+    /// Probe the downloader: confirm it is reachable and the
+    /// credentials are accepted, without submitting anything.
+    /// `Ok(())` means reachable *and* authenticated.
+    fn test_connection(&self) -> impl Future<Output = Result<(), DownloaderError>> + Send;
 }
 
 /// The configured downloader — exactly one is active at a time
@@ -50,6 +55,13 @@ impl Downloader for AnyDownloader {
         match self {
             AnyDownloader::Sabnzbd(c) => c.status(handle).await,
             AnyDownloader::Nzbget(c) => c.status(handle).await,
+        }
+    }
+
+    async fn test_connection(&self) -> Result<(), DownloaderError> {
+        match self {
+            AnyDownloader::Sabnzbd(c) => c.test_connection().await,
+            AnyDownloader::Nzbget(c) => c.test_connection().await,
         }
     }
 }
