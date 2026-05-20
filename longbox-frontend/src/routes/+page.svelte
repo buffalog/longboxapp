@@ -3,6 +3,7 @@
   import { BookOpen, FileImage } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { getActivity, type DashboardActivity } from '$lib/api/dashboard';
+  import { getReconcileCounts, type ReconcileCounts } from '$lib/api/reconcile';
   import { getStats } from '$lib/api/stats';
   import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
@@ -11,6 +12,7 @@
   import Button from '$lib/components/Button.svelte';
   import LoadingSpinner from '$lib/components/LoadingSpinner.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import ReconciliationBanner from '$lib/components/ReconciliationBanner.svelte';
   import type { Stats } from '$lib/types';
 
   let { data } = $props();
@@ -24,6 +26,9 @@
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
+  // Library Tidy counts for the nudge banner. Fetched independently of
+  // the critical dashboard data — see onMount.
+  let reconcileCounts = $state<ReconcileCounts | null>(null);
 
   // libraryRoot comes from the layout's load(). It's null only if
   // /api/library-roots failed at boot — which would have also surfaced
@@ -31,6 +36,15 @@
   const libraryRootId = $derived(data.libraryRoot?.id ?? null);
 
   onMount(async () => {
+    // The reconciliation banner is a non-critical nudge — fetch its
+    // counts independently so a failure here never trips the page error
+    // or hides the stats grid. On failure: no banner, silently.
+    getReconcileCounts()
+      .then((c) => {
+        reconcileCounts = c;
+      })
+      .catch(() => {});
+
     try {
       const [s, a, p] = await Promise.all([
         getStats(),
@@ -78,6 +92,13 @@
 
 {#if error}
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
+{/if}
+
+{#if reconcileCounts}
+  <ReconciliationBanner
+    transitionCount={reconcileCounts.phantoms_with_transition}
+    untrackedCount={reconcileCounts.untracked_folders}
+  />
 {/if}
 
 {#if loading}

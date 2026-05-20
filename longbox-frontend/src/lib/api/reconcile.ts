@@ -36,6 +36,12 @@ export interface DiscoveredFolder {
   file_count: number;
 }
 
+/** Lightweight reconciliation counts for the dashboard banner. */
+export interface ReconcileCounts {
+  phantoms_with_transition: number;
+  untracked_folders: number;
+}
+
 /** One folder to resolve, for `addFolders`. */
 export interface AddFolderInput {
   folder_name: string;
@@ -60,6 +66,12 @@ export function listPhantoms(): Promise<PhantomsResponse> {
 
 export function listUntracked(): Promise<DiscoveredFolder[]> {
   return apiFetch('/reconcile/untracked');
+}
+
+/** Counts only — feeds the dashboard reconciliation banner without
+ *  pulling the full phantom/untracked lists onto the landing page. */
+export function getReconcileCounts(): Promise<ReconcileCounts> {
+  return apiFetch('/reconcile/counts');
 }
 
 /** Resolve discovered folders against ComicVine. Per-row best-effort —
