@@ -124,6 +124,27 @@ pub async fn find_release(
     issue: &str,
     year: Option<i32>,
 ) -> Result<Option<Release>, NewznabError> {
+    Ok(find_release_excluding(indexers, series, issue, year, &[])
+        .await?
+        .map(|(_indexer, release)| release))
+}
+
+/// [`find_release`] with retry-exclusion: any release whose `guid` is
+/// in `exclude_guids` is dropped before selection. The pull engine's
+/// grab-retry path passes the guids of releases already tried for the
+/// issue, so the re-query picks a *different* NZB.
+///
+/// Returns the serving indexer's [`IndexerId`] alongside the chosen
+/// release — the caller records it on the pull attempt for error
+/// attribution. An indexer whose every result is excluded is treated
+/// like a zero-result response: not a failure, fall through.
+pub async fn find_release_excluding(
+    indexers: &[IndexerConfig],
+    series: &str,
+    issue: &str,
+    year: Option<i32>,
+    exclude_guids: &[String],
+) -> Result<Option<(IndexerId, Release)>, NewznabError> {
     if indexers.is_empty() {
         return Ok(None);
     }
@@ -137,12 +158,17 @@ pub async fn find_release(
 
     for indexer in ordered {
         match search_one_indexer(&client, indexer, series, issue, year).await {
-            Ok(results) if !results.is_empty() => {
-                // First indexer with results wins (matches Mylar).
-                return Ok(select_best(results));
-            }
-            Ok(_) => {
-                // Clean zero-results — fall through to the next indexer.
+            Ok(results) => {
+                let kept: Vec<Release> = results
+                    .into_iter()
+                    .filter(|r| !exclude_guids.iter().any(|g| g == &r.guid))
+                    .collect();
+                // First indexer with a usable result wins (matches
+                // Mylar). select_best is `None` only on an empty pool —
+                // an all-excluded indexer falls through like a zero-hit.
+                if let Some(best) = select_best(kept) {
+                    return Ok(Some((indexer.id, best)));
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -220,5 +246,55 @@ mod tests {
         // Nothing listening — connection refused, not a timeout.
         let result = test_connection(&cfg("http://127.0.0.1:1".into())).await;
         assert!(matches!(result, Err(IndexerError::HttpFailure(_))));
+    }
+
+    /// Two releases for the same issue — a cbz (guid abc-123) and a cbr
+    /// (guid def-456). `select_best` prefers the cbz absent exclusion.
+    const TWO_ITEM_RSS: &str = r#"<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+      <channel>
+        <item><title>Wolverine 005.cbz</title><guid>abc-123</guid>
+              <enclosure url="https://idx/nzb/abc-123"/></item>
+        <item><title>Wolverine 005.cbr</title><guid>def-456</guid>
+              <enclosure url="https://idx/nzb/def-456"/></item>
+      </channel>
+    </rss>"#;
+
+    #[tokio::test]
+    async fn find_release_excluding_skips_tried_guids() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(TWO_ITEM_RSS))
+            .mount(&server)
+            .await;
+        let indexers = [cfg(server.uri())];
+
+        // No exclusion: the cbz wins, and the serving indexer id comes back.
+        let (id, rel) = find_release_excluding(&indexers, "Wolverine", "5", None, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, IndexerId(1));
+        assert_eq!(rel.guid, "abc-123");
+
+        // Exclude the cbz: the cbr is picked instead.
+        let (_, rel) =
+            find_release_excluding(&indexers, "Wolverine", "5", None, &["abc-123".into()])
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(rel.guid, "def-456");
+
+        // Exclude both: nothing usable — Ok(None), not an error.
+        let exhausted = find_release_excluding(
+            &indexers,
+            "Wolverine",
+            "5",
+            None,
+            &["abc-123".into(), "def-456".into()],
+        )
+        .await
+        .unwrap();
+        assert!(exhausted.is_none());
     }
 }

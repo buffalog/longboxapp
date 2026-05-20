@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  issue_id AS \"issue_id!: i64\", attempted_at AS \"attempted_at: _\",\n                  indexer_id, release_id, status, error_message,\n                  retry_count AS \"retry_count!: i64\"\n           FROM pull_attempts\n           WHERE series_id = ? AND issue_id = ?\n           ORDER BY attempted_at DESC, id DESC",
+  "query": "INSERT INTO pull_attempts\n               (series_id, issue_id, indexer_id, release_id, status,\n                error_message, retry_count, download_handle)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     issue_id AS \"issue_id!: i64\", attempted_at AS \"attempted_at: _\",\n                     indexer_id, release_id, status, error_message,\n                     retry_count AS \"retry_count!: i64\", download_handle,\n                     unknown_polls AS \"unknown_polls!: i64\"",
   "describe": {
     "columns": [
       {
@@ -47,22 +47,34 @@
         "name": "retry_count!: i64",
         "ordinal": 8,
         "type_info": "Int64"
+      },
+      {
+        "name": "download_handle",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "unknown_polls!: i64",
+        "ordinal": 10,
+        "type_info": "Int64"
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 8
     },
     "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
       true,
       false,
-      false,
-      false,
-      true,
       true,
       false,
       true,
       false
     ]
   },
-  "hash": "6458794ac9b856a78587a44b8d632b354f261e5dc70897e354f36a8eb82d1004"
+  "hash": "3539e59d2a903330874c3aff76e592a574e7ea218e8503626472e8a1827721f9"
 }

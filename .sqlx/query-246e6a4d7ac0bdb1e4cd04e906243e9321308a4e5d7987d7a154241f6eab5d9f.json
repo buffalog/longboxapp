@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_attempts\n           SET status = 'failed',\n               error_message = ?,\n               retry_count = retry_count + 1\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "246e6a4d7ac0bdb1e4cd04e906243e9321308a4e5d7987d7a154241f6eab5d9f"
+}

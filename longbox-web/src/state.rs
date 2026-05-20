@@ -21,6 +21,10 @@ pub struct AppState {
     /// present (empty when Phase B is disabled or no files are stuck)
     /// so handlers don't need to special-case the absent state.
     pub pending_cache: Arc<longbox_postprocess::PendingInterventionsCache>,
+    /// Handle to the Phase A.8 pull engine. Always present — the
+    /// scheduler task runs unconditionally; the `/pull/check` route
+    /// uses this to trigger an immediate sweep.
+    pub pull: longbox_pull::PullHandle,
 }
 
 /// In-memory mid-scan status. The "current" pill in the UI reads from

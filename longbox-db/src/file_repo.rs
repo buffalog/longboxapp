@@ -351,9 +351,11 @@ where
 ///
 /// Always sets:
 /// - `status = 'owned'`
-/// - `match_method = 'phase_b'` (overrides any prior lower-confidence
-///   match like `'filename_regex'` or `'comicinfo_xml'` — Phase B is
-///   the higher-confidence path)
+/// - `match_method` to the caller-supplied value — `'phase_b'` for an
+///   ordinary Phase B catch, `'pull_list'` for a file the pull engine
+///   auto-downloaded. Either overrides a prior lower-confidence match
+///   like `'filename_regex'` or `'comicinfo_xml'`; the auto-import
+///   paths are the higher-confidence ones.
 /// - `match_confidence = 1.0`
 /// - `is_present = true`
 /// - `last_scanned_at = now` / `last_seen_at = now`
@@ -365,12 +367,16 @@ where
 /// `cached_comicinfo_xml` / `cached_at` are cleared because Phase B's
 /// own writer just produced a fresh ComicInfo embedded in the file;
 /// the scanner can re-cache from disk on the next scan if needed.
+// One parameter per written column — a row-struct would only move the
+// argument list, not shorten it.
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_imported<'e, E>(
     executor: E,
     library_root_id: i64,
     path_relative: &str,
     series_id: i64, // currently informational; FK is via issue_id
     issue_id: i64,
+    match_method: &str,
     size: i64,
     mtime: OffsetDateTime,
 ) -> Result<FileRow>
@@ -403,7 +409,7 @@ where
             size_bytes: size,
             mtime: mtime_p,
             last_scanned_at: now_p,
-            match_method: longbox_core::MatchMethod::PhaseB.as_db_str().to_owned(),
+            match_method: match_method.to_owned(),
             match_confidence: 1.0,
             status: longbox_core::FileStatus::Owned.as_db_str().to_owned(),
             // Phase B wrote a fresh ComicInfo into the file; drop any
@@ -423,7 +429,7 @@ where
             size_bytes: size,
             mtime: mtime_p,
             last_scanned_at: now_p,
-            match_method: longbox_core::MatchMethod::PhaseB.as_db_str().to_owned(),
+            match_method: match_method.to_owned(),
             match_confidence: 1.0,
             status: longbox_core::FileStatus::Owned.as_db_str().to_owned(),
             cached_comicinfo_xml: None,

@@ -17,8 +17,8 @@ use longbox_core::{
     MatchMethod, ParsingPattern,
 };
 use longbox_db::{
-    file_repo, find_candidates, issue_repo, parsing_pattern_repo, series_repo, FileRow, FileUpdate,
-    IssueRow, NewFile, Pool, SeriesRow,
+    file_repo, find_candidates, issue_repo, parsing_pattern_repo, pull_attempt_repo, series_repo,
+    FileRow, FileUpdate, IssueRow, NewFile, Pool, SeriesRow,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use zip::write::SimpleFileOptions;
@@ -302,16 +302,41 @@ async fn import_as_owned(
         .to_string_lossy()
         .into_owned();
 
+    // Pull-engine attribution: a file whose (series, issue) has an
+    // in-flight `pull_attempt` was auto-downloaded by the Step 6 pull
+    // engine — catalogue it `pull_list` and settle the attempt(s).
+    // Otherwise it is an ordinary Phase B catch (`phase_b`).
+    let pulled = pull_attempt_repo::has_in_flight_attempt(db, series.id, issue.id).await?;
+    let match_method = if pulled {
+        MatchMethod::PullList
+    } else {
+        MatchMethod::PhaseB
+    };
+
     let row = file_repo::upsert_imported(
         db,
         library_root_id,
         &path_relative,
         series.id,
         issue.id,
+        match_method.as_db_str(),
         size,
         mtime,
     )
     .await?;
+
+    if pulled {
+        // Multi-row by design: 2+ in-flight attempts for one issue (the
+        // race the Step 3 brief calls out) all settle to `grabbed`.
+        let settled = pull_attempt_repo::mark_grabbed_for_issue(db, series.id, issue.id).await?;
+        tracing::info!(
+            target: "longbox_postprocess",
+            series_id = series.id,
+            issue_id = issue.id,
+            attempts = settled,
+            "phase_b.pull_attributed"
+        );
+    }
 
     Ok(Outcome::Imported {
         target: target_abs,

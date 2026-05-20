@@ -425,6 +425,7 @@ async fn upsert_imported_fresh_row_sets_phase_b_owned() {
         "Saga (2012)/Saga (2012) 001.cbz",
         series_id,
         issue_id,
+        "phase_b",
         17_823_412,
         now_offset(),
     )
@@ -451,6 +452,7 @@ async fn upsert_imported_same_issue_preserves_matched_at() {
         "Saga (2012)/Saga (2012) 001.cbz",
         series_id,
         issue_id,
+        "phase_b",
         1000,
         now_offset(),
     )
@@ -468,6 +470,7 @@ async fn upsert_imported_same_issue_preserves_matched_at() {
         "Saga (2012)/Saga (2012) 001.cbz",
         series_id,
         issue_id, // same issue
+        "phase_b",
         1000,
         now_offset(),
     )
@@ -515,6 +518,7 @@ async fn upsert_imported_changed_issue_bumps_matched_at() {
         "Saga (2012)/Saga (2012) 001.cbz",
         series_id,
         first_issue,
+        "phase_b",
         1000,
         now_offset(),
     )
@@ -529,6 +533,7 @@ async fn upsert_imported_changed_issue_bumps_matched_at() {
         "Saga (2012)/Saga (2012) 001.cbz",
         series_id,
         second_issue, // different issue
+        "phase_b",
         1000,
         now_offset(),
     )
@@ -581,6 +586,7 @@ async fn upsert_imported_promotes_lower_confidence_match_methods() {
             &path,
             1,
             issue_id,
+            "phase_b",
             999,
             now_offset(),
         )
@@ -632,6 +638,7 @@ async fn upsert_imported_clears_stale_comicinfo_cache() {
         "stale.cbz",
         1,
         issue_id,
+        "phase_b",
         100,
         now_offset(),
     )
@@ -651,6 +658,7 @@ async fn upsert_imported_with_invalid_issue_id_errors() {
         "nope.cbz",
         series_id,
         9999, // FK doesn't exist
+        "phase_b",
         100,
         now_offset(),
     )

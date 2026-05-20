@@ -24,6 +24,6 @@ mod query;
 mod select;
 mod types;
 
-pub use client::{find_release, search_indexer, test_connection};
+pub use client::{find_release, find_release_excluding, search_indexer, test_connection};
 pub use error::{IndexerError, NewznabError};
 pub use types::{ArchiveFormat, IndexerConfig, IndexerId, Release};

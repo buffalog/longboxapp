@@ -1,0 +1,25 @@
+[package]
+name = "longbox-pull"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox pull engine — scheduled auto-download of solicited issues for subscribed series."
+
+[lints]
+workspace = true
+
+[dependencies]
+longbox-core = { path = "../longbox-core" }
+longbox-db = { path = "../longbox-db" }
+longbox-newznab = { path = "../longbox-newznab" }
+longbox-downloader = { path = "../longbox-downloader" }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+time = { version = "0.3", features = ["macros"] }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"
+pretty_assertions = "1"

@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n             AND NOT EXISTS (\n               SELECT 1 FROM pull_attempts pa\n               WHERE pa.issue_id = i.id\n                 AND (pa.status IN ('pending', 'submitted', 'grabbed', 'mismatched')\n                      OR pa.retry_count >= 3)\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_issue_id",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "metron_issue_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "number",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_date",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 9,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "updated_at: _",
+        "ordinal": 10,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2bef1f3a4c1919b0c278287eae1a5f6815a168b7c15f94f20218742a9a728c02"
+}

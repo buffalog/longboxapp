@@ -21,6 +21,7 @@ longbox-scanner = { path = "../longbox-scanner" }
 longbox-postprocess = { path = "../longbox-postprocess" }
 longbox-newznab = { path = "../longbox-newznab" }
 longbox-downloader = { path = "../longbox-downloader" }
+longbox-pull = { path = "../longbox-pull" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
