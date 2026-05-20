@@ -26,6 +26,11 @@ pub enum MatchMethod {
     /// lower-confidence matches from the scanner's filename / ComicInfo
     /// tiers without prompting.
     PhaseB,
+    /// Phase A.8's auto-pull workflow: Phase B caught a file that a
+    /// pending `pull_attempts` row claims, so the import is attributed
+    /// to the pull engine rather than a manual drop. Same confidence
+    /// tier as `PhaseB` — full caller-supplied identity.
+    PullList,
     /// No plausible match found in any tier.
     Unmatched,
     /// User-marked as not-a-comic; not surfaced in catalog views.
@@ -41,6 +46,7 @@ impl MatchMethod {
             Self::FilenameRegex => "filename_regex",
             Self::Manual => "manual",
             Self::PhaseB => "phase_b",
+            Self::PullList => "pull_list",
             Self::Unmatched => "unmatched",
             Self::Ignored => "ignored",
         }
@@ -54,6 +60,7 @@ impl MatchMethod {
             "filename_regex" => Self::FilenameRegex,
             "manual" => Self::Manual,
             "phase_b" => Self::PhaseB,
+            "pull_list" => Self::PullList,
             "unmatched" => Self::Unmatched,
             "ignored" => Self::Ignored,
             _ => return None,
@@ -151,6 +158,7 @@ mod tests {
             MatchMethod::FilenameRegex,
             MatchMethod::Manual,
             MatchMethod::PhaseB,
+            MatchMethod::PullList,
             MatchMethod::Unmatched,
             MatchMethod::Ignored,
         ] {

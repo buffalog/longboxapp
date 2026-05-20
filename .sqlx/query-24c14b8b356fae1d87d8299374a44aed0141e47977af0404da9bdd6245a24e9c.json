@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM downloader_config WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "24c14b8b356fae1d87d8299374a44aed0141e47977af0404da9bdd6245a24e9c"
+}

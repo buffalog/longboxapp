@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  issue_id AS \"issue_id!: i64\", attempted_at AS \"attempted_at: _\",\n                  indexer_id, release_id, status, error_message,\n                  retry_count AS \"retry_count!: i64\"\n           FROM pull_attempts\n           WHERE series_id = ? AND issue_id = ?\n           ORDER BY attempted_at DESC, id DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "attempted_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "indexer_id",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "release_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_count!: i64",
+        "ordinal": 8,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "6458794ac9b856a78587a44b8d632b354f261e5dc70897e354f36a8eb82d1004"
+}

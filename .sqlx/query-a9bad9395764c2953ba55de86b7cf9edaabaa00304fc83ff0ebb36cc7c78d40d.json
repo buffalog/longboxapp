@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_attempts SET status = ?, error_message = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a9bad9395764c2953ba55de86b7cf9edaabaa00304fc83ff0ebb36cc7c78d40d"
+}

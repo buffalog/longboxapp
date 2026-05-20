@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", name, base_url, api_key,\n                  enabled AS \"enabled!: bool\", priority AS \"priority!: i64\",\n                  maxage_days AS \"maxage_days!: i64\", created_at AS \"created_at: _\"\n           FROM indexer_configs\n           WHERE enabled = 1\n           ORDER BY priority ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "base_url",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "api_key",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "priority!: i64",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "maxage_days!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 7,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "86523bc4c373a4cdea609aaba835c228c28a2bf819b2adcc5a8427bf880e0aa8"
+}

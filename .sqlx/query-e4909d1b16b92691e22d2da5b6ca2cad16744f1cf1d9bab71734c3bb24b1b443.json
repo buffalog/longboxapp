@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM indexer_configs WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e4909d1b16b92691e22d2da5b6ca2cad16744f1cf1d9bab71734c3bb24b1b443"
+}
