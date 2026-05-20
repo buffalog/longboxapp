@@ -19,6 +19,7 @@ async fn migration_creates_all_tables() {
         names,
         vec![
             "cv_release_cache".to_string(),
+            "discovered_folders".to_string(),
             "downloader_config".to_string(),
             "files".to_string(),
             "indexer_configs".to_string(),

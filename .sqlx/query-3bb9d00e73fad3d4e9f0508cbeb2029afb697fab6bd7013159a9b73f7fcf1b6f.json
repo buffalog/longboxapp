@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!: i64\", s.title, s.sort_title,\n                  s.start_year, s.publisher, s.cover_url,\n                  s.last_matched_count AS \"last_matched_count!: i64\"\n           FROM series s\n           WHERE NOT EXISTS (\n               SELECT 1 FROM files f\n               JOIN issues i ON f.issue_id = i.id\n               WHERE i.series_id = s.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n           )\n           ORDER BY s.sort_title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "sort_title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_matched_count!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3bb9d00e73fad3d4e9f0508cbeb2029afb697fab6bd7013159a9b73f7fcf1b6f"
+}

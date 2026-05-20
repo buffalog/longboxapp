@@ -5,6 +5,7 @@
 //! statements or `&mut Transaction<'_, Sqlite>` for transactional work.
 
 pub mod candidate;
+pub mod discovered_folders_repo;
 pub mod downloader_config_repo;
 pub mod error;
 pub mod file_repo;
@@ -23,6 +24,7 @@ pub mod settings_repo;
 pub mod webhook_config_repo;
 
 pub use candidate::{find_candidates, row_to_issue, row_to_series};
+pub use discovered_folders_repo::{DiscoveredFolder, DiscoveredFolderRow};
 pub use downloader_config_repo::{DownloaderConfigRow, NewDownloaderConfig};
 pub use error::{DbError, Result};
 pub use file_repo::{FileRow, FileUpdate, NewFile};
@@ -47,5 +49,5 @@ pub type Pool = sqlx::SqlitePool;
 pub use scan_run_repo::{
     NewScanRun, ScanCompletion, ScanProgress, ScanRunKind, ScanRunRow, ScanRunStatus,
 };
-pub use series_repo::{NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts};
+pub use series_repo::{NewSeries, PhantomSeries, SeriesRow, SeriesUpdate, SeriesWithCounts};
 pub use settings_repo::{KEY_LIBRARY_ROOT_PATH, KEY_MATCH_CONFIDENCE_THRESHOLD};

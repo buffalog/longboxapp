@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET last_matched_count = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b1bf150f8d0bf576327dc6015a7063ad00ce43c0a75cdcf33fd30942286c36be"
+}
