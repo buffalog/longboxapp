@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", folder_name,\n                  first_seen_at AS \"first_seen_at: _\",\n                  last_seen_at AS \"last_seen_at: _\",\n                  dismissed_at AS \"dismissed_at: _\",\n                  file_count AS \"file_count!: i64\"\n           FROM discovered_folders\n           WHERE dismissed_at IS NULL\n           ORDER BY first_seen_at ASC, folder_name ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "folder_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "first_seen_at: _",
+        "ordinal": 2,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "last_seen_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "dismissed_at: _",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "file_count!: i64",
+        "ordinal": 5,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4cd1c6cf20bf1a2d0e610e328912252f0ed625ade0013fb6cd113cbf2d3857b4"
+}

@@ -327,3 +327,68 @@ where
     .ok_or(DbError::NotFound)?;
     Ok(row)
 }
+
+/// A zero-owned series — a "phantom" — carrying its last-scan matched
+/// count. `last_matched_count > 0` marks a *transition* phantom (the
+/// series held files at the last scan and has since lost them all);
+/// the transition-vs-steady-state partition is the route's job.
+///
+/// Deliberately a narrow struct rather than a `SeriesRow` field — the
+/// new column stays out of the widely-used row type and its many
+/// SELECTs.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
+pub struct PhantomSeries {
+    pub id: i64,
+    pub title: String,
+    pub sort_title: String,
+    pub start_year: Option<i64>,
+    pub publisher: Option<String>,
+    pub cover_url: Option<String>,
+    pub last_matched_count: i64,
+}
+
+/// Every series with no owned, present file — the phantom set. The
+/// reconciliation route partitions the result on `last_matched_count`
+/// for its transition vs steady-state surfaces.
+pub async fn list_phantoms<'e, E>(executor: E) -> Result<Vec<PhantomSeries>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        PhantomSeries,
+        r#"SELECT s.id AS "id!: i64", s.title, s.sort_title,
+                  s.start_year, s.publisher, s.cover_url,
+                  s.last_matched_count AS "last_matched_count!: i64"
+           FROM series s
+           WHERE NOT EXISTS (
+               SELECT 1 FROM files f
+               JOIN issues i ON f.issue_id = i.id
+               WHERE i.series_id = s.id
+                 AND f.status = 'owned'
+                 AND f.is_present = 1
+           )
+           ORDER BY s.sort_title COLLATE NOCASE"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Set a series' `last_matched_count` — the scanner calls this for each
+/// series at the end of a full scan.
+pub async fn update_last_matched_count<'e, E>(executor: E, series_id: i64, count: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series SET last_matched_count = ? WHERE id = ?"#,
+        count,
+        series_id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}

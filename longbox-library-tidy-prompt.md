@@ -54,9 +54,9 @@ file_count       INTEGER NOT NULL DEFAULT 0
 
 **Hard definition (transition signal):** series with zero matched files in current scan AND `>0` matched files in prior scan. Strongest possible user-deletion signal — almost certainly the user just deleted a folder. Triggers the proactive reconciliation prompt.
 
-**Soft definition (steady-state):** series with zero matched files for N consecutive scans. Listed in tidy view without action prompt — user can review at their leisure. Handles the existing phantom backlog (28 series that were already zero-ownership before LongBox started detecting transitions).
+**Soft definition (steady-state):** series currently zero-owned. Listed in tidy view without action prompt — user can review at their leisure. Handles the existing phantom backlog (28 series that were already zero-ownership before LongBox started detecting transitions).
 
-Schema: `series.last_matched_count INT DEFAULT 0` — updated at end of each full scan.
+Schema: `series.last_matched_count INT DEFAULT 0` — the last full scan's matched count, updated at the end of each scan. There is **no** consecutive-scan counter. "Steady-state" is therefore the operational definition "currently zero-owned"; "transition" is "currently zero-owned AND `last_matched_count > 0`". The repo returns all zero-owned series with their `last_matched_count`; the steady-state/transition split is a **route-layer** partition, not a repo-layer one.
 
 ### 4. Scheduled scan time
 
@@ -87,11 +87,11 @@ Per-step kickoffs run before each step (5–10 questions each), per the A.8 prec
 
 ### Step 1 — Schema + repos
 
-- Migration: add `series.last_matched_count INT DEFAULT 0`.
+- Migration: add `series.last_matched_count INT DEFAULT 0`, backfilled from each series' current owned-file count so transition detection is live from the first post-migration scan.
 - Create `discovered_folders` table per #2.
-- Repo: `series_repo` gains `update_last_matched_count`, `list_phantoms` (zero owned), `list_phantoms_with_transition` (zero owned AND last_matched_count > 0).
-- Repo: new `discovered_folders_repo` with insert/upsert/list/dismiss/delete.
-- Regenerate `.sqlx/` offline cache.
+- Repo: `series_repo` gains `update_last_matched_count` and `list_phantoms` — the latter returns every zero-owned series with its `last_matched_count` in a localized `PhantomSeries` struct (the new column is **not** added to the widely-used `SeriesRow`). The steady-state/transition split is partitioned by the Step 4 route, not by separate repo methods.
+- Repo: new `discovered_folders_repo` with `upsert` / `list` / `dismiss`. A standalone `insert` and `delete` are omitted — `upsert` covers new-folder insertion, and no Step 1–6 caller deletes a row; either is added later if a consumer appears.
+- Regenerate `.sqlx/` offline cache via `cargo sqlx prepare --workspace -- --all-targets`.
 - Standard schema step shape (mirrors A.8 Step 3).
 
 ### Step 2 — Scanner additions
