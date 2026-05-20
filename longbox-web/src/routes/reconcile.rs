@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/reconcile/add", post(add))
         .route("/reconcile/dismiss", post(dismiss))
         .route("/reconcile/phantom/:series_id", delete(delete_phantom))
+        .route("/reconcile/phantom/:series_id/keep", post(keep_phantom))
         .route("/reconcile/phantoms/bulk", post(bulk_delete_phantoms))
 }
 
@@ -186,6 +187,29 @@ async fn delete_phantom(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     delete_series(&state.db, series_id).await?;
     Ok(Json(serde_json::json!({ "deleted": series_id })))
+}
+
+/// "Keep" a transition phantom: reset `last_matched_count` to 0 so it
+/// demotes from the "recently lost files" surface to the steady-state
+/// list. The user has reviewed the lost-files signal and decided to
+/// keep the catalog entry. 404 for an unknown series — the explicit
+/// existence check gives a clean `series` 404 rather than the generic
+/// `row` one `update_last_matched_count`'s own `NotFound` would map to.
+async fn keep_phantom(
+    State(state): State<AppState>,
+    Path(series_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if series_repo::find_by_id(&state.db, series_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: series_id.to_string(),
+        });
+    }
+    series_repo::update_last_matched_count(&state.db, series_id, 0).await?;
+    Ok(Json(serde_json::json!({ "kept": series_id })))
 }
 
 /// Best-effort bulk phantom delete. Each id routes through the shared

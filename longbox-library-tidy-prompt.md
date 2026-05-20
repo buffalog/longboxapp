@@ -122,6 +122,7 @@ New module `routes/reconcile.rs`:
 - `POST /api/reconcile/dismiss` → body `{ folder_names: [...] }`; bulk-mark `dismissed_at`.
 - `DELETE /api/reconcile/phantom/:series_id` → single series delete (cascade per existing delete-series semantics).
 - `POST /api/reconcile/phantoms/bulk` → body `{ series_ids: [...] }`; bulk delete.
+- `POST /api/reconcile/phantom/:series_id/keep` → reset `last_matched_count` to 0, demoting a transition phantom to the steady-state list. **(Brief amendment, folded into the Step 5 commit: Step 4's original route enumeration omitted this endpoint even though Step 1's `update_last_matched_count` doc-comment names the Step 5 "Keep" action as its consumer. Implemented in Step 5 alongside the UI that drives it.)**
 
 Typed 409 / 404 surfacing per A.8 convention.
 
