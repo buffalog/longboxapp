@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["longbox-core", "longbox-db", "longbox-comicvine", "longbox-newznab", "longbox-downloader", "longbox-scanner", "longbox-web", "longbox-postprocess", "longbox-pull"]
+members = ["longbox-core", "longbox-db", "longbox-comicvine", "longbox-newznab", "longbox-downloader", "longbox-scanner", "longbox-web", "longbox-postprocess", "longbox-pull", "longbox-scan-scheduler"]
 
 [workspace.package]
 edition = "2021"

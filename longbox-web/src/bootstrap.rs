@@ -7,11 +7,13 @@ use longbox_comicvine::{ComicVineClient, ComicVineClientConfig};
 use longbox_db::{library_root_repo, NewLibraryRoot};
 use longbox_scanner::{Scanner, ScannerConfig};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
+use ulid::Ulid;
 
 use crate::config::{normalize_path, AppConfig};
-use crate::state::{AppState, ScanStatus};
+use crate::state::{AppState, CurrentScan, ScanKind, ScanStatus};
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
@@ -94,12 +96,12 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     .map_err(BootstrapError::Cv)?;
 
     // 5. Scanner.
-    let scanner = Scanner::new(
+    let scanner = Arc::new(Scanner::new(
         db.clone(),
         ScannerConfig {
             match_threshold: config.match_threshold,
         },
-    );
+    ));
 
     // 6. Phase B pending-intervention cache. Created here so it exists
     //    even when the watcher is disabled — the dashboard handler
@@ -124,17 +126,78 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         db.clone(),
     );
 
-    // 9. Compose state.
+    // 9. Library Tidy scheduled scan. The scan-with-status logic is a
+    //    closure built here — it needs `scan_status`, a web-layer type
+    //    the scheduler crate can't depend on without a cycle; the
+    //    generic scheduler just fires the closure daily.
+    let scan_status = Arc::new(RwLock::new(ScanStatus::default()));
+    let scan_scheduler = longbox_scan_scheduler::start(
+        longbox_scan_scheduler::ScanSchedulerConfig {
+            daily_time: config.scan_schedule_time,
+        },
+        {
+            let scanner = Arc::clone(&scanner);
+            let scan_status = Arc::clone(&scan_status);
+            move || {
+                run_scheduled_scan(
+                    Arc::clone(&scanner),
+                    Arc::clone(&scan_status),
+                    library_root_id,
+                )
+            }
+        },
+    );
+
+    // 10. Compose state.
     Ok(AppState {
         db,
         cv: Arc::new(cv),
-        scanner: Arc::new(scanner),
+        scanner,
         config: Arc::new(config),
-        scan_status: Arc::new(RwLock::new(ScanStatus::default())),
+        scan_status,
         library_root_id,
         pending_cache,
         pull,
+        scan_scheduler,
     })
+}
+
+/// One scheduled-scan attempt. Routes through the same `scan_status`
+/// guard the manual scan route uses, so a scheduled scan and a manual
+/// scan are mutually exclusive and a scheduled scan shows in the live
+/// "scan in progress" indicator. A fire while a scan is already running
+/// is skipped (logged) — the next day's slot retries.
+async fn run_scheduled_scan(
+    scanner: Arc<Scanner>,
+    scan_status: Arc<RwLock<ScanStatus>>,
+    library_root_id: i64,
+) {
+    {
+        let mut status = scan_status.write().await;
+        if status.current.is_some() {
+            info!(
+                target: "longbox_web",
+                "scheduled scan skipped — a scan is already in progress"
+            );
+            return;
+        }
+        status.current = Some(CurrentScan {
+            scan_id: Ulid::new().to_string(),
+            library_root_id,
+            kind: ScanKind::Full,
+            started_at: OffsetDateTime::now_utc(),
+        });
+    }
+    let result = scanner.scan_full(library_root_id).await;
+    scan_status.write().await.current = None;
+    match result {
+        Ok(report) => info!(
+            target: "longbox_web",
+            files_seen = report.files_seen,
+            "scheduled scan complete"
+        ),
+        Err(e) => warn!(target: "longbox_web", err = %e, "scheduled scan failed"),
+    }
 }
 
 /// Phase B startup. Best-effort: a watch-folder misconfiguration must

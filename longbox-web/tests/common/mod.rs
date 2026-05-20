@@ -79,12 +79,18 @@ pub async fn build_test_app() -> TestApp {
         cors_permissive: false,
         download_watch_path: None,
         pull_schedule_time: time::macros::time!(05:00),
+        scan_schedule_time: time::macros::time!(03:00),
     };
 
-    // The pull scheduler runs in every test app; with the default
-    // 05:00 slot it just sleeps — tests never wait on it. The handle
-    // is what the `/pull/check` route exercises.
+    // The pull + scan schedulers run in every test app; with their
+    // default slots they just sleep — tests never wait on them. The
+    // pull handle is what the `/pull/check` route exercises; the scan
+    // scheduler gets a no-op closure.
     let pull = longbox_pull::start(longbox_pull::PullConfig::default(), pool.clone());
+    let scan_scheduler = longbox_scan_scheduler::start(
+        longbox_scan_scheduler::ScanSchedulerConfig::default(),
+        || async {},
+    );
 
     let state = AppState {
         db: pool,
@@ -95,6 +101,7 @@ pub async fn build_test_app() -> TestApp {
         library_root_id,
         pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
         pull,
+        scan_scheduler,
     };
 
     let router = build_router(state.clone());

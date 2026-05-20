@@ -1,0 +1,18 @@
+[package]
+name = "longbox-scan-scheduler"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox scheduled-scan timer — runs the daily library scan on a tokio schedule."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time"] }
+time = { version = "0.3", features = ["macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
