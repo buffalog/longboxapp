@@ -66,7 +66,7 @@ Schema: `series.last_matched_count INT DEFAULT 0` — the last full scan's match
 - Runs **before** the pull sweep at `05:00` UTC — catalog is fresh when the pull engine runs.
 - Same env-var + tokio task pattern as `PULL_SCHEDULE_TIME` (A.8 Step 6).
 - UTC-only (same `OffsetDateTime::now_local()` IndeterminateOffset limitation as Step 6; documented in env var help text).
-- Manual scan still available via UI and `/api/scans/trigger`; graceful 409 guard when scheduled scan in progress.
+- Manual scan still available via the UI and the existing `POST /library-roots/:id/scan` endpoint; graceful 409 guard when a scan is already in progress. The scheduled scan participates in the same `scan_status` guard the manual route uses, so the two are mutually exclusive and a scheduled scan shows in the dashboard's live indicator.
 
 ### 5. Phase B coexistence
 
@@ -105,12 +105,12 @@ Per-step kickoffs run before each step (5–10 questions each), per the A.8 prec
 
 ### Step 3 — Scheduled scan crate
 
-- New `longbox-scan-scheduler` workspace crate.
-- `start()` spawns daily scheduler task, returns `ScanSchedulerHandle`.
+- New `longbox-scan-scheduler` workspace crate — a generic daily scheduler: `start(config, scan_fn)` spawns the tokio task and returns `ScanSchedulerHandle`. The crate does not depend on `longbox-scanner`/`longbox-web` (the `scan_status` types it would need live in `longbox-web`, which would be a dependency cycle); the scan-with-status logic is a closure built in `bootstrap.rs` and handed to the scheduler.
 - `SCAN_SCHEDULE_TIME` env var read from `AppConfig` (default `03:00` UTC).
-- Triggers the same scan code path as the manual UI trigger.
-- 409 guard if scan already running (mirrors `longbox-pull`'s `AlreadyRunning`).
+- The bootstrap closure runs the same `scan_status`-guarded full scan the manual route uses.
+- 409 guard is the existing `scan_status` check in `routes/scan.rs` plus the scanner's `scan_lock` — the closure participates in `scan_status`, so no new guard and no route changes.
 - `bootstrap.rs` wiring; `AppState` gains the handle.
+- Ships its own tests: `duration_until_next` units + a `tokio::time`-mocked test that the scheduler fires the closure at the configured time.
 
 ### Step 4 — Reconciliation routes
 
@@ -151,7 +151,7 @@ Temporary flat `/library/tidy` nav link (with `// TODO Step 12 (A.8): fold into 
 
 - Backend route tests in `api_tests.rs`: full CRUD coverage, bulk operations, dismissal idempotency, 404s for unknown series/folders.
 - Scanner integration tests: transition detection (mocked file state changes between two scans), discovered folder upserts (new / existing / dismissed paths).
-- Scheduled scan crate tests: tokio time-mocking, scheduler triggers correctly at configured time, 409 guard.
+- (The `longbox-scan-scheduler` crate's own unit + `tokio::time`-mocked tests ship with Step 3; Step 7 keeps only broader cross-component integration coverage.)
 - Frontend `api/*.ts` unit tests + `@testing-library/svelte` component tests for `/library/tidy` (per A.8 Step 5/7 component-test pattern, IndexerSettings.test.ts as template).
 
 ### Step 8 — End-to-end verification (optional, may fold into Step 7)

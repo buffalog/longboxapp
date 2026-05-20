@@ -25,6 +25,10 @@ pub struct AppState {
     /// scheduler task runs unconditionally; the `/pull/check` route
     /// uses this to trigger an immediate sweep.
     pub pull: longbox_pull::PullHandle,
+    /// Handle to the Library Tidy scheduled-scan timer. Always present;
+    /// the daily scan runs through the same `scan_status` guard as the
+    /// manual scan route.
+    pub scan_scheduler: longbox_scan_scheduler::ScanSchedulerHandle,
 }
 
 /// In-memory mid-scan status. The "current" pill in the UI reads from

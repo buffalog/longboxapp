@@ -20,6 +20,10 @@ pub struct AppConfig {
     /// `PULL_SCHEDULE_TIME` (`HH:MM`, default 05:00). Interpreted as
     /// UTC by the pull scheduler — see `longbox_pull::PullConfig`.
     pub pull_schedule_time: time::Time,
+    /// Wall-clock time the daily library scan fires, from
+    /// `SCAN_SCHEDULE_TIME` (`HH:MM`, default 03:00 — before the pull
+    /// sweep, so the catalog is fresh). UTC, same rationale as above.
+    pub scan_schedule_time: time::Time,
 }
 
 #[derive(Debug, Error)]
@@ -72,8 +76,13 @@ impl AppConfig {
         let download_watch_path = optional("DOWNLOAD_WATCH_PATH");
 
         let pull_schedule_time = match optional("PULL_SCHEDULE_TIME") {
-            Some(raw) => parse_schedule_time(&raw)?,
+            Some(raw) => parse_schedule_time("PULL_SCHEDULE_TIME", &raw)?,
             None => time::macros::time!(05:00),
+        };
+
+        let scan_schedule_time = match optional("SCAN_SCHEDULE_TIME") {
+            Some(raw) => parse_schedule_time("SCAN_SCHEDULE_TIME", &raw)?,
+            None => time::macros::time!(03:00),
         };
 
         Ok(Self {
@@ -86,15 +95,17 @@ impl AppConfig {
             cors_permissive,
             download_watch_path,
             pull_schedule_time,
+            scan_schedule_time,
         })
     }
 }
 
 /// Parse a `HH:MM` 24-hour wall-clock string into a [`time::Time`].
-/// The pull scheduler interprets the result as UTC.
-fn parse_schedule_time(raw: &str) -> Result<time::Time, ConfigError> {
+/// The schedulers interpret the result as UTC. `var` names the source
+/// env var for the error message.
+fn parse_schedule_time(var: &'static str, raw: &str) -> Result<time::Time, ConfigError> {
     let invalid = |reason: &str| ConfigError::InvalidValue {
-        var: "PULL_SCHEDULE_TIME",
+        var,
         value: raw.to_owned(),
         reason: reason.to_owned(),
     };
@@ -206,16 +217,11 @@ mod tests {
 
     #[test]
     fn parse_schedule_time_accepts_hh_mm_and_rejects_garbage() {
-        assert_eq!(
-            parse_schedule_time("05:00").unwrap(),
-            time::macros::time!(05:00)
-        );
-        assert_eq!(
-            parse_schedule_time("23:30").unwrap(),
-            time::macros::time!(23:30)
-        );
-        assert!(parse_schedule_time("5am").is_err());
-        assert!(parse_schedule_time("24:00").is_err());
-        assert!(parse_schedule_time("05:99").is_err());
+        let p = |raw| parse_schedule_time("SCHEDULE_TIME", raw);
+        assert_eq!(p("05:00").unwrap(), time::macros::time!(05:00));
+        assert_eq!(p("23:30").unwrap(), time::macros::time!(23:30));
+        assert!(p("5am").is_err());
+        assert!(p("24:00").is_err());
+        assert!(p("05:99").is_err());
     }
 }

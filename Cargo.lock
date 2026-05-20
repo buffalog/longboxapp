@@ -1273,6 +1273,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "longbox-scan-scheduler"
+version = "0.0.1"
+dependencies = [
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "longbox-scanner"
 version = "0.0.1"
 dependencies = [
@@ -1305,6 +1314,7 @@ dependencies = [
  "longbox-newznab",
  "longbox-postprocess",
  "longbox-pull",
+ "longbox-scan-scheduler",
  "longbox-scanner",
  "mime_guess",
  "pretty_assertions",
