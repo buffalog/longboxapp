@@ -78,10 +78,7 @@ where
     Ok(row)
 }
 
-pub async fn find_by_metron_id<'e, E>(
-    executor: E,
-    metron_id: &str,
-) -> Result<Option<SeriesRow>>
+pub async fn find_by_metron_id<'e, E>(executor: E, metron_id: &str) -> Result<Option<SeriesRow>>
 where
     E: SqliteExecutor<'e>,
 {
@@ -116,9 +113,7 @@ pub struct SeriesWithCounts {
 /// counts. `missing_count` is "issues for which no present owned file
 /// exists" — not derivable from `total_count - owned_count`, because that
 /// conflates with needs_review and ignored.
-pub async fn find_all_with_counts<'e, E>(
-    executor: E,
-) -> Result<Vec<SeriesWithCounts>>
+pub async fn find_all_with_counts<'e, E>(executor: E) -> Result<Vec<SeriesWithCounts>>
 where
     E: SqliteExecutor<'e>,
 {

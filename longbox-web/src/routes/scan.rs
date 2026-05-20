@@ -103,9 +103,7 @@ async fn start_scan(
     ))
 }
 
-async fn current(
-    State(state): State<AppState>,
-) -> Json<Option<CurrentScan>> {
+async fn current(State(state): State<AppState>) -> Json<Option<CurrentScan>> {
     Json(state.scan_status.read().await.current.clone())
 }
 
@@ -114,9 +112,7 @@ async fn current(
 /// match-folder-from-cv). The mid-scan pill (`/api/scans/current`) keeps
 /// surfacing those while they're in flight; they just don't pollute
 /// history.
-async fn recent(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<ScanRunRow>>, ApiError> {
+async fn recent(State(state): State<AppState>) -> Result<Json<Vec<ScanRunRow>>, ApiError> {
     let rows = scan_run_repo::list_recent(
         &state.db,
         10,

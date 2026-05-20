@@ -113,7 +113,10 @@ mod tests {
             deck: Some("Apocalypse comic.".into()),
         };
         let projected = project_search_item(item);
-        assert_eq!(projected.cover_url.as_deref(), Some("https://cdn/medium.jpg"));
+        assert_eq!(
+            projected.cover_url.as_deref(),
+            Some("https://cdn/medium.jpg")
+        );
         assert_eq!(projected.publisher.as_deref(), Some("Image"));
         assert_eq!(projected.start_year, Some(2003));
         assert_eq!(projected.issue_count, 193);
@@ -181,7 +184,10 @@ mod tests {
         let projected = project_issue(issue);
         assert_eq!(projected.issue_number, "1.MU");
         assert_eq!(projected.cv_issue_id, 12345);
-        assert_eq!(projected.cover_url.as_deref(), Some("https://cdn/issue-medium.jpg"));
+        assert_eq!(
+            projected.cover_url.as_deref(),
+            Some("https://cdn/issue-medium.jpg")
+        );
     }
 
     #[test]

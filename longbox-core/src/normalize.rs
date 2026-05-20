@@ -61,7 +61,10 @@ mod tests {
 
     #[test]
     fn does_not_strip_article_without_trailing_space() {
-        assert_eq!(normalize_title("Theory of Everything"), "theory of everything");
+        assert_eq!(
+            normalize_title("Theory of Everything"),
+            "theory of everything"
+        );
         assert_eq!(normalize_title("Ant-Man"), "ant-man");
         assert_eq!(normalize_title("The"), "the");
     }

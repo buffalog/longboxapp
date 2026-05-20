@@ -11,11 +11,7 @@ fn scanner_for(db: longbox_db::Pool) -> Scanner {
     Scanner::new(db, ScannerConfig::default())
 }
 
-async fn find_file(
-    pool: &longbox_db::Pool,
-    library_root_id: i64,
-    path: &str,
-) -> FileRow {
+async fn find_file(pool: &longbox_db::Pool, library_root_id: i64, path: &str) -> FileRow {
     file_repo::find_by_path(pool, library_root_id, path)
         .await
         .unwrap()
@@ -62,18 +58,33 @@ async fn full_scan_with_seeded_watchlist_matches_all_three_tiers() {
         .unwrap();
 
     // 001 → Tier 1 (Web URL → CV issue 101001).
-    let f1 = find_file(&pool, library_root_id, "Walking Dead (2003)/Walking Dead 001 (2003).cbz").await;
+    let f1 = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 001 (2003).cbz",
+    )
+    .await;
     assert_eq!(f1.match_method, "web_url_cv", "001 should hit Tier 1");
     assert_eq!(f1.match_confidence, 1.0);
     assert_eq!(f1.status, "owned");
 
     // 002 → Tier 3 (no ComicInfo, filename matched).
-    let f2 = find_file(&pool, library_root_id, "Walking Dead (2003)/Walking Dead 002 (2003).cbz").await;
+    let f2 = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 002 (2003).cbz",
+    )
+    .await;
     assert_eq!(f2.match_method, "filename_regex", "002 should hit Tier 3");
     assert_eq!(f2.status, "owned");
 
     // 003 → Tier 2 (ComicInfo Series + Number, no Web URL).
-    let f3 = find_file(&pool, library_root_id, "Walking Dead (2003)/Walking Dead 003 (2003).cbz").await;
+    let f3 = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 003 (2003).cbz",
+    )
+    .await;
     assert_eq!(f3.match_method, "comicinfo_xml", "003 should hit Tier 2");
     assert_eq!(f3.status, "owned");
 
@@ -148,7 +159,12 @@ async fn tier1_cv_url_falls_through_when_id_not_in_db() {
         .scan_full(library_root_id)
         .await
         .unwrap();
-    let f = find_file(&pool, library_root_id, "Walking Dead (2003)/Walking Dead 001 (2003).cbz").await;
+    let f = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 001 (2003).cbz",
+    )
+    .await;
     // Tier 2 should win on series+number similarity.
     assert_eq!(f.match_method, "comicinfo_xml");
     assert_eq!(f.status, "owned");
@@ -228,7 +244,10 @@ async fn corrupt_cbz_logged_but_scan_continues() {
         .await
         .unwrap();
     assert!(
-        report.errors.iter().any(|e| e.path_relative.contains("corrupt.cbz")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.path_relative.contains("corrupt.cbz")),
         "expected corrupt.cbz in report.errors, got {:?}",
         report.errors
     );
@@ -366,7 +385,10 @@ async fn restored_file_flipped_present_again_no_duplicate_row() {
 async fn library_root_not_found_does_not_panic() {
     let pool = fresh_pool().await;
     let err = scanner_for(pool).scan_full(9_999_999).await.unwrap_err();
-    assert!(matches!(err, ScanError::LibraryRootNotFound { id: 9_999_999 }));
+    assert!(matches!(
+        err,
+        ScanError::LibraryRootNotFound { id: 9_999_999 }
+    ));
 }
 
 #[tokio::test]

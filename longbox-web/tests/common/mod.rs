@@ -10,9 +10,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::Router;
 use longbox_comicvine::{ComicVineClient, ComicVineClientConfig};
-use longbox_db::{
-    library_root_repo, NewLibraryRoot, Pool,
-};
+use longbox_db::{library_root_repo, NewLibraryRoot, Pool};
 use longbox_scanner::{Scanner, ScannerConfig};
 use longbox_web::{build_router, AppConfig, AppState, ScanStatus};
 use tempfile::TempDir;

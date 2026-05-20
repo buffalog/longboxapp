@@ -72,8 +72,11 @@ impl ComicVineClient {
             .timeout(config.timeout)
             .user_agent(config.user_agent)
             .build()?;
-        let limiter =
-            CvRateLimiter::new(config.rate_limit_per_hour, BURST_CAPACITY, config.max_wait_for_slot);
+        let limiter = CvRateLimiter::new(
+            config.rate_limit_per_hour,
+            BURST_CAPACITY,
+            config.max_wait_for_slot,
+        );
         Ok(Self {
             http,
             base_url,

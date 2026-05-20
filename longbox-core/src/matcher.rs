@@ -278,7 +278,11 @@ mod tests {
             ..Default::default()
         };
         let r = match_file(Some(&ci), None, &candidates);
-        assert_eq!(r.issue_id, Some(20), "2014 series should win on year tie-break");
+        assert_eq!(
+            r.issue_id,
+            Some(20),
+            "2014 series should win on year tie-break"
+        );
     }
 
     #[test]

@@ -33,22 +33,12 @@ async fn find_by_id_returns_none_for_missing() {
 #[tokio::test]
 async fn list_all_orders_by_id() {
     let pool = fresh_pool().await;
-    library_root_repo::insert(
-        &pool,
-        NewLibraryRoot {
-            path: "/a".into(),
-        },
-    )
-    .await
-    .unwrap();
-    library_root_repo::insert(
-        &pool,
-        NewLibraryRoot {
-            path: "/b".into(),
-        },
-    )
-    .await
-    .unwrap();
+    library_root_repo::insert(&pool, NewLibraryRoot { path: "/a".into() })
+        .await
+        .unwrap();
+    library_root_repo::insert(&pool, NewLibraryRoot { path: "/b".into() })
+        .await
+        .unwrap();
     let rows = library_root_repo::list_all(&pool).await.unwrap();
     let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(paths, vec!["/a", "/b"]);

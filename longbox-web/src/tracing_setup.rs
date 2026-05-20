@@ -9,8 +9,7 @@ use tracing_subscriber::EnvFilter;
 /// a TTY (production / Docker / journald); pretty otherwise. Filter level
 /// from `LOG_LEVEL`, falling back to `info`.
 pub fn init(log_level: &str) {
-    let filter =
-        EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let is_tty = std::io::stderr().is_terminal();
     let registry = tracing_subscriber::registry().with(filter);

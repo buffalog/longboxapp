@@ -57,8 +57,10 @@ impl ComicInfoMetadata {
     /// UTF-8 and ready to embed in a CBZ as `ComicInfo.xml`.
     pub fn to_xml(&self) -> String {
         let mut out = String::with_capacity(512);
-        out.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
-"#);
+        out.push_str(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+"#,
+        );
         out.push_str(
             r#"<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
 "#,
@@ -264,7 +266,8 @@ mod tests {
         };
         let xml = m.to_xml();
         // HTML survives unescaped via CDATA; readers render it.
-        assert!(xml.contains("<Summary><![CDATA[<p>Has <i>italics</i> &amp; entities.</p>]]></Summary>"));
+        assert!(xml
+            .contains("<Summary><![CDATA[<p>Has <i>italics</i> &amp; entities.</p>]]></Summary>"));
     }
 
     #[test]

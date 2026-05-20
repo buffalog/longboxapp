@@ -102,7 +102,11 @@ async fn update_overwrites_mutable_fields_but_keeps_cv_id() {
     .await
     .unwrap();
     assert_eq!(updated.title, "Walking Dead (Refreshed)");
-    assert_eq!(updated.cv_id, Some(12345), "cv_id must not change on update");
+    assert_eq!(
+        updated.cv_id,
+        Some(12345),
+        "cv_id must not change on update"
+    );
     assert_eq!(updated.publisher.as_deref(), Some("Skybound"));
     assert_eq!(updated.description.as_deref(), Some("Apocalypse comic."));
 }
@@ -131,7 +135,9 @@ async fn update_missing_id_returns_not_found() {
 async fn duplicate_cv_id_surfaces_unique_violation() {
     let pool = fresh_pool().await;
     series_repo::insert(&pool, walking_dead()).await.unwrap();
-    let err = series_repo::insert(&pool, walking_dead()).await.unwrap_err();
+    let err = series_repo::insert(&pool, walking_dead())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, DbError::UniqueViolation { field: "cv_id" }),
         "got {err:?}"

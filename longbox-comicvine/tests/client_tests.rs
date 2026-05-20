@@ -111,9 +111,7 @@ async fn fetch_volume_happy_path() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/volume/4050-2127/"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(fixture("volume_4050_2127.json")),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture("volume_4050_2127.json")))
         .mount(&server)
         .await;
 
@@ -323,9 +321,7 @@ async fn http_503_surfaces_as_http_variant() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/search/"))
-        .respond_with(
-            ResponseTemplate::new(503).set_body_string(fixture("server_error_503.json")),
-        )
+        .respond_with(ResponseTemplate::new(503).set_body_string(fixture("server_error_503.json")))
         .mount(&server)
         .await;
 

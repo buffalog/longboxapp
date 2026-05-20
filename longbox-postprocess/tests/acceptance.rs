@@ -35,9 +35,7 @@ use longbox_db::{
     file_repo, issue_repo, library_root_repo, series_repo, NewIssue, NewLibraryRoot, NewSeries,
     Pool,
 };
-use longbox_postprocess::{
-    InterventionReason, PendingInterventionsCache, PostprocessConfig,
-};
+use longbox_postprocess::{InterventionReason, PendingInterventionsCache, PostprocessConfig};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -260,20 +258,14 @@ async fn six_file_acceptance_smoke() {
         let db = db.clone();
         let cache = Arc::clone(&cache_for_poll);
         async move {
-            let saga_001 = file_repo::find_by_path(
-                &db,
-                library_root_id,
-                "Saga (2012)/Saga (2012) 001.cbz",
-            )
-            .await
-            .unwrap();
-            let saga_002 = file_repo::find_by_path(
-                &db,
-                library_root_id,
-                "Saga (2012)/Saga (2012) 002.cbz",
-            )
-            .await
-            .unwrap();
+            let saga_001 =
+                file_repo::find_by_path(&db, library_root_id, "Saga (2012)/Saga (2012) 001.cbz")
+                    .await
+                    .unwrap();
+            let saga_002 =
+                file_repo::find_by_path(&db, library_root_id, "Saga (2012)/Saga (2012) 002.cbz")
+                    .await
+                    .unwrap();
             let watchmen_001 = file_repo::find_by_path(
                 &db,
                 library_root_id,
@@ -281,20 +273,14 @@ async fn six_file_acceptance_smoke() {
             )
             .await
             .unwrap();
-            let unsorted_c = file_repo::find_by_path(
-                &db,
-                library_root_id,
-                "_unsorted/Marvel 1602 001.cbz",
-            )
-            .await
-            .unwrap();
-            let unsorted_d = file_repo::find_by_path(
-                &db,
-                library_root_id,
-                "_unsorted/garbage_no_number.cbz",
-            )
-            .await
-            .unwrap();
+            let unsorted_c =
+                file_repo::find_by_path(&db, library_root_id, "_unsorted/Marvel 1602 001.cbz")
+                    .await
+                    .unwrap();
+            let unsorted_d =
+                file_repo::find_by_path(&db, library_root_id, "_unsorted/garbage_no_number.cbz")
+                    .await
+                    .unwrap();
             saga_001.is_some()
                 && saga_002.is_some()
                 && watchmen_001.is_some()
@@ -309,14 +295,11 @@ async fn six_file_acceptance_smoke() {
 
     // Criterion 1, 2, 3, 6 — file (a): detect, identify, owned import,
     // matched_at populated.
-    let row_a = file_repo::find_by_path(
-        &f.db,
-        f.library_root_id,
-        "Saga (2012)/Saga (2012) 001.cbz",
-    )
-    .await
-    .unwrap()
-    .expect("file a must be catalogued as owned");
+    let row_a =
+        file_repo::find_by_path(&f.db, f.library_root_id, "Saga (2012)/Saga (2012) 001.cbz")
+            .await
+            .unwrap()
+            .expect("file a must be catalogued as owned");
     assert_eq!(row_a.issue_id, Some(f.saga_1_id), "file a → Saga #1");
     assert_eq!(row_a.status, "owned");
     assert_eq!(row_a.match_method, "phase_b");
@@ -332,42 +315,32 @@ async fn six_file_acceptance_smoke() {
     assert!(!a_path.exists(), "source (a) must have moved out of watch");
 
     // Criterion 3 alt — file (b): filename-only match.
-    let row_b = file_repo::find_by_path(
-        &f.db,
-        f.library_root_id,
-        "Saga (2012)/Saga (2012) 002.cbz",
-    )
-    .await
-    .unwrap()
-    .expect("file b must be catalogued as owned");
+    let row_b =
+        file_repo::find_by_path(&f.db, f.library_root_id, "Saga (2012)/Saga (2012) 002.cbz")
+            .await
+            .unwrap()
+            .expect("file b must be catalogued as owned");
     assert_eq!(row_b.issue_id, Some(f.saga_2_id), "file b → Saga #2");
     assert_eq!(row_b.status, "owned");
     assert_eq!(row_b.match_method, "phase_b");
     assert!(row_b.matched_at.is_some());
 
     // Criterion 4 — file (c): ComicInfo for unknown series → _unsorted.
-    let row_c = file_repo::find_by_path(
-        &f.db,
-        f.library_root_id,
-        "_unsorted/Marvel 1602 001.cbz",
-    )
-    .await
-    .unwrap()
-    .expect("file c must land in _unsorted");
+    let row_c = file_repo::find_by_path(&f.db, f.library_root_id, "_unsorted/Marvel 1602 001.cbz")
+        .await
+        .unwrap()
+        .expect("file c must land in _unsorted");
     assert_eq!(row_c.status, "unmatched");
     assert_eq!(row_c.match_method, "phase_b");
     assert!(row_c.issue_id.is_none());
     assert!(!c_path.exists(), "source (c) must have moved to _unsorted");
 
     // Criterion 4 alt — file (d): no-hint short-circuit → _unsorted.
-    let row_d = file_repo::find_by_path(
-        &f.db,
-        f.library_root_id,
-        "_unsorted/garbage_no_number.cbz",
-    )
-    .await
-    .unwrap()
-    .expect("file d must land in _unsorted via no-hint branch");
+    let row_d =
+        file_repo::find_by_path(&f.db, f.library_root_id, "_unsorted/garbage_no_number.cbz")
+            .await
+            .unwrap()
+            .expect("file d must land in _unsorted via no-hint branch");
     assert_eq!(row_d.status, "unmatched");
     assert!(row_d.issue_id.is_none());
 

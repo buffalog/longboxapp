@@ -155,7 +155,11 @@ mod tests {
             MatchMethod::Ignored,
         ] {
             let s = m.as_db_str();
-            assert_eq!(MatchMethod::from_db_str(s), Some(m), "round-trip failed for {s}");
+            assert_eq!(
+                MatchMethod::from_db_str(s),
+                Some(m),
+                "round-trip failed for {s}"
+            );
         }
         assert_eq!(MatchMethod::from_db_str("bogus"), None);
     }

@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn jaccard_identical() {
-        assert!(approx(jaccard_similarity("walking dead", "walking dead"), 1.0));
+        assert!(approx(
+            jaccard_similarity("walking dead", "walking dead"),
+            1.0
+        ));
     }
 
     #[test]

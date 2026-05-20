@@ -11,7 +11,10 @@ async fn migration_creates_all_tables() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    let names: Vec<String> = rows.into_iter().map(|r| r.name.unwrap_or_default()).collect();
+    let names: Vec<String> = rows
+        .into_iter()
+        .map(|r| r.name.unwrap_or_default())
+        .collect();
     assert_eq!(
         names,
         vec![
@@ -36,7 +39,10 @@ async fn migration_creates_all_indexes() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    let names: Vec<String> = rows.into_iter().map(|r| r.name.unwrap_or_default()).collect();
+    let names: Vec<String> = rows
+        .into_iter()
+        .map(|r| r.name.unwrap_or_default())
+        .collect();
     assert!(names.contains(&"idx_series_sort_title".to_string()));
     assert!(names.contains(&"idx_issues_series".to_string()));
     assert!(names.contains(&"idx_files_issue".to_string()));
@@ -47,12 +53,9 @@ async fn migration_creates_all_indexes() {
 #[tokio::test]
 async fn seed_settings_row_present() {
     let pool = fresh_pool().await;
-    let value = longbox_db::settings_repo::get(
-        &pool,
-        longbox_db::KEY_MATCH_CONFIDENCE_THRESHOLD,
-    )
-    .await
-    .unwrap();
+    let value = longbox_db::settings_repo::get(&pool, longbox_db::KEY_MATCH_CONFIDENCE_THRESHOLD)
+        .await
+        .unwrap();
     assert_eq!(value.as_deref(), Some("0.85"));
 }
 

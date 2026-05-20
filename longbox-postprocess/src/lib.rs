@@ -128,7 +128,9 @@ async fn resolve_library_root_id(library_root: &PathBuf, db: &longbox_db::Pool) 
             return Ok(row.id);
         }
     }
-    Err(PostprocessError::LibraryRootNotInCatalog(library_root.clone()))
+    Err(PostprocessError::LibraryRootNotInCatalog(
+        library_root.clone(),
+    ))
 }
 
 /// Walk the watch folder once at startup, enqueueing every CBZ that
@@ -400,7 +402,11 @@ fn apply_outcome_to_cache(
                 last_attempt: time::OffsetDateTime::now_utc(),
             });
         }
-        Outcome::Failed { reason, target, size } => {
+        Outcome::Failed {
+            reason,
+            target,
+            size,
+        } => {
             cache.push(PendingIntervention {
                 source_path: source.to_path_buf(),
                 target_path: target,
@@ -609,7 +615,7 @@ mod tests {
 
     #[test]
     fn eviction_paths_from_event_catches_remove_and_rename_from() {
-        use notify::event::{Event, EventKind, ModifyKind, RenameMode, RemoveKind};
+        use notify::event::{Event, EventKind, ModifyKind, RemoveKind, RenameMode};
         let with_paths = |kind: EventKind, paths: Vec<PathBuf>| Event {
             kind,
             paths,
@@ -651,19 +657,31 @@ mod tests {
     #[test]
     fn paths_from_event_filters_to_relevant_kinds() {
         use notify::event::{Event, EventKind, ModifyKind, RenameMode};
-        let with_paths =
-            |kind: EventKind| Event { kind, paths: vec![PathBuf::from("/x/y.cbz")], attrs: Default::default() };
+        let with_paths = |kind: EventKind| Event {
+            kind,
+            paths: vec![PathBuf::from("/x/y.cbz")],
+            attrs: Default::default(),
+        };
 
         assert_eq!(
-            paths_from_event(&with_paths(EventKind::Create(notify::event::CreateKind::File))).len(),
+            paths_from_event(&with_paths(EventKind::Create(
+                notify::event::CreateKind::File
+            )))
+            .len(),
             1
         );
         assert_eq!(
-            paths_from_event(&with_paths(EventKind::Modify(ModifyKind::Name(RenameMode::To)))).len(),
+            paths_from_event(&with_paths(EventKind::Modify(ModifyKind::Name(
+                RenameMode::To
+            ))))
+            .len(),
             1
         );
         assert_eq!(
-            paths_from_event(&with_paths(EventKind::Remove(notify::event::RemoveKind::File))).len(),
+            paths_from_event(&with_paths(EventKind::Remove(
+                notify::event::RemoveKind::File
+            )))
+            .len(),
             0
         );
     }

@@ -63,12 +63,12 @@ async fn create(
     .await
     {
         Ok(row) => Ok(Json(row)),
-        Err(longbox_db::DbError::UniqueViolation { field: "publisher_name" }) => {
-            Err(ApiError::Conflict {
-                code: "conflict.publisher_filter_exists",
-                message: format!("A filter for {name:?} already exists (case-insensitive)."),
-            })
-        }
+        Err(longbox_db::DbError::UniqueViolation {
+            field: "publisher_name",
+        }) => Err(ApiError::Conflict {
+            code: "conflict.publisher_filter_exists",
+            message: format!("A filter for {name:?} already exists (case-insensitive)."),
+        }),
         Err(e) => Err(ApiError::from(e)),
     }
 }

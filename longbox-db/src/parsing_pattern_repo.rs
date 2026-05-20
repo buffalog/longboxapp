@@ -80,10 +80,7 @@ where
     Ok(rows)
 }
 
-pub async fn insert<'e, E>(
-    executor: E,
-    input: NewParsingPattern,
-) -> Result<ParsingPatternRow>
+pub async fn insert<'e, E>(executor: E, input: NewParsingPattern) -> Result<ParsingPatternRow>
 where
     E: SqliteExecutor<'e>,
 {

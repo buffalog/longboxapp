@@ -74,11 +74,9 @@ pub async fn blocked_names_lower<'e, E>(executor: E) -> Result<Vec<String>>
 where
     E: SqliteExecutor<'e>,
 {
-    let rows = sqlx::query!(
-        r#"SELECT publisher_name FROM publisher_filters WHERE mode = 'block'"#
-    )
-    .fetch_all(executor)
-    .await?;
+    let rows = sqlx::query!(r#"SELECT publisher_name FROM publisher_filters WHERE mode = 'block'"#)
+        .fetch_all(executor)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|r| r.publisher_name.to_lowercase())

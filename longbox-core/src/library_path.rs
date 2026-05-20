@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn pure_integer_padded_to_three_digits() {
         for (input, expected) in [
-            ("0", "Saga (2012) 000.cbz"),   // 0 = preview issues in '90s comics
+            ("0", "Saga (2012) 000.cbz"), // 0 = preview issues in '90s comics
             ("1", "Saga (2012) 001.cbz"),
             ("12", "Saga (2012) 012.cbz"),
             ("100", "Saga (2012) 100.cbz"),

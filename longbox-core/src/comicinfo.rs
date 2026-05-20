@@ -282,7 +282,11 @@ mod tests {
   <Web>https://comicvine.gamespot.com/issue/4000-12345/ https://metron.cloud/issue/saga-1-2012</Web>
 </ComicInfo>"#;
         let ci = ComicInfo::parse(xml.as_bytes()).unwrap();
-        assert_eq!(ci.web_urls.len(), 2, "whitespace-separated tokens become separate entries");
+        assert_eq!(
+            ci.web_urls.len(),
+            2,
+            "whitespace-separated tokens become separate entries"
+        );
         assert_eq!(ci.cv_issue_id(), Some(12345));
         assert_eq!(ci.metron_issue_slug().as_deref(), Some("saga-1-2012"));
     }

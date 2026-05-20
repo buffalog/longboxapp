@@ -46,7 +46,10 @@ async fn insert_new_pattern() {
 #[tokio::test]
 async fn find_by_id_for_seed_row() {
     let pool = fresh_pool().await;
-    let row = parsing_pattern_repo::find_by_id(&pool, 1).await.unwrap().unwrap();
+    let row = parsing_pattern_repo::find_by_id(&pool, 1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.priority, 5);
     assert_eq!(row.name, "Series Vol N #M");
 }

@@ -101,8 +101,8 @@ fn write_cbz(path: &Path, comic_info: Option<&str>) {
     // Push mtime back so the stability check doesn't sleep — tests
     // measure end-to-end behavior, not the 2 s wait.
     let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
-    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(earlier))
-        .ok(); // best-effort; if filetime isn't a dep, sleep instead
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(earlier)).ok();
+    // best-effort; if filetime isn't a dep, sleep instead
 }
 
 fn read_cbz_entry(path: &Path, entry_name: &str) -> Option<String> {
@@ -132,17 +132,17 @@ async fn imports_owned_via_filename_match() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(
-        &source,
-        f.library.path(),
-        f.library_root_id,
-        &f.db,
-    )
-    .await
-    .unwrap();
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db)
+        .await
+        .unwrap();
 
     let target = match outcome {
-        Outcome::Imported { target, series_id, issue_id, .. } => {
+        Outcome::Imported {
+            target,
+            series_id,
+            issue_id,
+            ..
+        } => {
             assert_eq!(series_id, f.series_id);
             assert_eq!(issue_id, f.issue_id);
             target
@@ -212,7 +212,10 @@ async fn overwrites_existing_comicinfo_in_source() {
         .iter()
         .filter(|n| n.eq_ignore_ascii_case("ComicInfo.xml"))
         .count();
-    assert_eq!(count, 1, "exactly one ComicInfo.xml expected, got {entries:?}");
+    assert_eq!(
+        count, 1,
+        "exactly one ComicInfo.xml expected, got {entries:?}"
+    );
 }
 
 #[tokio::test]
@@ -232,7 +235,11 @@ async fn unmatched_file_lands_in_unsorted() {
         other => panic!("expected Unsorted, got {other:?}"),
     };
 
-    let expected = f.library.path().join("_unsorted").join("Totally Unknown 042.cbz");
+    let expected = f
+        .library
+        .path()
+        .join("_unsorted")
+        .join("Totally Unknown 042.cbz");
     assert_eq!(target, expected);
     assert!(target.exists());
     assert!(!source.exists());
@@ -274,7 +281,10 @@ async fn conflict_leaves_source_untouched() {
 
     assert!(source.exists(), "source must stay put on conflict");
     let existing_bytes = std::fs::read(&existing_target).unwrap();
-    assert_eq!(existing_bytes, b"pre-existing", "target must not be overwritten");
+    assert_eq!(
+        existing_bytes, b"pre-existing",
+        "target must not be overwritten"
+    );
 
     // No catalog row was written for the source.
     let row = longbox_db::file_repo::find_by_path(
@@ -341,7 +351,11 @@ async fn rewrite_failure_surfaces_as_outcome_failed() {
         .unwrap();
 
     match outcome {
-        Outcome::Failed { reason, size, target } => {
+        Outcome::Failed {
+            reason,
+            size,
+            target,
+        } => {
             use longbox_postprocess::InterventionReason;
             assert!(
                 matches!(reason, InterventionReason::ComicInfoWriteFailed(_)),
