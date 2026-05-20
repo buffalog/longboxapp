@@ -2830,3 +2830,520 @@ async fn reconcile_counts_reports_transition_and_untracked() {
     assert_eq!(body["phantoms_with_transition"], 1);
     assert_eq!(body["untracked_folders"], 1);
 }
+
+// -------- reconcile: route matrix (Library Tidy Step 7) --------
+//
+// The failure / edge / idempotency / 404 coverage the Step 4-6 smoke
+// tests deferred. Two e2e scenarios (Step 8, folded into Step 7) follow
+// in the next section.
+
+/// Mount ComicVine volume + (empty) issues mocks for `cv_id` — enough
+/// for the reconcile-add flow's `fetch_volume` + `fetch_issues`.
+async fn mount_cv_volume(app: &common::TestApp, cv_id: i64, name: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/volume/4050-{cv_id}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{ "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": {{ "id": {cv_id}, "name": "{name}", "start_year": "2010",
+                "publisher": {{ "id": 1, "name": "Image" }}, "description": null,
+                "image": {{ "medium_url": "https://example.com/c.jpg" }},
+                "site_detail_url": "https://cv/{cv_id}/" }} }}"#
+        )))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 0,
+                "limit": 100, "offset": 0, "results": [] }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+}
+
+/// Seed a series + one issue, drop a CBZ whose ComicInfo CV-URL resolves
+/// to that issue, and run a full scan so the file lands `owned` and
+/// present. Returns the series id.
+async fn seed_series_with_owned_file(app: &common::TestApp, title: &str, cv_issue_id: i64) -> i64 {
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2010),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: Some(cv_issue_id),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let comic_info = format!(
+        "<?xml version=\"1.0\"?>\n<ComicInfo>\n  <Series>{title}</Series>\n  \
+         <Number>1</Number>\n  \
+         <Web>https://comicvine.gamespot.com/issue/4000-{cv_issue_id}/</Web>\n</ComicInfo>"
+    );
+    write_cbz(
+        &app.library_path().join(format!("{title}/{title} 001.cbz")),
+        Some(comic_info.as_str()),
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    series.id
+}
+
+#[tokio::test]
+async fn reconcile_phantoms_partitions_transition_and_steady() {
+    let app = build_test_app().await;
+    let transition = seed_pull_series(&app, "Lost Series").await;
+    series_repo::update_last_matched_count(&app.state.db, transition, 4)
+        .await
+        .unwrap();
+    let steady = seed_pull_series(&app, "Never Owned").await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    let ids = |key: &str| -> Vec<i64> {
+        body[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_i64().unwrap())
+            .collect()
+    };
+    // Transition subset: only the bumped series. Full list: both.
+    assert_eq!(ids("with_transition"), vec![transition]);
+    let all = ids("all_zero_owned");
+    assert_eq!(all.len(), 2);
+    assert!(all.contains(&transition) && all.contains(&steady));
+}
+
+#[tokio::test]
+async fn reconcile_add_partial_failure_splits_succeeded_and_failed() {
+    let app = build_test_app().await;
+    for name in ["Good (2010)", "Bad (2010)"] {
+        discovered_folders_repo::upsert(
+            &app.state.db,
+            DiscoveredFolder {
+                folder_name: name.into(),
+                file_count: 1,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    mount_cv_volume(&app, 3001, "Good").await;
+    // The bad volume resolves to a ComicVine "object not found".
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-3002/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 101, "error": "Object Not Found", "results": null }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"Good (2010)","cv_id":3001},{"folder_name":"Bad (2010)","cv_id":3002}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let succeeded = body["succeeded"].as_array().unwrap();
+    let failed = body["failed"].as_array().unwrap();
+    assert_eq!(succeeded.len(), 1);
+    assert_eq!(succeeded[0]["folder_name"], "Good (2010)");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["folder_name"], "Bad (2010)");
+}
+
+#[tokio::test]
+async fn reconcile_add_rejects_nonpositive_cv_id() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"X (2010)","cv_id":0}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["succeeded"].as_array().unwrap().len(), 0);
+    let failed = body["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0]["error"].as_str().unwrap().contains("cv_id"));
+}
+
+#[tokio::test]
+async fn reconcile_add_existing_cv_id_is_idempotent() {
+    let app = build_test_app().await;
+    // The series is already tracked under cv_id 4242.
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(4242),
+            metron_id: None,
+            title: "Tracked".into(),
+            sort_title: "tracked".into(),
+            start_year: Some(2010),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    discovered_folders_repo::upsert(
+        &app.state.db,
+        DiscoveredFolder {
+            folder_name: "Tracked (2010)".into(),
+            file_count: 3,
+        },
+    )
+    .await
+    .unwrap();
+
+    // No CV mock — `add_or_get_from_cv` short-circuits on the existing
+    // series without any ComicVine call.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"Tracked (2010)","cv_id":4242}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["succeeded"].as_array().unwrap().len(), 1);
+    assert_eq!(body["failed"].as_array().unwrap().len(), 0);
+    // The folder is dismissed even though no new series was created.
+    let untracked = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    assert_eq!(untracked.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn reconcile_add_unknown_folder_name_still_succeeds() {
+    let app = build_test_app().await;
+    mount_cv_volume(&app, 5001, "Fresh").await;
+    // "Fresh (2010)" was never recorded in discovered_folders; the add
+    // proceeds and the dismiss is a clean no-op (no 404).
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"Fresh (2010)","cv_id":5001}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["succeeded"].as_array().unwrap().len(), 1);
+    assert_eq!(body["failed"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn reconcile_dismiss_is_idempotent_and_ignores_unknown_names() {
+    let app = build_test_app().await;
+    for name in ["A (2010)", "B (2010)"] {
+        discovered_folders_repo::upsert(
+            &app.state.db,
+            DiscoveredFolder {
+                folder_name: name.into(),
+                file_count: 1,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // First dismiss covers both known folders.
+    let first = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/reconcile/dismiss",
+            r#"{"folder_names":["A (2010)","B (2010)"]}"#,
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(first["dismissed"], 2);
+    // Re-dismissing the same names plus an unknown one is a clean no-op.
+    let second = response_json(
+        app.request(json_request(
+            "POST",
+            "/api/reconcile/dismiss",
+            r#"{"folder_names":["A (2010)","B (2010)","Never Seen (2010)"]}"#,
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(second["dismissed"], 0);
+}
+
+#[tokio::test]
+async fn reconcile_delete_phantom_404_for_unknown_series() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("DELETE", "/api/reconcile/phantom/999999"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reconcile_delete_phantom_409_for_present_owned_files_not_absent() {
+    let app = build_test_app().await;
+    // Series A keeps a present, owned file — delete must 409.
+    let present = seed_series_with_owned_file(&app, "Present", 600_001).await;
+    // Series B owned a file that has since vanished — a transition
+    // phantom. Delete must succeed: the guard counts `is_present = 1`
+    // only, so an absent owned file never blocks the delete.
+    let absent = seed_series_with_owned_file(&app, "Absent", 600_002).await;
+    std::fs::remove_dir_all(app.library_path().join("Absent")).unwrap();
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    let blocked = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/reconcile/phantom/{present}"),
+        ))
+        .await;
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(blocked).await["error"]["code"],
+        "conflict.series_has_owned_files"
+    );
+
+    let ok = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/reconcile/phantom/{absent}"),
+        ))
+        .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert!(series_repo::find_by_id(&app.state.db, absent)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reconcile_bulk_delete_skips_unknown_and_owned_with_readable_reasons() {
+    let app = build_test_app().await;
+    let phantom = seed_pull_series(&app, "Deletable Phantom").await;
+    let owned = seed_series_with_owned_file(&app, "Has Files", 700_001).await;
+    let unknown = 999_999_i64;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/phantoms/bulk",
+            format!(r#"{{"series_ids":[{phantom},{owned},{unknown}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let deleted: Vec<i64> = body["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(deleted, vec![phantom]);
+    let skipped = body["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2);
+    // The skip reasons surface verbatim in UI toasts — assert they read
+    // as human sentences, not merely that the field is populated.
+    let reason_for = |sid: i64| -> String {
+        skipped
+            .iter()
+            .find(|s| s["series_id"].as_i64() == Some(sid))
+            .unwrap_or_else(|| panic!("no skipped entry for series {sid}"))["reason"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+    };
+    let owned_reason = reason_for(owned);
+    assert!(
+        owned_reason.contains("owned file"),
+        "owned-files skip reason should mention owned files: {owned_reason:?}"
+    );
+    let unknown_reason = reason_for(unknown);
+    assert!(
+        unknown_reason.contains("not found"),
+        "unknown-series skip reason should say not found: {unknown_reason:?}"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_keep_404_for_unknown_series() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("POST", "/api/reconcile/phantom/999999/keep"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reconcile_counts_zero_when_nothing_to_reconcile() {
+    let app = build_test_app().await;
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/counts"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["phantoms_with_transition"], 0);
+    assert_eq!(body["untracked_folders"], 0);
+}
+
+// -------- reconcile: end-to-end (Library Tidy Step 8, folded in) --------
+//
+// The full scanner -> reconcile-API chain, exercising what the brief
+// scoped as Step 8. Both run a real `scan_full`.
+
+#[tokio::test]
+async fn e2e_discover_folder_then_add_via_api() {
+    let app = build_test_app().await;
+    // The user drops an untracked series folder — unmatched CBZs, no
+    // ComicInfo, resolving to no tracked series.
+    write_cbz(
+        &app.library_path()
+            .join("Invincible (2003)/Invincible 001.cbz"),
+        None,
+    );
+    write_cbz(
+        &app.library_path()
+            .join("Invincible (2003)/Invincible 002.cbz"),
+        None,
+    );
+
+    // A full scan walks the library and records the folder as discovered.
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let untracked = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    let rows = untracked.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["folder_name"], "Invincible (2003)");
+
+    // The user resolves it to a ComicVine volume via the reconcile API.
+    mount_cv_volume(&app, 8001, "Invincible").await;
+    let add = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"Invincible (2003)","cv_id":8001}]}"#,
+        ))
+        .await;
+    assert_eq!(add.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(add).await["succeeded"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The catalog now tracks the series and the folder is off the
+    // untracked list.
+    assert!(series_repo::find_by_cv_id(&app.state.db, 8001)
+        .await
+        .unwrap()
+        .is_some());
+    let after = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    assert_eq!(after.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn e2e_delete_folder_transitions_to_phantom_then_remove() {
+    let app = build_test_app().await;
+    // A tracked series with a matched, owned, present file on disk.
+    let series = seed_series_with_owned_file(&app, "Chew", 900_001).await;
+    // Not a phantom yet — its file is present.
+    let phantoms = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    assert_eq!(phantoms["all_zero_owned"].as_array().unwrap().len(), 0);
+
+    // The user deletes the folder; the next scan walks it, marks the
+    // file missing, and the series transitions to a phantom.
+    std::fs::remove_dir_all(app.library_path().join("Chew")).unwrap();
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    let phantoms = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    let with_transition: Vec<i64> = phantoms["with_transition"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        with_transition,
+        vec![series],
+        "Chew is a transition phantom after losing its files"
+    );
+
+    // The user removes it from the catalog via the reconcile API.
+    let del = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/reconcile/phantom/{series}"),
+        ))
+        .await;
+    assert_eq!(del.status(), StatusCode::OK);
+    assert!(series_repo::find_by_id(&app.state.db, series)
+        .await
+        .unwrap()
+        .is_none());
+}

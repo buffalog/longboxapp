@@ -15,6 +15,8 @@ import {
   type PhantomSeries
 } from '$lib/api/reconcile';
 import { searchVolumes } from '$lib/api/cv';
+import { ApiError } from '$lib/api/client';
+import { toast } from '$lib/stores/toast.svelte';
 import TidyPage from './+page.svelte';
 
 vi.mock('$lib/api/reconcile', async (importOriginal) => ({
@@ -28,6 +30,10 @@ vi.mock('$lib/api/reconcile', async (importOriginal) => ({
 
 vi.mock('$lib/api/cv', () => ({
   searchVolumes: vi.fn()
+}));
+
+vi.mock('$lib/stores/toast.svelte', () => ({
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() }
 }));
 
 function phantom(over: Partial<PhantomSeries> = {}): PhantomSeries {
@@ -193,5 +199,75 @@ describe('library tidy page', () => {
       expect(addFolders).toHaveBeenCalledWith([{ folder_name: 'Saga (2012)', cv_id: 18000 }])
     );
     await waitFor(() => expect(screen.queryByText('Saga (2012)')).not.toBeInTheDocument());
+  });
+
+  it('surfaces an inline error in the add modal when the add fails', async () => {
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [
+        {
+          cv_id: 18000,
+          name: 'Saga',
+          start_year: 2012,
+          publisher: 'Image',
+          issue_count: 60,
+          cover_url: null,
+          description: null
+        }
+      ],
+      filtered_count: 0
+    });
+    // POST /reconcile/add resolves 200 with a populated `failed` array.
+    vi.mocked(addFolders).mockResolvedValue({
+      succeeded: [],
+      failed: [{ folder_name: 'Saga (2012)', error: 'ComicVine rate limited' }]
+    });
+    render(TidyPage, pageData({ untracked: [folder({ folder_name: 'Saga (2012)' })] }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add to LongBox' }));
+    const result = await screen.findByRole('button', { name: /Saga/ });
+    await fireEvent.click(result);
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    // The failure surfaces inline and the modal stays open for a retry.
+    await waitFor(() =>
+      expect(screen.getByText('ComicVine rate limited')).toBeInTheDocument()
+    );
+    expect(screen.getByRole('button', { name: 'Add' })).toBeInTheDocument();
+  });
+
+  it('surfaces a delete failure in the page error banner', async () => {
+    vi.mocked(deletePhantom).mockRejectedValue(
+      new ApiError(409, 'conflict.series_has_owned_files', 'Files reappeared on disk')
+    );
+    render(TidyPage, pageData({ phantoms: [phantom({ id: 2, title: 'Stubborn' })] }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Files reappeared on disk/)).toBeInTheDocument()
+    );
+    // The delete failed — the row is still present.
+    expect(screen.getByText('Stubborn')).toBeInTheDocument();
+  });
+
+  it('keeps skipped rows and warns after a partial bulk delete', async () => {
+    vi.mocked(bulkDeletePhantoms).mockResolvedValue({
+      deleted: [2],
+      skipped: [{ series_id: 3, reason: 'owned files reappeared' }]
+    });
+    render(
+      TidyPage,
+      pageData({
+        phantoms: [phantom({ id: 2, title: 'Gone Two' }), phantom({ id: 3, title: 'Kept Three' })]
+      })
+    );
+
+    await fireEvent.click(screen.getByLabelText('Select all zero-ownership series'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }));
+
+    await waitFor(() => expect(screen.queryByText('Gone Two')).not.toBeInTheDocument());
+    // The skipped row stays; the warning toast names the skipped count.
+    expect(screen.getByText('Kept Three')).toBeInTheDocument();
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('skipped 1'));
   });
 });
