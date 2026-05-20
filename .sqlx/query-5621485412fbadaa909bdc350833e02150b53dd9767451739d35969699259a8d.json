@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET last_matched_count = (\n               SELECT COUNT(*) FROM files f\n               JOIN issues i ON f.issue_id = i.id\n               WHERE i.series_id = series.id\n                 AND f.status = 'owned' AND f.is_present = 1\n           )\n           WHERE (\n               SELECT COUNT(*) FROM files f\n               JOIN issues i ON f.issue_id = i.id\n               WHERE i.series_id = series.id\n                 AND f.status = 'owned' AND f.is_present = 1\n           ) > 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "5621485412fbadaa909bdc350833e02150b53dd9767451739d35969699259a8d"
+}

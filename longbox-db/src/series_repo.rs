@@ -374,8 +374,10 @@ where
     Ok(rows)
 }
 
-/// Set a series' `last_matched_count` — the scanner calls this for each
-/// series at the end of a full scan.
+/// Set one series' `last_matched_count` directly. Used by the "Keep"
+/// reconciliation action (Step 5) to reset a transition phantom to 0,
+/// dropping it to the steady-state list. The scanner refreshes counts
+/// in bulk via [`refresh_last_matched_counts`] instead.
 pub async fn update_last_matched_count<'e, E>(executor: E, series_id: i64, count: i64) -> Result<()>
 where
     E: SqliteExecutor<'e>,
@@ -391,4 +393,42 @@ where
         return Err(DbError::NotFound);
     }
     Ok(())
+}
+
+/// Refresh every series' `last_matched_count` to its current owned,
+/// present file count — the scanner calls this once at the end of a
+/// full scan. Returns the number of series whose count was refreshed.
+///
+/// Series whose current count is zero are deliberately **skipped** (the
+/// `WHERE` clause): leaving `last_matched_count` at its last non-zero
+/// value is exactly what marks a series that just lost all its files as
+/// a *transition* phantom rather than steady-state. A series that has
+/// been zero-owned all along stays at 0.
+///
+/// The owned-AND-present predicate is identical to the one
+/// [`list_phantoms`] uses for an "owned file", so `last_matched_count`
+/// and the phantom check measure the same thing — the route's
+/// transition partition (zero owned now AND `last_matched_count > 0`)
+/// is a coherent comparison.
+pub async fn refresh_last_matched_counts<'e, E>(executor: E) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series SET last_matched_count = (
+               SELECT COUNT(*) FROM files f
+               JOIN issues i ON f.issue_id = i.id
+               WHERE i.series_id = series.id
+                 AND f.status = 'owned' AND f.is_present = 1
+           )
+           WHERE (
+               SELECT COUNT(*) FROM files f
+               JOIN issues i ON f.issue_id = i.id
+               WHERE i.series_id = series.id
+                 AND f.status = 'owned' AND f.is_present = 1
+           ) > 0"#
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
 }
