@@ -4,6 +4,7 @@ import {
   bulkDeletePhantoms,
   deletePhantom,
   dismissFolders,
+  getReconcileCounts,
   keepPhantom,
   listPhantoms,
   listUntracked
@@ -80,5 +81,13 @@ describe('reconcile api', () => {
     const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/reconcile/phantom/7/keep');
     expect(opts?.method).toBe('POST');
+  });
+
+  it('getReconcileCounts GETs /api/reconcile/counts', async () => {
+    const fetchSpy = mockJson({ phantoms_with_transition: 2, untracked_folders: 5 });
+    const out = await getReconcileCounts();
+    expect(out.phantoms_with_transition).toBe(2);
+    expect(out.untracked_folders).toBe(5);
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/reconcile/counts');
   });
 });

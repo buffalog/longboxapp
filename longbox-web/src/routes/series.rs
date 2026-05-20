@@ -274,10 +274,20 @@ async fn refresh(
 /// place.
 ///
 /// Returns `NotFound` for an unknown id and `Conflict` when owned files
-/// still match the series. For a phantom delete the conflict is a real
-/// time-of-check/time-of-use guard — a series can regain files between
-/// the tidy view loading and the delete being clicked. On success the
-/// `series` row is deleted; dependent `issues`/`files` rows cascade.
+/// are *present on disk* for the series. For a phantom delete the
+/// conflict is a real time-of-check/time-of-use guard — a series can
+/// regain files between the tidy view loading and the delete being
+/// clicked. On success the `series` row is deleted; dependent
+/// `issues`/`files` rows cascade.
+///
+/// The guard counts `status = 'owned' AND is_present = 1`. The
+/// `is_present = 1` clause is load-bearing: a *transition phantom* has
+/// owned files whose `is_present` the scanner's mark-missing pass
+/// flipped to 0 (it never touches `status`), so without the clause this
+/// guard would 409 every transition phantom — the exact rows Library
+/// Tidy exists to let the user delete. Counting only present owned
+/// files is also the correct `DELETE /api/series/:id` semantic: a series
+/// whose files merely went missing should be deletable.
 pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), ApiError> {
     if series_repo::find_by_id(db, id).await?.is_none() {
         return Err(ApiError::NotFound {
@@ -285,12 +295,12 @@ pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), 
             id: id.to_string(),
         });
     }
-    // 409 if any owned files matched to this series's issues.
+    // 409 if any owned files are present on disk for this series's issues.
     let owned = sqlx::query!(
         r#"SELECT COUNT(*) AS n
            FROM files f
            JOIN issues i ON f.issue_id = i.id
-           WHERE i.series_id = ? AND f.status = 'owned'"#,
+           WHERE i.series_id = ? AND f.status = 'owned' AND f.is_present = 1"#,
         id
     )
     .fetch_one(db)

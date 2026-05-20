@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{build_fixture_library, fresh_pool, seed_library_root, seed_walking_dead};
+use common::{build_fixture_library, fresh_pool, seed_library_root, seed_walking_dead, write_cbz};
 use longbox_db::{discovered_folders_repo, series_repo};
 use longbox_scanner::{Scanner, ScannerConfig};
 use tempfile::TempDir;
@@ -108,6 +108,38 @@ async fn a_series_that_loses_its_files_keeps_its_last_matched_count() {
     assert!(
         row.last_matched_count > 0,
         "a series that just lost its files retains last_matched_count > 0 (transition signal)"
+    );
+}
+
+#[tokio::test]
+async fn an_existing_discovered_folder_refreshes_its_file_count_on_rescan() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    // Scan 1: the `Mystery` folder holds a single CBZ.
+    scanner.scan_full(library_root_id).await.unwrap();
+    let count_of = |rows: &[longbox_db::DiscoveredFolderRow]| {
+        rows.iter()
+            .find(|r| r.folder_name == "Mystery")
+            .expect("Mystery is discovered")
+            .file_count
+    };
+    let before = discovered_folders_repo::list(&pool).await.unwrap();
+    assert_eq!(count_of(&before), 1);
+
+    // A second CBZ lands in the folder; scan 2 re-detects it and the
+    // upsert's existing-row branch must refresh `file_count`.
+    write_cbz(&tmp.path().join("Mystery/SecondComic.cbz"), None);
+    scanner.scan_full(library_root_id).await.unwrap();
+
+    let after = discovered_folders_repo::list(&pool).await.unwrap();
+    assert_eq!(
+        count_of(&after),
+        2,
+        "re-detecting an existing folder refreshes its file_count"
     );
 }
 

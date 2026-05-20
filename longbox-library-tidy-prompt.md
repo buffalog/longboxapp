@@ -149,21 +149,21 @@ Temporary flat `/library/tidy` nav link (with `// TODO Step 12 (A.8): fold into 
 - Copy assembled conditionally — one sentence per non-zero count, singular/plural-aware: "*N series lost their files. M untracked folders detected.*" + a "Review →" link to `/library/tidy`.
 - **Dismissal — localStorage count-signature model.** Dismissing stores the current `transition:untracked` count signature in `localStorage`. The banner stays hidden while the live counts still match the stored signature, and reappears when either count changes. Dismiss is cosmetic — it never clears the underlying reconciliation state. (Brief amendment, folded into the Step 6 commit: this replaces the original draft's ambiguous "current session / localStorage flag / returns next visit" wording, which was internally inconsistent — the count-signature model is the concrete behavior.)
 
-### Step 7 — Tests
+### Step 7 — Tests (Step 8 folded in)
 
-- Backend route tests in `api_tests.rs`: full CRUD coverage, bulk operations, dismissal idempotency, 404s for unknown series/folders.
-- Scanner integration tests: transition detection (mocked file state changes between two scans), discovered folder upserts (new / existing / dismissed paths).
-- (The `longbox-scan-scheduler` crate's own unit + `tokio::time`-mocked tests ship with Step 3; Step 7 keeps only broader cross-component integration coverage.)
-- Frontend `api/*.ts` unit tests + `@testing-library/svelte` component tests for `/library/tidy` (per A.8 Step 5/7 component-test pattern, IndexerSettings.test.ts as template).
+The exhaustive test matrix the Step 4–6 smoke tests deferred. **Step 8 is folded into Step 7** — see below; the phase ends at Step 7.
 
-### Step 8 — End-to-end verification (optional, may fold into Step 7)
+- Backend route matrix in `api_tests.rs`: the failure / edge / idempotency / 404 coverage — phantom transition/steady partition, `add` partial failure + non-positive `cv_id` + already-tracked idempotency + unknown-folder-name, `dismiss` idempotency, `delete`/`keep` 404s, `bulk` skipped-with-readable-reason.
+- Scanner integration tests were front-loaded into **Step 2** (`longbox-scanner/tests/library_tidy.rs`: discovered / tracked-excluded / dismissed / transition / steady). Step 7 adds only the one gap — an existing non-dismissed folder re-detected with a changed file count refreshes `file_count`.
+- The `longbox-scan-scheduler` crate's own unit + `tokio::time`-mocked tests ship with Step 3; Step 7 adds nothing there.
+- Frontend: `api/reconcile.ts` unit tests + `@testing-library/svelte` component tests for `/library/tidy` and `ReconciliationBanner` (IndexerSettings.test.ts pattern) — the `getReconcileCounts` gap plus the add-failure / delete-error / bulk-skipped edge cases.
 
-Two scenarios as integration tests against a test DB + temp library:
+**End-to-end scenarios (folded in from the former Step 8).** Two `api_tests.rs` integration tests running a real `scan_full` → reconcile-API chain:
 
-1. Drop series folder → scheduled scan walks → folder discovered → user adds via UI → catalog populated, folder dismissed.
-2. Delete series folder → scheduled scan walks → series transitions to phantom → user removes via UI → series gone from catalog.
+1. Drop series folder → scan walks → folder discovered → user adds via the reconcile API → catalog populated, folder dismissed.
+2. Delete series folder → scan walks → series transitions to phantom → user removes via the reconcile API → series gone from the catalog.
 
-May be folded into Step 7 if not warranted as its own step.
+**Bug surfaced during e2e test preparation.** Designing scenario 2 exposed a latent bug: `delete_series`'s owned-files 409 guard counted `status = 'owned'` with no `is_present` check, but the scanner's mark-missing pass only flips `is_present = 0` (it never touches `status`). A transition phantom therefore has owned-but-absent files, and the guard would 409 every `DELETE /api/reconcile/phantom/:id` and bulk delete on a transition phantom — the exact rows `/library/tidy`'s "Recently lost files" CTA exists to let the user delete. The guard now reads `status = 'owned' AND is_present = 1`, which is also the correct `DELETE /api/series/:id` semantic (a series whose files merely went missing should be deletable) and still fires for the real time-of-check/time-of-use case (files re-dropped + rescanned → `is_present = 1` again). Fixed in the Step 7 commit, with the route-matrix regression test and the e2e scenario covering it; `.sqlx` regenerated for the changed query.
 
 ## Brief tracking
 
@@ -182,5 +182,5 @@ Library Tidy may build the underlying "add series by cv_id" primitive (Step 4 ab
 - Untracked folders surface in `/library/tidy` and can be added via CV search modal or dismissed.
 - Scheduled scan runs daily at `SCAN_SCHEDULE_TIME`; falls back to manual trigger when needed.
 - Dashboard banner surfaces non-zero reconciliation state, clicks through to `/library/tidy`.
-- Test coverage per Step 7.
+- Test coverage per Step 7, including the two end-to-end scenarios folded in from the former Step 8.
 - A.8 Step 8 can resume cleanly with `add-series-by-cv_id` primitive available.

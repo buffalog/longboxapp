@@ -4,9 +4,14 @@ import ReconciliationBanner from './ReconciliationBanner.svelte';
 
 const KEY = 'longbox.reconcileBannerDismissed';
 
-// jsdom under Vitest doesn't supply a full `Storage`, so stub a clean
-// in-memory one per test — both the component and the assertions read
-// through it.
+// jsdom under Vitest exposes a `localStorage` global, but not a complete
+// `Storage` — `localStorage.clear` is missing (`clear is not a function`),
+// so the usual `clear()`-in-`beforeEach` reset throws. Rather than
+// diagnose the jsdom/Node webstorage quirk, stub a clean in-memory
+// `Storage` per test via `vi.stubGlobal`: both the component under test
+// and these assertions read and write through the same stub. The
+// component's own `localStorage` use is standard and works unchanged in
+// real browsers.
 function makeStorage() {
   const m = new Map<string, string>();
   return {
