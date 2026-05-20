@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status FROM files\n           WHERE path_relative = 'Saga (2012)/Annual/Annual 1.cbz'",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6fc3c361516447d65c1bdd43ccfe6c32a0b94b11c9c3695c8ed98f14e2db5ba0"
+}

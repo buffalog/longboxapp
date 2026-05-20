@@ -2389,3 +2389,180 @@ async fn pull_check_accepts_a_sweep_request() {
     let resp = app.request(empty_request("POST", "/api/pull/check")).await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
+
+// -------- pull list (Phase A.8 Step 7) --------
+
+async fn seed_pull_series(app: &common::TestApp, title: &str) -> i64 {
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2020),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn pull_list_add_lists_with_the_series_title() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+
+    let empty = response_json(app.request(empty_request("GET", "/api/pull-list")).await).await;
+    assert_eq!(empty.as_array().unwrap().len(), 0);
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/pull-list",
+            format!(r#"{{"series_id":{sid}}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let list = response_json(app.request(empty_request("GET", "/api/pull-list")).await).await;
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["series_id"], sid);
+    assert_eq!(rows[0]["series_title"], "Saga");
+    assert_eq!(rows[0]["paused"], false);
+}
+
+#[tokio::test]
+async fn pull_list_add_unknown_series_is_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/pull-list",
+            r#"{"series_id":9999}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pull_list_add_duplicate_is_409() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    let body = format!(r#"{{"series_id":{sid}}}"#);
+    assert_eq!(
+        app.request(json_request("POST", "/api/pull-list", body.clone()))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let resp = app
+        .request(json_request("POST", "/api/pull-list", body))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(resp).await["error"]["code"],
+        "conflict.already_on_pull_list"
+    );
+}
+
+#[tokio::test]
+async fn pull_list_get_one_reflects_subscription() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+
+    let before = response_json(
+        app.request(empty_request("GET", &format!("/api/pull-list/{sid}")))
+            .await,
+    )
+    .await;
+    assert!(before.is_null(), "not subscribed -> null");
+
+    app.request(json_request(
+        "POST",
+        "/api/pull-list",
+        format!(r#"{{"series_id":{sid}}}"#),
+    ))
+    .await;
+
+    let after = response_json(
+        app.request(empty_request("GET", &format!("/api/pull-list/{sid}")))
+            .await,
+    )
+    .await;
+    assert_eq!(after["series_id"], sid);
+    assert_eq!(after["paused"], false);
+}
+
+#[tokio::test]
+async fn pull_list_pause_then_resume() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    app.request(json_request(
+        "POST",
+        "/api/pull-list",
+        format!(r#"{{"series_id":{sid}}}"#),
+    ))
+    .await;
+
+    let paused = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/pull-list/{sid}"),
+            r#"{"paused":true}"#,
+        ))
+        .await;
+    assert_eq!(paused.status(), StatusCode::OK);
+    assert_eq!(response_json(paused).await["paused"], true);
+
+    let resumed = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/pull-list/{sid}"),
+            r#"{"paused":false}"#,
+        ))
+        .await;
+    assert_eq!(response_json(resumed).await["paused"], false);
+}
+
+#[tokio::test]
+async fn pull_list_pause_unknown_series_is_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PATCH",
+            "/api/pull-list/9999",
+            r#"{"paused":true}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pull_list_delete_unsubscribes_then_404s() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    app.request(json_request(
+        "POST",
+        "/api/pull-list",
+        format!(r#"{{"series_id":{sid}}}"#),
+    ))
+    .await;
+
+    let del = app
+        .request(empty_request("DELETE", &format!("/api/pull-list/{sid}")))
+        .await;
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let list = response_json(app.request(empty_request("GET", "/api/pull-list")).await).await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+
+    let again = app
+        .request(empty_request("DELETE", &format!("/api/pull-list/{sid}")))
+        .await;
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}

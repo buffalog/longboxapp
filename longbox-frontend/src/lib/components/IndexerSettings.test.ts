@@ -88,7 +88,7 @@ describe('IndexerSettings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(updateIndexer).toHaveBeenCalledTimes(1));
-    const [id, input] = vi.mocked(updateIndexer).mock.calls[0];
+    const [id, input] = vi.mocked(updateIndexer).mock.calls[0]!;
     expect(id).toBe(1);
     expect(input.name).toBe('Renamed');
     // Blank api_key is the "keep the stored key" signal.

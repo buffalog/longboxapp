@@ -24,13 +24,13 @@ describe('webhooks api', () => {
     const fetchSpy = mockFetch([{ id: 1, name: 'Slack' }]);
     const out = await listWebhooks();
     expect(out).toHaveLength(1);
-    expect(fetchSpy.mock.calls[0][0]).toBe('/api/webhooks');
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/webhooks');
   });
 
   it('createWebhook POSTs the input as a JSON body', async () => {
     const fetchSpy = mockFetch({ id: 1 });
     await createWebhook({ name: 'Slack', url: 'https://x', event_mask: 5, enabled: true });
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/webhooks');
     expect(opts?.method).toBe('POST');
     expect(JSON.parse(opts?.body as string)).toMatchObject({ name: 'Slack', event_mask: 5 });
@@ -39,7 +39,7 @@ describe('webhooks api', () => {
   it('updateWebhook PUTs to /api/webhooks/:id', async () => {
     const fetchSpy = mockFetch({ id: 4 });
     await updateWebhook(4, { name: 'Slack', url: 'https://x', event_mask: 1, enabled: false });
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/webhooks/4');
     expect(opts?.method).toBe('PUT');
   });
@@ -48,7 +48,7 @@ describe('webhooks api', () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchSpy);
     await deleteWebhook(9);
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/webhooks/9');
     expect(opts?.method).toBe('DELETE');
   });

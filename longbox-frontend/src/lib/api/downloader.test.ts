@@ -19,7 +19,7 @@ describe('downloader api', () => {
     const fetchSpy = mockFetch(null);
     const out = await getDownloader();
     expect(out).toBeNull();
-    expect(fetchSpy.mock.calls[0][0]).toBe('/api/downloader');
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/downloader');
   });
 
   it('saveDownloader PUTs the input as a JSON body', async () => {
@@ -32,7 +32,7 @@ describe('downloader api', () => {
       category: '',
       enabled: true
     });
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/downloader');
     expect(opts?.method).toBe('PUT');
     expect(JSON.parse(opts?.body as string)).toMatchObject({ kind: 'sab', secret: 'K' });
@@ -42,7 +42,7 @@ describe('downloader api', () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchSpy);
     await clearDownloader();
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/downloader');
     expect(opts?.method).toBe('DELETE');
   });
@@ -58,6 +58,6 @@ describe('downloader api', () => {
       enabled: true
     });
     expect(out.ok).toBe(false);
-    expect(fetchSpy.mock.calls[0][0]).toBe('/api/downloader/test');
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/downloader/test');
   });
 });
