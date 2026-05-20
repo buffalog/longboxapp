@@ -3,6 +3,7 @@
   import { CircleSlash, FileImage } from 'lucide-svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import AlphaScrubber from '$lib/components/AlphaScrubber.svelte';
+  import { isSolicited } from '$lib/solicitation';
   import type { MissingSort } from '$lib/api/missing';
 
   let { data } = $props();
@@ -22,16 +23,16 @@
     void goto(url.pathname + url.search, { replaceState: true });
   }
 
-  // "Missing for X" — best-effort age from cover_date. Real comics have
-  // future cover dates ("solicited" issues that haven't shipped yet), in
-  // which case we show "Solicited" rather than a nonsense negative age.
-  // Null cover_date renders as "—".
+  // "Missing for X" — best-effort age from cover_date. Solicited issues
+  // (cover_date today-or-future, not shipped yet) show "Solicited"
+  // rather than a nonsense negative age — via the shared `isSolicited`
+  // predicate, the same one /series/[id] uses. Null cover_date → "—".
   function missingAge(coverDate: string | null): string {
     if (!coverDate) return '—';
+    if (isSolicited(coverDate)) return 'Solicited';
     const cover = Date.parse(coverDate + 'T00:00:00Z');
     if (Number.isNaN(cover)) return '—';
     const diffMs = Date.now() - cover;
-    if (diffMs < 0) return 'Solicited';
     const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     if (days < 31) return `${days}d`;
     const months = Math.floor(days / 30);

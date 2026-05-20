@@ -40,6 +40,8 @@ COPY .sqlx/ ./.sqlx/
 COPY longbox-core/ ./longbox-core/
 COPY longbox-db/ ./longbox-db/
 COPY longbox-comicvine/ ./longbox-comicvine/
+COPY longbox-newznab/ ./longbox-newznab/
+COPY longbox-downloader/ ./longbox-downloader/
 COPY longbox-scanner/ ./longbox-scanner/
 COPY longbox-postprocess/ ./longbox-postprocess/
 COPY longbox-web/ ./longbox-web/
