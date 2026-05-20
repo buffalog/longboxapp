@@ -11,3 +11,7 @@
 # `_app/` and `favicon.ico` (etc.) is regenerated.
 longbox-web/frontend-dist/_app/
 longbox-web/frontend-dist/favicon.ico
+
+# Session-bridge / handoff docs — local working notes between Claude Code
+# sessions, not project files.
+longbox-handoff-*.md
