@@ -1,8 +1,17 @@
 <script lang="ts">
-  import { CheckCircle2, Circle, AlertCircle, XCircle, ExternalLink, FileImage } from 'lucide-svelte';
+  import {
+    CheckCircle2,
+    Circle,
+    Clock,
+    AlertCircle,
+    XCircle,
+    ExternalLink,
+    FileImage
+  } from 'lucide-svelte';
   import type { IssueWithFile } from '$lib/types';
   import { cvIssueUrl, formatDate } from '$lib/format';
   import { sanitizeCvSynopsis } from '$lib/text';
+  import { isSolicited } from '$lib/solicitation';
   import { toast } from '$lib/stores/toast.svelte';
 
   interface Props {
@@ -11,8 +20,13 @@
 
   let { issue }: Props = $props();
 
+  // A file-present row keeps its actionable status. A no-file row
+  // splits into 'solicited' (cover_date today-or-future — not shipped
+  // yet) vs plain 'missing'.
   const status = $derived.by(() => {
-    if (!issue.file) return 'missing' as const;
+    if (!issue.file) {
+      return isSolicited(issue.cover_date) ? ('solicited' as const) : ('missing' as const);
+    }
     return issue.file.status;
   });
 
@@ -26,6 +40,8 @@
         return { Icon: XCircle, color: 'text-status-ignored', label: 'Ignored' };
       case 'unmatched':
         return { Icon: AlertCircle, color: 'text-status-unmatched', label: 'Unmatched' };
+      case 'solicited':
+        return { Icon: Clock, color: 'text-status-solicited', label: 'Solicited' };
       case 'missing':
         return { Icon: Circle, color: 'text-status-missing', label: 'Missing' };
     }
