@@ -78,7 +78,13 @@ pub async fn build_test_app() -> TestApp {
         match_threshold: 0.85,
         cors_permissive: false,
         download_watch_path: None,
+        pull_schedule_time: time::macros::time!(05:00),
     };
+
+    // The pull scheduler runs in every test app; with the default
+    // 05:00 slot it just sleeps — tests never wait on it. The handle
+    // is what the `/pull/check` route exercises.
+    let pull = longbox_pull::start(longbox_pull::PullConfig::default(), pool.clone());
 
     let state = AppState {
         db: pool,
@@ -88,6 +94,7 @@ pub async fn build_test_app() -> TestApp {
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         library_root_id,
         pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
+        pull,
     };
 
     let router = build_router(state.clone());

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteExecutor;
 use time::PrimitiveDateTime;
 
-use crate::error::Result;
+use crate::error::{DbError, Result};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
 pub struct PullAttemptRow {
@@ -21,7 +21,15 @@ pub struct PullAttemptRow {
     /// `pending` | `submitted` | `grabbed` | `failed` | `mismatched`.
     pub status: String,
     pub error_message: Option<String>,
+    /// Cumulative failed attempts for this issue, counting this row
+    /// when its status is `failed`. The pull engine parks an issue
+    /// (stops generating candidates) once any attempt reaches 3.
     pub retry_count: i64,
+    /// Downloader job id (SABnzbd nzo_id / NZBGet NZBID), captured at
+    /// submission. `None` until a submit succeeds.
+    pub download_handle: Option<String>,
+    /// Consecutive status polls that returned `Unknown`.
+    pub unknown_polls: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +41,7 @@ pub struct NewPullAttempt {
     pub status: String,
     pub error_message: Option<String>,
     pub retry_count: i64,
+    pub download_handle: Option<String>,
 }
 
 pub async fn insert<'e, E>(executor: E, input: NewPullAttempt) -> Result<PullAttemptRow>
@@ -43,12 +52,13 @@ where
         PullAttemptRow,
         r#"INSERT INTO pull_attempts
                (series_id, issue_id, indexer_id, release_id, status,
-                error_message, retry_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+                error_message, retry_count, download_handle)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      issue_id AS "issue_id!: i64", attempted_at AS "attempted_at: _",
                      indexer_id, release_id, status, error_message,
-                     retry_count AS "retry_count!: i64""#,
+                     retry_count AS "retry_count!: i64", download_handle,
+                     unknown_polls AS "unknown_polls!: i64""#,
         input.series_id,
         input.issue_id,
         input.indexer_id,
@@ -56,6 +66,7 @@ where
         input.status,
         input.error_message,
         input.retry_count,
+        input.download_handle,
     )
     .fetch_one(executor)
     .await?;
@@ -77,12 +88,35 @@ where
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   issue_id AS "issue_id!: i64", attempted_at AS "attempted_at: _",
                   indexer_id, release_id, status, error_message,
-                  retry_count AS "retry_count!: i64"
+                  retry_count AS "retry_count!: i64", download_handle,
+                  unknown_polls AS "unknown_polls!: i64"
            FROM pull_attempts
            WHERE series_id = ? AND issue_id = ?
            ORDER BY attempted_at DESC, id DESC"#,
         series_id,
         issue_id
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Every `submitted` attempt — the pull engine's in-flight set, polled
+/// for downloader status at the top of each sweep.
+pub async fn list_submitted<'e, E>(executor: E) -> Result<Vec<PullAttemptRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        PullAttemptRow,
+        r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
+                  issue_id AS "issue_id!: i64", attempted_at AS "attempted_at: _",
+                  indexer_id, release_id, status, error_message,
+                  retry_count AS "retry_count!: i64", download_handle,
+                  unknown_polls AS "unknown_polls!: i64"
+           FROM pull_attempts
+           WHERE status = 'submitted'
+           ORDER BY attempted_at ASC, id ASC"#
     )
     .fetch_all(executor)
     .await?;
@@ -139,8 +173,8 @@ where
     Ok(result.rows_affected())
 }
 
-/// Update one attempt's status (+ optional error message). Used by the
-/// pull engine to record submission / failure transitions.
+/// Update one attempt's status (+ optional error message). Used for
+/// transitions that don't change the retry count.
 pub async fn update_status<'e, E>(
     executor: E,
     id: i64,
@@ -159,7 +193,70 @@ where
     .execute(executor)
     .await?;
     if result.rows_affected() == 0 {
-        return Err(crate::error::DbError::NotFound);
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
+
+/// Transition an attempt to `failed` and bump its `retry_count` — the
+/// engine calls this on a submission failure, a downloader grab
+/// failure, or a lost-track timeout. The bumped `retry_count` is what
+/// the candidate query checks against the parking threshold (3).
+pub async fn record_failure<'e, E>(executor: E, id: i64, error_message: &str) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE pull_attempts
+           SET status = 'failed',
+               error_message = ?,
+               retry_count = retry_count + 1
+           WHERE id = ?"#,
+        error_message,
+        id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
+
+/// Increment an attempt's consecutive-`Unknown` poll counter. The
+/// engine calls this when a downloader status poll returns `Unknown`
+/// but the threshold for giving up hasn't been reached.
+pub async fn bump_unknown_polls<'e, E>(executor: E, id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE pull_attempts SET unknown_polls = unknown_polls + 1 WHERE id = ?"#,
+        id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
+
+/// Reset an attempt's `Unknown`-poll counter to zero — called when a
+/// poll returns a *known* status again, keeping the counter a measure
+/// of strictly *consecutive* Unknowns.
+pub async fn reset_unknown_polls<'e, E>(executor: E, id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE pull_attempts SET unknown_polls = 0 WHERE id = ?"#,
+        id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
     }
     Ok(())
 }

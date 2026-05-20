@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pull_attempts SET unknown_polls = 0 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2688c8ef0a3d24d668d7d24dd3815b27ce87f47582deec5050d4ef504829e969"
+}

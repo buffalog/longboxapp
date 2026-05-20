@@ -443,6 +443,7 @@ fn new_attempt(series_id: i64, issue_id: i64, status: &str) -> NewPullAttempt {
         status: status.into(),
         error_message: None,
         retry_count: 0,
+        download_handle: None,
     }
 }
 

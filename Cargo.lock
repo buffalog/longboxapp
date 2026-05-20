@@ -1257,6 +1257,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "longbox-pull"
+version = "0.0.1"
+dependencies = [
+ "longbox-core",
+ "longbox-db",
+ "longbox-downloader",
+ "longbox-newznab",
+ "pretty_assertions",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "longbox-scanner"
 version = "0.0.1"
 dependencies = [
@@ -1288,6 +1304,7 @@ dependencies = [
  "longbox-downloader",
  "longbox-newznab",
  "longbox-postprocess",
+ "longbox-pull",
  "longbox-scanner",
  "mime_guess",
  "pretty_assertions",

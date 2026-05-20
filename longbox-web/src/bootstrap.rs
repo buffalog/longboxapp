@@ -113,7 +113,18 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //    Web boot is unaffected either way — Phase B is best-effort.
     start_phase_b(&config, &db, Arc::clone(&pending_cache)).await;
 
-    // 8. Compose state.
+    // 8. Pull engine — the Phase A.8 scheduled auto-download workflow.
+    //    Always started: the scheduler is a cheap sleeping task and
+    //    each sweep no-ops gracefully when no downloader or indexers
+    //    are configured.
+    let pull = longbox_pull::start(
+        longbox_pull::PullConfig {
+            daily_time: config.pull_schedule_time,
+        },
+        db.clone(),
+    );
+
+    // 9. Compose state.
     Ok(AppState {
         db,
         cv: Arc::new(cv),
@@ -122,6 +133,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         library_root_id,
         pending_cache,
+        pull,
     })
 }
 

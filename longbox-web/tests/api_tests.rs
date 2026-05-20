@@ -2380,3 +2380,12 @@ async fn webhooks_delete_removes_the_row() {
     let list = response_json(app.request(empty_request("GET", "/api/webhooks")).await).await;
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
+
+// -------- pull engine (Phase A.8 Step 6) --------
+
+#[tokio::test]
+async fn pull_check_accepts_a_sweep_request() {
+    let app = build_test_app().await;
+    let resp = app.request(empty_request("POST", "/api/pull/check")).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+}

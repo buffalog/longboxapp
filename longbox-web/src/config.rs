@@ -16,6 +16,10 @@ pub struct AppConfig {
     /// starts the post-process watcher at boot. Unset = Phase B not
     /// enabled; unreadable = warn-and-skip.
     pub download_watch_path: Option<String>,
+    /// Wall-clock time the daily pull sweep fires, from
+    /// `PULL_SCHEDULE_TIME` (`HH:MM`, default 05:00). Interpreted as
+    /// UTC by the pull scheduler — see `longbox_pull::PullConfig`.
+    pub pull_schedule_time: time::Time,
 }
 
 #[derive(Debug, Error)]
@@ -67,6 +71,11 @@ impl AppConfig {
 
         let download_watch_path = optional("DOWNLOAD_WATCH_PATH");
 
+        let pull_schedule_time = match optional("PULL_SCHEDULE_TIME") {
+            Some(raw) => parse_schedule_time(&raw)?,
+            None => time::macros::time!(05:00),
+        };
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -76,8 +85,31 @@ impl AppConfig {
             match_threshold,
             cors_permissive,
             download_watch_path,
+            pull_schedule_time,
         })
     }
+}
+
+/// Parse a `HH:MM` 24-hour wall-clock string into a [`time::Time`].
+/// The pull scheduler interprets the result as UTC.
+fn parse_schedule_time(raw: &str) -> Result<time::Time, ConfigError> {
+    let invalid = |reason: &str| ConfigError::InvalidValue {
+        var: "PULL_SCHEDULE_TIME",
+        value: raw.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let (h, m) = raw
+        .split_once(':')
+        .ok_or_else(|| invalid("expected HH:MM"))?;
+    let hour: u8 = h
+        .trim()
+        .parse()
+        .map_err(|_| invalid("hour is not a number"))?;
+    let minute: u8 = m
+        .trim()
+        .parse()
+        .map_err(|_| invalid("minute is not a number"))?;
+    time::Time::from_hms(hour, minute, 0).map_err(|_| invalid("hour must be 0-23, minute 0-59"))
 }
 
 /// Normalize a path string per Step 5 bootstrap rules: strip trailing slashes
@@ -170,5 +202,20 @@ mod tests {
         assert!(parse_f64_in_range("T", "1.5", 0.0, 1.0).is_err());
         assert!(parse_f64_in_range("T", "-0.1", 0.0, 1.0).is_err());
         assert!(parse_f64_in_range("T", "not a number", 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn parse_schedule_time_accepts_hh_mm_and_rejects_garbage() {
+        assert_eq!(
+            parse_schedule_time("05:00").unwrap(),
+            time::macros::time!(05:00)
+        );
+        assert_eq!(
+            parse_schedule_time("23:30").unwrap(),
+            time::macros::time!(23:30)
+        );
+        assert!(parse_schedule_time("5am").is_err());
+        assert!(parse_schedule_time("24:00").is_err());
+        assert!(parse_schedule_time("05:99").is_err());
     }
 }
