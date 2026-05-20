@@ -5,7 +5,9 @@ use std::path::Path;
 
 use axum::http::StatusCode;
 use common::{build_test_app, empty_request, json_request, response_json};
-use longbox_db::{issue_repo, series_repo, NewIssue, NewSeries};
+use longbox_db::{
+    discovered_folders_repo, issue_repo, series_repo, DiscoveredFolder, NewIssue, NewSeries,
+};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 use zip::write::SimpleFileOptions;
@@ -2565,4 +2567,209 @@ async fn pull_list_delete_unsubscribes_then_404s() {
         .request(empty_request("DELETE", &format!("/api/pull-list/{sid}")))
         .await;
     assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}
+
+// -------- reconcile (Library Tidy Step 4) --------
+//
+// One happy-path smoke test per route — every handler is exercised
+// before commit. Step 7 layers on the failure / edge / idempotency
+// matrix.
+
+#[tokio::test]
+async fn reconcile_phantoms_lists_zero_owned_series() {
+    let app = build_test_app().await;
+    // Seeded with no files -> zero-owned -> a phantom.
+    let sid = seed_pull_series(&app, "Phantom Title").await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    let all = body["all_zero_owned"].as_array().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0]["id"], sid);
+    // Never held files -> last_matched_count 0 -> not a transition phantom.
+    assert_eq!(body["with_transition"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn reconcile_untracked_lists_discovered_folders() {
+    let app = build_test_app().await;
+    discovered_folders_repo::upsert(
+        &app.state.db,
+        DiscoveredFolder {
+            folder_name: "Invincible (2003)".into(),
+            file_count: 12,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["folder_name"], "Invincible (2003)");
+    assert_eq!(rows[0]["file_count"], 12);
+}
+
+#[tokio::test]
+async fn reconcile_add_resolves_folder_and_dismisses_it() {
+    let app = build_test_app().await;
+    discovered_folders_repo::upsert(
+        &app.state.db,
+        DiscoveredFolder {
+            folder_name: "The Walking Dead (2003)".into(),
+            file_count: 5,
+        },
+    )
+    .await
+    .unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-2127/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": {
+                    "id": 2127, "name": "The Walking Dead", "start_year": "2003",
+                    "publisher": { "id": 1, "name": "Image" },
+                    "description": null,
+                    "image": { "medium_url": "https://example.com/wd.jpg" },
+                    "site_detail_url": "https://cv/wd/4050-2127/"
+                }
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 0, "limit": 100, "offset": 0,
+                "results": []
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/add",
+            r#"{"folders":[{"folder_name":"The Walking Dead (2003)","cv_id":2127}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let succeeded = body["succeeded"].as_array().unwrap();
+    assert_eq!(succeeded.len(), 1);
+    assert_eq!(succeeded[0]["folder_name"], "The Walking Dead (2003)");
+    assert_eq!(body["failed"].as_array().unwrap().len(), 0);
+
+    // Series tracked, and the folder dismissed off the untracked list.
+    assert!(series_repo::find_by_cv_id(&app.state.db, 2127)
+        .await
+        .unwrap()
+        .is_some());
+    let untracked = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    assert_eq!(untracked.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn reconcile_dismiss_marks_folders_dismissed() {
+    let app = build_test_app().await;
+    discovered_folders_repo::upsert(
+        &app.state.db,
+        DiscoveredFolder {
+            folder_name: "Saga (2012)".into(),
+            file_count: 3,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/dismiss",
+            r#"{"folder_names":["Saga (2012)"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["dismissed"], 1);
+
+    // Dismissed folders drop off the untracked list.
+    let untracked = response_json(
+        app.request(empty_request("GET", "/api/reconcile/untracked"))
+            .await,
+    )
+    .await;
+    assert_eq!(untracked.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn reconcile_delete_phantom_removes_zero_owned_series() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Doomed Series").await;
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/reconcile/phantom/{sid}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["deleted"], sid);
+
+    assert!(series_repo::find_by_id(&app.state.db, sid)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reconcile_bulk_delete_phantoms_removes_all_given() {
+    let app = build_test_app().await;
+    let a = seed_pull_series(&app, "Phantom A").await;
+    let b = seed_pull_series(&app, "Phantom B").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/phantoms/bulk",
+            format!(r#"{{"series_ids":[{a},{b}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let mut deleted: Vec<i64> = body["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    deleted.sort_unstable();
+    let mut expected = [a, b];
+    expected.sort_unstable();
+    assert_eq!(deleted, expected);
+    assert_eq!(body["skipped"].as_array().unwrap().len(), 0);
+
+    assert!(series_repo::find_by_id(&app.state.db, a)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(series_repo::find_by_id(&app.state.db, b)
+        .await
+        .unwrap()
+        .is_none());
 }
