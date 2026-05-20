@@ -35,7 +35,7 @@ pub use publisher_filter_repo::{
     NewPublisherFilter, PublisherFilterMode, PublisherFilterRow, DEFAULT_BLOCKED_PUBLISHERS,
 };
 pub use pull_attempt_repo::{NewPullAttempt, PullAttemptRow};
-pub use pull_list_repo::{NewPullEntry, PullListRow};
+pub use pull_list_repo::{NewPullEntry, PullListRow, PullListWithSeries};
 pub use release_cache_repo::{NewReleaseCacheEntry, ReleaseCacheRow};
 pub use webhook_config_repo::{NewWebhookConfig, WebhookConfigRow, WebhookConfigUpdate};
 

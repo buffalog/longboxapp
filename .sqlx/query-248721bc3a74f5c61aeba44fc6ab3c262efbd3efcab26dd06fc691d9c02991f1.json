@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.series_id AS \"series_id!: i64\",\n                  s.title AS \"series_title!\",\n                  s.sort_title AS \"series_sort_title!\",\n                  s.start_year AS \"series_start_year?: i64\",\n                  p.paused AS \"paused!: bool\",\n                  p.added_at AS \"added_at!: time::PrimitiveDateTime\",\n                  p.last_pull_attempt_at AS \"last_pull_attempt_at?: time::PrimitiveDateTime\",\n                  p.last_successful_pull_at AS \"last_successful_pull_at?: time::PrimitiveDateTime\",\n                  p.failure_count AS \"failure_count!: i64\"\n           FROM pull_list p\n           JOIN series s ON p.series_id = s.id\n           ORDER BY s.sort_title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_title!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_sort_title!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_start_year?: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "paused!: bool",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "added_at!: time::PrimitiveDateTime",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "last_pull_attempt_at?: time::PrimitiveDateTime",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "last_successful_pull_at?: time::PrimitiveDateTime",
+        "ordinal": 7,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "failure_count!: i64",
+        "ordinal": 8,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "248721bc3a74f5c61aeba44fc6ab3c262efbd3efcab26dd06fc691d9c02991f1"
+}

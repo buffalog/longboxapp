@@ -74,7 +74,7 @@ describe('WebhookSettings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(updateWebhook).toHaveBeenCalledTimes(1));
-    const [id, input] = vi.mocked(updateWebhook).mock.calls[0];
+    const [id, input] = vi.mocked(updateWebhook).mock.calls[0]!;
     expect(id).toBe(1);
     expect(input.name).toBe('Slack prod');
     expect(await screen.findByText('Slack prod')).toBeInTheDocument();

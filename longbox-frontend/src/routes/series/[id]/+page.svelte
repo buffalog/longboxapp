@@ -7,6 +7,7 @@
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import IssueGrid from '$lib/components/IssueGrid.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import PullListToggle from '$lib/components/PullListToggle.svelte';
   import SeriesHeader from '$lib/components/SeriesHeader.svelte';
 
   let { data } = $props();
@@ -62,6 +63,7 @@
     >
       <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
     </Button>
+    <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
 </SeriesHeader>
 

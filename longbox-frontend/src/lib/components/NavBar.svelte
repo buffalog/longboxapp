@@ -10,6 +10,9 @@
     { href: '/files', label: 'Files' },
     { href: '/missing', label: 'Missing' },
     { href: '/scans', label: 'Scans' },
+    // TODO Step 12 (nav restructure): fold into the `Releases ▾` dropdown
+    // alongside Calendar / Releases of note. Flat link until then.
+    { href: '/releases/pull-list', label: 'Pull list' },
     { href: '/settings', label: 'Settings' }
   ];
 
