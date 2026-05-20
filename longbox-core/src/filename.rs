@@ -52,7 +52,9 @@ pub fn parse(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilena
             volume: caps
                 .name("volume")
                 .and_then(|m| m.as_str().parse::<i32>().ok()),
-            year: caps.name("year").and_then(|m| m.as_str().parse::<i32>().ok()),
+            year: caps
+                .name("year")
+                .and_then(|m| m.as_str().parse::<i32>().ok()),
             title: caps.name("title").map(|m| m.as_str().trim().to_owned()),
             pattern_id: p.id,
         });
@@ -200,8 +202,14 @@ mod tests {
 
     #[test]
     fn matches_cbr_and_cb7_extensions() {
-        assert_eq!(parse("Saga 1.cbr", &patterns()).unwrap().series_title, "Saga");
-        assert_eq!(parse("Saga 1.cb7", &patterns()).unwrap().series_title, "Saga");
+        assert_eq!(
+            parse("Saga 1.cbr", &patterns()).unwrap().series_title,
+            "Saga"
+        );
+        assert_eq!(
+            parse("Saga 1.cb7", &patterns()).unwrap().series_title,
+            "Saga"
+        );
     }
 
     #[test]

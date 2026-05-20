@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use longbox_core::{
-    classify_status, match_file, ComicInfo, ComicInfoMetadata, CoverDate, FileStatus,
-    LibraryPath, MatchMethod, ParsingPattern,
+    classify_status, match_file, ComicInfo, ComicInfoMetadata, CoverDate, FileStatus, LibraryPath,
+    MatchMethod, ParsingPattern,
 };
 use longbox_db::{
-    file_repo, find_candidates, issue_repo, parsing_pattern_repo, series_repo, FileRow,
-    FileUpdate, IssueRow, NewFile, Pool, SeriesRow,
+    file_repo, find_candidates, issue_repo, parsing_pattern_repo, series_repo, FileRow, FileUpdate,
+    IssueRow, NewFile, Pool, SeriesRow,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use zip::write::SimpleFileOptions;
@@ -88,8 +88,8 @@ pub async fn process_one(
 
     let Some(hint) = title_hint.filter(|s| !s.trim().is_empty()) else {
         // No usable hint at all — straight to _unsorted.
-        let outcome = move_to_unsorted(source, library_root, library_root_id, size, mtime, db)
-            .await?;
+        let outcome =
+            move_to_unsorted(source, library_root, library_root_id, size, mtime, db).await?;
         log_outcome(&outcome, started_at, source);
         return Ok(outcome);
     };
@@ -172,9 +172,7 @@ async fn wait_for_stability(source: &Path) {
     let Ok(mtime) = meta.modified() else {
         return;
     };
-    let age = SystemTime::now()
-        .duration_since(mtime)
-        .unwrap_or_default();
+    let age = SystemTime::now().duration_since(mtime).unwrap_or_default();
     if age < STABILITY_WINDOW {
         tokio::time::sleep(STABILITY_WINDOW - age).await;
     }
@@ -226,16 +224,17 @@ async fn import_as_owned(
     mtime: OffsetDateTime,
     db: &Pool,
 ) -> Result<Outcome> {
-    let issue = issue_repo::find_by_id(db, issue_id)
-        .await?
-        .ok_or(PostprocessError::CatalogNotFound {
-            what: format!("issue {issue_id}"),
-        })?;
-    let series = series_repo::find_by_id(db, issue.series_id)
-        .await?
-        .ok_or(PostprocessError::CatalogNotFound {
+    let issue =
+        issue_repo::find_by_id(db, issue_id)
+            .await?
+            .ok_or(PostprocessError::CatalogNotFound {
+                what: format!("issue {issue_id}"),
+            })?;
+    let series = series_repo::find_by_id(db, issue.series_id).await?.ok_or(
+        PostprocessError::CatalogNotFound {
             what: format!("series {}", issue.series_id),
-        })?;
+        },
+    )?;
 
     let library_path = LibraryPath::new(
         &series.title,
@@ -262,11 +261,10 @@ async fn import_as_owned(
     // failure surface is precise.
     let source_owned = source.to_path_buf();
     let target_owned = target_abs.clone();
-    let rewrite_res = tokio::task::spawn_blocking(move || {
-        rewrite_to_temp(&source_owned, &target_owned, &xml)
-    })
-    .await
-    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+    let rewrite_res =
+        tokio::task::spawn_blocking(move || rewrite_to_temp(&source_owned, &target_owned, &xml))
+            .await
+            .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
 
     let temp = match rewrite_res {
         Ok(t) => t,
@@ -281,11 +279,10 @@ async fn import_as_owned(
 
     let source_owned = source.to_path_buf();
     let target_owned = target_abs.clone();
-    let commit_res = tokio::task::spawn_blocking(move || {
-        commit_move(temp, &target_owned, &source_owned)
-    })
-    .await
-    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+    let commit_res =
+        tokio::task::spawn_blocking(move || commit_move(temp, &target_owned, &source_owned))
+            .await
+            .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
 
     if let Err(e) = commit_res {
         return Ok(Outcome::Failed {
@@ -395,19 +392,15 @@ async fn upsert_unmatched(
         PrimitiveDateTime::new(n.date(), n.time())
     };
 
-    let row = if let Some(existing) = file_repo::find_by_path(db, library_root_id, path_relative)
-        .await?
+    let row = if let Some(existing) =
+        file_repo::find_by_path(db, library_root_id, path_relative).await?
     {
         // next_matched_at handles the issue_id=None case (clears
         // matched_at). The brief's "match_confidence=null" can't be
         // honored (schema is REAL NOT NULL); we store 0.0, matching
         // scanner's own unmatched-insert pattern.
-        let matched_at = file_repo::next_matched_at(
-            existing.issue_id,
-            None,
-            existing.matched_at,
-            now_p,
-        );
+        let matched_at =
+            file_repo::next_matched_at(existing.issue_id, None, existing.matched_at, now_p);
         let patch = FileUpdate {
             issue_id: None,
             size_bytes: size,
@@ -530,7 +523,8 @@ fn rewrite_to_temp(
 ///
 /// All errors here are "MoveFailed" semantically.
 fn commit_move(temp: tempfile::NamedTempFile, target: &Path, source: &Path) -> Result<()> {
-    temp.persist(target).map_err(|e| PostprocessError::Io(e.error))?;
+    temp.persist(target)
+        .map_err(|e| PostprocessError::Io(e.error))?;
     std::fs::remove_file(source)?;
     Ok(())
 }
@@ -553,14 +547,14 @@ fn copy_then_unlink(source: &Path, target: &Path) -> Result<()> {
         std::io::copy(&mut src, &mut dst)?;
         dst.flush()?;
     }
-    temp.persist(target).map_err(|e| PostprocessError::Io(e.error))?;
+    temp.persist(target)
+        .map_err(|e| PostprocessError::Io(e.error))?;
     std::fs::remove_file(source)?;
     Ok(())
 }
 
 fn system_time_to_offset(t: SystemTime) -> OffsetDateTime {
-    t.try_into()
-        .unwrap_or_else(|_| OffsetDateTime::now_utc())
+    t.try_into().unwrap_or_else(|_| OffsetDateTime::now_utc())
 }
 
 fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path) {
@@ -614,4 +608,3 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
         }
     }
 }
-

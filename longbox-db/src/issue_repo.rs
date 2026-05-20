@@ -57,10 +57,7 @@ where
     Ok(row)
 }
 
-pub async fn find_by_cv_issue_id<'e, E>(
-    executor: E,
-    cv_issue_id: i64,
-) -> Result<Option<IssueRow>>
+pub async fn find_by_cv_issue_id<'e, E>(executor: E, cv_issue_id: i64) -> Result<Option<IssueRow>>
 where
     E: SqliteExecutor<'e>,
 {

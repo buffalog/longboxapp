@@ -24,8 +24,7 @@ pub use library_root_repo::{LibraryRootRow, NewLibraryRoot};
 pub use parsing_pattern_repo::{NewParsingPattern, ParsingPatternRow};
 pub use pool::open;
 pub use publisher_filter_repo::{
-    NewPublisherFilter, PublisherFilterMode, PublisherFilterRow,
-    DEFAULT_BLOCKED_PUBLISHERS,
+    NewPublisherFilter, PublisherFilterMode, PublisherFilterRow, DEFAULT_BLOCKED_PUBLISHERS,
 };
 
 /// Re-export of [`sqlx::SqlitePool`] under the project's canonical name.

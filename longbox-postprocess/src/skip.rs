@@ -83,7 +83,12 @@ mod tests {
 
     #[test]
     fn dotfiles_skipped_before_extension_check() {
-        for n in [".DS_Store", ".AppleDouble", ".fuse_hidden0001", ".thing.cbz"] {
+        for n in [
+            ".DS_Store",
+            ".AppleDouble",
+            ".fuse_hidden0001",
+            ".thing.cbz",
+        ] {
             assert_eq!(
                 should_skip(Path::new(n)),
                 Some(SkipReason::Dotfile),
@@ -114,7 +119,11 @@ mod tests {
 
     #[test]
     fn in_progress_suffix_case_insensitive() {
-        for n in ["Saga 001.PARTIAL", "Saga 001.CrDownload", "Saga 001.cbz.PARTIAL"] {
+        for n in [
+            "Saga 001.PARTIAL",
+            "Saga 001.CrDownload",
+            "Saga 001.cbz.PARTIAL",
+        ] {
             assert_eq!(
                 should_skip(Path::new(n)),
                 Some(SkipReason::InProgress),

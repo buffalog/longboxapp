@@ -89,7 +89,9 @@ async fn cv_search_upstream_500_maps_to_502() {
         .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
         .mount(&app.cv_server)
         .await;
-    let resp = app.request(empty_request("GET", "/api/cv/search?q=x")).await;
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=x"))
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let body = response_json(resp).await;
     assert_eq!(body["error"]["code"], "upstream.comicvine");
@@ -136,7 +138,9 @@ async fn cv_search_blocks_seeded_reprint_publishers() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let resp = app.request(empty_request("GET", "/api/cv/search?q=batman")).await;
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=batman"))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     let results = body["results"].as_array().unwrap();
@@ -167,7 +171,10 @@ async fn cv_search_show_filtered_bypasses_blocklist() {
         .mount(&app.cv_server)
         .await;
     let resp = app
-        .request(empty_request("GET", "/api/cv/search?q=batman&show_filtered=true"))
+        .request(empty_request(
+            "GET",
+            "/api/cv/search?q=batman&show_filtered=true",
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
@@ -213,12 +220,18 @@ async fn publisher_filters_create_then_delete() {
     assert_eq!(body["mode"], "block");
 
     let resp = app
-        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/publishers/filters/{id}"),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     let resp = app
-        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/publishers/filters/{id}"),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -269,12 +282,18 @@ async fn publisher_filters_reset_reinserts_missing_defaults() {
         .unwrap();
     let id = target["id"].as_i64().unwrap();
     let resp = app
-        .request(empty_request("DELETE", &format!("/api/publishers/filters/{id}")))
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/publishers/filters/{id}"),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     let resp = app
-        .request(empty_request("POST", "/api/publishers/filters/reset-defaults"))
+        .request(empty_request(
+            "POST",
+            "/api/publishers/filters/reset-defaults",
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
@@ -528,7 +547,10 @@ async fn delete_series_with_no_owned_files_succeeds() {
     .await
     .unwrap();
     let resp = app
-        .request(empty_request("DELETE", &format!("/api/series/{}", series.id)))
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{}", series.id),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(series_repo::find_by_id(&app.state.db, series.id)
@@ -542,10 +564,7 @@ async fn delete_series_with_no_owned_files_succeeds() {
 #[tokio::test]
 async fn list_files_filters_by_status() {
     let app = build_test_app().await;
-    write_cbz(
-        &app.library_path().join("Mystery/UnknownComic.cbz"),
-        None,
-    );
+    write_cbz(&app.library_path().join("Mystery/UnknownComic.cbz"), None);
     // Trigger a scan to populate files table.
     app.state
         .scanner
@@ -574,10 +593,7 @@ async fn list_files_invalid_status_returns_400() {
 #[tokio::test]
 async fn patch_file_marks_ignored() {
     let app = build_test_app().await;
-    write_cbz(
-        &app.library_path().join("Mystery/UnknownComic.cbz"),
-        None,
-    );
+    write_cbz(&app.library_path().join("Mystery/UnknownComic.cbz"), None);
     app.state
         .scanner
         .scan_full(app.library_root_id)
@@ -604,10 +620,7 @@ async fn patch_file_marks_ignored() {
 #[tokio::test]
 async fn patch_file_clear_ignored_resets_to_unmatched() {
     let app = build_test_app().await;
-    write_cbz(
-        &app.library_path().join("Mystery/UnknownComic.cbz"),
-        None,
-    );
+    write_cbz(&app.library_path().join("Mystery/UnknownComic.cbz"), None);
     app.state
         .scanner
         .scan_full(app.library_root_id)
@@ -641,10 +654,7 @@ async fn patch_file_clear_ignored_resets_to_unmatched() {
 #[tokio::test]
 async fn patch_file_manual_rematch_sets_issue_and_owned() {
     let app = build_test_app().await;
-    write_cbz(
-        &app.library_path().join("Mystery/UnknownComic.cbz"),
-        None,
-    );
+    write_cbz(&app.library_path().join("Mystery/UnknownComic.cbz"), None);
     let series = series_repo::insert(
         &app.state.db,
         NewSeries {
@@ -713,7 +723,11 @@ async fn patch_file_empty_body_returns_400() {
         .await
         .unwrap();
     let resp = app
-        .request(json_request("PATCH", &format!("/api/files/{}", files[0].id), "{}"))
+        .request(json_request(
+            "PATCH",
+            &format!("/api/files/{}", files[0].id),
+            "{}",
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
@@ -808,7 +822,12 @@ async fn frontend_root_serves_index_html() {
     let app = build_test_app().await;
     let resp = app.request(empty_request("GET", "/")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/html"));
 }
 
@@ -817,7 +836,12 @@ async fn frontend_spa_fallback_returns_index_for_unknown_path() {
     let app = build_test_app().await;
     let resp = app.request(empty_request("GET", "/series/42")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/html"));
 }
 
@@ -836,7 +860,11 @@ async fn well_known_returns_404_no_fallback() {
 async fn malformed_json_returns_422() {
     let app = build_test_app().await;
     let resp = app
-        .request(json_request("POST", "/api/series", r#"{ "cv_id": "not a number" }"#))
+        .request(json_request(
+            "POST",
+            "/api/series",
+            r#"{ "cv_id": "not a number" }"#,
+        ))
         .await;
     // Axum's built-in JSON extractor returns 400 for type mismatch, 422 for
     // shape mismatch. Accept either as long as it's a 4xx.
@@ -935,7 +963,12 @@ async fn match_from_cv_resolves_issue_number_from_filename() {
             r#"{"cv_volume_id": 7777}"#,
         ))
         .await;
-    assert_eq!(resp.status(), StatusCode::OK, "body: {:?}", response_json(app.request(empty_request("GET", "/api/files")).await).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "body: {:?}",
+        response_json(app.request(empty_request("GET", "/api/files")).await).await
+    );
     let body = response_json(resp).await;
     assert_eq!(body["match_method"], "manual");
     assert_eq!(body["match_confidence"], 1.0);
@@ -1019,7 +1052,10 @@ async fn match_from_cv_returns_422_when_number_unresolvable() {
         .await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(resp).await;
-    assert_eq!(body["error"]["code"], "unprocessable.issue_number_unresolved");
+    assert_eq!(
+        body["error"]["code"],
+        "unprocessable.issue_number_unresolved"
+    );
 }
 
 #[tokio::test]
@@ -1290,7 +1326,10 @@ async fn missing_filters_by_series_id() {
     .unwrap();
 
     let resp = app
-        .request(empty_request("GET", &format!("/api/missing?series_id={}", saga.id)))
+        .request(empty_request(
+            "GET",
+            &format!("/api/missing?series_id={}", saga.id),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
@@ -1316,7 +1355,11 @@ async fn missing_sorts_by_cover_date_when_requested() {
     )
     .await
     .unwrap();
-    for (n, d) in [("3", "2024-03-01"), ("1", "2024-01-01"), ("2", "2024-02-01")] {
+    for (n, d) in [
+        ("3", "2024-03-01"),
+        ("1", "2024-01-01"),
+        ("2", "2024-02-01"),
+    ] {
         issue_repo::insert(
             &app.state.db,
             NewIssue {
@@ -1446,7 +1489,10 @@ async fn dashboard_activity_validates_limit() {
     let app = build_test_app().await;
     for bad in ["0", "51", "9999"] {
         let resp = app
-            .request(empty_request("GET", &format!("/api/dashboard/activity?limit={bad}")))
+            .request(empty_request(
+                "GET",
+                &format!("/api/dashboard/activity?limit={bad}"),
+            ))
             .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "limit={bad}");
     }
@@ -1582,10 +1628,7 @@ async fn match_folder_happy_path_matches_all_resolvable() {
     assert_eq!(body["skipped"].as_array().unwrap().len(), 0);
 
     // Sibling files in a different folder must not be touched.
-    write_cbz(
-        &app.library_path().join("Other Series/Other 001.cbz"),
-        None,
-    );
+    write_cbz(&app.library_path().join("Other Series/Other 001.cbz"), None);
 }
 
 #[tokio::test]
@@ -1808,7 +1851,6 @@ async fn match_folder_strips_trailing_slash() {
     assert_eq!(body["matched_count"], 1);
 }
 
-
 // -------- /api/postprocess/pending --------
 
 #[tokio::test]
@@ -1864,7 +1906,12 @@ async fn pending_endpoint_reflects_cache_contents() {
 
     let hellboy = items
         .iter()
-        .find(|i| i["source_path"].as_str().unwrap().ends_with("Hellboy 002.cbz"))
+        .find(|i| {
+            i["source_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("Hellboy 002.cbz")
+        })
         .expect("Hellboy item missing");
     assert_eq!(hellboy["reason"]["kind"], "move_failed");
     assert_eq!(hellboy["reason"]["detail"], "EXDEV cross-device");

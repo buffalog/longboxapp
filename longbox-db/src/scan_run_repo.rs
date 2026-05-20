@@ -195,11 +195,7 @@ where
 
 /// Single UPDATE with absolute counter values. Idempotent — calling twice
 /// with the same `ScanProgress` leaves the row unchanged.
-pub async fn update_progress<'e, E>(
-    executor: E,
-    id: i64,
-    progress: ScanProgress,
-) -> Result<()>
+pub async fn update_progress<'e, E>(executor: E, id: i64, progress: ScanProgress) -> Result<()>
 where
     E: SqliteExecutor<'e>,
 {
@@ -246,11 +242,7 @@ where
 /// and stamps `finished_at`. Use this from the scanner's success path so
 /// the row goes from `running` to `completed` in a single query (no
 /// partial-progress window where a card would render zero counts).
-pub async fn complete_with_stats<'e, E>(
-    executor: E,
-    id: i64,
-    stats: ScanCompletion,
-) -> Result<()>
+pub async fn complete_with_stats<'e, E>(executor: E, id: i64, stats: ScanCompletion) -> Result<()>
 where
     E: SqliteExecutor<'e>,
 {
@@ -281,10 +273,7 @@ where
 /// the given error message. Returns the number of rows touched. Called
 /// once at server boot — nothing should be `running` then because the
 /// process that wrote it is gone.
-pub async fn mark_running_as_failed<'e, E>(
-    executor: E,
-    error_message: &str,
-) -> Result<u64>
+pub async fn mark_running_as_failed<'e, E>(executor: E, error_message: &str) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {

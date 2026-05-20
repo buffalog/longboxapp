@@ -2,8 +2,8 @@ mod common;
 
 use common::{fixed_ts, fresh_pool};
 use longbox_db::{
-    file_repo, issue_repo, library_root_repo, series_repo, DbError, FileUpdate, NewFile,
-    NewIssue, NewLibraryRoot, NewSeries,
+    file_repo, issue_repo, library_root_repo, series_repo, DbError, FileUpdate, NewFile, NewIssue,
+    NewLibraryRoot, NewSeries,
 };
 use sqlx::SqlitePool;
 
@@ -71,7 +71,11 @@ fn new_file(library_root_id: i64, path: &str, status: &str, issue_id: Option<i64
         cached_at: None,
         is_present: true,
         last_seen_at: fixed_ts(),
-        matched_at: if issue_id.is_some() { Some(fixed_ts()) } else { None },
+        matched_at: if issue_id.is_some() {
+            Some(fixed_ts())
+        } else {
+            None
+        },
     }
 }
 
@@ -122,12 +126,9 @@ async fn list_by_library_root() {
     )
     .await
     .unwrap();
-    file_repo::insert(
-        &pool,
-        new_file(library_root_id, "b.cbz", "unmatched", None),
-    )
-    .await
-    .unwrap();
+    file_repo::insert(&pool, new_file(library_root_id, "b.cbz", "unmatched", None))
+        .await
+        .unwrap();
     let rows = file_repo::list_by_library_root(&pool, library_root_id)
         .await
         .unwrap();
@@ -204,12 +205,9 @@ async fn list_by_status_returns_only_matching() {
     )
     .await
     .unwrap();
-    file_repo::insert(
-        &pool,
-        new_file(library_root_id, "b.cbz", "unmatched", None),
-    )
-    .await
-    .unwrap();
+    file_repo::insert(&pool, new_file(library_root_id, "b.cbz", "unmatched", None))
+        .await
+        .unwrap();
     let rows = file_repo::list_by_status(&pool, library_root_id, "owned")
         .await
         .unwrap();
@@ -256,14 +254,14 @@ async fn update_can_set_issue_id_to_null_for_ignore_flow() {
 async fn delete_removes_row() {
     let pool = fresh_pool().await;
     let (library_root_id, _, _) = seed(&pool).await;
-    let row = file_repo::insert(
-        &pool,
-        new_file(library_root_id, "a.cbz", "unmatched", None),
-    )
-    .await
-    .unwrap();
+    let row = file_repo::insert(&pool, new_file(library_root_id, "a.cbz", "unmatched", None))
+        .await
+        .unwrap();
     file_repo::delete(&pool, row.id).await.unwrap();
-    assert!(file_repo::find_by_id(&pool, row.id).await.unwrap().is_none());
+    assert!(file_repo::find_by_id(&pool, row.id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -325,12 +323,9 @@ async fn deleting_issue_clears_issue_id_on_files() {
 async fn insert_defaults_is_present_true() {
     let pool = fresh_pool().await;
     let (library_root_id, _, _) = seed(&pool).await;
-    let row = file_repo::insert(
-        &pool,
-        new_file(library_root_id, "a.cbz", "unmatched", None),
-    )
-    .await
-    .unwrap();
+    let row = file_repo::insert(&pool, new_file(library_root_id, "a.cbz", "unmatched", None))
+        .await
+        .unwrap();
     assert!(row.is_present);
 }
 
@@ -408,7 +403,10 @@ async fn mark_files_not_seen_since_is_scoped_to_library_root() {
         .await
         .unwrap()
         .unwrap();
-    assert!(other_row.is_present, "other library root's row must remain untouched");
+    assert!(
+        other_row.is_present,
+        "other library root's row must remain untouched"
+    );
 }
 
 // ----- upsert_imported (Phase B step 3) -----
@@ -437,7 +435,10 @@ async fn upsert_imported_fresh_row_sets_phase_b_owned() {
     assert_eq!(row.match_method, "phase_b");
     assert!((row.match_confidence - 1.0).abs() < f64::EPSILON);
     assert!(row.is_present);
-    assert!(row.matched_at.is_some(), "matched_at must be set on first import");
+    assert!(
+        row.matched_at.is_some(),
+        "matched_at must be set on first import"
+    );
 }
 
 #[tokio::test]
@@ -473,7 +474,10 @@ async fn upsert_imported_same_issue_preserves_matched_at() {
     .await
     .unwrap();
 
-    assert_eq!(second.id, first.id, "should be an UPDATE, not a fresh INSERT");
+    assert_eq!(
+        second.id, first.id,
+        "should be an UPDATE, not a fresh INSERT"
+    );
     assert_eq!(
         second.matched_at, first.matched_at,
         "same issue_id must preserve matched_at (per Task 3 rule)"

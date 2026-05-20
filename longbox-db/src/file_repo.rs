@@ -146,10 +146,7 @@ where
     Ok(row)
 }
 
-pub async fn list_by_library_root<'e, E>(
-    executor: E,
-    library_root_id: i64,
-) -> Result<Vec<FileRow>>
+pub async fn list_by_library_root<'e, E>(executor: E, library_root_id: i64) -> Result<Vec<FileRow>>
 where
     E: SqliteExecutor<'e>,
 {
@@ -481,7 +478,10 @@ mod tests {
         let earlier = datetime!(2026-05-18 09:00:00);
         let now = datetime!(2026-05-18 10:00:00);
         // Some(1) -> Some(2) → user remapped, set to now.
-        assert_eq!(next_matched_at(Some(1), Some(2), Some(earlier), now), Some(now));
+        assert_eq!(
+            next_matched_at(Some(1), Some(2), Some(earlier), now),
+            Some(now)
+        );
     }
 
     #[test]

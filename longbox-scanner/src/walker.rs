@@ -20,9 +20,7 @@ pub struct DiscoveredFile {
 /// with `.`), `Thumbs.db`, `.cbr`/`.cb7` archives, and non-regular files
 /// (sockets, fifos, broken symlinks) are silently skipped. Symlink loops are
 /// detected by walkdir and surface as `ScanError::Walk`.
-pub fn walk_library(
-    root: &Path,
-) -> impl Iterator<Item = Result<DiscoveredFile, ScanError>> + '_ {
+pub fn walk_library(root: &Path) -> impl Iterator<Item = Result<DiscoveredFile, ScanError>> + '_ {
     let root_owned = root.to_path_buf();
     WalkDir::new(root)
         .follow_links(true)
@@ -73,25 +71,23 @@ fn has_cbz_extension(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".cbz")
 }
 
-fn make_discovered(
-    entry: walkdir::DirEntry,
-    root: &Path,
-) -> Result<DiscoveredFile, ScanError> {
+fn make_discovered(entry: walkdir::DirEntry, root: &Path) -> Result<DiscoveredFile, ScanError> {
     let path_absolute = entry.path().to_path_buf();
-    let relative =
-        path_absolute
-            .strip_prefix(root)
-            .map_err(|e| ScanError::InvalidPath {
-                path: path_absolute.clone(),
-                reason: format!("computed outside library root: {e}"),
-            })?;
+    let relative = path_absolute
+        .strip_prefix(root)
+        .map_err(|e| ScanError::InvalidPath {
+            path: path_absolute.clone(),
+            reason: format!("computed outside library root: {e}"),
+        })?;
     let path_relative = relative
         .to_string_lossy()
         .replace('\\', "/")
         .trim_start_matches('/')
         .to_string();
 
-    let metadata = entry.metadata().map_err(|e| ScanError::Walk(e.to_string()))?;
+    let metadata = entry
+        .metadata()
+        .map_err(|e| ScanError::Walk(e.to_string()))?;
     let size_bytes = metadata.len();
     let modified = metadata.modified()?;
     let off = OffsetDateTime::from(modified);

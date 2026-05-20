@@ -29,8 +29,8 @@ async fn insert_starts_running() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     assert_eq!(row.status, "running");
     assert!(row.finished_at.is_none());
     assert_eq!(row.files_seen, 0);
@@ -47,8 +47,8 @@ async fn update_progress_idempotent() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let progress = ScanProgress {
         files_seen: 100,
         files_added: 25,
@@ -87,8 +87,8 @@ async fn complete_transitions_status_and_sets_finished_at() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     scan_run_repo::complete(&pool, row.id).await.unwrap();
     let done = scan_run_repo::find_by_id(&pool, row.id)
         .await
@@ -109,8 +109,8 @@ async fn fail_records_error_message() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     scan_run_repo::fail(&pool, row.id, "permission denied at /comics/X")
         .await
         .unwrap();
@@ -137,8 +137,8 @@ async fn list_recent_orders_descending() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let b = scan_run_repo::insert(
         &pool,
         NewScanRun {
@@ -146,8 +146,8 @@ async fn list_recent_orders_descending() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let c = scan_run_repo::insert(
         &pool,
         NewScanRun {
@@ -155,8 +155,8 @@ async fn list_recent_orders_descending() {
             kind: ScanRunKind::Full,
         },
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let rows = scan_run_repo::list_recent(&pool, 20, &[]).await.unwrap();
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     assert_eq!(ids, vec![c.id, b.id, a.id]);

@@ -100,7 +100,10 @@ impl std::fmt::Display for IssueNumber {
 
 #[derive(Debug, PartialEq)]
 enum Parsed<'a> {
-    Numeric { value: f64, suffix: &'a str },
+    Numeric {
+        value: f64,
+        suffix: &'a str,
+    },
     Alphabetic {
         prefix: &'a str,
         number: Option<i64>,
@@ -353,7 +356,16 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                "-1", "½", "1", "1.MU", "1.5", "2", "10", "Annual 1", "Annual 10", "Year One",
+                "-1",
+                "½",
+                "1",
+                "1.MU",
+                "1.5",
+                "2",
+                "10",
+                "Annual 1",
+                "Annual 10",
+                "Year One",
             ]
         );
     }

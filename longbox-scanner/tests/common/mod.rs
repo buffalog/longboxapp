@@ -78,9 +78,7 @@ pub fn build_fixture_library(root: &Path) {
     );
 
     write_cbz(
-        &root
-            .join("Saga (2012)")
-            .join("Saga 001 (2012).cbz"),
+        &root.join("Saga (2012)").join("Saga 001 (2012).cbz"),
         Some(
             r#"<?xml version="1.0"?>
 <ComicInfo>
@@ -91,10 +89,7 @@ pub fn build_fixture_library(root: &Path) {
         ),
     );
 
-    write_cbz(
-        &root.join("Mystery").join("UnknownComic.cbz"),
-        None,
-    );
+    write_cbz(&root.join("Mystery").join("UnknownComic.cbz"), None);
 
     // Corrupt CBZ: random bytes that aren't a valid ZIP.
     let corrupt = wd_dir.join("corrupt.cbz");
@@ -152,13 +147,8 @@ pub async fn seed_walking_dead(pool: &Pool) -> SeriesRow {
 
 #[allow(dead_code)]
 pub async fn seed_library_root(pool: &Pool, path: &str) -> i64 {
-    library_root_repo::insert(
-        pool,
-        NewLibraryRoot {
-            path: path.into(),
-        },
-    )
-    .await
-    .unwrap()
-    .id
+    library_root_repo::insert(pool, NewLibraryRoot { path: path.into() })
+        .await
+        .unwrap()
+        .id
 }

@@ -168,9 +168,7 @@ async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<EnrichedFileRow>>, ApiError> {
-    let library_root_id = params
-        .library_root_id
-        .unwrap_or(state.library_root_id);
+    let library_root_id = params.library_root_id.unwrap_or(state.library_root_id);
 
     let validated_status = match params.status.as_deref() {
         None | Some("all") => None,
@@ -259,12 +257,13 @@ async fn update(
     Path(id): Path<i64>,
     Json(body): Json<PatchBody>,
 ) -> Result<Json<EnrichedFileRow>, ApiError> {
-    let existing = file_repo::find_by_id(&state.db, id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound {
-            resource: "file",
-            id: id.to_string(),
-        })?;
+    let existing =
+        file_repo::find_by_id(&state.db, id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound {
+                resource: "file",
+                id: id.to_string(),
+            })?;
 
     let now = now_utc_primitive();
     let mut patch = FileUpdate {
@@ -320,8 +319,7 @@ async fn update(
         }
         _ => {
             return Err(ApiError::BadRequest {
-                message: "ambiguous PATCH body; use either `issue_id` OR `status`, not both"
-                    .into(),
+                message: "ambiguous PATCH body; use either `issue_id` OR `status`, not both".into(),
             });
         }
     }
@@ -456,7 +454,12 @@ fn try_resolve_issue_number(
 
     if let Some(xml) = file.cached_comicinfo_xml.as_deref() {
         if let Ok(info) = longbox_core::ComicInfo::parse(xml.as_bytes()) {
-            if let Some(n) = info.number.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(n) = info
+                .number
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 return Some(n.to_owned());
             }
         }

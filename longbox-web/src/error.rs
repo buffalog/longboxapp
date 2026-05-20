@@ -15,19 +15,13 @@ pub enum ApiError {
     NotFound { resource: &'static str, id: String },
 
     #[error("conflict ({code}): {message}")]
-    Conflict {
-        code: &'static str,
-        message: String,
-    },
+    Conflict { code: &'static str, message: String },
 
     #[error("validation failed: {} errors", errors.len())]
     Validation { errors: Vec<FieldError> },
 
     #[error("unprocessable ({code}): {message}")]
-    Unprocessable {
-        code: &'static str,
-        message: String,
-    },
+    Unprocessable { code: &'static str, message: String },
 
     #[error("upstream {service} failed (status {status}): {message}")]
     Upstream {

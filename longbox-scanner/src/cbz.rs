@@ -58,8 +58,8 @@ mod tests {
         let path = dir.join(name);
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         // Always include a placeholder page so the archive isn't empty.
         zip.start_file("page-001.jpg", opts).unwrap();
         zip.write_all(b"\xFF\xD8\xFF").unwrap();
@@ -94,8 +94,8 @@ mod tests {
         let path = tmp.path().join("Lower.cbz");
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("comicinfo.xml", opts).unwrap();
         zip.write_all(b"<ComicInfo/>").unwrap();
         zip.finish().unwrap();

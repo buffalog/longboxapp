@@ -55,9 +55,7 @@ fn parse_unique_violation(msg: &str) -> Option<&'static str> {
         "issues.metron_issue_id" => "metron_issue_id",
         "issues.series_id, issues.number" => "issues_series_id_number",
         "library_roots.path" => "path",
-        "files.library_root_id, files.path_relative" => {
-            "files_library_root_id_path_relative"
-        }
+        "files.library_root_id, files.path_relative" => "files_library_root_id_path_relative",
         "publisher_filters.publisher_name" => "publisher_name",
         _ => return None,
     })

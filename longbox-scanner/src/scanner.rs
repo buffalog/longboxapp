@@ -7,9 +7,9 @@ use longbox_core::{
     ParsingPattern,
 };
 use longbox_db::{
-    file_repo, find_candidates, issue_repo, library_root_repo, parsing_pattern_repo,
-    row_to_issue, row_to_series, scan_run_repo, FileUpdate, NewFile, NewScanRun, Pool,
-    ScanCompletion, ScanRunKind,
+    file_repo, find_candidates, issue_repo, library_root_repo, parsing_pattern_repo, row_to_issue,
+    row_to_series, scan_run_repo, FileUpdate, NewFile, NewScanRun, Pool, ScanCompletion,
+    ScanRunKind,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
@@ -114,8 +114,8 @@ impl Scanner {
             }
         }
 
-        let marked = file_repo::mark_files_not_seen_since(&self.db, library_root_id, started_at)
-            .await?;
+        let marked =
+            file_repo::mark_files_not_seen_since(&self.db, library_root_id, started_at).await?;
         report.files_marked_missing = u32::try_from(marked).unwrap_or(u32::MAX);
 
         let completed_at = utc_now();
@@ -127,10 +127,7 @@ impl Scanner {
     /// Re-run the match cascade against every `needs_review` file in the
     /// given library root. No filesystem walk. No mark-missing pass.
     #[instrument(target = "longbox_scanner", skip(self), fields(library_root_id = library_root_id))]
-    pub async fn rescan_unmatched(
-        &self,
-        library_root_id: i64,
-    ) -> Result<ScanReport, ScanError> {
+    pub async fn rescan_unmatched(&self, library_root_id: i64) -> Result<ScanReport, ScanError> {
         let _guard = self
             .scan_lock
             .try_lock()
@@ -331,11 +328,7 @@ impl Scanner {
         // elsewhere). Run only Tier 2/3 against the single-candidate pool.
         let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), candidates);
 
-        let new_status = compute_status(
-            Some(existing),
-            &match_result,
-            self.config.match_threshold,
-        );
+        let new_status = compute_status(Some(existing), &match_result, self.config.match_threshold);
 
         // Only update if the status actually changed.
         if existing.status != new_status.as_db_str() {
@@ -422,8 +415,8 @@ impl Scanner {
             // with whatever the matcher just produced — preserve issue_id /
             // match_method / match_confidence too. Only refresh disk-state
             // columns (mtime, size, last_scanned_at, last_seen_at, is_present).
-            let preserve_ignored = new_status == FileStatus::Ignored
-                && row.status == FileStatus::Ignored.as_db_str();
+            let preserve_ignored =
+                new_status == FileStatus::Ignored && row.status == FileStatus::Ignored.as_db_str();
             let new_issue_id = if preserve_ignored {
                 row.issue_id
             } else {

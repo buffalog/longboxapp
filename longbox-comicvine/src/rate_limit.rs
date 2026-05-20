@@ -49,12 +49,11 @@ impl CvRateLimiter {
                 Ok(()) => return Ok(()),
                 Err(not_until) => {
                     let wait = not_until.wait_time_from(clock.now());
-                    let remaining =
-                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if wait > remaining {
-                        let secs = wait.as_secs().saturating_add(u64::from(
-                            wait.subsec_nanos() > 0,
-                        ));
+                        let secs = wait
+                            .as_secs()
+                            .saturating_add(u64::from(wait.subsec_nanos() > 0));
                         return Err(CvError::RateLimited {
                             retry_after_seconds: secs,
                         });
@@ -119,7 +118,9 @@ mod tests {
         let err = limiter.acquire().await.unwrap_err();
         let elapsed = start.elapsed();
         match err {
-            CvError::RateLimited { retry_after_seconds } => {
+            CvError::RateLimited {
+                retry_after_seconds,
+            } => {
                 // Wait until next slot is ~1s (one cell/sec).
                 assert!(
                     retry_after_seconds >= 1,

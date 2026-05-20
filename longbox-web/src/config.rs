@@ -45,9 +45,8 @@ impl AppConfig {
             return Err(ConfigError::LibraryRootNotReadable { path });
         }
         // Cheap readable check: try to read the directory.
-        std::fs::read_dir(&path).map_err(|_| ConfigError::LibraryRootNotReadable {
-            path: path.clone(),
-        })?;
+        std::fs::read_dir(&path)
+            .map_err(|_| ConfigError::LibraryRootNotReadable { path: path.clone() })?;
 
         let database_url =
             optional("DATABASE_URL").unwrap_or_else(|| "sqlite:./longbox.db?mode=rwc".to_owned());
