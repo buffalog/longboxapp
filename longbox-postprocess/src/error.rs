@@ -33,6 +33,9 @@ pub enum PostprocessError {
     #[error("cbz read/write failed: {0}")]
     Cbz(#[from] zip::result::ZipError),
 
+    #[error("archive read failed: {0}")]
+    Archive(#[from] longbox_archive::ArchiveError),
+
     #[error("catalog row not found: {what}")]
     CatalogNotFound { what: String },
 }

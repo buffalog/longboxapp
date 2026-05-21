@@ -26,7 +26,9 @@ RUN pnpm build
 # bundle in place so rust-embed bakes it into the binary.
 # ────────────────────────────────────────────────────────────────────────────
 FROM rust:1.95-alpine AS backend-builder
-RUN apk add --no-cache musl-dev sqlite-dev sqlite-static pkgconfig perl make
+# musl-dev/sqlite-* cover the SQLite static link; g++ builds the bundled
+# libunrar C++ (unrar-ng-sys) that gives the scanner + Phase B CBR support.
+RUN apk add --no-cache musl-dev sqlite-dev sqlite-static pkgconfig perl make g++
 WORKDIR /build
 
 # Make sure the MUSL target is installed (rust:alpine usually has it but we
@@ -38,6 +40,7 @@ ENV SQLX_OFFLINE=true
 COPY Cargo.toml Cargo.lock ./
 COPY .sqlx/ ./.sqlx/
 COPY longbox-core/ ./longbox-core/
+COPY longbox-archive/ ./longbox-archive/
 COPY longbox-db/ ./longbox-db/
 COPY longbox-comicvine/ ./longbox-comicvine/
 COPY longbox-newznab/ ./longbox-newznab/

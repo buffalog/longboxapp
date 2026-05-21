@@ -16,10 +16,11 @@ pub struct DiscoveredFile {
     pub mtime: PrimitiveDateTime,
 }
 
-/// Walk `root` and yield every `.cbz` file. Hidden entries (names starting
-/// with `.`), `Thumbs.db`, `.cbr`/`.cb7` archives, and non-regular files
-/// (sockets, fifos, broken symlinks) are silently skipped. Symlink loops are
-/// detected by walkdir and surface as `ScanError::Walk`.
+/// Walk `root` and yield every `.cbz` and `.cbr` file. Hidden entries
+/// (names starting with `.`), `Thumbs.db`, `.cb7` archives, and
+/// non-regular files (sockets, fifos, broken symlinks) are silently
+/// skipped. Symlink loops are detected by walkdir and surface as
+/// `ScanError::Walk`.
 pub fn walk_library(root: &Path) -> impl Iterator<Item = Result<DiscoveredFile, ScanError>> + '_ {
     let root_owned = root.to_path_buf();
     WalkDir::new(root)
@@ -60,15 +61,19 @@ fn dispatch(
         return None;
     }
     let name = entry.file_name().to_string_lossy();
-    if !has_cbz_extension(&name) {
-        // CBR / CB7 / non-comic files: silently skip.
+    if !is_comic_archive(&name) {
+        // CB7 / non-comic files: silently skip.
         return None;
     }
     Some(make_discovered(entry, root))
 }
 
-fn has_cbz_extension(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".cbz")
+/// True for the comic-archive extensions LongBox indexes — `.cbz` (ZIP)
+/// and `.cbr` (RAR), case-insensitive. `.cb7` is excluded: there is no
+/// 7-Zip reader.
+fn is_comic_archive(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".cbz") || lower.ends_with(".cbr")
 }
 
 fn make_discovered(entry: walkdir::DirEntry, root: &Path) -> Result<DiscoveredFile, ScanError> {
@@ -134,28 +139,31 @@ mod tests {
     }
 
     #[test]
-    fn skips_non_cbz_extensions() {
+    fn walks_cbz_and_cbr_skips_cb7_and_others() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::write(root.join("Saga 1.cbz"), b"fake").unwrap();
         fs::write(root.join("Saga 1.cbr"), b"fake").unwrap();
         fs::write(root.join("Saga 1.cb7"), b"fake").unwrap();
         fs::write(root.join("README.txt"), b"fake").unwrap();
-        let names: Vec<String> = walk_library(root)
+        let mut names: Vec<String> = walk_library(root)
             .filter_map(|r| r.ok().map(|d| d.path_relative))
             .collect();
-        assert_eq!(names, vec!["Saga 1.cbz"]);
+        names.sort();
+        assert_eq!(names, vec!["Saga 1.cbr", "Saga 1.cbz"]);
     }
 
     #[test]
-    fn matches_cbz_case_insensitively() {
+    fn matches_extensions_case_insensitively() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::write(root.join("upper.CBZ"), b"fake").unwrap();
-        let names: Vec<String> = walk_library(root)
+        fs::write(root.join("upper.CbR"), b"fake").unwrap();
+        let mut names: Vec<String> = walk_library(root)
             .filter_map(|r| r.ok().map(|d| d.path_relative))
             .collect();
-        assert_eq!(names, vec!["upper.CBZ"]);
+        names.sort();
+        assert_eq!(names, vec!["upper.CBZ", "upper.CbR"]);
     }
 
     #[test]

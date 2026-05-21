@@ -1,0 +1,21 @@
+[package]
+name = "longbox-archive"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+# unrar-ng is edition 2024 and declares rust-version 1.85, so this crate
+# (and transitively the build) needs 1.85 — not the workspace-wide 1.78.
+rust-version = "1.85"
+description = "LongBox archive reading: ComicInfo + entry extraction for CBZ (ZIP) and CBR (RAR)."
+
+[lints]
+workspace = true
+
+[dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+unrar-ng = "0.7"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }

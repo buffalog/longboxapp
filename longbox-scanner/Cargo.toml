@@ -10,11 +10,11 @@ description = "LongBox library scanner: walks the disk, matches against the DB."
 workspace = true
 
 [dependencies]
+longbox-archive = { path = "../longbox-archive" }
 longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
 serde = { version = "1", features = ["derive"] }
 walkdir = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "sync", "rt-multi-thread", "fs"] }
 tracing = "0.1"
 thiserror = "1"

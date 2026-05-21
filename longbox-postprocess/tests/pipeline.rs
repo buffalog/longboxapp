@@ -185,6 +185,53 @@ async fn imports_owned_via_filename_match() {
 }
 
 #[tokio::test]
+async fn imports_owned_cbr_converting_to_cbz() {
+    let f = seed_basic_fixture().await;
+
+    // A real CBR (RAR5) carrying ComicInfo for Saga #1. There is no
+    // Rust RAR writer, so the fixture is a committed binary copied in
+    // rather than built in-process like write_cbz does for CBZ.
+    let source = f._watch.path().join("Saga 001.cbr");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-rar5.cbr");
+    std::fs::copy(&fixture, &source).unwrap();
+    // Push mtime back so the 2 s stability check doesn't sleep.
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    filetime::set_file_mtime(&source, filetime::FileTime::from_system_time(earlier)).ok();
+
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db)
+        .await
+        .unwrap();
+
+    let target = match outcome {
+        Outcome::Imported { target, .. } => target,
+        other => panic!("expected Imported, got {other:?}"),
+    };
+
+    // No RAR writer exists, so a matched CBR is re-emitted as a CBZ at
+    // the canonical `.cbz` path — the conversion accepted in kickoff Q3.
+    assert_eq!(
+        target,
+        f.library
+            .path()
+            .join("Saga (2012)")
+            .join("Saga (2012) 001.cbz")
+    );
+    assert!(target.exists());
+    assert!(!source.exists(), "CBR source removed after import");
+
+    // The output is a valid ZIP: the page survived the RAR→ZIP
+    // conversion and ComicInfo was regenerated from the catalog.
+    let entries = list_cbz_entries(&target);
+    assert!(
+        entries.iter().any(|e| e == "page-001.jpg"),
+        "page lost in conversion: {entries:?}"
+    );
+    let xml = read_cbz_entry(&target, "ComicInfo.xml").expect("ComicInfo.xml missing");
+    assert!(xml.contains("<Series>Saga</Series>"));
+    assert!(xml.contains("<Web>https://comicvine.gamespot.com/issue/4000-364354/</Web>"));
+}
+
+#[tokio::test]
 async fn overwrites_existing_comicinfo_in_source() {
     let f = seed_basic_fixture().await;
 

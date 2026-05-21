@@ -89,7 +89,6 @@ async fn watcher_ignores_in_progress_and_dotfiles() {
     // skipped at the watcher boundary; the candidate should arrive.
     std::fs::write(tmp.path().join(".DS_Store"), []).unwrap();
     std::fs::write(tmp.path().join("Foo.cbz.partial"), []).unwrap();
-    std::fs::write(tmp.path().join("foo.cbr"), []).unwrap();
     std::fs::write(tmp.path().join("Real Series 001.cbz"), b"PK\x03\x04").unwrap();
 
     let detected = timeout(Duration::from_secs(2), detected_rx.recv())
@@ -103,7 +102,7 @@ async fn watcher_ignores_in_progress_and_dotfiles() {
     while let Ok(Some(extra)) = timeout(Duration::from_millis(250), detected_rx.recv()).await {
         let name = extra.file_name().unwrap().to_string_lossy().to_string();
         assert!(
-            !name.starts_with('.') && !name.ends_with(".partial") && !name.ends_with(".cbr"),
+            !name.starts_with('.') && !name.ends_with(".partial"),
             "noise file leaked through skip filter: {name}"
         );
     }
