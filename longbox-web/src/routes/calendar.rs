@@ -15,6 +15,7 @@ use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use longbox_comicvine::CvCalendarItem;
+use longbox_core::normalize_title;
 use longbox_db::{
     pull_list_repo, release_cache_repo, series_repo, NewPullEntry, NewReleaseCacheEntry,
 };
@@ -34,6 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/releases/calendar", get(calendar))
         .route("/releases/calendar/pull", post(add_to_pull_list))
+        .route("/releases/of-note", get(releases_of_note))
 }
 
 // -------- shapes --------
@@ -62,6 +64,19 @@ struct CalendarRow {
 #[derive(Debug, Deserialize)]
 struct AddToPullBody {
     cv_volume_id: i64,
+}
+
+/// One "release of note" — a volume from this ship-week's calendar whose
+/// name matches a series the user owns and that is not on the pull list.
+/// Deduped to one row per volume.
+#[derive(Debug, Serialize)]
+struct ReleaseOfNote {
+    cv_volume_id: i64,
+    volume_name: String,
+    cover_url: Option<String>,
+    site_detail_url: String,
+    /// How many of the volume's issues land in the ship-week.
+    issue_count: i64,
 }
 
 // -------- handlers --------
@@ -114,6 +129,68 @@ async fn add_to_pull_list(
         .await?;
     }
     Ok(Json(serde_json::json!({ "series_id": series.id })))
+}
+
+/// "Releases of note" — the current ship-week's calendar, narrowed to
+/// volumes whose name matches a series the user *owns* and that is *not*
+/// already on the pull list. A dashboard discovery affordance, deduped
+/// to one row per volume.
+///
+/// The name match runs here, not in a repo method: the calendar payload
+/// is cached CV JSON (`cv_release_cache.payload_json`), not table rows,
+/// so there is nothing to `LIKE`-join against. An owned series' (already
+/// normalized) `sort_title` must be a substring of the release's
+/// `normalize_title`-d `volume_name` — see the brief's known v1 tradeoff
+/// on short-title false positives.
+async fn releases_of_note(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ReleaseOfNote>>, ApiError> {
+    let (from, to) = current_ship_week();
+    let items = load_calendar(&state, &from, &to, false).await?;
+
+    let series = series_repo::find_all_with_counts(&state.db).await?;
+    // Normalized titles of series the user owns at least one file of.
+    let owned_titles: Vec<String> = series
+        .iter()
+        .filter(|s| s.owned_count > 0 && !s.series.sort_title.is_empty())
+        .map(|s| s.series.sort_title.clone())
+        .collect();
+    // cv_id of every series currently on the pull list.
+    let id_to_cv: HashMap<i64, i64> = series
+        .iter()
+        .filter_map(|s| s.series.cv_id.map(|cv| (s.series.id, cv)))
+        .collect();
+    let pulled_cv_ids: HashSet<i64> = pull_list_repo::list_all(&state.db)
+        .await?
+        .into_iter()
+        .filter_map(|e| id_to_cv.get(&e.series_id).copied())
+        .collect();
+
+    // Match + dedup by volume, preserving the calendar's order.
+    let mut index: HashMap<i64, usize> = HashMap::new();
+    let mut out: Vec<ReleaseOfNote> = Vec::new();
+    for item in items {
+        if pulled_cv_ids.contains(&item.cv_volume_id) {
+            continue;
+        }
+        let haystack = normalize_title(&item.volume_name);
+        if !owned_titles.iter().any(|t| haystack.contains(t.as_str())) {
+            continue;
+        }
+        if let Some(&i) = index.get(&item.cv_volume_id) {
+            out[i].issue_count += 1;
+        } else {
+            index.insert(item.cv_volume_id, out.len());
+            out.push(ReleaseOfNote {
+                cv_volume_id: item.cv_volume_id,
+                volume_name: item.volume_name,
+                cover_url: item.cover_url,
+                site_detail_url: item.site_detail_url,
+                issue_count: 1,
+            });
+        }
+    }
+    Ok(Json(out))
 }
 
 // -------- internals --------
@@ -190,6 +267,24 @@ fn is_fresh(cached_at: PrimitiveDateTime) -> bool {
     let now = OffsetDateTime::now_utc();
     let now_pdt = PrimitiveDateTime::new(now.date(), now.time());
     now_pdt - cached_at < CALENDAR_CACHE_TTL
+}
+
+/// The current comics shipping week — Wednesday through the following
+/// Tuesday — as `(from, to)` `YYYY-MM-DD` strings, in UTC. New comics
+/// ship Wednesday; `from` is the most-recent Wednesday at or before
+/// today.
+fn current_ship_week() -> (String, String) {
+    let today = OffsetDateTime::now_utc().date();
+    // number_days_from_monday(): Mon=0 .. Sun=6. Wednesday is 2.
+    let days_from_monday = i64::from(today.weekday().number_days_from_monday());
+    let back_to_wed = (days_from_monday + 7 - 2) % 7;
+    let from = today - time::Duration::days(back_to_wed);
+    let to = from + time::Duration::days(6);
+    (fmt_date(from), fmt_date(to))
+}
+
+fn fmt_date(d: time::Date) -> String {
+    format!("{:04}-{:02}-{:02}", d.year(), d.month() as u8, d.day())
 }
 
 /// A `YYYY-MM-DD`-shaped string. Not a full calendar check — a nonsense

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { addCalendarVolumeToPullList, getReleaseCalendar } from './releases';
+import { addCalendarVolumeToPullList, getReleaseCalendar, getReleasesOfNote } from './releases';
 
 describe('releases api', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -39,5 +39,11 @@ describe('releases api', () => {
     expect(opts?.method).toBe('POST');
     expect(JSON.parse(opts?.body as string)).toEqual({ cv_volume_id: 2127 });
     expect(out.series_id).toBe(42);
+  });
+
+  it('getReleasesOfNote GETs /api/releases/of-note', async () => {
+    const fetchSpy = mockJson([]);
+    await getReleasesOfNote();
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/releases/of-note');
   });
 });

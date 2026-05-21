@@ -2864,12 +2864,18 @@ async fn mount_cv_volume(app: &common::TestApp, cv_id: i64, name: &str) {
 
 /// Seed a series + one issue, drop a CBZ whose ComicInfo CV-URL resolves
 /// to that issue, and run a full scan so the file lands `owned` and
-/// present. Returns the series id.
-async fn seed_series_with_owned_file(app: &common::TestApp, title: &str, cv_issue_id: i64) -> i64 {
+/// present. Returns the series id. `cv_id` is the series' ComicVine
+/// volume id (`None` when the test doesn't exercise cv_id linkage).
+async fn seed_series_with_owned_file(
+    app: &common::TestApp,
+    title: &str,
+    cv_id: Option<i64>,
+    cv_issue_id: i64,
+) -> i64 {
     let series = series_repo::insert(
         &app.state.db,
         NewSeries {
-            cv_id: None,
+            cv_id,
             metron_id: None,
             title: title.into(),
             sort_title: title.to_lowercase(),
@@ -3122,11 +3128,11 @@ async fn reconcile_delete_phantom_404_for_unknown_series() {
 async fn reconcile_delete_phantom_409_for_present_owned_files_not_absent() {
     let app = build_test_app().await;
     // Series A keeps a present, owned file — delete must 409.
-    let present = seed_series_with_owned_file(&app, "Present", 600_001).await;
+    let present = seed_series_with_owned_file(&app, "Present", None, 600_001).await;
     // Series B owned a file that has since vanished — a transition
     // phantom. Delete must succeed: the guard counts `is_present = 1`
     // only, so an absent owned file never blocks the delete.
-    let absent = seed_series_with_owned_file(&app, "Absent", 600_002).await;
+    let absent = seed_series_with_owned_file(&app, "Absent", None, 600_002).await;
     std::fs::remove_dir_all(app.library_path().join("Absent")).unwrap();
     app.state
         .scanner
@@ -3163,7 +3169,7 @@ async fn reconcile_delete_phantom_409_for_present_owned_files_not_absent() {
 async fn reconcile_bulk_delete_skips_unknown_and_owned_with_readable_reasons() {
     let app = build_test_app().await;
     let phantom = seed_pull_series(&app, "Deletable Phantom").await;
-    let owned = seed_series_with_owned_file(&app, "Has Files", 700_001).await;
+    let owned = seed_series_with_owned_file(&app, "Has Files", None, 700_001).await;
     let unknown = 999_999_i64;
 
     let resp = app
@@ -3300,7 +3306,7 @@ async fn e2e_discover_folder_then_add_via_api() {
 async fn e2e_delete_folder_transitions_to_phantom_then_remove() {
     let app = build_test_app().await;
     // A tracked series with a matched, owned, present file on disk.
-    let series = seed_series_with_owned_file(&app, "Chew", 900_001).await;
+    let series = seed_series_with_owned_file(&app, "Chew", None, 900_001).await;
     // Not a phantom yet — its file is present.
     let phantoms = response_json(
         app.request(empty_request("GET", "/api/reconcile/phantoms"))
@@ -3597,4 +3603,149 @@ async fn calendar_add_to_pull_list_is_idempotent_for_an_already_subscribed_serie
         pull_list_repo::list_all(&app.state.db).await.unwrap().len(),
         1
     );
+}
+
+// -------- releases of note (A.8 Step 9) --------
+
+/// Mount a ComicVine `/issues/` response for ANY query. The of-note
+/// endpoint computes its ship-week range server-side, so a test can't
+/// match on a fixed `filter` param the way `mount_cv_calendar` does.
+async fn mount_cv_calendar_any(app: &common::TestApp, results: &str) {
+    let count = results.matches("\"issue_number\"").count();
+    let body = format!(
+        r#"{{ "status_code": 1, "error": "OK", "limit": 100, "offset": 0,
+            "number_of_page_results": {count}, "number_of_total_results": {count},
+            "results": {results} }}"#
+    );
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&app.cv_server)
+        .await;
+}
+
+#[tokio::test]
+async fn releases_of_note_surfaces_owned_unpulled_matches() {
+    let app = build_test_app().await;
+    // The user owns "Saga" — give it a matched, owned file.
+    seed_series_with_owned_file(&app, "Saga", None, 810_001).await;
+    // This week's calendar: a Saga issue (name-matches) and an unrelated one.
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 81001, "issue_number": "55", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8100, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-81001/" },
+            { "id": 81002, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8200, "name": "Random Comic" },
+              "site_detail_url": "https://cv/4000-81002/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/of-note"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "only the owned-series match surfaces");
+    assert_eq!(rows[0]["cv_volume_id"], 8100);
+    assert_eq!(rows[0]["volume_name"], "Saga");
+    assert_eq!(rows[0]["issue_count"], 1);
+}
+
+#[tokio::test]
+async fn releases_of_note_excludes_a_volume_on_the_pull_list() {
+    let app = build_test_app().await;
+    // The user owns "Saga" (cv_id 8800) and it is already on the pull list.
+    let series = seed_series_with_owned_file(&app, "Saga", Some(8800), 820_001).await;
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: series,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 82001, "issue_number": "56", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8800, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-82001/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/of-note"))
+            .await,
+    )
+    .await;
+    // Name-matches an owned series, but it is already pulled — not "of note".
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn releases_of_note_dedups_a_volume_with_several_issues() {
+    let app = build_test_app().await;
+    seed_series_with_owned_file(&app, "Saga", None, 830_001).await;
+    // Two Saga issues land in the week — one row, issue_count 2.
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 83001, "issue_number": "57", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 9100, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-83001/" },
+            { "id": 83002, "issue_number": "58", "name": null, "cover_date": null,
+              "store_date": "2026-05-15", "description": null, "image": null,
+              "volume": { "id": 9100, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-83002/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/of-note"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["cv_volume_id"], 9100);
+    assert_eq!(rows[0]["issue_count"], 2);
+}
+
+#[tokio::test]
+async fn releases_of_note_empty_when_nothing_owned_matches() {
+    let app = build_test_app().await;
+    // The user owns "Chew" — nothing in this week's calendar matches it.
+    seed_series_with_owned_file(&app, "Chew", None, 840_001).await;
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 84001, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8400, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-84001/" },
+            { "id": 84002, "issue_number": "2", "name": null, "cover_date": null,
+              "store_date": "2026-05-15", "description": null, "image": null,
+              "volume": { "id": 8500, "name": "Batman" },
+              "site_detail_url": "https://cv/4000-84002/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/of-note"))
+            .await,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
 }
