@@ -8,8 +8,8 @@ use url::Url;
 use crate::error::{excerpt, CvError};
 use crate::models::{CvIssueFull, CvResponse, CvVolumeFull, CvVolumeSearchItem};
 use crate::projection::{
-    project_issue, project_search_item, project_volume, CvIssueDetail, CvVolumeDetail,
-    SeriesSearchResult,
+    project_calendar_item, project_issue, project_search_item, project_volume, CvCalendarItem,
+    CvIssueDetail, CvVolumeDetail, SeriesSearchResult,
 };
 use crate::rate_limit::CvRateLimiter;
 
@@ -148,6 +148,55 @@ impl ComicVineClient {
             }
             offset = offset.saturating_add(returned);
             debug!(target: "longbox_comicvine", offset, "paginating next issue page");
+        }
+
+        Ok(out)
+    }
+
+    /// Fetch every issue with a `store_date` inside `[from, to]` — the
+    /// release-calendar query, paginated like [`Self::fetch_issues`].
+    /// `from` / `to` are `YYYY-MM-DD`. Issues CV returns without a
+    /// `store_date` or `volume` are dropped by the projection.
+    #[instrument(target = "longbox_comicvine", skip(self))]
+    pub async fn fetch_release_calendar(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<CvCalendarItem>, CvError> {
+        let mut out = Vec::new();
+        let mut offset: u32 = 0;
+        let filter = format!("store_date:{from}|{to}");
+        let limit_str = PAGE_LIMIT.to_string();
+
+        loop {
+            let offset_str = offset.to_string();
+            let url = self.build_url(
+                "issues/",
+                &[
+                    ("filter", filter.as_str()),
+                    ("limit", limit_str.as_str()),
+                    ("offset", offset_str.as_str()),
+                ],
+            )?;
+            let body = self.execute_with_retry(url).await?;
+            let envelope = parse_envelope::<Vec<CvIssueFull>>(&body)?;
+            let total = envelope.number_of_total_results;
+            let page = unwrap_envelope_results(envelope, &body)?;
+            let returned = page.len() as u32;
+            for issue in page {
+                if let Some(item) = project_calendar_item(issue) {
+                    out.push(item);
+                }
+            }
+
+            if returned == 0 {
+                break;
+            }
+            if total <= offset.saturating_add(returned) {
+                break;
+            }
+            offset = offset.saturating_add(returned);
+            debug!(target: "longbox_comicvine", offset, "paginating next calendar page");
         }
 
         Ok(out)

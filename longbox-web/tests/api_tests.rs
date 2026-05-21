@@ -6,7 +6,8 @@ use std::path::Path;
 use axum::http::StatusCode;
 use common::{build_test_app, empty_request, json_request, response_json};
 use longbox_db::{
-    discovered_folders_repo, issue_repo, series_repo, DiscoveredFolder, NewIssue, NewSeries,
+    discovered_folders_repo, issue_repo, pull_list_repo, release_cache_repo, series_repo,
+    DiscoveredFolder, NewIssue, NewPullEntry, NewReleaseCacheEntry, NewSeries,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -3346,4 +3347,254 @@ async fn e2e_delete_folder_transitions_to_phantom_then_remove() {
         .await
         .unwrap()
         .is_none());
+}
+
+// -------- release calendar (A.8 Step 8) --------
+
+/// Mount a ComicVine release-calendar (`store_date`-filtered `/issues/`)
+/// response with the given results array for the `from`–`to` range.
+async fn mount_cv_calendar(app: &common::TestApp, from: &str, to: &str, results: &str) {
+    // One `issue_number` per issue — the nested `volume` ref has none,
+    // so this counts issues without over-counting `"id"`.
+    let count = results.matches("\"issue_number\"").count();
+    let body = format!(
+        r#"{{ "status_code": 1, "error": "OK", "limit": 100, "offset": 0,
+            "number_of_page_results": {count}, "number_of_total_results": {count},
+            "results": {results} }}"#
+    );
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .and(query_param("filter", format!("store_date:{from}|{to}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&app.cv_server)
+        .await;
+}
+
+#[tokio::test]
+async fn calendar_queries_cv_cold_and_enriches_pull_list_state() {
+    let app = build_test_app().await;
+    // One calendar volume is a tracked, subscribed series; the other is
+    // untracked.
+    let tracked = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(4050),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: tracked.id,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    mount_cv_calendar(
+        &app,
+        "2026-05-13",
+        "2026-05-19",
+        r#"[
+            { "id": 50001, "issue_number": "12", "name": null, "cover_date": "2026-07-01",
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 4050, "name": "Saga" }, "site_detail_url": "https://cv/4000-50001/" },
+            { "id": 50002, "issue_number": "3", "name": null, "cover_date": null,
+              "store_date": "2026-05-15", "description": null, "image": null,
+              "volume": { "id": 9999, "name": "Untracked Title" },
+              "site_detail_url": "https://cv/4000-50002/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let saga = rows.iter().find(|r| r["cv_volume_id"] == 4050).unwrap();
+    assert_eq!(saga["series_id"], tracked.id);
+    assert_eq!(saga["on_pull_list"], true);
+    assert_eq!(saga["volume_name"], "Saga");
+    let untracked = rows.iter().find(|r| r["cv_volume_id"] == 9999).unwrap();
+    assert!(untracked["series_id"].is_null());
+    assert_eq!(untracked["on_pull_list"], false);
+}
+
+#[tokio::test]
+async fn calendar_serves_a_fresh_cache_entry_without_hitting_cv() {
+    let app = build_test_app().await;
+    // Prime the cache. With no CV mock mounted, a cache miss would fall
+    // through to CV, 404, and surface as 502 — so a 200 proves the hit.
+    release_cache_repo::upsert(
+        &app.state.db,
+        NewReleaseCacheEntry {
+            date_from: "2026-05-13".into(),
+            date_to: "2026-05-19".into(),
+            publisher: String::new(),
+            payload_json: r#"[{"cv_issue_id":111,"issue_number":"1","store_date":"2026-05-14",
+                "cv_volume_id":4050,"volume_name":"Saga","cover_url":null,
+                "site_detail_url":"https://cv/4000-111/"}]"#
+                .into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["cv_issue_id"], 111);
+}
+
+#[tokio::test]
+async fn calendar_refresh_requeries_cv_past_a_fresh_cache() {
+    let app = build_test_app().await;
+    // A fresh cache entry holds issue 111 ...
+    release_cache_repo::upsert(
+        &app.state.db,
+        NewReleaseCacheEntry {
+            date_from: "2026-05-13".into(),
+            date_to: "2026-05-19".into(),
+            publisher: String::new(),
+            payload_json: r#"[{"cv_issue_id":111,"issue_number":"1","store_date":"2026-05-14",
+                "cv_volume_id":4050,"volume_name":"Saga","cover_url":null,
+                "site_detail_url":"https://cv/4000-111/"}]"#
+                .into(),
+        },
+    )
+    .await
+    .unwrap();
+    // ... but CV now reports issue 222.
+    mount_cv_calendar(
+        &app,
+        "2026-05-13",
+        "2026-05-19",
+        r#"[
+            { "id": 222, "issue_number": "2", "name": null, "cover_date": null,
+              "store_date": "2026-05-16", "description": null, "image": null,
+              "volume": { "id": 4050, "name": "Saga" }, "site_detail_url": "https://cv/4000-222/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19&refresh=true",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["cv_issue_id"], 222,
+        "refresh bypassed the fresh cache"
+    );
+}
+
+#[tokio::test]
+async fn calendar_rejects_a_malformed_date() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=not-a-date&to=2026-05-19",
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn calendar_add_to_pull_list_creates_series_and_subscribes() {
+    let app = build_test_app().await;
+    mount_cv_volume(&app, 2127, "The Walking Dead").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"cv_volume_id":2127}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let series_id = response_json(resp).await["series_id"].as_i64().unwrap();
+
+    // The volume is now a tracked series and that series is subscribed.
+    let series = series_repo::find_by_cv_id(&app.state.db, 2127)
+        .await
+        .unwrap()
+        .expect("series created");
+    assert_eq!(series.id, series_id);
+    assert!(pull_list_repo::get(&app.state.db, series_id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn calendar_add_to_pull_list_is_idempotent_for_an_already_subscribed_series() {
+    let app = build_test_app().await;
+    // The volume is already a tracked, subscribed series.
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(5151),
+            metron_id: None,
+            title: "Chew".into(),
+            sort_title: "chew".into(),
+            start_year: Some(2009),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: series.id,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // No CV mock — add_or_get_from_cv short-circuits on the existing series.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"cv_volume_id":5151}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["series_id"], series.id);
+    // Still exactly one pull-list entry — no duplicate, no 409.
+    assert_eq!(
+        pull_list_repo::list_all(&app.state.db).await.unwrap().len(),
+        1
+    );
 }

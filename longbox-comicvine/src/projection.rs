@@ -41,6 +41,21 @@ pub struct CvIssueDetail {
     pub site_detail_url: String,
 }
 
+/// One release-calendar entry — an issue projected from a
+/// `store_date`-filtered `/issues/` query. Carries the owning volume
+/// (id + name) so the web layer can link a release back to a tracked
+/// series, and the `store_date` the calendar groups on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvCalendarItem {
+    pub cv_issue_id: i64,
+    pub issue_number: String,
+    pub store_date: String,
+    pub cv_volume_id: i64,
+    pub volume_name: String,
+    pub cover_url: Option<String>,
+    pub site_detail_url: String,
+}
+
 pub(crate) fn project_search_item(item: CvVolumeSearchItem) -> SeriesSearchResult {
     SeriesSearchResult {
         cv_id: item.id,
@@ -75,6 +90,23 @@ pub(crate) fn project_issue(item: CvIssueFull) -> CvIssueDetail {
         cover_url: extract_cover(item.image),
         site_detail_url: item.site_detail_url,
     }
+}
+
+/// Project a CV issue into a calendar item, or `None` when it lacks the
+/// `store_date` / `volume` the calendar requires. A `store_date`-filtered
+/// query only returns dated issues, so the `None` path is defensive.
+pub(crate) fn project_calendar_item(item: CvIssueFull) -> Option<CvCalendarItem> {
+    let store_date = item.store_date?;
+    let volume = item.volume?;
+    Some(CvCalendarItem {
+        cv_issue_id: item.id,
+        issue_number: item.issue_number,
+        store_date,
+        cv_volume_id: volume.id,
+        volume_name: volume.name.unwrap_or_default(),
+        cover_url: extract_cover(item.image),
+        site_detail_url: item.site_detail_url,
+    })
 }
 
 fn parse_year(raw: Option<&str>) -> Option<i32> {
@@ -177,8 +209,10 @@ mod tests {
             issue_number: "1.MU".into(),
             name: Some("Marvel Universe Tie-In".into()),
             cover_date: Some("2009-08-15".into()),
+            store_date: None,
             description: None,
             image: Some(img("https://cdn/issue-medium.jpg")),
+            volume: None,
             site_detail_url: "https://cv/issue/4000-12345/".into(),
         };
         let projected = project_issue(issue);
@@ -188,6 +222,45 @@ mod tests {
             projected.cover_url.as_deref(),
             Some("https://cdn/issue-medium.jpg")
         );
+    }
+
+    #[test]
+    fn calendar_item_projects_volume_and_store_date() {
+        let issue = CvIssueFull {
+            id: 700,
+            issue_number: "12".into(),
+            name: None,
+            cover_date: Some("2026-07-01".into()),
+            store_date: Some("2026-05-13".into()),
+            description: None,
+            image: Some(img("https://cdn/c.jpg")),
+            volume: Some(crate::models::CvVolumeRef {
+                id: 4050,
+                name: Some("Saga".into()),
+            }),
+            site_detail_url: "https://cv/issue/4000-700/".into(),
+        };
+        let item = project_calendar_item(issue).expect("has store_date + volume");
+        assert_eq!(item.store_date, "2026-05-13");
+        assert_eq!(item.cv_volume_id, 4050);
+        assert_eq!(item.volume_name, "Saga");
+        assert_eq!(item.cv_issue_id, 700);
+    }
+
+    #[test]
+    fn calendar_item_skipped_when_store_date_absent() {
+        let issue = CvIssueFull {
+            id: 701,
+            issue_number: "1".into(),
+            name: None,
+            cover_date: None,
+            store_date: None,
+            description: None,
+            image: None,
+            volume: Some(crate::models::CvVolumeRef { id: 1, name: None }),
+            site_detail_url: "https://cv/issue/4000-701/".into(),
+        };
+        assert!(project_calendar_item(issue).is_none());
     }
 
     #[test]
