@@ -55,3 +55,20 @@ export interface ReleaseOfNote {
 export function getReleasesOfNote(): Promise<ReleaseOfNote[]> {
   return apiFetch('/releases/of-note');
 }
+
+/** One issue shipping this ship-week for a series on the pull list. */
+export interface PullThisWeek {
+  cv_issue_id: number;
+  issue_number: string;
+  store_date: string;
+  cv_volume_id: number;
+  volume_name: string;
+  cover_url: string | null;
+  site_detail_url: string;
+}
+
+/** This ship-week's calendar issues whose volume is on the pull list —
+ *  the "This week's pulls" dashboard widget. */
+export function getThisWeeksPulls(): Promise<PullThisWeek[]> {
+  return apiFetch('/releases/this-weeks-pulls');
+}

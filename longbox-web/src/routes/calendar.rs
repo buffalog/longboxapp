@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/releases/calendar", get(calendar))
         .route("/releases/calendar/pull", post(add_to_pull_list))
         .route("/releases/of-note", get(releases_of_note))
+        .route("/releases/this-weeks-pulls", get(this_weeks_pulls))
 }
 
 // -------- shapes --------
@@ -193,7 +194,40 @@ async fn releases_of_note(
     Ok(Json(out))
 }
 
+/// "This week's pulls" — the current ship-week's calendar narrowed to
+/// issues whose volume is on the pull list. Per-issue, no dedup: it's a
+/// what's-shipping-for-me glance. Calendar-based, so the date is the
+/// accurate on-sale `store_date` — see the brief's Step 9b note on the
+/// `store_date` model superseding the original `cover_date` framing.
+async fn this_weeks_pulls(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CvCalendarItem>>, ApiError> {
+    let (from, to) = current_ship_week();
+    let items = load_calendar(&state, &from, &to, false).await?;
+    let pulled = pulled_cv_ids(&state).await?;
+    Ok(Json(
+        items
+            .into_iter()
+            .filter(|i| pulled.contains(&i.cv_volume_id))
+            .collect(),
+    ))
+}
+
 // -------- internals --------
+
+/// The `cv_id` of every series currently on the pull list.
+async fn pulled_cv_ids(state: &AppState) -> Result<HashSet<i64>, ApiError> {
+    let id_to_cv: HashMap<i64, i64> = series_repo::find_all(&state.db)
+        .await?
+        .into_iter()
+        .filter_map(|s| s.cv_id.map(|cv| (s.id, cv)))
+        .collect();
+    Ok(pull_list_repo::list_all(&state.db)
+        .await?
+        .into_iter()
+        .filter_map(|e| id_to_cv.get(&e.series_id).copied())
+        .collect())
+}
 
 /// The CV calendar payload for `[from, to]`, from cache when fresh and
 /// not force-refreshed, otherwise re-queried from ComicVine and cached.

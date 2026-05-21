@@ -3749,3 +3749,96 @@ async fn releases_of_note_empty_when_nothing_owned_matches() {
     .await;
     assert_eq!(body.as_array().unwrap().len(), 0);
 }
+
+// -------- this week's pulls (A.8 Step 9b) --------
+
+/// Insert a tracked series with the given `cv_id`. Returns its series id.
+async fn seed_tracked_series(app: &common::TestApp, title: &str, cv_id: i64) -> i64 {
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(cv_id),
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn this_weeks_pulls_lists_only_pulled_volumes() {
+    let app = build_test_app().await;
+    // Volume 7700 is a subscribed series; 8800 is tracked but not pulled.
+    let pulled = seed_tracked_series(&app, "Saga", 7700).await;
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: pulled,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    seed_tracked_series(&app, "Chew", 8800).await;
+
+    // This week's calendar: two Saga issues + one Chew issue.
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 91001, "issue_number": "60", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 7700, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-91001/" },
+            { "id": 91002, "issue_number": "61", "name": null, "cover_date": null,
+              "store_date": "2026-05-15", "description": null, "image": null,
+              "volume": { "id": 7700, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-91002/" },
+            { "id": 91003, "issue_number": "9", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8800, "name": "Chew" },
+              "site_detail_url": "https://cv/4000-91003/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/this-weeks-pulls"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    // Both Saga issues (per-issue, no dedup); the unpulled Chew issue is out.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r["cv_volume_id"] == 7700));
+}
+
+#[tokio::test]
+async fn this_weeks_pulls_empty_when_nothing_is_subscribed() {
+    let app = build_test_app().await;
+    // A tracked series, but not on the pull list.
+    seed_tracked_series(&app, "Chew", 8800).await;
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+            { "id": 92001, "issue_number": "9", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8800, "name": "Chew" },
+              "site_detail_url": "https://cv/4000-92001/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/releases/this-weeks-pulls"))
+            .await,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
