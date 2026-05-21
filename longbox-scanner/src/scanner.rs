@@ -16,7 +16,6 @@ use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 
-use crate::cbz::extract_comic_info;
 use crate::error::ScanError;
 use crate::report::{ScanFileError, ScanReport};
 use crate::walker::{walk_library, DiscoveredFile};
@@ -565,7 +564,7 @@ fn read_comic_info(
     discovered: &DiscoveredFile,
     report: &mut ScanReport,
 ) -> (Option<ComicInfo>, Option<String>) {
-    let xml = match extract_comic_info(&discovered.path_absolute) {
+    let xml = match longbox_archive::read_comic_info(&discovered.path_absolute) {
         Ok(xml) => xml,
         Err(e) => {
             warn!(

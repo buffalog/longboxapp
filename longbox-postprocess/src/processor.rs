@@ -1,4 +1,5 @@
-//! Per-file processing pipeline. Owns the full lifecycle for one CBZ:
+//! Per-file processing pipeline. Owns the full lifecycle for one
+//! watch-folder file (CBZ or CBR):
 //! stability check → ComicInfo + filename extraction → match → either
 //! (write ComicInfo, move to library, upsert as owned) OR
 //! (move to `_unsorted/`, insert as unmatched). Errors at any stage
@@ -8,7 +9,7 @@
 //! Public for test reach. Production consumers go through
 //! [`process_one`] directly.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -192,27 +193,14 @@ async fn load_patterns(db: &Pool) -> Result<Vec<ParsingPattern>> {
         .collect())
 }
 
+/// Read `ComicInfo.xml` from the source archive — CBZ or CBR — via
+/// `longbox-archive`, so the ZIP/RAR dispatch lives in exactly one
+/// place. `Ok(None)` means the archive carries no ComicInfo (the
+/// untagged common case). A genuinely unreadable archive (corrupt
+/// ZIP/RAR, I/O failure, non-UTF-8 ComicInfo payload) propagates as an
+/// error, leaving the file in the watch folder for manual intervention.
 fn read_comic_info_xml(source: &Path) -> Result<Option<String>> {
-    let file = std::fs::File::open(source)?;
-    let mut archive = ZipArchive::new(file)?;
-    let mut found: Option<usize> = None;
-    for i in 0..archive.len() {
-        let entry = archive.by_index(i)?;
-        if entry.name().eq_ignore_ascii_case("ComicInfo.xml") {
-            found = Some(i);
-            break;
-        }
-    }
-    let Some(idx) = found else {
-        return Ok(None);
-    };
-    let mut entry = archive.by_index(idx)?;
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(Some(s)),
-        Err(_) => Ok(None), // non-UTF-8 ComicInfo is rare; treat as missing
-    }
+    Ok(longbox_archive::read_comic_info(source)?)
 }
 
 async fn import_as_owned(
@@ -495,11 +483,18 @@ fn parse_cover_date(raw: Option<&str>) -> Option<CoverDate> {
     })
 }
 
-/// Stage 1 of the rewrite-and-move flow: read source CBZ, re-emit
-/// every entry except ComicInfo.xml into a fresh temp archive sited
-/// next to the target (so the eventual rename is same-filesystem),
-/// then append the regenerated ComicInfo payload. Returns the
+/// Stage 1 of the rewrite-and-move flow: re-emit the source archive
+/// into a fresh ZIP temp sited next to the target (so the eventual
+/// rename is same-filesystem), with a freshly regenerated
+/// `ComicInfo.xml` replacing any the source carried. Returns the
 /// `NamedTempFile` for stage 2 to persist.
+///
+/// A **CBZ** source is raw-copied entry-by-entry — compressed bytes
+/// move across without recompression. A **CBR** source is read via
+/// `longbox-archive` (libunrar): there is no RAR writer, so a matched
+/// CBR is necessarily converted here — its entries are decompressed
+/// and recompressed into the ZIP. Either way the output is a `.cbz`,
+/// which is what the canonical target path always is.
 ///
 /// All errors here are "ComicInfoWriteFailed" semantically — we
 /// couldn't produce the rewritten archive. The temp drops on Err and
@@ -514,9 +509,6 @@ fn rewrite_to_temp(
     })?;
     std::fs::create_dir_all(target_dir)?;
 
-    let src_file = std::fs::File::open(source)?;
-    let mut archive = ZipArchive::new(src_file)?;
-
     let temp = tempfile::Builder::new()
         .prefix(".longbox-phase-b-")
         .suffix(".cbz.tmp")
@@ -524,17 +516,32 @@ fn rewrite_to_temp(
 
     {
         let mut writer = ZipWriter::new(temp.as_file());
-        for i in 0..archive.len() {
-            let entry = archive.by_index(i)?;
-            if entry.name().eq_ignore_ascii_case("ComicInfo.xml") {
-                continue;
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        if longbox_archive::is_rar(source) {
+            // CBR: no RAR writer exists, so decompress every entry via
+            // libunrar and recompress it into the ZIP.
+            for entry in longbox_archive::read_entries(source)? {
+                if entry.name.eq_ignore_ascii_case("ComicInfo.xml") {
+                    continue;
+                }
+                writer.start_file(&entry.name, deflated)?;
+                writer.write_all(&entry.data)?;
             }
-            writer.raw_copy_file(entry)?;
+        } else {
+            // CBZ: raw-copy compressed entries, no recompression.
+            let src_file = std::fs::File::open(source)?;
+            let mut archive = ZipArchive::new(src_file)?;
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i)?;
+                if entry.name().eq_ignore_ascii_case("ComicInfo.xml") {
+                    continue;
+                }
+                writer.raw_copy_file(entry)?;
+            }
         }
-        writer.start_file(
-            "ComicInfo.xml",
-            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
-        )?;
+
+        writer.start_file("ComicInfo.xml", deflated)?;
         writer.write_all(comic_info_xml.as_bytes())?;
         writer.finish()?;
     }

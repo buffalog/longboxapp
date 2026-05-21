@@ -45,7 +45,6 @@ pub fn write_cbz(path: &Path, comic_info: Option<&str>) {
 /// - `Mystery/UnknownComic.cbz`                         — won't match
 /// - `Walking Dead (2003)/corrupt.cbz`                  — invalid zip bytes
 /// - `Walking Dead (2003)/.DS_Store`                    — should be skipped
-/// - `Walking Dead (2003)/cover.cbr`                    — should be skipped
 #[allow(dead_code)]
 pub fn build_fixture_library(root: &Path) {
     let wd_dir = root.join("Walking Dead (2003)");
@@ -98,9 +97,6 @@ pub fn build_fixture_library(root: &Path) {
 
     // Hidden file: should be skipped.
     fs::write(wd_dir.join(".DS_Store"), b"junk").unwrap();
-
-    // CBR: should be silently skipped (we don't extract RAR).
-    fs::write(wd_dir.join("cover.cbr"), b"fake rar").unwrap();
 }
 
 /// Seed the watchlist: The Walking Dead (2003) with 3 issues (one carrying

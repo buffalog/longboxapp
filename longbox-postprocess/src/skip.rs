@@ -19,9 +19,9 @@ pub enum SkipReason {
     /// Filename ends with a downloader's in-progress suffix
     /// (`.partial`, `.crdownload`, `.!ut`) — case-insensitive.
     InProgress,
-    /// Not a `.cbz` extension. CBR / CB7 land here too; CBR support
-    /// is on the A.5 cleanup queue.
-    NotCbz,
+    /// Not a comic-archive extension. `.cbz` (ZIP) and `.cbr` (RAR)
+    /// are candidates; `.cb7` and everything else land here.
+    NotComicArchive,
     /// `path.file_name()` returned None (path ends in `..` or `/`,
     /// or is otherwise not a normal file path). Defensive; should
     /// not happen for paths emitted by walkdir or notify.
@@ -49,8 +49,8 @@ pub fn should_skip(path: &Path) -> Option<SkipReason> {
         }
     }
 
-    if !lower.ends_with(".cbz") {
-        return Some(SkipReason::NotCbz);
+    if !lower.ends_with(".cbz") && !lower.ends_with(".cbr") {
+        return Some(SkipReason::NotComicArchive);
     }
 
     None
@@ -62,21 +62,33 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn cbz_is_a_candidate() {
-        assert_eq!(should_skip(Path::new("Saga 001.cbz")), None);
-        assert_eq!(should_skip(Path::new("/abs/path/Saga 001.cbz")), None);
-        // Mixed-case extension still wins.
-        assert_eq!(should_skip(Path::new("Saga 001.CBZ")), None);
-        assert_eq!(should_skip(Path::new("Saga 001.Cbz")), None);
+    fn cbz_and_cbr_are_candidates() {
+        // Both comic-archive extensions, mixed case, absolute paths.
+        for n in [
+            "Saga 001.cbz",
+            "/abs/path/Saga 001.cbz",
+            "Saga 001.CBZ",
+            "Saga 001.Cbz",
+            "Saga 001.cbr",
+            "Saga 001.CBR",
+            "Saga 001.CbR",
+        ] {
+            assert_eq!(
+                should_skip(Path::new(n)),
+                None,
+                "expected candidate for {n:?}"
+            );
+        }
     }
 
     #[test]
-    fn non_cbz_extensions_skipped() {
-        for n in ["foo.cbr", "foo.cb7", "foo.zip", "foo.rar", "foo.txt", "foo"] {
+    fn non_comic_extensions_skipped() {
+        // `.rar` is NOT a comic archive — only `.cbr` is.
+        for n in ["foo.cb7", "foo.zip", "foo.rar", "foo.txt", "foo"] {
             assert_eq!(
                 should_skip(Path::new(n)),
-                Some(SkipReason::NotCbz),
-                "expected NotCbz for {n:?}"
+                Some(SkipReason::NotComicArchive),
+                "expected NotComicArchive for {n:?}"
             );
         }
     }

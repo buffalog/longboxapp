@@ -9,10 +9,11 @@ description = "LongBox Phase B post-process pipeline: watch-folder import."
 [lints]
 workspace = true
 
-# Phase B step 6 adds the processing pipeline: `longbox-core` (matcher,
-# ComicInfo writer, LibraryPath), `zip` (CBZ rewrite), `tempfile`
-# (atomic-rename temp paths in the target dir).
+# Phase B processing pipeline: `longbox-core` (matcher, ComicInfo
+# writer, LibraryPath), `longbox-archive` (CBZ/CBR reading), `zip`
+# (CBZ-side rewrite), `tempfile` (atomic-rename temp paths).
 [dependencies]
+longbox-archive = { path = "../longbox-archive" }
 longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
