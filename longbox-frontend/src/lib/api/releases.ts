@@ -39,3 +39,19 @@ export function addCalendarVolumeToPullList(
     body: JSON.stringify({ cv_volume_id: cvVolumeId })
   });
 }
+
+/** One "release of note" — a volume on sale this ship-week whose name
+ *  matches a series the user owns and that isn't on the pull list. */
+export interface ReleaseOfNote {
+  cv_volume_id: number;
+  volume_name: string;
+  cover_url: string | null;
+  site_detail_url: string;
+  issue_count: number;
+}
+
+/** This ship-week's "releases of note" — the dashboard discovery widget.
+ *  The server computes the Wed–Tue range. */
+export function getReleasesOfNote(): Promise<ReleaseOfNote[]> {
+  return apiFetch('/releases/of-note');
+}

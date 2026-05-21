@@ -4,6 +4,7 @@
   import { ApiError } from '$lib/api/client';
   import { getActivity, type DashboardActivity } from '$lib/api/dashboard';
   import { getReconcileCounts, type ReconcileCounts } from '$lib/api/reconcile';
+  import { getReleasesOfNote, type ReleaseOfNote } from '$lib/api/releases';
   import { getStats } from '$lib/api/stats';
   import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
@@ -13,6 +14,7 @@
   import LoadingSpinner from '$lib/components/LoadingSpinner.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import ReconciliationBanner from '$lib/components/ReconciliationBanner.svelte';
+  import ReleasesOfNoteWidget from '$lib/components/ReleasesOfNoteWidget.svelte';
   import type { Stats } from '$lib/types';
 
   let { data } = $props();
@@ -29,6 +31,8 @@
   // Library Tidy counts for the nudge banner. Fetched independently of
   // the critical dashboard data — see onMount.
   let reconcileCounts = $state<ReconcileCounts | null>(null);
+  // This week's releases-of-note — also fetched independently.
+  let releasesOfNote = $state<ReleaseOfNote[]>([]);
 
   // libraryRoot comes from the layout's load(). It's null only if
   // /api/library-roots failed at boot — which would have also surfaced
@@ -42,6 +46,13 @@
     getReconcileCounts()
       .then((c) => {
         reconcileCounts = c;
+      })
+      .catch(() => {});
+
+    // The releases-of-note widget is likewise non-critical discovery.
+    getReleasesOfNote()
+      .then((r) => {
+        releasesOfNote = r;
       })
       .catch(() => {});
 
@@ -186,6 +197,9 @@
       </a>
     </section>
   {/if}
+
+  <!-- Discovery widget: self-hides when there's nothing of note. -->
+  <ReleasesOfNoteWidget rows={releasesOfNote} />
 
   {#if activity}
     <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">

@@ -238,9 +238,15 @@ The following step breakdown is a starting point; per-step kickoffs may surface 
 - Per-row "Add to pull list" action
 
 ### Step 9: Releases of note widget
-- Dashboard widget querying owned series names → matching this-week solicitations not on pull list
-- Substring match logic in repo method
-- Frontend test: widget renders correctly with mock data
+- Dashboard widget: the current ship-week release calendar (`cv_release_cache`, the Step 8 data source) filtered to volumes whose name matches a series the user *owns* and that is *not* on the pull list — a discovery affordance.
+- Match runs route-side, not in a repo method: the calendar payload is cached CV JSON in `cv_release_cache.payload_json`, not DB rows, so there is no table to `LIKE`-join against. `GET /api/releases/of-note` reuses `load_calendar` + `series_repo::find_all_with_counts` (`owned_count > 0`) + `pull_list_repo::list_all`, and matches with `longbox-core::normalize_title`.
+- **Match semantics + known v1 tradeoff:** a release is "of note" when an owned series' `sort_title` is a *substring* of the release's normalized `volume_name`. This can false-positive on short owned titles (`hawk` ⊂ `hawkeye`). Accepted for v1 — the widget is a low-stakes discovery surface, not a critical path. Deferred refinement: word/token-boundary matching to kill the short-title false positives (A.8+ / B+ queue).
+- Frontend test: widget renders correctly with mock data.
+
+### Step 9b: This week's pulls widget + Pull-list counter tile
+Inserted after Step 9 (the remaining items from the brief's "Dashboard widgets (added)" / "Dashboard counter tiles" sections that Step 9's narrow scope left unstepped — kept separate from Step 12's nav restructure, which is structural not widget work):
+- **"This week's pulls" widget** — solicited issues from *pulled* series with `cover_date` in the current ship-week (Wed–Tue). Distinct data source from Step 9 (the catalog's `issues`, not `cv_release_cache`).
+- **"Pull list" counter tile** — count of subscribed series, added to the dashboard tile row.
 
 ### Step 10: Notifications + webhook dispatch
 - Webhook delivery module: POST JSON, Slack block-kit formatting when URL host matches
