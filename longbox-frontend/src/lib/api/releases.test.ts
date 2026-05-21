@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { addCalendarVolumeToPullList, getReleaseCalendar, getReleasesOfNote } from './releases';
+import {
+  addCalendarVolumeToPullList,
+  getReleaseCalendar,
+  getReleasesOfNote,
+  getThisWeeksPulls
+} from './releases';
 
 describe('releases api', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -45,5 +50,11 @@ describe('releases api', () => {
     const fetchSpy = mockJson([]);
     await getReleasesOfNote();
     expect(fetchSpy.mock.calls[0]![0]).toBe('/api/releases/of-note');
+  });
+
+  it('getThisWeeksPulls GETs /api/releases/this-weeks-pulls', async () => {
+    const fetchSpy = mockJson([]);
+    await getThisWeeksPulls();
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/releases/this-weeks-pulls');
   });
 });

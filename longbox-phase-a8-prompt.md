@@ -245,7 +245,7 @@ The following step breakdown is a starting point; per-step kickoffs may surface 
 
 ### Step 9b: This week's pulls widget + Pull-list counter tile
 Inserted after Step 9 (the remaining items from the brief's "Dashboard widgets (added)" / "Dashboard counter tiles" sections that Step 9's narrow scope left unstepped — kept separate from Step 12's nav restructure, which is structural not widget work):
-- **"This week's pulls" widget** — solicited issues from *pulled* series with `cover_date` in the current ship-week (Wed–Tue). Distinct data source from Step 9 (the catalog's `issues`, not `cv_release_cache`).
+- **"This week's pulls" widget** — the current ship-week's release calendar (`cv_release_cache`, the Step 8 data source) filtered to issues whose volume is on the pull list. Per-issue, dated by `store_date`. **Supersession note:** the brief's original framing for this widget — "solicited issues … `cover_date` … catalog `issues`" — predates Step 8's decision to model on-sale dates with `store_date`. The catalog `issues` table carries only `cover_date` (the cover-printed month, ~2 months ahead of on-sale), so it cannot answer "shipping this week" accurately. Step 9b's data source is therefore the calendar firehose filtered to pull-list `cv_id`s — the inverse membership filter of Step 9's of-note widget — **not** catalog issues.
 - **"Pull list" counter tile** — count of subscribed series, added to the dashboard tile row.
 
 ### Step 10: Notifications + webhook dispatch

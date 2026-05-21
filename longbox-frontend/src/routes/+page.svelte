@@ -4,7 +4,13 @@
   import { ApiError } from '$lib/api/client';
   import { getActivity, type DashboardActivity } from '$lib/api/dashboard';
   import { getReconcileCounts, type ReconcileCounts } from '$lib/api/reconcile';
-  import { getReleasesOfNote, type ReleaseOfNote } from '$lib/api/releases';
+  import {
+    getReleasesOfNote,
+    getThisWeeksPulls,
+    type PullThisWeek,
+    type ReleaseOfNote
+  } from '$lib/api/releases';
+  import { listPullList } from '$lib/api/pull';
   import { getStats } from '$lib/api/stats';
   import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
@@ -15,6 +21,7 @@
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import ReconciliationBanner from '$lib/components/ReconciliationBanner.svelte';
   import ReleasesOfNoteWidget from '$lib/components/ReleasesOfNoteWidget.svelte';
+  import ThisWeeksPullsWidget from '$lib/components/ThisWeeksPullsWidget.svelte';
   import type { Stats } from '$lib/types';
 
   let { data } = $props();
@@ -25,6 +32,8 @@
   // empty (zero) when Phase B is disabled or no files are stuck. Always
   // rendered as a tile so it sits next to the DB-derived stats tiles.
   let pendingCount = $state(0);
+  // Count of subscribed series, for the "Pull list" tile.
+  let pullListCount = $state(0);
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
@@ -33,6 +42,8 @@
   let reconcileCounts = $state<ReconcileCounts | null>(null);
   // This week's releases-of-note — also fetched independently.
   let releasesOfNote = $state<ReleaseOfNote[]>([]);
+  // This week's pulls for subscribed series — likewise independent.
+  let thisWeeksPulls = $state<PullThisWeek[]>([]);
 
   // libraryRoot comes from the layout's load(). It's null only if
   // /api/library-roots failed at boot — which would have also surfaced
@@ -49,22 +60,30 @@
       })
       .catch(() => {});
 
-    // The releases-of-note widget is likewise non-critical discovery.
+    // The releases-of-note and this-week's-pulls widgets are likewise
+    // non-critical — a failure means no widget, never a page error.
     getReleasesOfNote()
       .then((r) => {
         releasesOfNote = r;
       })
       .catch(() => {});
+    getThisWeeksPulls()
+      .then((r) => {
+        thisWeeksPulls = r;
+      })
+      .catch(() => {});
 
     try {
-      const [s, a, p] = await Promise.all([
+      const [s, a, p, pl] = await Promise.all([
         getStats(),
         getActivity(6),
-        getPendingInterventions()
+        getPendingInterventions(),
+        listPullList()
       ]);
       stats = s;
       activity = a;
       pendingCount = p.count;
+      pullListCount = pl.length;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -115,7 +134,7 @@
 {#if loading}
   <LoadingSpinner />
 {:else if stats}
-  <section class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+  <section class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-8">
     <div class="rounded-lg border border-slate-200 bg-white p-3">
       <div class="text-xs uppercase text-slate-500">Series</div>
       <div class="text-2xl font-semibold">{stats.total_series}</div>
@@ -147,6 +166,14 @@
     >
       <div class="text-xs uppercase text-status-needs_review">Pending</div>
       <div class="text-2xl font-semibold">{pendingCount}</div>
+    </a>
+    <a
+      href="/releases/pull-list"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+      title="Series subscribed for auto-download"
+    >
+      <div class="text-xs uppercase text-slate-500">Pull list</div>
+      <div class="text-2xl font-semibold">{pullListCount}</div>
     </a>
   </section>
 
@@ -198,7 +225,8 @@
     </section>
   {/if}
 
-  <!-- Discovery widget: self-hides when there's nothing of note. -->
+  <!-- Releases widgets: each self-hides when it has nothing to show. -->
+  <ThisWeeksPullsWidget rows={thisWeeksPulls} />
   <ReleasesOfNoteWidget rows={releasesOfNote} />
 
   {#if activity}
