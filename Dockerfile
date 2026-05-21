@@ -45,6 +45,7 @@ COPY longbox-downloader/ ./longbox-downloader/
 COPY longbox-scanner/ ./longbox-scanner/
 COPY longbox-postprocess/ ./longbox-postprocess/
 COPY longbox-pull/ ./longbox-pull/
+COPY longbox-scan-scheduler/ ./longbox-scan-scheduler/
 COPY longbox-web/ ./longbox-web/
 
 # Replace any tracked frontend-dist placeholder with the freshly-built
