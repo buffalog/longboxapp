@@ -1264,6 +1264,7 @@ dependencies = [
  "longbox-db",
  "longbox-downloader",
  "longbox-newznab",
+ "longbox-webhooks",
  "pretty_assertions",
  "thiserror 1.0.69",
  "time",
@@ -1316,6 +1317,7 @@ dependencies = [
  "longbox-pull",
  "longbox-scan-scheduler",
  "longbox-scanner",
+ "longbox-webhooks",
  "mime_guess",
  "pretty_assertions",
  "rust-embed",
@@ -1333,6 +1335,21 @@ dependencies = [
  "ulid",
  "wiremock",
  "zip",
+]
+
+[[package]]
+name = "longbox-webhooks"
+version = "0.0.1"
+dependencies = [
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

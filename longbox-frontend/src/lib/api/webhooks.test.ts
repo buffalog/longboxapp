@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createWebhook, deleteWebhook, listWebhooks, updateWebhook, WEBHOOK_EVENTS } from './webhooks';
+import {
+  createWebhook,
+  deleteWebhook,
+  listWebhooks,
+  testWebhook,
+  updateWebhook,
+  WEBHOOK_EVENTS
+} from './webhooks';
 
 describe('webhooks api', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -51,5 +58,13 @@ describe('webhooks api', () => {
     const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/webhooks/9');
     expect(opts?.method).toBe('DELETE');
+  });
+
+  it('testWebhook POSTs /api/webhooks/:id/test', async () => {
+    const fetchSpy = mockFetch({ delivered: true });
+    await testWebhook(7);
+    const [url, opts] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/webhooks/7/test');
+    expect(opts?.method).toBe('POST');
   });
 });

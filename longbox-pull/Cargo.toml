@@ -14,6 +14,7 @@ longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
 longbox-newznab = { path = "../longbox-newznab" }
 longbox-downloader = { path = "../longbox-downloader" }
+longbox-webhooks = { path = "../longbox-webhooks" }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 time = { version = "0.3", features = ["macros"] }
 thiserror = "1"

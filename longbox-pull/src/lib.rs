@@ -16,6 +16,7 @@
 //! [`engine`] for the consequence and the intended discovery path.
 
 mod config;
+mod dispatch;
 mod engine;
 mod error;
 mod schedule;

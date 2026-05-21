@@ -48,3 +48,9 @@ export function updateWebhook(id: number, input: WebhookInput): Promise<Webhook>
 export function deleteWebhook(id: number): Promise<void> {
   return apiFetch(`/webhooks/${id}`, { method: 'DELETE' });
 }
+
+/** Deliver a synthetic test notification to a webhook's URL. Rejects
+ *  with `ApiError` (422) when the endpoint is unreachable or errors. */
+export function testWebhook(id: number): Promise<{ delivered: boolean }> {
+  return apiFetch(`/webhooks/${id}/test`, { method: 'POST' });
+}

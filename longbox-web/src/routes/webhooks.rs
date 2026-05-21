@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/webhooks", get(list).post(create))
         .route("/webhooks/:id", axum::routing::put(update).delete(remove))
+        .route("/webhooks/:id/test", axum::routing::post(test))
 }
 
 fn default_true() -> bool {
@@ -104,6 +105,33 @@ async fn remove(
             other => ApiError::from(other),
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deliver a synthetic test notification to a webhook's URL, so the
+/// user can verify the endpoint works before relying on it for real
+/// events. A delivery failure surfaces as `422` rather than `500` — a
+/// bad / unreachable URL is a client-fixable condition.
+async fn test(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let webhook = webhook_config_repo::get(&state.db, id)
+        .await?
+        .ok_or_else(|| not_found(id))?;
+    let event = longbox_webhooks::WebhookEvent {
+        event: "test".into(),
+        message: format!(
+            "LongBox test notification for webhook \"{}\".",
+            webhook.name
+        ),
+    };
+    longbox_webhooks::deliver(&webhook.url, &event)
+        .await
+        .map_err(|e| ApiError::Unprocessable {
+            code: "webhook.test_failed",
+            message: format!("Test delivery failed: {e}"),
+        })?;
+    Ok(Json(serde_json::json!({ "delivered": true })))
 }
 
 fn validate(body: WebhookBody) -> Result<ValidWebhook, ApiError> {
