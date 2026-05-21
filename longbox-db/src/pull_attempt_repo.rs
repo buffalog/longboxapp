@@ -101,6 +101,76 @@ where
     Ok(rows)
 }
 
+/// A pull failure for the needs-attention surface — the latest attempt
+/// for an issue, when that attempt is `failed`, joined with the display
+/// fields a `pull_attempts` row lacks. One row per issue.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
+pub struct FailedPull {
+    pub series_id: i64,
+    pub issue_id: i64,
+    pub series_title: String,
+    pub issue_number: String,
+    /// `None` for a submission failure (no release ever landed); `Some`
+    /// for a grab failure (a submitted release that then failed).
+    pub release_id: Option<String>,
+    pub error_message: Option<String>,
+    pub retry_count: i64,
+    pub attempted_at: PrimitiveDateTime,
+}
+
+/// Issues whose most-recent pull attempt is `failed` — the pull side of
+/// the needs-attention surface. One row per issue (its latest attempt);
+/// an issue retried since (latest attempt `submitted`/`grabbed`) drops
+/// off.
+pub async fn list_failed<'e, E>(executor: E) -> Result<Vec<FailedPull>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        FailedPull,
+        r#"SELECT pa.series_id AS "series_id!: i64", pa.issue_id AS "issue_id!: i64",
+                  s.title AS "series_title!: String", i.number AS "issue_number!: String",
+                  pa.release_id, pa.error_message,
+                  pa.retry_count AS "retry_count!: i64",
+                  pa.attempted_at AS "attempted_at: _"
+           FROM pull_attempts pa
+           JOIN series s ON pa.series_id = s.id
+           JOIN issues i ON pa.issue_id = i.id
+           WHERE pa.status = 'failed'
+             AND pa.id = (
+                 SELECT MAX(p2.id) FROM pull_attempts p2
+                 WHERE p2.series_id = pa.series_id AND p2.issue_id = pa.issue_id
+             )
+           ORDER BY pa.attempted_at DESC, pa.id DESC"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Delete an issue's `failed` pull attempts — the "Retry" un-park. With
+/// the failure history gone the candidate query no longer treats the
+/// issue as parked, so the next sweep attempts it fresh. Returns the
+/// number of rows cleared.
+pub async fn clear_failed_for_issue<'e, E>(
+    executor: E,
+    series_id: i64,
+    issue_id: i64,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM pull_attempts
+           WHERE series_id = ? AND issue_id = ? AND status = 'failed'"#,
+        series_id,
+        issue_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Every `submitted` attempt — the pull engine's in-flight set, polled
 /// for downloader status at the top of each sweep.
 pub async fn list_submitted<'e, E>(executor: E) -> Result<Vec<PullAttemptRow>>

@@ -70,6 +70,17 @@
   immediate sweep. Subscribe to a series from its detail page.
 </p>
 
+{#if data.pullFailureCount > 0}
+  <p class="mb-3 text-sm">
+    <a href="/needs-attention" class="font-medium text-amber-700 hover:underline">
+      {data.pullFailureCount} pull{data.pullFailureCount === 1 ? '' : 's'} need{data.pullFailureCount ===
+      1
+        ? 's'
+        : ''} attention →
+    </a>
+  </p>
+{/if}
+
 {#if error}
   <div class="mb-3"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}

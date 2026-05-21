@@ -11,6 +11,7 @@
     type ReleaseOfNote
   } from '$lib/api/releases';
   import { listPullList } from '$lib/api/pull';
+  import { getPullFailures } from '$lib/api/needs_attention';
   import { getStats } from '$lib/api/stats';
   import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
@@ -28,10 +29,10 @@
 
   let stats = $state<Stats | null>(null);
   let activity = $state<DashboardActivity | null>(null);
-  // Phase B pending-intervention counter. Reads the in-memory cache;
-  // empty (zero) when Phase B is disabled or no files are stuck. Always
-  // rendered as a tile so it sits next to the DB-derived stats tiles.
+  // The "Needs attention" tile sums Phase B pending interventions and
+  // failed pulls — the two surfaces the /needs-attention page shows.
   let pendingCount = $state(0);
+  let pullFailureCount = $state(0);
   // Count of subscribed series, for the "Pull list" tile.
   let pullListCount = $state(0);
   let loading = $state(true);
@@ -74,16 +75,18 @@
       .catch(() => {});
 
     try {
-      const [s, a, p, pl] = await Promise.all([
+      const [s, a, p, pl, pf] = await Promise.all([
         getStats(),
         getActivity(6),
         getPendingInterventions(),
-        listPullList()
+        listPullList(),
+        getPullFailures()
       ]);
       stats = s;
       activity = a;
       pendingCount = p.count;
       pullListCount = pl.length;
+      pullFailureCount = pf.length;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -160,12 +163,12 @@
       <div class="text-2xl font-semibold">{stats.missing_issues}</div>
     </div>
     <a
-      href="/files/pending-intervention"
+      href="/needs-attention"
       class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
-      title="Files Phase B couldn't process automatically"
+      title="Failed pulls and files Phase B couldn't process automatically"
     >
-      <div class="text-xs uppercase text-status-needs_review">Pending</div>
-      <div class="text-2xl font-semibold">{pendingCount}</div>
+      <div class="text-xs uppercase text-status-needs_review">Needs attention</div>
+      <div class="text-2xl font-semibold">{pendingCount + pullFailureCount}</div>
     </a>
     <a
       href="/releases/pull-list"

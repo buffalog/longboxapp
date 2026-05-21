@@ -260,10 +260,13 @@ Inserted after Step 9 (the remaining items from the brief's "Dashboard widgets (
   - **`new_solicitations`** — requires a ComicVine-polling delta detector for tracked-series new-issue detection; no such subsystem exists. Per the locked architecture decision ("no CV refresh during pull sweeps; new-issue discovery is the release calendar's job, via `cv_release_cache`"), new-issue detection belongs to calendar-cache work, not the pull engine. The event has no emitter until that subsystem exists.
 
 ### Step 11: Failure surface rebrand
-- Rename `/files/pending-intervention` → `/needs-attention`
-- Add new failure categories (Submission failed, Grab failed, No match, Mismatched grab)
-- Retry buttons where applicable
-- Cross-link from pull list and release calendar
+- Rename `/files/pending-intervention` → `/needs-attention`; a two-section page — pull failures + Phase B manual intervention.
+- Failure categories — **v1 ships five, the ones with real data:** Phase B's three (Conflict, ComicInfo write failed, Move failed) + pull's two (Submission failed, Grab failed — split from `pull_attempts.status = 'failed'` by whether `release_id` is set: a submit that never landed a release vs. a submitted download that then failed).
+- **Deferred categories — by data availability, not oversight:**
+  - **No match** — the sweep counts `no_match` but writes no row; `pull_attempts.status` has no `no_match` value. Surfacing it needs sweep-side persistence: a `status` (or table) addition plus the sweep writing a row when an indexer search returns nothing. Out of Step 11's rebrand scope.
+  - **Mismatched grab** — `pull_attempts.status` defines `mismatched`, but nothing sets it. It needs post-grab content verification (does the landed file match the issue it was pulled for?) — the A.8+ "Post-processing validation / auto-detect mismatched grabs" detector, which does not exist. The category surfaces once that detector is built.
+- Retry — **pull-failure rows only.** A "Retry" un-parks the issue (clears its `failed` `pull_attempts` rows) and nudges an immediate sweep. **Phase B intervention rows get no retry button:** the post-process watcher re-triggers naturally — when the user resolves the underlying conflict on disk, the next filesystem event re-runs processing for that file. A manual re-process entry point would land in `longbox-postprocess` (alongside `start`) if dogfooding shows the fs-event path is insufficient; v1 does not add it.
+- Cross-link — the pull-list page gets an inbound indicator linking to `/needs-attention`; `/needs-attention` pull-failure rows link out to `/series/:id`. **The release-calendar cross-link from the original brief is dropped** — the calendar is forward-looking (upcoming releases) and failures are backward-looking; there is no natural composition.
 
 ### Step 12: Nav restructure
 - Top nav: Dashboard | Library ▾ | Releases ▾ | Add | Settings
