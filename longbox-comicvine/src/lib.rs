@@ -15,4 +15,4 @@ mod rate_limit;
 
 pub use client::{ComicVineClient, ComicVineClientConfig};
 pub use error::CvError;
-pub use projection::{CvIssueDetail, CvVolumeDetail, SeriesSearchResult};
+pub use projection::{CvCalendarItem, CvIssueDetail, CvVolumeDetail, SeriesSearchResult};

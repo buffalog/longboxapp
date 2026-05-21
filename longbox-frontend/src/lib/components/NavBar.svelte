@@ -14,7 +14,8 @@
     // Flat link until then.
     { href: '/library/tidy', label: 'Library tidy' },
     // TODO Step 12 (nav restructure): fold into the `Releases ▾` dropdown
-    // alongside Calendar / Releases of note. Flat link until then.
+    // alongside Releases of note. Flat links until then.
+    { href: '/releases/calendar', label: 'Calendar' },
     { href: '/releases/pull-list', label: 'Pull list' },
     { href: '/settings', label: 'Settings' }
   ];

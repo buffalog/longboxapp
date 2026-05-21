@@ -32,6 +32,16 @@ pub(crate) struct CvPublisher {
     pub name: Option<String>,
 }
 
+/// CV's volume reference embedded in an issue payload. Unlike
+/// [`CvPublisher`] the calendar needs the `id` (to link a release back
+/// to a tracked series), so this carries both.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvVolumeRef {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// Result item from `/search/?resources=volume`. CV returns `start_year` as a
 /// quoted string, hence the `Option<String>` rather than an integer.
 #[derive(Debug, Clone, Deserialize)]
@@ -67,7 +77,9 @@ pub(crate) struct CvVolumeFull {
     pub site_detail_url: String,
 }
 
-/// Full issue detail from `/issues/?filter=volume:<id>` results.
+/// Full issue detail from `/issues/` results — both the
+/// `filter=volume:<id>` (per-volume) and `filter=store_date:<from>|<to>`
+/// (release-calendar) queries deserialize into this.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CvIssueFull {
     pub id: i64,
@@ -77,9 +89,17 @@ pub(crate) struct CvIssueFull {
     pub name: Option<String>,
     #[serde(default)]
     pub cover_date: Option<String>,
+    /// On-sale date. Absent on many older / indie issues; the
+    /// release-calendar projection skips rows without it.
+    #[serde(default)]
+    pub store_date: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<CvImage>,
+    /// The owning volume. Always present on a real CV issue payload;
+    /// `Option` for deserialization safety.
+    #[serde(default)]
+    pub volume: Option<CvVolumeRef>,
     pub site_detail_url: String,
 }

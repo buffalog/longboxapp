@@ -373,3 +373,75 @@ async fn completely_unparseable_body_surfaces_as_malformed() {
         other => panic!("expected Malformed, got {other:?}"),
     }
 }
+
+// ---------- fetch_release_calendar ----------
+
+#[tokio::test]
+async fn fetch_release_calendar_projects_dated_issues() {
+    // Three issues come back; the one with no `store_date` is dropped by
+    // the projection. The `store_date:from|to` filter is asserted too.
+    let body = r#"{
+        "status_code": 1,
+        "error": "OK",
+        "limit": 100,
+        "offset": 0,
+        "number_of_page_results": 3,
+        "number_of_total_results": 3,
+        "results": [
+            {
+                "id": 30001,
+                "issue_number": "12",
+                "name": null,
+                "cover_date": "2026-07-01",
+                "store_date": "2026-05-13",
+                "description": null,
+                "image": { "medium_url": "https://cdn/a.jpg" },
+                "volume": { "id": 4050, "name": "Saga" },
+                "site_detail_url": "https://cv/4000-30001/"
+            },
+            {
+                "id": 30002,
+                "issue_number": "5",
+                "name": null,
+                "cover_date": "2026-07-01",
+                "store_date": "2026-05-14",
+                "description": null,
+                "image": null,
+                "volume": { "id": 6000, "name": "Chew" },
+                "site_detail_url": "https://cv/4000-30002/"
+            },
+            {
+                "id": 30003,
+                "issue_number": "1",
+                "name": null,
+                "cover_date": null,
+                "store_date": null,
+                "description": null,
+                "image": null,
+                "volume": { "id": 7000, "name": "No Date" },
+                "site_detail_url": "https://cv/4000-30003/"
+            }
+        ]
+    }"#;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .and(query_param("filter", "store_date:2026-05-13|2026-05-19"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let items = client
+        .fetch_release_calendar("2026-05-13", "2026-05-19")
+        .await
+        .unwrap();
+    // The store_date-less issue is dropped; the two dated ones project.
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].cv_issue_id, 30001);
+    assert_eq!(items[0].store_date, "2026-05-13");
+    assert_eq!(items[0].cv_volume_id, 4050);
+    assert_eq!(items[0].volume_name, "Saga");
+    assert_eq!(items[1].volume_name, "Chew");
+}
