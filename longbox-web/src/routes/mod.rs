@@ -17,6 +17,7 @@ pub mod health;
 pub mod indexers;
 pub mod library_roots;
 pub mod missing;
+pub mod needs_attention;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
@@ -55,7 +56,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(webhooks::router())
         .merge(pull::router())
         .merge(reconcile::router())
-        .merge(calendar::router());
+        .merge(calendar::router())
+        .merge(needs_attention::router());
 
     Router::new()
         .nest("/api", api)

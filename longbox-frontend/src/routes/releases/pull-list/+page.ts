@@ -1,5 +1,7 @@
+import { getPullFailures } from '$lib/api/needs_attention';
 import { listPullList } from '$lib/api/pull';
 
 export const load = async () => {
-  return { entries: await listPullList() };
+  const [entries, pullFailures] = await Promise.all([listPullList(), getPullFailures()]);
+  return { entries, pullFailureCount: pullFailures.length };
 };

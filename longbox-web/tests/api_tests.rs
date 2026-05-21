@@ -6,9 +6,9 @@ use std::path::Path;
 use axum::http::StatusCode;
 use common::{build_test_app, empty_request, json_request, response_json};
 use longbox_db::{
-    discovered_folders_repo, issue_repo, pull_list_repo, release_cache_repo, series_repo,
-    webhook_config_repo, DiscoveredFolder, NewIssue, NewPullEntry, NewReleaseCacheEntry, NewSeries,
-    NewWebhookConfig,
+    discovered_folders_repo, issue_repo, pull_attempt_repo, pull_list_repo, release_cache_repo,
+    series_repo, webhook_config_repo, DiscoveredFolder, NewIssue, NewPullAttempt, NewPullEntry,
+    NewReleaseCacheEntry, NewSeries, NewWebhookConfig,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -3885,4 +3885,165 @@ async fn webhook_test_404_for_unknown_id() {
         .request(empty_request("POST", "/api/webhooks/999999/test"))
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// -------- needs-attention pull failures (A.8 Step 11) --------
+
+/// Insert a series + one issue; returns (series_id, issue_id).
+async fn seed_series_and_issue(app: &common::TestApp, title: &str, number: &str) -> (i64, i64) {
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let issue = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: number.into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    (series.id, issue.id)
+}
+
+fn failed_attempt(series_id: i64, issue_id: i64, release_id: Option<&str>) -> NewPullAttempt {
+    NewPullAttempt {
+        series_id,
+        issue_id,
+        indexer_id: None,
+        release_id: release_id.map(str::to_owned),
+        status: "failed".into(),
+        error_message: Some("boom".into()),
+        retry_count: 3,
+        download_handle: None,
+    }
+}
+
+#[tokio::test]
+async fn needs_attention_pull_failures_lists_categorized_failures() {
+    let app = build_test_app().await;
+    let (series, issue_a) = seed_series_and_issue(&app, "Saga", "1").await;
+    let issue_b = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "2".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    // A release_id-less failure is a submission failure; one with a
+    // release is a grab failure.
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_a, None))
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        failed_attempt(series, issue_b, Some("rel-1")),
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let category_of = |iid: i64| -> String {
+        rows.iter()
+            .find(|r| r["issue_id"].as_i64() == Some(iid))
+            .unwrap()["category"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(category_of(issue_a), "submission_failed");
+    assert_eq!(category_of(issue_b), "grab_failed");
+}
+
+#[tokio::test]
+async fn needs_attention_pull_failures_excludes_a_retried_issue() {
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_and_issue(&app, "Chew", "1").await;
+    // A failure, then a later attempt that is back in flight.
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue, None))
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: series,
+            issue_id: issue,
+            indexer_id: None,
+            release_id: Some("rel-2".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 1,
+            download_handle: Some("handle".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    // The issue's latest attempt is `submitted` — not "needs attention".
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn needs_attention_retry_clears_an_issues_failed_attempts() {
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_and_issue(&app, "Saga", "1").await;
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue, None))
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/needs-attention/retry",
+            format!(r#"{{"series_id":{series},"issue_id":{issue}}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["cleared"], 1);
+
+    // Un-parked — gone from the failures list.
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
 }
