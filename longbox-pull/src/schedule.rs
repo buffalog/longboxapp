@@ -99,11 +99,17 @@ async fn scheduler_loop(
                 indexer_errors = s.indexer_errors,
                 "pull.sweep_complete"
             ),
-            Err(e) => tracing::error!(
-                target: "longbox_pull",
-                error = %e,
-                "pull.sweep_failed"
-            ),
+            Err(e) => {
+                tracing::error!(target: "longbox_pull", error = %e, "pull.sweep_failed");
+                crate::dispatch::dispatch(
+                    db.clone(),
+                    longbox_db::webhook_config_repo::EVENT_PULL_ENGINE_ERROR,
+                    longbox_webhooks::WebhookEvent {
+                        event: "pull_engine_error".into(),
+                        message: format!("Pull engine error: {e}"),
+                    },
+                );
+            }
         }
         running.store(false, Ordering::SeqCst);
     }

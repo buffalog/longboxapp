@@ -7,7 +7,8 @@ use axum::http::StatusCode;
 use common::{build_test_app, empty_request, json_request, response_json};
 use longbox_db::{
     discovered_folders_repo, issue_repo, pull_list_repo, release_cache_repo, series_repo,
-    DiscoveredFolder, NewIssue, NewPullEntry, NewReleaseCacheEntry, NewSeries,
+    webhook_config_repo, DiscoveredFolder, NewIssue, NewPullEntry, NewReleaseCacheEntry, NewSeries,
+    NewWebhookConfig,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -3841,4 +3842,47 @@ async fn this_weeks_pulls_empty_when_nothing_is_subscribed() {
     )
     .await;
     assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+// -------- webhook test endpoint (A.8 Step 10) --------
+
+#[tokio::test]
+async fn webhook_test_delivers_to_the_configured_url() {
+    let app = build_test_app().await;
+    // A fresh mock server stands in for the user's webhook endpoint.
+    let target = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&target)
+        .await;
+    let webhook = webhook_config_repo::insert(
+        &app.state.db,
+        NewWebhookConfig {
+            name: "Test Hook".into(),
+            url: format!("{}/hook", target.uri()),
+            event_mask: 1,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/webhooks/{}/test", webhook.id),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["delivered"], true);
+    assert_eq!(target.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn webhook_test_404_for_unknown_id() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("POST", "/api/webhooks/999999/test"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

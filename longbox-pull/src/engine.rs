@@ -22,15 +22,17 @@ use std::cmp::Ordering;
 use longbox_core::IssueNumber;
 use longbox_db::{
     downloader_config_repo, indexer_config_repo, issue_repo, pull_attempt_repo, pull_list_repo,
-    series_repo, DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool,
-    PullListRow,
+    series_repo, webhook_config_repo, DownloaderConfigRow, IndexerConfigRow, IssueRow,
+    NewPullAttempt, Pool, PullListRow,
 };
 use longbox_downloader::{
     connect, AnyDownloader, DownloadHandle, DownloadStatus, Downloader, DownloaderAuth,
     DownloaderConfig,
 };
 use longbox_newznab::{IndexerConfig, IndexerId, NewznabError};
+use longbox_webhooks::WebhookEvent;
 
+use crate::dispatch;
 use crate::error::PullError;
 
 /// Consecutive `Unknown` status polls tolerated before the engine
@@ -38,6 +40,12 @@ use crate::error::PullError;
 /// downloader can briefly drop a job from both its queue and history;
 /// one `Unknown` is not enough to conclude the grab is lost.
 const UNKNOWN_POLL_LIMIT: i64 = 3;
+
+/// Failed-attempt count at which an issue is parked — the pull engine
+/// retries it no further. Mirrors the parking threshold baked into
+/// `issue_repo::list_pull_candidates`'s SQL; reaching it is what a
+/// `pull_failed` notification reports.
+const RETRY_CAP: i64 = 3;
 
 /// Tallies from one sweep — logged by the scheduler, asserted by tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -117,23 +125,17 @@ async fn poll_in_flight(
                 }
             }
             Ok(DownloadStatus::Failed(reason)) => {
-                pull_attempt_repo::record_failure(
-                    db,
-                    attempt.id,
-                    &format!("download failed: {reason}"),
-                )
-                .await?;
+                let msg = format!("download failed: {reason}");
+                pull_attempt_repo::record_failure(db, attempt.id, &msg).await?;
                 summary.grab_failed += 1;
+                maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, &msg).await;
             }
             Ok(DownloadStatus::Unknown) => {
                 if attempt.unknown_polls + 1 >= UNKNOWN_POLL_LIMIT {
-                    pull_attempt_repo::record_failure(
-                        db,
-                        attempt.id,
-                        "lost track of download — the downloader no longer reports this job",
-                    )
-                    .await?;
+                    let msg = "lost track of download — the downloader no longer reports this job";
+                    pull_attempt_repo::record_failure(db, attempt.id, msg).await?;
                     summary.grab_failed += 1;
+                    maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
                 } else {
                     pull_attempt_repo::bump_unknown_polls(db, attempt.id).await?;
                 }
@@ -216,6 +218,7 @@ async fn sweep_series(
                         // Submission failure — record a failed attempt
                         // with no release_id so the same release is
                         // retried next sweep.
+                        let reason = format!("submit failed: {e}");
                         pull_attempt_repo::insert(
                             db,
                             NewPullAttempt {
@@ -224,7 +227,7 @@ async fn sweep_series(
                                 indexer_id: Some(indexer_id.0),
                                 release_id: None,
                                 status: "failed".into(),
-                                error_message: Some(format!("submit failed: {e}")),
+                                error_message: Some(reason.clone()),
                                 retry_count: failed_count + 1,
                                 download_handle: None,
                             },
@@ -232,6 +235,7 @@ async fn sweep_series(
                         .await?;
                         summary.submission_failed += 1;
                         any_failed = true;
+                        maybe_fire_pull_failed(db, entry.series_id, issue.id, &reason).await;
                     }
                 }
             }
@@ -265,6 +269,38 @@ async fn sweep_series(
         pull_list_repo::mark_attempt_failed(db, entry.series_id).await?;
     }
     Ok(())
+}
+
+/// Fire a `pull_failed` webhook event when this issue's failed-attempt
+/// count has reached [`RETRY_CAP`] — the point at which the engine
+/// parks it and retries no further. A no-op below the cap. Delivery is
+/// spawned by [`dispatch::dispatch`], so this never blocks the sweep on
+/// webhook HTTP.
+async fn maybe_fire_pull_failed(db: &Pool, series_id: i64, issue_id: i64, reason: &str) {
+    let failed = match pull_attempt_repo::list_for_issue(db, series_id, issue_id).await {
+        Ok(attempts) => attempts.iter().filter(|a| a.status == "failed").count() as i64,
+        Err(e) => {
+            tracing::warn!(target: "longbox_pull", error = %e, "pull.failed_event_check_failed");
+            return;
+        }
+    };
+    if failed < RETRY_CAP {
+        return;
+    }
+    let title = series_repo::find_by_id(db, series_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.title)
+        .unwrap_or_else(|| format!("series {series_id}"));
+    dispatch::dispatch(
+        db.clone(),
+        webhook_config_repo::EVENT_PULL_FAILED,
+        WebhookEvent {
+            event: "pull_failed".into(),
+            message: format!("Pull failed permanently: {title} — {reason}"),
+        },
+    );
 }
 
 /// Drop candidate issues below the pull entry's `start_issue` floor.

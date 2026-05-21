@@ -3,14 +3,25 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
-import { createWebhook, deleteWebhook, updateWebhook, type Webhook } from '$lib/api/webhooks';
+import {
+  createWebhook,
+  deleteWebhook,
+  testWebhook,
+  updateWebhook,
+  type Webhook
+} from '$lib/api/webhooks';
 import WebhookSettings from './WebhookSettings.svelte';
 
 vi.mock('$lib/api/webhooks', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/webhooks')>()),
   createWebhook: vi.fn(),
   updateWebhook: vi.fn(),
-  deleteWebhook: vi.fn()
+  deleteWebhook: vi.fn(),
+  testWebhook: vi.fn()
+}));
+
+vi.mock('$lib/stores/toast.svelte', () => ({
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() }
 }));
 
 function sampleWebhook(over: Partial<Webhook> = {}): Webhook {
@@ -87,6 +98,15 @@ describe('WebhookSettings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Remove webhook Slack' }));
     await waitFor(() => expect(deleteWebhook).toHaveBeenCalledWith(1));
     await waitFor(() => expect(screen.queryByText('Slack')).not.toBeInTheDocument());
+  });
+
+  it('sends a test notification', async () => {
+    vi.mocked(testWebhook).mockResolvedValue({ delivered: true });
+    render(WebhookSettings, { props: { webhooks: [sampleWebhook()] } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Test webhook Slack' }));
+
+    await waitFor(() => expect(testWebhook).toHaveBeenCalledWith(1));
   });
 
   it('surfaces an ApiError when a mutation fails', async () => {

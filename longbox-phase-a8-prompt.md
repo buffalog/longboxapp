@@ -249,10 +249,15 @@ Inserted after Step 9 (the remaining items from the brief's "Dashboard widgets (
 - **"Pull list" counter tile** — count of subscribed series, added to the dashboard tile row.
 
 ### Step 10: Notifications + webhook dispatch
-- Webhook delivery module: POST JSON, Slack block-kit formatting when URL host matches
-- Event triggers wired into pull engine: pull_succeeded, pull_failed, new_solicitations, pull_engine_error
-- Per-webhook event mask filtering
-- Integration test against a local HTTP echo server
+- `longbox-webhooks` crate — a pure delivery client: `deliver(url, event)` POSTs the event, with Slack block-kit formatting for `hooks.slack.com` hosts and plain JSON otherwise, and count-based in-memory retry (3 attempts, no persistent retry queue).
+- Dispatch wiring in `longbox-pull`: on a pull-engine event, fan out to every enabled webhook subscribed to it (`webhook_config_repo::list_subscribed`), spawned fire-and-forget so webhook latency never blocks a sweep.
+- `POST /api/webhooks/:id/test` + a per-webhook "Test" button in the Settings webhook UI.
+- Per-webhook event-mask filtering (the `event_mask` bitset + `EVENT_*` constants already exist).
+- Integration test against a local HTTP mock server.
+
+**v1 event scope — `pull_failed` + `pull_engine_error` only.** Of the four `EVENT_*` bits, only these two have a clean, dedup-safe emit point in the pull engine; both are wired in Step 10. The other two are **deferred by architecture, not oversight** — their bits and UI checkboxes remain (forward-compat; the "Test" button still exercises any webhook):
+  - **`pull_succeeded`** — its correct emit point is Phase B's `submitted → grabbed` `pull_attempt` transition in `longbox-postprocess`, where a download is actually finalized and catalogued. It cannot fire from the pull sweep: the sweep only *observes* `DownloadStatus::Completed` while the attempt is still `submitted`, and can re-observe it on a later sweep (e.g. if Phase B is disabled) — no dedup. Wiring it belongs to a `longbox-postprocess` event hook.
+  - **`new_solicitations`** — requires a ComicVine-polling delta detector for tracked-series new-issue detection; no such subsystem exists. Per the locked architecture decision ("no CV refresh during pull sweeps; new-issue discovery is the release calendar's job, via `cv_release_cache`"), new-issue detection belongs to calendar-cache work, not the pull engine. The event has no emitter until that subsystem exists.
 
 ### Step 11: Failure surface rebrand
 - Rename `/files/pending-intervention` → `/needs-attention`

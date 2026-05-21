@@ -2,16 +2,18 @@
   // Webhook notification targets — CRUD section of the Settings page.
   // Self-contained: seeded once from the page's load data, then it
   // maintains its own `$state` list from each mutation's response.
-  import { Pencil, Trash2 } from 'lucide-svelte';
+  import { Pencil, Send, Trash2 } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
     createWebhook,
     deleteWebhook,
+    testWebhook,
     updateWebhook,
     WEBHOOK_EVENTS,
     type Webhook,
     type WebhookInput
   } from '$lib/api/webhooks';
+  import { toast } from '$lib/stores/toast.svelte';
   import Button from './Button.svelte';
   import ErrorBanner from './ErrorBanner.svelte';
 
@@ -25,6 +27,19 @@
   let addForm = $state<WebhookInput>(blankForm());
   let editingId = $state<number | null>(null);
   let editForm = $state<WebhookInput>(blankForm());
+  let testingId = $state<number | null>(null);
+
+  async function handleTest(id: number): Promise<void> {
+    testingId = id;
+    try {
+      await testWebhook(id);
+      toast.success('Test notification delivered.');
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : 'Test delivery failed.');
+    } finally {
+      testingId = null;
+    }
+  }
 
   function blankForm(): WebhookInput {
     return { name: '', url: '', event_mask: 0, enabled: true };
@@ -211,6 +226,15 @@
                 <div class="text-xs text-slate-400">{eventSummary(wh.event_mask)}</div>
               </div>
               <div class="flex flex-shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                  aria-label={`Test webhook ${wh.name}`}
+                  onclick={() => handleTest(wh.id)}
+                  disabled={busy || testingId !== null}
+                >
+                  <Send class="size-4" aria-hidden="true" />
+                </button>
                 <button
                   type="button"
                   class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
