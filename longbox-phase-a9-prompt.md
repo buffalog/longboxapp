@@ -154,6 +154,43 @@ path. Likely splits into 7a (per-row search) and 7b (bulk).
 
 ---
 
+## Workflow rules codified during A.9
+
+Cross-cutting build, verification, and deploy rules that surfaced
+mid-phase. Recorded here so they bind every remaining step rather than
+being relearned per step.
+
+- **Redeploy with `docker-compose up -d --force-recreate`.** Plain
+  `up -d` no-op'd on the 6a deploy — it reported the container "Running"
+  and left it on the stale pre-rebuild image. `--force-recreate` always
+  recreates the container against the freshly built image. Use it as the
+  standard redeploy command.
+
+- **`cargo clippy --workspace --all-targets` per step.** A plain `clippy`
+  check skips test code; the CBR hot-fix surfaced 6 pre-existing warnings
+  visible only under `--all-targets`. Run it as a per-step verification
+  flag, mirror of the `sqlx prepare --all-targets` rule below.
+
+- **`sqlx prepare --workspace -- --all-targets`.** Established in A.8
+  Step 7 — regenerate the `.sqlx` offline query cache across all targets
+  whenever SQL changes, so the `SQLX_OFFLINE=true` container build stays
+  in sync. Codified here alongside the others for visibility.
+
+- **Dockerfile crate-COPY rule.** When a step adds a new workspace crate,
+  update the `Dockerfile` stage-2 `COPY` list in the same commit —
+  otherwise the hermetic build can't see the crate's sources. (A.9 added
+  `longbox-archive` in the CBR hot-fix; its COPY line shipped in
+  `f57a21c`.)
+
+- **Colima mount fragility.** `/Volumes/Comics` is bind-mounted into the
+  Colima VM over virtiofs; the VM's view can go stale when the host-side
+  mount is touched (unmount/remount, sleep, drive swap), and
+  `docker-compose up` then fails with `mkdir /Volumes/Comics: file
+  exists`. `colima restart` re-syncs virtiofs and recovers it. Keep the
+  host mount stable through A.9 work. (From the A.8 closeout doc.)
+
+---
+
 ## Deferred items
 
 Not scheduled into a step — tracked here so they have a canonical home
@@ -178,10 +215,3 @@ rather than accreting in commit messages.
 - **`new_solicitations` webhook event.** Deferred from A.8 Step 10 — it
   needs a ComicVine-polling delta detector. Future emit point documented
   in code.
-
-- **`clippy --all-targets` workflow rule.** The CBR hot-fix surfaced 6
-  pre-existing clippy warnings visible only under `--all-targets` (test
-  code), meaning prior steps' clippy checks did not use it. Codify
-  `cargo clippy --workspace --all-targets` as the standing rule, mirror
-  of the `sqlx prepare --workspace -- --all-targets` rule codified in
-  A.8 Step 7.
