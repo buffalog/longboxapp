@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/releases/calendar", get(calendar))
         .route("/releases/calendar/pull", post(add_to_pull_list))
+        .route("/releases/calendar/pull/bulk", post(add_to_pull_list_bulk))
         .route("/releases/of-note", get(releases_of_note))
         .route("/releases/this-weeks-pulls", get(this_weeks_pulls))
 }
@@ -65,6 +66,29 @@ struct CalendarRow {
 #[derive(Debug, Deserialize)]
 struct AddToPullBody {
     cv_volume_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BulkAddBody {
+    cv_volume_ids: Vec<i64>,
+}
+
+/// Per-volume outcome of a bulk add. `status` is one of `added`,
+/// `already_on_list`, or `failed`; `series_id` rides along on the two
+/// success statuses, `error` on `failed`.
+#[derive(Debug, Serialize)]
+struct BulkAddResult {
+    cv_volume_id: i64,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BulkAddResponse {
+    results: Vec<BulkAddResult>,
 }
 
 /// One "release of note" — a volume from this ship-week's calendar whose
@@ -99,27 +123,25 @@ async fn calendar(
     Ok(Json(enrich(&state, items).await?))
 }
 
-/// Compound "add to pull list": resolve the volume to a series (creating
-/// it via ComicVine when LongBox doesn't track it yet — the Library Tidy
-/// `add_or_get_from_cv` primitive), then subscribe it. Both halves are
-/// idempotent, so a volume that is already a subscribed series is a
-/// clean no-op `200`.
-async fn add_to_pull_list(
-    State(state): State<AppState>,
-    Json(body): Json<AddToPullBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if body.cv_volume_id <= 0 {
+/// Resolve one CV volume to a tracked series (creating it from
+/// ComicVine when LongBox doesn't track it yet — the Library Tidy
+/// `add_or_get_from_cv` primitive) and subscribe it to the pull list.
+/// Returns the series id and whether the subscription was newly
+/// `added` or the series was `already_on_list`. Both halves are
+/// idempotent; shared by the single and bulk add handlers.
+async fn try_add_one(state: &AppState, cv_volume_id: i64) -> Result<(i64, &'static str), ApiError> {
+    if cv_volume_id <= 0 {
         return Err(ApiError::BadRequest {
             message: "cv_volume_id must be > 0".into(),
         });
     }
-    let (series, was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
+    let (series, was_new) = add_or_get_from_cv(state, cv_volume_id).await?;
     if was_new {
         // A freshly created series: match any of its files already on
         // disk, same as the /files and Library Tidy add paths.
-        spawn_auto_rematch(&state, series.id, "calendar-add");
+        spawn_auto_rematch(state, series.id, "calendar-add");
     }
-    if pull_list_repo::get(&state.db, series.id).await?.is_none() {
+    let status = if pull_list_repo::get(&state.db, series.id).await?.is_none() {
         pull_list_repo::add(
             &state.db,
             NewPullEntry {
@@ -128,8 +150,52 @@ async fn add_to_pull_list(
             },
         )
         .await?;
+        "added"
+    } else {
+        "already_on_list"
+    };
+    Ok((series.id, status))
+}
+
+/// Compound "add to pull list": resolve the volume to a series (creating
+/// it via ComicVine when LongBox doesn't track it yet), then subscribe
+/// it. Idempotent — a volume already subscribed is a clean no-op `200`.
+async fn add_to_pull_list(
+    State(state): State<AppState>,
+    Json(body): Json<AddToPullBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (series_id, _status) = try_add_one(&state, body.cv_volume_id).await?;
+    Ok(Json(serde_json::json!({ "series_id": series_id })))
+}
+
+/// Bulk "add to pull list" — one [`try_add_one`] per volume,
+/// non-transactional: a per-volume CV failure (rate limit, unknown
+/// volume, network) is captured as a `failed` result and never aborts
+/// the batch. Each result carries the 3-way `status` the UI tallies
+/// into one "N added, M already on pull list, K failed" toast.
+async fn add_to_pull_list_bulk(
+    State(state): State<AppState>,
+    Json(body): Json<BulkAddBody>,
+) -> Result<Json<BulkAddResponse>, ApiError> {
+    let mut results = Vec::with_capacity(body.cv_volume_ids.len());
+    for cv_volume_id in body.cv_volume_ids {
+        let result = match try_add_one(&state, cv_volume_id).await {
+            Ok((series_id, status)) => BulkAddResult {
+                cv_volume_id,
+                status,
+                series_id: Some(series_id),
+                error: None,
+            },
+            Err(e) => BulkAddResult {
+                cv_volume_id,
+                status: "failed",
+                series_id: None,
+                error: Some(e.to_string()),
+            },
+        };
+        results.push(result);
     }
-    Ok(Json(serde_json::json!({ "series_id": series.id })))
+    Ok(Json(BulkAddResponse { results }))
 }
 
 /// "Releases of note" — the current ship-week's calendar, narrowed to

@@ -3606,6 +3606,87 @@ async fn calendar_add_to_pull_list_is_idempotent_for_an_already_subscribed_serie
     );
 }
 
+#[tokio::test]
+async fn calendar_bulk_add_returns_per_volume_status() {
+    let app = build_test_app().await;
+    // Two volumes already tracked (so add_or_get_from_cv short-circuits,
+    // no CV mock needed): one unsubscribed, one already on the pull list.
+    let unsub = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(6001),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let subbed = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(6002),
+            metron_id: None,
+            title: "Chew".into(),
+            sort_title: "chew".into(),
+            start_year: Some(2009),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: subbed.id,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // 6001 -> added, 6002 -> already_on_list, 0 -> failed (must be > 0).
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull/bulk",
+            r#"{"cv_volume_ids":[6001,6002,0]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    let by_id = |cid: i64| {
+        results
+            .iter()
+            .find(|r| r["cv_volume_id"].as_i64() == Some(cid))
+            .unwrap_or_else(|| panic!("no result for cv_volume_id {cid}"))
+    };
+    assert_eq!(by_id(6001)["status"], "added");
+    assert_eq!(by_id(6001)["series_id"], unsub.id);
+    assert_eq!(by_id(6002)["status"], "already_on_list");
+    assert_eq!(by_id(6002)["series_id"], subbed.id);
+    assert_eq!(by_id(0)["status"], "failed");
+    assert!(by_id(0)["error"].is_string());
+
+    // 6001 is subscribed now; 6002 still has exactly its one entry.
+    assert!(pull_list_repo::get(&app.state.db, unsub.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        pull_list_repo::list_all(&app.state.db).await.unwrap().len(),
+        2
+    );
+}
+
 // -------- releases of note (A.8 Step 9) --------
 
 /// Mount a ComicVine `/issues/` response for ANY query. The of-note
