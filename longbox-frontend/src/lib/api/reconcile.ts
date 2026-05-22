@@ -15,6 +15,13 @@ export interface PhantomSeries {
    *  *transition* phantom — the series held files at the last scan and
    *  has lost them all since. */
   last_matched_count: number;
+  /** True when the series is empty by intent — on the pull list or
+   *  with a pull attempt, i.e. awaiting its first download rather than
+   *  having lost files. */
+  awaiting_first_download: boolean;
+  /** Recovery deadline ("YYYY-MM-DD HH:MM:SS") when the series is
+   *  marked for automatic removal; `null` when unmarked. */
+  auto_tidy_due_at: string | null;
 }
 
 /** Both phantom surfaces. `all_zero_owned` is every zero-owned series;

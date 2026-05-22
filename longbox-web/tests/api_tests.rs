@@ -2833,6 +2833,40 @@ async fn reconcile_counts_reports_transition_and_untracked() {
     assert_eq!(body["untracked_folders"], 1);
 }
 
+#[tokio::test]
+async fn reconcile_phantoms_flags_a_pull_list_series_as_awaiting_first_download() {
+    let app = build_test_app().await;
+    let awaiting = seed_pull_series(&app, "Subscribed").await;
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: awaiting,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    let plain = seed_pull_series(&app, "Plain Phantom").await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/reconcile/phantoms"))
+            .await,
+    )
+    .await;
+    let all = body["all_zero_owned"].as_array().unwrap();
+    let flag = |id: i64| {
+        all.iter()
+            .find(|p| p["id"] == id)
+            .expect("phantom present")["awaiting_first_download"]
+            .as_bool()
+            .unwrap()
+    };
+    // A pull-list series is empty by intent — it must read as awaiting a
+    // first download; a plain zero-owned phantom must not.
+    assert!(flag(awaiting), "a pull-list series is awaiting a download");
+    assert!(!flag(plain), "a plain phantom is not");
+}
+
 // -------- reconcile: route matrix (Library Tidy Step 7) --------
 //
 // The failure / edge / idempotency / 404 coverage the Step 4-6 smoke

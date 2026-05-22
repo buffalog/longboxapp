@@ -5,10 +5,12 @@ mod common;
 
 use common::{fixed_ts, fresh_pool};
 use longbox_db::{
-    discovered_folders_repo, file_repo, issue_repo, library_root_repo, series_repo, DbError,
-    DiscoveredFolder, NewFile, NewIssue, NewLibraryRoot, NewSeries,
+    discovered_folders_repo, file_repo, issue_repo, library_root_repo, pull_attempt_repo,
+    pull_list_repo, series_repo, DbError, DiscoveredFolder, NewFile, NewIssue, NewLibraryRoot,
+    NewPullAttempt, NewPullEntry, NewSeries,
 };
 use sqlx::SqlitePool;
+use time::{Duration, PrimitiveDateTime};
 
 // -------- discovered_folders_repo --------
 
@@ -205,4 +207,257 @@ async fn list_phantoms_excludes_series_with_an_owned_file() {
         !ids.contains(&owned),
         "a series with an owned, present file is not a phantom"
     );
+}
+
+// -------- series_repo auto-tidy (A.9 Step 6b) --------
+
+/// Attach one owned, present file to `series_id` (via a fresh library
+/// root + issue) so the series stops being a phantom.
+async fn give_owned_file(pool: &SqlitePool, series_id: i64) {
+    let library_root_id = library_root_repo::insert(
+        pool,
+        NewLibraryRoot {
+            path: format!("/comics/{series_id}"),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let issue_id = issue_repo::insert(
+        pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    file_repo::insert(
+        pool,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id,
+            path_relative: format!("s{series_id}/1.cbz"),
+            size_bytes: 1,
+            mtime: fixed_ts(),
+            last_scanned_at: fixed_ts(),
+            match_method: "comicinfo_xml".into(),
+            match_confidence: 0.95,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: fixed_ts(),
+            matched_at: Some(fixed_ts()),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+async fn empty_scan_counter(pool: &SqlitePool, series_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT consecutive_empty_scans FROM series WHERE id = ?")
+        .bind(series_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn due_at(pool: &SqlitePool, series_id: i64) -> Option<PrimitiveDateTime> {
+    sqlx::query_scalar("SELECT auto_tidy_due_at FROM series WHERE id = ?")
+        .bind(series_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn auto_tidy_marks_a_series_empty_past_the_threshold() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Abandoned").await;
+    let due = fixed_ts();
+
+    // Two empty scans — below the threshold of 3, nothing is marked.
+    series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    assert_eq!(empty_scan_counter(&pool, sid).await, 2);
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        0,
+        "two empty scans is below the threshold"
+    );
+
+    // The third tick reaches the threshold; the mark now fires.
+    series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        1
+    );
+    assert_eq!(due_at(&pool, sid).await, Some(due));
+
+    // A second mark pass is a no-op — the series is already marked.
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        0,
+        "an already-marked series is not re-marked"
+    );
+}
+
+#[tokio::test]
+async fn auto_tidy_never_marks_a_series_awaiting_a_first_download() {
+    let pool = fresh_pool().await;
+    let on_list = insert_series(&pool, "On Pull List").await;
+    let attempted = insert_series(&pool, "Has Pull Attempt").await;
+    let due = fixed_ts();
+
+    pull_list_repo::add(
+        &pool,
+        NewPullEntry {
+            series_id: on_list,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // `attempted` has a pull attempt but no pull-list row.
+    let issue_id = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: attempted,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    pull_attempt_repo::insert(
+        &pool,
+        NewPullAttempt {
+            series_id: attempted,
+            issue_id,
+            indexer_id: None,
+            release_id: None,
+            status: "pending".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Both are empty well past the threshold...
+    for _ in 0..5 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    // ...but neither is marked: a pull-list entry or a pull attempt is
+    // an explicit "awaiting a first download" intent auto-tidy must not
+    // act on.
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        0
+    );
+    assert_eq!(due_at(&pool, on_list).await, None);
+    assert_eq!(due_at(&pool, attempted).await, None);
+}
+
+#[tokio::test]
+async fn auto_tidy_purge_respects_the_recovery_window() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Doomed").await;
+    let due = fixed_ts();
+
+    for _ in 0..3 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+
+    // A purge before the deadline leaves the series alone.
+    assert_eq!(
+        series_repo::purge_due_auto_tidy(&pool, due - Duration::days(1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(series_repo::find_by_id(&pool, sid).await.unwrap().is_some());
+
+    // A purge once the deadline has passed hard-deletes it.
+    assert_eq!(
+        series_repo::purge_due_auto_tidy(&pool, due + Duration::days(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(series_repo::find_by_id(&pool, sid).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn auto_tidy_tick_clears_the_mark_when_files_return() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Came Back").await;
+    let due = fixed_ts();
+
+    for _ in 0..3 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    assert_eq!(due_at(&pool, sid).await, Some(due));
+
+    // The folder reappears: the series owns a present file again. The
+    // next tick resets the counter and clears the removal mark.
+    give_owned_file(&pool, sid).await;
+    series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    assert_eq!(empty_scan_counter(&pool, sid).await, 0);
+    assert_eq!(due_at(&pool, sid).await, None);
+}
+
+#[tokio::test]
+async fn keep_phantom_series_clears_every_auto_tidy_signal() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Kept").await;
+    let due = fixed_ts();
+
+    series_repo::update_last_matched_count(&pool, sid, 9)
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+
+    series_repo::keep_phantom_series(&pool, sid).await.unwrap();
+
+    assert_eq!(empty_scan_counter(&pool, sid).await, 0);
+    assert_eq!(due_at(&pool, sid).await, None);
+    let row = series_repo::list_phantoms(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == sid)
+        .expect("still a phantom");
+    assert_eq!(row.last_matched_count, 0);
+    assert!(row.auto_tidy_due_at.is_none());
+}
+
+#[tokio::test]
+async fn keep_phantom_series_unknown_is_not_found() {
+    let pool = fresh_pool().await;
+    let err = series_repo::keep_phantom_series(&pool, 4242)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::NotFound));
 }

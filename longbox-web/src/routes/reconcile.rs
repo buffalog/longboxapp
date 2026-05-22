@@ -169,8 +169,13 @@ async fn untracked(
 async fn counts(State(state): State<AppState>) -> Result<Json<ReconcileCounts>, ApiError> {
     let phantoms = series_repo::list_phantoms(&state.db).await?;
     let untracked = discovered_folders_repo::list(&state.db).await?;
-    let phantoms_with_transition =
-        phantoms.iter().filter(|p| p.last_matched_count > 0).count() as i64;
+    // A series already marked for automatic removal (`auto_tidy_due_at`)
+    // is handled, not pending — exclude it from the dashboard's
+    // attention count even though it still reads as a transition phantom.
+    let phantoms_with_transition = phantoms
+        .iter()
+        .filter(|p| p.last_matched_count > 0 && p.auto_tidy_due_at.is_none())
+        .count() as i64;
     Ok(Json(ReconcileCounts {
         phantoms_with_transition,
         untracked_folders: untracked.len() as i64,
@@ -244,12 +249,15 @@ async fn delete_phantom(
     Ok(Json(serde_json::json!({ "deleted": series_id })))
 }
 
-/// "Keep" a transition phantom: reset `last_matched_count` to 0 so it
-/// demotes from the "recently lost files" surface to the steady-state
-/// list. The user has reviewed the lost-files signal and decided to
-/// keep the catalog entry. 404 for an unknown series — the explicit
-/// existence check gives a clean `series` 404 rather than the generic
-/// `row` one `update_last_matched_count`'s own `NotFound` would map to.
+/// "Keep" a phantom: clear every auto-tidy signal — `last_matched_count`
+/// to 0 (demotes a transition phantom to steady-state),
+/// `consecutive_empty_scans` to 0, and `auto_tidy_due_at` to NULL
+/// (cancels a scheduled automatic removal). The user has reviewed the
+/// series and decided it stays — the same action serves the "recently
+/// lost files" and "scheduled for removal" tidy surfaces. 404 for an
+/// unknown series; the explicit existence check gives a clean `series`
+/// 404 rather than the generic `row` one `keep_phantom_series`'s own
+/// `NotFound` would map to.
 async fn keep_phantom(
     State(state): State<AppState>,
     Path(series_id): Path<i64>,
@@ -263,7 +271,7 @@ async fn keep_phantom(
             id: series_id.to_string(),
         });
     }
-    series_repo::update_last_matched_count(&state.db, series_id, 0).await?;
+    series_repo::keep_phantom_series(&state.db, series_id).await?;
     Ok(Json(serde_json::json!({ "kept": series_id })))
 }
 

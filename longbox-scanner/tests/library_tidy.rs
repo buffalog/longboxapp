@@ -4,12 +4,23 @@
 mod common;
 
 use common::{build_fixture_library, fresh_pool, seed_library_root, seed_walking_dead, write_cbz};
-use longbox_db::{discovered_folders_repo, series_repo};
+use longbox_db::{discovered_folders_repo, pull_list_repo, series_repo, NewPullEntry, PhantomSeries};
 use longbox_scanner::{Scanner, ScannerConfig};
 use tempfile::TempDir;
 
 fn scanner_for(db: longbox_db::Pool) -> Scanner {
     Scanner::new(db, ScannerConfig::default())
+}
+
+/// The phantom row for `series_id` — fails the test if the series is
+/// not currently a phantom.
+async fn phantom(pool: &longbox_db::Pool, series_id: i64) -> PhantomSeries {
+    series_repo::list_phantoms(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == series_id)
+        .expect("series is a phantom")
 }
 
 async fn discovered_names(pool: &longbox_db::Pool) -> Vec<String> {
@@ -164,5 +175,103 @@ async fn a_never_owned_series_is_a_steady_state_phantom() {
     assert_eq!(
         row.last_matched_count, 0,
         "a series that never owned a file stays at last_matched_count 0 (steady-state)"
+    );
+}
+
+// -------- auto-tidy on folder removal (A.9 Step 6b) --------
+
+#[tokio::test]
+async fn a_series_is_marked_for_auto_tidy_after_repeated_empty_scans() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    let wd = seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    // Scan 1: the folder is on disk — the series owns files, unmarked.
+    scanner.scan_full(library_root_id).await.unwrap();
+
+    // The user deletes the folder. Each subsequent scan finds the series
+    // empty; two empty scans is still below the threshold of 3.
+    std::fs::remove_dir_all(tmp.path().join("Walking Dead (2003)")).unwrap();
+    for _ in 0..2 {
+        scanner.scan_full(library_root_id).await.unwrap();
+    }
+    assert!(
+        phantom(&pool, wd.id).await.auto_tidy_due_at.is_none(),
+        "two empty scans is below the auto-tidy threshold"
+    );
+
+    // The third empty scan crosses the threshold and marks the series.
+    let report = scanner.scan_full(library_root_id).await.unwrap();
+    assert_eq!(report.series_auto_marked, 1);
+    assert!(
+        phantom(&pool, wd.id).await.auto_tidy_due_at.is_some(),
+        "the third empty scan marks the series for automatic removal"
+    );
+}
+
+#[tokio::test]
+async fn a_pull_list_series_is_never_auto_marked() {
+    // Empty library — the seeded series never has files on disk.
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    let wd = seed_walking_dead(&pool).await;
+    pull_list_repo::add(
+        &pool,
+        NewPullEntry {
+            series_id: wd.id,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    // Several empty scans, well past the threshold.
+    for _ in 0..5 {
+        let report = scanner.scan_full(library_root_id).await.unwrap();
+        assert_eq!(report.series_auto_marked, 0);
+    }
+    assert!(
+        phantom(&pool, wd.id).await.auto_tidy_due_at.is_none(),
+        "a pull-list series is awaiting a first download — never auto-marked"
+    );
+}
+
+#[tokio::test]
+async fn a_marked_series_is_recovered_when_its_folder_returns() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    let wd = seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    scanner.scan_full(library_root_id).await.unwrap();
+    std::fs::remove_dir_all(tmp.path().join("Walking Dead (2003)")).unwrap();
+    for _ in 0..3 {
+        scanner.scan_full(library_root_id).await.unwrap();
+    }
+    assert!(
+        phantom(&pool, wd.id).await.auto_tidy_due_at.is_some(),
+        "three empty scans mark the series"
+    );
+
+    // The folder reappears before the recovery window elapses.
+    build_fixture_library(tmp.path());
+    scanner.scan_full(library_root_id).await.unwrap();
+
+    // The series owns files again, so it is no longer a phantom — the
+    // empty-scan counter and the removal mark were both cleared.
+    assert!(
+        series_repo::list_phantoms(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .all(|p| p.id != wd.id),
+        "a series whose folder returned is recovered, not a phantom"
     );
 }

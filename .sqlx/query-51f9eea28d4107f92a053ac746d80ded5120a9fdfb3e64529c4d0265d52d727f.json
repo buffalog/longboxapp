@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM series\n           WHERE auto_tidy_due_at IS NOT NULL AND auto_tidy_due_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "51f9eea28d4107f92a053ac746d80ded5120a9fdfb3e64529c4d0265d52d727f"
+}

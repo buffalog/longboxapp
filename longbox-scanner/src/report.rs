@@ -16,6 +16,11 @@ pub struct ScanReport {
     /// Preserved from prior status; the scanner never assigns `Ignored`.
     pub matched_ignored: u32,
     pub unmatched: u32,
+    /// Series newly marked for automatic removal this scan (A.9 Step 6b).
+    pub series_auto_marked: u32,
+    /// Series hard-deleted this scan because their auto-tidy recovery
+    /// window elapsed (A.9 Step 6b).
+    pub series_auto_purged: u32,
     pub errors: Vec<ScanFileError>,
 }
 
@@ -40,6 +45,8 @@ impl ScanReport {
             matched_needs_review: 0,
             matched_ignored: 0,
             unmatched: 0,
+            series_auto_marked: 0,
+            series_auto_purged: 0,
             errors: Vec::new(),
         }
     }

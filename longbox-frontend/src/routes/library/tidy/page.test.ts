@@ -47,6 +47,8 @@ function phantom(over: Partial<PhantomSeries> = {}): PhantomSeries {
     publisher: 'Image',
     cover_url: null,
     last_matched_count: 0,
+    awaiting_first_download: false,
+    auto_tidy_due_at: null,
     ...over
   };
 }
@@ -68,6 +70,9 @@ function pageData(over: { phantoms?: PhantomSeries[]; untracked?: DiscoveredFold
   return {
     props: {
       data: {
+        // `libraryRoot` rides in from a parent layout load; the tidy
+        // page never reads it, but the route's `data` type requires it.
+        libraryRoot: null,
         phantoms: {
           all_zero_owned: phantoms,
           with_transition: phantoms.filter((p) => p.last_matched_count > 0)
@@ -94,9 +99,9 @@ describe('library tidy page', () => {
       })
     );
     expect(screen.getByText('Recently lost files')).toBeInTheDocument();
-    expect(screen.getByText('Zero ownership')).toBeInTheDocument();
+    expect(screen.getByText('Empty series')).toBeInTheDocument();
     // Disjoint partition: the transition phantom renders exactly once
-    // (subsection 1), never duplicated into "Zero ownership".
+    // ("Recently lost files"), never duplicated into "Empty series".
     expect(screen.getAllByText('Transition Series')).toHaveLength(1);
     expect(screen.getByText('Steady Series')).toBeInTheDocument();
     expect(screen.getByText(/Had 5 matched files/)).toBeInTheDocument();
@@ -129,7 +134,7 @@ describe('library tidy page', () => {
       })
     );
 
-    await fireEvent.click(screen.getByLabelText('Select all zero-ownership series'));
+    await fireEvent.click(screen.getByLabelText('Select all empty series'));
     await fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }));
 
     await waitFor(() => expect(bulkDeletePhantoms).toHaveBeenCalledWith([2, 3]));
@@ -139,7 +144,7 @@ describe('library tidy page', () => {
     });
   });
 
-  it('keeps a transition phantom, moving it to Zero ownership', async () => {
+  it('keeps a transition phantom, moving it to Empty series', async () => {
     vi.mocked(keepPhantom).mockResolvedValue({ kept: 1 });
     render(
       TidyPage,
@@ -151,11 +156,63 @@ describe('library tidy page', () => {
 
     await waitFor(() => expect(keepPhantom).toHaveBeenCalledWith(1));
     // last_matched_count -> 0: the transition subsection empties and the
-    // row drops to "Zero ownership".
+    // row drops to "Empty series".
     await waitFor(() =>
       expect(screen.queryByText('Recently lost files')).not.toBeInTheDocument()
     );
     expect(screen.getByText('Lost Series')).toBeInTheDocument();
+  });
+
+  it('renders a scheduled-for-removal phantom only under "Scheduled for automatic removal"', () => {
+    render(
+      TidyPage,
+      pageData({
+        phantoms: [
+          phantom({ id: 1, title: 'Doomed Series', auto_tidy_due_at: '2026-06-05 03:00:00' }),
+          phantom({ id: 2, title: 'Steady Series' })
+        ]
+      })
+    );
+    expect(screen.getByText('Scheduled for automatic removal')).toBeInTheDocument();
+    // The scheduled bucket outranks every other — the row appears once.
+    expect(screen.getAllByText('Doomed Series')).toHaveLength(1);
+    expect(screen.getByText(/Will be removed on/)).toBeInTheDocument();
+  });
+
+  it('renders an awaiting-first-download phantom in its own subsection', () => {
+    render(
+      TidyPage,
+      pageData({
+        phantoms: [phantom({ id: 1, title: 'Subscribed Series', awaiting_first_download: true })]
+      })
+    );
+    expect(screen.getByText('Awaiting first download')).toBeInTheDocument();
+    expect(screen.getByText('Subscribed Series')).toBeInTheDocument();
+    // It is expected state, not a problem — no "Empty series" bulk surface.
+    expect(screen.queryByText('Empty series')).not.toBeInTheDocument();
+  });
+
+  it('cancels a scheduled removal when Keep is clicked', async () => {
+    vi.mocked(keepPhantom).mockResolvedValue({ kept: 1 });
+    render(
+      TidyPage,
+      pageData({
+        phantoms: [
+          phantom({ id: 1, title: 'Doomed Series', auto_tidy_due_at: '2026-06-05 03:00:00' })
+        ]
+      })
+    );
+    expect(screen.getByText('Scheduled for automatic removal')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+
+    await waitFor(() => expect(keepPhantom).toHaveBeenCalledWith(1));
+    // auto_tidy_due_at -> null: the scheduled subsection empties and the
+    // row drops to "Empty series".
+    await waitFor(() =>
+      expect(screen.queryByText('Scheduled for automatic removal')).not.toBeInTheDocument()
+    );
+    expect(screen.getByText('Doomed Series')).toBeInTheDocument();
   });
 
   it('dismisses an untracked folder', async () => {
@@ -294,7 +351,7 @@ describe('library tidy page', () => {
       })
     );
 
-    await fireEvent.click(screen.getByLabelText('Select all zero-ownership series'));
+    await fireEvent.click(screen.getByLabelText('Select all empty series'));
     await fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }));
 
     await waitFor(() => expect(screen.queryByText('Gone Two')).not.toBeInTheDocument());
