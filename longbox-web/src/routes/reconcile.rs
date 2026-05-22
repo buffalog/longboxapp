@@ -11,11 +11,18 @@
 //! include rows that have since changed, and one stale row shouldn't
 //! sink the whole batch.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use longbox_db::{discovered_folders_repo, series_repo, DiscoveredFolderRow, PhantomSeries};
+use longbox_core::{normalize_title, parse_filename, FileStatus, MatchMethod, ParsingPattern};
+use longbox_db::{
+    discovered_folders_repo, file_repo, issue_repo, library_root_repo, parsing_pattern_repo,
+    series_repo, DiscoveredFolderRow, FileRow, FileUpdate, NewIssue, NewSeries, PhantomSeries,
+};
 use serde::{Deserialize, Serialize};
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 use crate::error::ApiError;
 use crate::routes::series::{add_or_get_from_cv, delete_series, spawn_auto_rematch};
@@ -31,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/reconcile/phantom/:series_id", delete(delete_phantom))
         .route("/reconcile/phantom/:series_id/keep", post(keep_phantom))
         .route("/reconcile/phantoms/bulk", post(bulk_delete_phantoms))
+        .route("/reconcile/convert", post(convert))
 }
 
 // -------- shapes --------
@@ -105,6 +113,28 @@ struct BulkDeleteResponse {
 struct SkippedSeries {
     series_id: i64,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConvertBody {
+    folder_names: Vec<String>,
+}
+
+/// Per-folder outcome of a bulk shallow-convert. `status` is `converted`
+/// or `failed`; `series_id` rides along on success, `error` on failure.
+#[derive(Debug, Serialize)]
+struct ConvertResult {
+    folder_name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConvertResponse {
+    results: Vec<ConvertResult>,
 }
 
 // -------- handlers --------
@@ -256,4 +286,199 @@ async fn bulk_delete_phantoms(
         }
     }
     Ok(Json(BulkDeleteResponse { deleted, skipped }))
+}
+
+/// Bulk shallow-convert: turn discovered folders into tracked series
+/// without ComicVine. Each selected folder becomes a series (title +
+/// launch year parsed from the folder name) with number-only issue rows
+/// synthesized from its files' parsed filenames; those files attach as
+/// `owned`, so catalog counts are correct immediately. No CV metadata —
+/// covers, descriptions and the canonical issue list arrive later via
+/// the enrichment step. Per-folder atomic; the batch is
+/// non-transactional, so one bad folder never sinks the rest.
+async fn convert(
+    State(state): State<AppState>,
+    Json(body): Json<ConvertBody>,
+) -> Result<Json<ConvertResponse>, ApiError> {
+    let patterns = load_patterns(&state).await?;
+
+    // Every file, grouped by top-level folder — one query set reused
+    // across every folder in the batch.
+    let mut by_folder: HashMap<String, Vec<FileRow>> = HashMap::new();
+    for root in library_root_repo::list_all(&state.db).await? {
+        for file in file_repo::list_by_library_root(&state.db, root.id).await? {
+            if let Some(folder) = top_level_folder(&file.path_relative) {
+                by_folder.entry(folder.to_owned()).or_default().push(file);
+            }
+        }
+    }
+
+    let mut results = Vec::with_capacity(body.folder_names.len());
+    for folder_name in body.folder_names {
+        let files: &[FileRow] = by_folder
+            .get(&folder_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let result = match convert_one_folder(&state, &folder_name, files, &patterns).await {
+            Ok(series_id) => ConvertResult {
+                folder_name,
+                status: "converted",
+                series_id: Some(series_id),
+                error: None,
+            },
+            Err(e) => ConvertResult {
+                folder_name,
+                status: "failed",
+                series_id: None,
+                error: Some(e.to_string()),
+            },
+        };
+        results.push(result);
+    }
+    Ok(Json(ConvertResponse { results }))
+}
+
+/// Convert one folder, atomically: insert the shallow series, synthesize
+/// a number-only issue per distinct parsed file number, attach the
+/// folder's files to those issues as `owned`, and dismiss the
+/// discovered-folder row. Any failure rolls the whole folder back.
+async fn convert_one_folder(
+    state: &AppState,
+    folder_name: &str,
+    files: &[FileRow],
+    patterns: &[ParsingPattern],
+) -> Result<i64, ApiError> {
+    let (title, start_year) = parse_folder_name(folder_name);
+
+    let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
+
+    let series = series_repo::insert(
+        &mut *tx,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            sort_title: normalize_title(&title),
+            title,
+            start_year,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await?;
+
+    // Parse an issue number out of each file's basename. A file whose
+    // name doesn't parse is left untouched — it stays unmatched.
+    let parsed: Vec<(i64, String)> = files
+        .iter()
+        .filter_map(|f| {
+            let basename = f.path_relative.rsplit('/').next()?;
+            let p = parse_filename(basename, patterns)?;
+            Some((f.id, p.number))
+        })
+        .collect();
+
+    // One number-only issue per distinct number.
+    let mut numbers: Vec<String> = parsed.iter().map(|(_, n)| n.clone()).collect();
+    numbers.sort();
+    numbers.dedup();
+    let new_issues: Vec<NewIssue> = numbers
+        .into_iter()
+        .map(|number| NewIssue {
+            series_id: series.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number,
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        })
+        .collect();
+    let issue_by_number: HashMap<String, i64> = if new_issues.is_empty() {
+        HashMap::new()
+    } else {
+        issue_repo::bulk_insert(&mut *tx, new_issues)
+            .await?
+            .into_iter()
+            .map(|i| (i.number, i.id))
+            .collect()
+    };
+
+    // Attach each parsed file to its issue as an owned file.
+    let now = utc_now();
+    for f in files {
+        let Some((_, number)) = parsed.iter().find(|(id, _)| *id == f.id) else {
+            continue;
+        };
+        let Some(&issue_id) = issue_by_number.get(number) else {
+            continue;
+        };
+        let patch = FileUpdate {
+            issue_id: Some(issue_id),
+            size_bytes: f.size_bytes,
+            mtime: f.mtime,
+            last_scanned_at: f.last_scanned_at,
+            match_method: MatchMethod::FilenameRegex.as_db_str().to_owned(),
+            match_confidence: 1.0,
+            status: FileStatus::Owned.as_db_str().to_owned(),
+            cached_comicinfo_xml: f.cached_comicinfo_xml.clone(),
+            cached_at: f.cached_at,
+            is_present: f.is_present,
+            last_seen_at: f.last_seen_at,
+            matched_at: file_repo::next_matched_at(f.issue_id, Some(issue_id), f.matched_at, now),
+        };
+        file_repo::update(&mut *tx, f.id, patch).await?;
+    }
+
+    discovered_folders_repo::dismiss(&mut *tx, &[folder_name.to_owned()]).await?;
+
+    tx.commit().await.map_err(longbox_db::DbError::from)?;
+    Ok(series.id)
+}
+
+/// Split a discovered-folder name into (title, start_year). A trailing
+/// ` (YYYY)` is read as the launch year; a folder without one keeps the
+/// whole name as the title.
+fn parse_folder_name(folder: &str) -> (String, Option<i32>) {
+    let trimmed = folder.trim();
+    if let Some(inner) = trimmed.strip_suffix(')') {
+        if let Some((title, year)) = inner.rsplit_once(" (") {
+            let title = title.trim();
+            if year.len() == 4 && !title.is_empty() {
+                if let Ok(y) = year.parse::<i32>() {
+                    return (title.to_owned(), Some(y));
+                }
+            }
+        }
+    }
+    (trimmed.to_owned(), None)
+}
+
+/// First path component of a forward-slash relative path, or `None` for
+/// a file loose in the library root.
+fn top_level_folder(path_relative: &str) -> Option<&str> {
+    let (first, rest) = path_relative.split_once('/')?;
+    (!rest.is_empty()).then_some(first)
+}
+
+/// Load the enabled parsing patterns into `longbox-core`'s shape — the
+/// same mapping the scanner does.
+async fn load_patterns(state: &AppState) -> Result<Vec<ParsingPattern>, ApiError> {
+    let rows = parsing_pattern_repo::list_enabled(&state.db).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ParsingPattern {
+            id: r.id,
+            name: r.name,
+            pattern: r.pattern,
+            priority: i32::try_from(r.priority).unwrap_or(i32::MAX),
+            enabled: r.enabled,
+        })
+        .collect())
+}
+
+fn utc_now() -> PrimitiveDateTime {
+    let n = OffsetDateTime::now_utc();
+    PrimitiveDateTime::new(n.date(), n.time())
 }

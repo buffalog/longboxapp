@@ -30,6 +30,14 @@ export function createSelection<T>() {
       else next.add(id);
       ids = next;
     },
+    /** Drop one id if selected; a no-op otherwise. For keeping the
+     *  selection clean when a single-row action removes its row. */
+    discard(id: T): void {
+      if (!ids.has(id)) return;
+      const next = new Set(ids);
+      next.delete(id);
+      ids = next;
+    },
     /** Select every id in `all` if any is currently unselected;
      *  otherwise clear. Mirrors a select-all checkbox against the
      *  currently-shown rows. */

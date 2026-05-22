@@ -8,17 +8,17 @@ precedent it is amended as each step resolves.
 questions, each with a recommendation) → approval → a single
 implementation commit → container rebuild + redeploy.
 
-**Status (2026-05-22):** Step 4 in progress. Steps 1–3, 5, 7 queued;
-Step 6 sequenced behind Step 4. The A.8 closeout smoke
-(`longbox-phase-a8-closeout.md`, Step 13 of the A.8 brief) runs after
-Step 6 — once Library Tidy reflects accurate disk truth.
+**Status (2026-05-22):** Steps 4 and 6a shipped. Steps 1–3, 5, 7 and
+6b/6c queued. The A.8 closeout smoke (`longbox-phase-a8-closeout.md`,
+Step 13 of the A.8 brief) runs after Step 6b — once Library Tidy
+reflects accurate disk truth.
 
 ---
 
 ## Step structure
 
-A.9 is seven steps, grouped by surface, ordered by dependency and
-impact.
+A.9 is seven steps (Step 6 split three ways), grouped by surface,
+ordered by dependency and impact.
 
 ### Step 1 — UI polish sweep · items 4, 11
 
@@ -52,19 +52,38 @@ primitives — a `BulkActionBar` component and a `createSelection` helper
 Scan frequency as a configurable interval (item 3); timezone made
 configurable on two axes — UI display and scheduler (item 5).
 
-### Step 6 — Library Tidy accuracy & UX · items 2, 10 (+ scope expansion)
+### Step 6 — Library Tidy accuracy & UX
 
-Auto-tidy on folder removal (item 2) and phantom-series UX
-disambiguation (item 10). Sequenced behind Step 4 (inherits its bulk
-primitives) and behind a full scan (needs accurate Library Tidy data).
+Step 6 split into three sub-steps at its kickoff (the bulk-convert RC
+blocker is independent of the rest, and CV enrichment is its own design
+surface).
 
-**Scope expansion:** Step 6 also covers bulk-converting `/library/tidy`
-untracked folders → tracked series, for the ~563-folder backlog the CBR
-hot-fix surfaced. Implementation approach is TBD at the Step 6 kickoff —
-candidates: a background queue with a ComicVine throttle, a shallow add
-without CV enrichment, or bulk-add with a throttle. Tradeoffs surface
-there. Step 6 also refactors `/library/tidy`'s two hand-rolled bulk
-sections onto Step 4's `BulkActionBar` + `createSelection`.
+**Step 6a — bulk-convert (RC blocker).** Shallow-convert discovered
+folders → tracked series with no ComicVine: each folder becomes a series
+(title + launch year parsed from the folder name) *plus number-only
+issue rows synthesized from its files' parsed filenames* — so the files
+attach as `owned` and catalog counts are correct immediately. (Title +
+year alone would leave the files unmatched — it needs the synthesized
+issues; see the deferred-items note's reasoning.) Also refactors
+`/library/tidy`'s two hand-rolled bulk sections onto Step 4's
+`BulkActionBar` + `createSelection`.
+
+**Step 6b — auto-tidy + phantom UX · items 2, 10.** Auto-tidy on folder
+removal (item 2): N=3 consecutive empty scans, soft-delete with a
+recovery window, a new `series.consecutive_empty_scans` column. Phantom
+UX (item 10): split the zero-ownership bucket into "Awaiting first
+download" (on the pull list / has a pull_attempt) vs "Empty series".
+
+**Step 6c — CV enrichment.** Backfill CV metadata (covers, descriptions,
+the canonical issue list) for shallow-converted series. Its own kickoff:
+the scan-scheduler is a daily timer and can't host it, and a shallow
+series has no `cv_id`, so enrichment must CV-*search* + auto-pick — a
+real design surface (confidence threshold, manual fallback).
+
+### Step 7 — Missing-issue resolution · item 9
+
+Backissue search — the biggest item. `/missing` gains a resolution
+path. Likely splits into 7a (per-row search) and 7b (bulk).
 
 ### Step 7 — Missing-issue resolution · item 9
 
@@ -84,7 +103,7 @@ path. Likely splits into 7a (per-row search) and 7b (bulk).
    disappears from disk, auto-delete the series record without manual
    `/library/tidy` confirmation. Debounce: N=2–3 consecutive scans
    showing the folder absent before removal, to absorb mount blips. A
-   setting, defaulted on. → Step 6
+   setting, defaulted on. → Step 6b
 
 3. **Scan frequency.** 8 scans per 24h (every 3 hours). Interval-based
    scheduling sidesteps timezone entirely. Configurable via settings. → Step 5
@@ -125,7 +144,7 @@ path. Likely splits into 7a (per-row search) and 7b (bulk).
     section conflates true transition phantoms (had files, lost them)
     with newly-added-not-yet-fetched series (added via pull list,
     awaiting first download). Filter to transition phantoms, or split
-    into two sub-sections. → Step 6
+    into two sub-sections. → Step 6b
 
 11. **Dashboard polish.** Three small fixes: (a) the 8 stat tiles crowd
     the row — "NEEDS ATTENTION" wraps while peers stay single-line; (b)

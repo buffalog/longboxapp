@@ -111,3 +111,22 @@ export function bulkDeletePhantoms(seriesIds: number[]): Promise<BulkDeleteResul
 export function keepPhantom(seriesId: number): Promise<{ kept: number }> {
   return apiFetch(`/reconcile/phantom/${seriesId}/keep`, { method: 'POST' });
 }
+
+/** Per-folder outcome of a bulk shallow-convert. */
+export interface ConvertResult {
+  folder_name: string;
+  status: 'converted' | 'failed';
+  series_id?: number;
+  error?: string;
+}
+
+/** Bulk shallow-convert discovered folders into tracked series — no
+ *  ComicVine. Each folder becomes a series with number-only issues
+ *  synthesized from its filenames; its files attach as owned.
+ *  Non-transactional, per-folder results. */
+export function convertFolders(folderNames: string[]): Promise<{ results: ConvertResult[] }> {
+  return apiFetch('/reconcile/convert', {
+    method: 'POST',
+    body: JSON.stringify({ folder_names: folderNames })
+  });
+}

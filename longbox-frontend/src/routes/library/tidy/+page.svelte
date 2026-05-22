@@ -2,19 +2,26 @@
   // Library Tidy — reconcile the catalog against disk in both
   // directions. Self-owned list state, seeded from the load data and
   // maintained from each mutation's response (the pull-list pattern).
+  //
+  // A.9 Step 6a — the two bulk sections run on the shared BulkActionBar
+  // + createSelection primitives (Step 4), and untracked folders gain a
+  // shallow bulk-convert (folder → tracked series, no ComicVine).
   import { Folder, Sparkles } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
     addFolders,
     bulkDeletePhantoms,
+    convertFolders,
     deletePhantom,
     dismissFolders,
     keepPhantom,
     type DiscoveredFolder,
     type PhantomSeries
   } from '$lib/api/reconcile';
+  import { createSelection } from '$lib/createSelection.svelte';
   import { searchHintFromPath } from '$lib/match_hint';
   import { toast } from '$lib/stores/toast.svelte';
+  import BulkActionBar from '$lib/components/BulkActionBar.svelte';
   import Button from '$lib/components/Button.svelte';
   import CvSearchInput from '$lib/components/CvSearchInput.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
@@ -33,10 +40,9 @@
   let error = $state<ApiError | null>(null);
   let busy = $state(false);
 
-  // Bulk selection — one set per bulk section. Plain Sets aren't deeply
-  // reactive under $state, so every mutation reassigns the binding.
-  let selectedPhantoms = $state<Set<number>>(new Set());
-  let selectedFolders = $state<Set<string>>(new Set());
+  // Bulk selection — one per bulk section, on the shared primitive.
+  const phantomSel = createSelection<number>();
+  const folderSel = createSelection<string>();
 
   // Add-to-LongBox modal.
   let addModalFolder = $state<DiscoveredFolder | null>(null);
@@ -60,19 +66,9 @@
   const transitionPhantoms = $derived(phantoms.filter((p) => p.last_matched_count > 0));
   const steadyStatePhantoms = $derived(phantoms.filter((p) => p.last_matched_count === 0));
 
-  const allSteadySelected = $derived(
-    steadyStatePhantoms.length > 0 &&
-      steadyStatePhantoms.every((p) => selectedPhantoms.has(p.id))
-  );
-  const someSteadySelected = $derived(
-    steadyStatePhantoms.some((p) => selectedPhantoms.has(p.id))
-  );
-  const allFoldersSelected = $derived(
-    untracked.length > 0 && untracked.every((f) => selectedFolders.has(f.folder_name))
-  );
-  const someFoldersSelected = $derived(
-    untracked.some((f) => selectedFolders.has(f.folder_name))
-  );
+  // Id lists the BulkActionBar's select-all toggles against.
+  const steadyIds = $derived(steadyStatePhantoms.map((p) => p.id));
+  const untrackedNames = $derived(untracked.map((f) => f.folder_name));
 
   const addHint = $derived(
     addModalFolder ? searchHintFromPath(`${addModalFolder.folder_name}/_.cbz`) : ''
@@ -88,32 +84,6 @@
     } finally {
       busy = false;
     }
-  }
-
-  // --- phantom selection ---------------------------------------------
-  function togglePhantom(id: number): void {
-    if (selectedPhantoms.has(id)) selectedPhantoms.delete(id);
-    else selectedPhantoms.add(id);
-    selectedPhantoms = new Set(selectedPhantoms);
-  }
-
-  function toggleAllSteady(): void {
-    selectedPhantoms = allSteadySelected
-      ? new Set()
-      : new Set(steadyStatePhantoms.map((p) => p.id));
-  }
-
-  // --- folder selection ----------------------------------------------
-  function toggleFolder(name: string): void {
-    if (selectedFolders.has(name)) selectedFolders.delete(name);
-    else selectedFolders.add(name);
-    selectedFolders = new Set(selectedFolders);
-  }
-
-  function toggleAllFolders(): void {
-    selectedFolders = allFoldersSelected
-      ? new Set()
-      : new Set(untracked.map((f) => f.folder_name));
   }
 
   // --- phantom mutations ---------------------------------------------
@@ -133,22 +103,19 @@
     return run(async () => {
       await deletePhantom(seriesId);
       phantoms = phantoms.filter((p) => p.id !== seriesId);
-      if (selectedPhantoms.has(seriesId)) {
-        selectedPhantoms.delete(seriesId);
-        selectedPhantoms = new Set(selectedPhantoms);
-      }
+      phantomSel.discard(seriesId);
       toast.success('Series removed from the catalog.');
     });
   }
 
   function handleBulkRemovePhantoms(): Promise<void> {
-    const ids = [...selectedPhantoms];
+    const ids = [...phantomSel.selected];
     if (ids.length === 0) return Promise.resolve();
     return run(async () => {
       const result = await bulkDeletePhantoms(ids);
       const deleted = new Set(result.deleted);
       phantoms = phantoms.filter((p) => !deleted.has(p.id));
-      selectedPhantoms = new Set();
+      phantomSel.clear();
       if (result.skipped.length > 0) {
         toast.warning(
           `Removed ${result.deleted.length}; skipped ${result.skipped.length} (files reappeared).`
@@ -164,25 +131,45 @@
     return run(async () => {
       await dismissFolders([folderName]);
       untracked = untracked.filter((f) => f.folder_name !== folderName);
-      if (selectedFolders.has(folderName)) {
-        selectedFolders.delete(folderName);
-        selectedFolders = new Set(selectedFolders);
-      }
+      folderSel.discard(folderName);
       toast.success('Folder dismissed.');
     });
   }
 
   function handleBulkDismiss(): Promise<void> {
-    const names = [...selectedFolders];
+    const names = [...folderSel.selected];
     if (names.length === 0) return Promise.resolve();
     return run(async () => {
       const result = await dismissFolders(names);
       const dismissed = new Set(names);
       untracked = untracked.filter((f) => !dismissed.has(f.folder_name));
-      selectedFolders = new Set();
+      folderSel.clear();
       toast.success(
         `Dismissed ${result.dismissed} folder${result.dismissed === 1 ? '' : 's'}.`
       );
+    });
+  }
+
+  function handleBulkConvert(): Promise<void> {
+    const names = [...folderSel.selected];
+    if (names.length === 0) return Promise.resolve();
+    return run(async () => {
+      const { results } = await convertFolders(names);
+      const converted = results.filter((r) => r.status === 'converted').length;
+      const failed = results.filter((r) => r.status === 'failed').length;
+      // Drop every converted folder — it's a tracked series now.
+      const done = new Set(
+        results.filter((r) => r.status === 'converted').map((r) => r.folder_name)
+      );
+      untracked = untracked.filter((f) => !done.has(f.folder_name));
+      folderSel.clear();
+      if (failed > 0) {
+        toast.warning(`Converted ${converted}; ${failed} failed.`);
+      } else {
+        toast.success(
+          `Converted ${converted} folder${converted === 1 ? '' : 's'} to tracked series.`
+        );
+      }
     });
   }
 
@@ -212,10 +199,7 @@
       const result = await addFolders([{ folder_name: folderName, cv_id: cvId }]);
       if (result.succeeded.length > 0) {
         untracked = untracked.filter((f) => f.folder_name !== folderName);
-        if (selectedFolders.has(folderName)) {
-          selectedFolders.delete(folderName);
-          selectedFolders = new Set(selectedFolders);
-        }
+        folderSel.discard(folderName);
         closeAddModal();
         toast.success(`Added ${cvName}.`);
       } else {
@@ -327,29 +311,24 @@
               — every phantom is in "Recently lost files" above{/if}.
           </p>
         {:else}
-          <div
-            class="mb-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+          <BulkActionBar
+            count={phantomSel.size}
+            allSelected={phantomSel.allSelected(steadyIds)}
+            someSelected={phantomSel.someSelected(steadyIds)}
+            onToggleAll={() => phantomSel.toggleAll(steadyIds)}
+            selectAllLabel="Select all zero-ownership series"
           >
-            <label class="flex items-center gap-2 text-sm text-slate-600">
-              <input
-                type="checkbox"
-                class="rounded border-slate-300"
-                checked={allSteadySelected}
-                indeterminate={someSteadySelected && !allSteadySelected}
-                onchange={toggleAllSteady}
-                aria-label="Select all zero-ownership series"
-              />
-              {selectedPhantoms.size} selected
-            </label>
-            <Button
-              variant="danger"
-              size="sm"
-              onclick={handleBulkRemovePhantoms}
-              disabled={busy || selectedPhantoms.size === 0}
-            >
-              Remove selected
-            </Button>
-          </div>
+            {#snippet action()}
+              <Button
+                variant="danger"
+                size="sm"
+                onclick={handleBulkRemovePhantoms}
+                disabled={busy || phantomSel.size === 0}
+              >
+                Remove selected
+              </Button>
+            {/snippet}
+          </BulkActionBar>
           <ul class="space-y-2">
             {#each steadyStatePhantoms as p (p.id)}
               <li
@@ -358,8 +337,8 @@
                 <input
                   type="checkbox"
                   class="rounded border-slate-300"
-                  checked={selectedPhantoms.has(p.id)}
-                  onchange={() => togglePhantom(p.id)}
+                  checked={phantomSel.has(p.id)}
+                  onchange={() => phantomSel.toggle(p.id)}
                   aria-label={`Select ${p.title}`}
                 />
                 {@render coverThumb(p.cover_url)}
@@ -396,37 +375,45 @@
         No untracked folders — every series folder on disk is in the catalog.
       </p>
     {:else}
-      <div
-        class="mb-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+      <p class="mb-2 text-xs text-slate-500">
+        "Convert" tracks a folder as a series immediately, with issues read from its
+        filenames — no ComicVine. Covers and full metadata fill in later.
+      </p>
+      <BulkActionBar
+        count={folderSel.size}
+        allSelected={folderSel.allSelected(untrackedNames)}
+        someSelected={folderSel.someSelected(untrackedNames)}
+        onToggleAll={() => folderSel.toggleAll(untrackedNames)}
+        selectAllLabel="Select all untracked folders"
       >
-        <label class="flex items-center gap-2 text-sm text-slate-600">
-          <input
-            type="checkbox"
-            class="rounded border-slate-300"
-            checked={allFoldersSelected}
-            indeterminate={someFoldersSelected && !allFoldersSelected}
-            onchange={toggleAllFolders}
-            aria-label="Select all untracked folders"
-          />
-          {selectedFolders.size} selected
-        </label>
-        <Button
-          variant="secondary"
-          size="sm"
-          onclick={handleBulkDismiss}
-          disabled={busy || selectedFolders.size === 0}
-        >
-          Dismiss selected
-        </Button>
-      </div>
+        {#snippet action()}
+          <div class="flex gap-2">
+            <Button
+              size="sm"
+              onclick={handleBulkConvert}
+              disabled={busy || folderSel.size === 0}
+            >
+              {folderSel.size > 0 ? `Convert ${folderSel.size} selected` : 'Convert selected'}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onclick={handleBulkDismiss}
+              disabled={busy || folderSel.size === 0}
+            >
+              Dismiss selected
+            </Button>
+          </div>
+        {/snippet}
+      </BulkActionBar>
       <ul class="space-y-2">
         {#each untracked as f (f.folder_name)}
           <li class="flex items-center gap-3 rounded-md border border-slate-200 bg-white p-3">
             <input
               type="checkbox"
               class="rounded border-slate-300"
-              checked={selectedFolders.has(f.folder_name)}
-              onchange={() => toggleFolder(f.folder_name)}
+              checked={folderSel.has(f.folder_name)}
+              onchange={() => folderSel.toggle(f.folder_name)}
               aria-label={`Select ${f.folder_name}`}
             />
             <Folder class="size-5 flex-shrink-0 text-slate-400" aria-hidden="true" />
