@@ -2921,6 +2921,66 @@ async fn seed_series_with_owned_file(
 }
 
 #[tokio::test]
+async fn reconcile_convert_shallow_creates_series_and_attaches_files() {
+    let app = build_test_app().await;
+    // Two files for a series LongBox doesn't track — after a scan they
+    // are unmatched and "Wytches (2014)" is a discovered folder.
+    write_cbz(
+        &app.library_path()
+            .join("Wytches (2014)/Wytches (2014) 001.cbz"),
+        None,
+    );
+    write_cbz(
+        &app.library_path()
+            .join("Wytches (2014)/Wytches (2014) 002.cbz"),
+        None,
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/convert",
+            r#"{"folder_names":["Wytches (2014)"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["results"][0]["status"], "converted");
+    let series_id = body["results"][0]["series_id"].as_i64().unwrap();
+
+    // Shallow series — title + year parsed from the folder, no cv_id.
+    let series = series_repo::find_by_id(&app.state.db, series_id)
+        .await
+        .unwrap()
+        .expect("series created");
+    assert_eq!(series.title, "Wytches");
+    assert_eq!(series.start_year, Some(2014));
+    assert_eq!(series.cv_id, None);
+
+    // Two number-only issues synthesized; both files attach as owned.
+    let issues = issue_repo::list_by_series(&app.state.db, series_id)
+        .await
+        .unwrap();
+    assert_eq!(issues.len(), 2);
+    let owned = longbox_db::file_repo::list_by_library_root(&app.state.db, app.library_root_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.status == "owned" && f.issue_id.is_some())
+        .count();
+    assert_eq!(owned, 2);
+
+    // The folder is no longer untracked.
+    let untracked = discovered_folders_repo::list(&app.state.db).await.unwrap();
+    assert!(untracked.iter().all(|d| d.folder_name != "Wytches (2014)"));
+}
+
+#[tokio::test]
 async fn reconcile_phantoms_partitions_transition_and_steady() {
     let app = build_test_app().await;
     let transition = seed_pull_series(&app, "Lost Series").await;

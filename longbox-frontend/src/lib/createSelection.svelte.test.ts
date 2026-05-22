@@ -44,6 +44,19 @@ describe('createSelection', () => {
     expect(sel.allSelected([1, 2])).toBe(true);
   });
 
+  it('discard removes an id only when it is selected', () => {
+    const sel = createSelection<number>();
+    sel.toggle(1);
+    sel.toggle(2);
+    sel.discard(1);
+    expect(sel.has(1)).toBe(false);
+    expect(sel.has(2)).toBe(true);
+    expect(sel.size).toBe(1);
+    // Discarding an id that isn't selected is a no-op.
+    sel.discard(99);
+    expect(sel.size).toBe(1);
+  });
+
   it('clear drops all selections', () => {
     const sel = createSelection<string>();
     sel.toggleAll(['a', 'b']);

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addFolders,
   bulkDeletePhantoms,
+  convertFolders,
   deletePhantom,
   dismissFolders,
   keepPhantom,
@@ -23,6 +24,7 @@ vi.mock('$lib/api/reconcile', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/reconcile')>()),
   addFolders: vi.fn(),
   bulkDeletePhantoms: vi.fn(),
+  convertFolders: vi.fn(),
   deletePhantom: vi.fn(),
   dismissFolders: vi.fn(),
   keepPhantom: vi.fn()
@@ -164,6 +166,36 @@ describe('library tidy page', () => {
 
     await waitFor(() => expect(dismissFolders).toHaveBeenCalledWith(['Saga (2012)']));
     await waitFor(() => expect(screen.queryByText('Saga (2012)')).not.toBeInTheDocument());
+  });
+
+  it('bulk-converts selected untracked folders to tracked series', async () => {
+    vi.mocked(convertFolders).mockResolvedValue({
+      results: [
+        { folder_name: 'Wytches (2014)', status: 'converted', series_id: 10 },
+        { folder_name: 'Saga (2012)', status: 'converted', series_id: 11 }
+      ]
+    });
+    render(
+      TidyPage,
+      pageData({
+        untracked: [
+          folder({ folder_name: 'Wytches (2014)' }),
+          folder({ folder_name: 'Saga (2012)' })
+        ]
+      })
+    );
+
+    await fireEvent.click(screen.getByLabelText('Select all untracked folders'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Convert 2 selected' }));
+
+    await waitFor(() =>
+      expect(convertFolders).toHaveBeenCalledWith(['Wytches (2014)', 'Saga (2012)'])
+    );
+    // Converted folders drop out of the untracked list.
+    await waitFor(() => {
+      expect(screen.queryByText('Wytches (2014)')).not.toBeInTheDocument();
+      expect(screen.queryByText('Saga (2012)')).not.toBeInTheDocument();
+    });
   });
 
   it('adds an untracked folder via the ComicVine modal', async () => {
