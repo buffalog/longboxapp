@@ -345,6 +345,14 @@ pub struct PhantomSeries {
     pub publisher: Option<String>,
     pub cover_url: Option<String>,
     pub last_matched_count: i64,
+    /// True when the series is empty *by intent* — it is on the pull
+    /// list or has a pull attempt, i.e. awaiting a first download
+    /// rather than having lost files. Auto-tidy never marks such a
+    /// series; `/library/tidy` renders it in its own subsection.
+    pub awaiting_first_download: bool,
+    /// Recovery deadline when the series has been marked for automatic
+    /// removal; `None` when unmarked.
+    pub auto_tidy_due_at: Option<PrimitiveDateTime>,
 }
 
 /// Every series with no owned, present file — the phantom set. The
@@ -358,7 +366,11 @@ where
         PhantomSeries,
         r#"SELECT s.id AS "id!: i64", s.title, s.sort_title,
                   s.start_year, s.publisher, s.cover_url,
-                  s.last_matched_count AS "last_matched_count!: i64"
+                  s.last_matched_count AS "last_matched_count!: i64",
+                  (EXISTS (SELECT 1 FROM pull_list pl WHERE pl.series_id = s.id)
+                   OR EXISTS (SELECT 1 FROM pull_attempts pa WHERE pa.series_id = s.id))
+                      AS "awaiting_first_download!: bool",
+                  s.auto_tidy_due_at AS "auto_tidy_due_at: _"
            FROM series s
            WHERE NOT EXISTS (
                SELECT 1 FROM files f
@@ -431,4 +443,115 @@ where
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Scan-end tick of every series' `consecutive_empty_scans` (A.9 Step
+/// 6b). A series with no owned, present file has its counter
+/// incremented; a series that owns at least one such file is reset to 0
+/// **and** has any `auto_tidy_due_at` mark cleared — the auto-recovery
+/// path for a folder that came back on disk. Run once per full scan,
+/// after the mark-missing pass and `refresh_last_matched_counts`.
+pub async fn tick_empty_scan_counters<'e, E>(executor: E) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    sqlx::query!(
+        r#"UPDATE series SET
+               consecutive_empty_scans = CASE WHEN EXISTS (
+                   SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
+                   WHERE i.series_id = series.id
+                     AND f.status = 'owned' AND f.is_present = 1
+               ) THEN 0 ELSE consecutive_empty_scans + 1 END,
+               auto_tidy_due_at = CASE WHEN EXISTS (
+                   SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
+                   WHERE i.series_id = series.id
+                     AND f.status = 'owned' AND f.is_present = 1
+               ) THEN NULL ELSE auto_tidy_due_at END"#
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Mark every series eligible for automatic removal: empty for at least
+/// `threshold` consecutive scans, not already marked, and not awaiting a
+/// first download (no `pull_list` entry, no `pull_attempts` row — the
+/// pull list is an explicit "I want this" signal auto-tidy must never
+/// override). `due_at` is the recovery deadline written to the
+/// newly-marked rows. Returns the count of series newly marked. The
+/// caller gates this call on the `auto_tidy_enabled` setting.
+pub async fn mark_for_auto_tidy<'e, E>(
+    executor: E,
+    threshold: i64,
+    due_at: PrimitiveDateTime,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series SET auto_tidy_due_at = ?
+           WHERE auto_tidy_due_at IS NULL
+             AND consecutive_empty_scans >= ?
+             AND NOT EXISTS (
+                 SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
+                 WHERE i.series_id = series.id
+                   AND f.status = 'owned' AND f.is_present = 1
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM pull_list pl WHERE pl.series_id = series.id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM pull_attempts pa WHERE pa.series_id = series.id
+             )"#,
+        due_at,
+        threshold
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Hard-delete every series whose auto-tidy recovery window has elapsed
+/// (`auto_tidy_due_at <= now`). Dependent `issues`/`files` rows cascade.
+/// Safe to run unguarded: [`tick_empty_scan_counters`] runs first in the
+/// scan and clears `auto_tidy_due_at` on any series that regained files,
+/// so every still-marked series is confirmed empty as of this scan.
+/// Returns the count of series purged.
+pub async fn purge_due_auto_tidy<'e, E>(executor: E, now: PrimitiveDateTime) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM series
+           WHERE auto_tidy_due_at IS NOT NULL AND auto_tidy_due_at <= ?"#,
+        now
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// "Keep" a phantom: clear every auto-tidy signal in one shot —
+/// `last_matched_count` to 0 (demotes a transition phantom to
+/// steady-state), `consecutive_empty_scans` to 0, and `auto_tidy_due_at`
+/// to NULL (cancels a scheduled removal). The user has reviewed the
+/// series and decided it stays. `NotFound` for an unknown id.
+pub async fn keep_phantom_series<'e, E>(executor: E, series_id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET last_matched_count = 0,
+               consecutive_empty_scans = 0,
+               auto_tidy_due_at = NULL
+           WHERE id = ?"#,
+        series_id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
 }

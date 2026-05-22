@@ -19,6 +19,7 @@
     type PhantomSeries
   } from '$lib/api/reconcile';
   import { createSelection } from '$lib/createSelection.svelte';
+  import { formatDateTime } from '$lib/format';
   import { searchHintFromPath } from '$lib/match_hint';
   import { toast } from '$lib/stores/toast.svelte';
   import BulkActionBar from '$lib/components/BulkActionBar.svelte';
@@ -50,21 +51,33 @@
   let addSubmitting = $state(false);
   let addError = $state<string | null>(null);
 
-  // The /reconcile/phantoms API returns `with_transition` and
-  // `all_zero_owned` as OVERLAPPING lists — a transition phantom appears
-  // in both, which is correct for the API (`all_zero_owned` means
-  // literally "every zero-owned series"). The UI deliberately renders
-  // the two subsections as a DISJOINT partition instead: a transition
-  // phantom shows ONLY under "Recently lost files", never also under
-  // "Zero ownership". Deriving both subsets from the single `phantoms`
-  // list here — rather than tracking the API's two lists separately — is
-  // what makes that work, and it makes "Keep" a pure local mutation: set
-  // last_matched_count to 0 and the row reactively slides from one
-  // subsection to the other with no refetch. Do not "fix" this back into
-  // rendering the API's overlapping lists directly — the disjoint UI is
-  // intentional.
-  const transitionPhantoms = $derived(phantoms.filter((p) => p.last_matched_count > 0));
-  const steadyStatePhantoms = $derived(phantoms.filter((p) => p.last_matched_count === 0));
+  // The zero-owned phantom set is partitioned into four DISJOINT
+  // subsections — every phantom renders in exactly one. Precedence
+  // (highest first): a row scheduled for automatic removal outranks a
+  // transition row (lost files), which outranks an awaiting-first-
+  // download row (on the pull list, never downloaded), which outranks a
+  // plain empty series. Deriving all four from the single `phantoms`
+  // list — rather than the API's overlapping `with_transition` /
+  // `all_zero_owned` lists — keeps "Keep" a pure local mutation: clear
+  // a row's signals and it reactively slides between subsections with
+  // no refetch. Do not "fix" this into rendering the API's overlapping
+  // lists directly — the disjoint partition is intentional.
+  const scheduledForRemoval = $derived(phantoms.filter((p) => p.auto_tidy_due_at !== null));
+  const transitionPhantoms = $derived(
+    phantoms.filter((p) => p.auto_tidy_due_at === null && p.last_matched_count > 0)
+  );
+  const awaitingFirstDownload = $derived(
+    phantoms.filter(
+      (p) =>
+        p.auto_tidy_due_at === null && p.last_matched_count === 0 && p.awaiting_first_download
+    )
+  );
+  const steadyStatePhantoms = $derived(
+    phantoms.filter(
+      (p) =>
+        p.auto_tidy_due_at === null && p.last_matched_count === 0 && !p.awaiting_first_download
+    )
+  );
 
   // Id lists the BulkActionBar's select-all toggles against.
   const steadyIds = $derived(steadyStatePhantoms.map((p) => p.id));
@@ -90,12 +103,14 @@
   function handleKeep(seriesId: number): Promise<void> {
     return run(async () => {
       await keepPhantom(seriesId);
-      // Local last_matched_count -> 0; the $derived split moves the row
-      // from "Recently lost files" down to "Zero ownership".
+      // Clear both signals locally — last_matched_count -> 0 and
+      // auto_tidy_due_at -> null — mirroring what the endpoint does. The
+      // $derived partition slides the row out of "Recently lost files"
+      // or "Scheduled for automatic removal" into its resting bucket.
       phantoms = phantoms.map((p) =>
-        p.id === seriesId ? { ...p, last_matched_count: 0 } : p
+        p.id === seriesId ? { ...p, last_matched_count: 0, auto_tidy_due_at: null } : p
       );
-      toast.success('Kept — moved to Zero ownership.');
+      toast.success('Kept this series.');
     });
   }
 
@@ -254,7 +269,50 @@
         No phantom series — every tracked series has files on disk.
       </p>
     {:else}
-      <!-- Subsection 1: transition phantoms — the urgent call to action. -->
+      <!-- Subsection 1: scheduled for automatic removal — a countdown. -->
+      {#if scheduledForRemoval.length > 0}
+        <div class="mb-4 rounded-lg border border-red-200 bg-red-50 p-4">
+          <h3 class="text-sm font-semibold text-red-900">Scheduled for automatic removal</h3>
+          <p class="mb-3 text-xs text-red-800">
+            These series have had no files on disk for several scans and will be removed from
+            the catalog automatically. Keep one to cancel its removal, or remove it now.
+          </p>
+          <ul class="space-y-2">
+            {#each scheduledForRemoval as p (p.id)}
+              <li class="flex items-center gap-3 rounded-md border border-red-200 bg-white p-3">
+                {@render coverThumb(p.cover_url)}
+                <div class="min-w-0 flex-1">
+                  <div class="truncate font-medium" title={p.title}>
+                    {p.title}{#if p.start_year}
+                      <span class="text-slate-500">({p.start_year})</span>{/if}
+                  </div>
+                  <div class="text-xs text-red-700">
+                    Will be removed on {formatDateTime(p.auto_tidy_due_at)}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => handleKeep(p.id)}
+                  disabled={busy}
+                >
+                  Keep
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onclick={() => handleRemovePhantom(p.id)}
+                  disabled={busy}
+                >
+                  Remove now
+                </Button>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+
+      <!-- Subsection 2: transition phantoms — the urgent call to action. -->
       {#if transitionPhantoms.length > 0}
         <div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
           <h3 class="text-sm font-semibold text-amber-900">Recently lost files</h3>
@@ -302,21 +360,16 @@
         </div>
       {/if}
 
-      <!-- Subsection 2: steady-state zero-ownership backlog. -->
-      <div>
-        <h3 class="mb-2 text-sm font-semibold text-slate-700">Zero ownership</h3>
-        {#if steadyStatePhantoms.length === 0}
-          <p class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
-            Nothing here{#if transitionPhantoms.length > 0}
-              — every phantom is in "Recently lost files" above{/if}.
-          </p>
-        {:else}
+      <!-- Subsection 3: steady-state empty-series backlog. -->
+      {#if steadyStatePhantoms.length > 0}
+        <div class="mb-4">
+          <h3 class="mb-2 text-sm font-semibold text-slate-700">Empty series</h3>
           <BulkActionBar
             count={phantomSel.size}
             allSelected={phantomSel.allSelected(steadyIds)}
             someSelected={phantomSel.someSelected(steadyIds)}
             onToggleAll={() => phantomSel.toggleAll(steadyIds)}
-            selectAllLabel="Select all zero-ownership series"
+            selectAllLabel="Select all empty series"
           >
             {#snippet action()}
               <Button
@@ -362,8 +415,45 @@
               </li>
             {/each}
           </ul>
-        {/if}
-      </div>
+        </div>
+      {/if}
+
+      <!-- Subsection 4: awaiting first download — informational, no action needed. -->
+      {#if awaitingFirstDownload.length > 0}
+        <div>
+          <h3 class="mb-1 text-sm font-semibold text-slate-700">Awaiting first download</h3>
+          <p class="mb-2 text-xs text-slate-500">
+            On the pull list but not yet downloaded — these aren't a problem; LongBox fills
+            them in as issues are grabbed.
+          </p>
+          <ul class="space-y-2">
+            {#each awaitingFirstDownload as p (p.id)}
+              <li
+                class="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3"
+              >
+                {@render coverThumb(p.cover_url)}
+                <div class="min-w-0 flex-1">
+                  <div class="truncate font-medium" title={p.title}>
+                    {p.title}{#if p.start_year}
+                      <span class="text-slate-500">({p.start_year})</span>{/if}
+                  </div>
+                  {#if p.publisher}
+                    <div class="truncate text-xs text-slate-500">{p.publisher}</div>
+                  {/if}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => handleRemovePhantom(p.id)}
+                  disabled={busy}
+                >
+                  Remove
+                </Button>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
     {/if}
   </section>
 

@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!: i64\", s.title, s.sort_title,\n                  s.start_year, s.publisher, s.cover_url,\n                  s.last_matched_count AS \"last_matched_count!: i64\",\n                  (EXISTS (SELECT 1 FROM pull_list pl WHERE pl.series_id = s.id)\n                   OR EXISTS (SELECT 1 FROM pull_attempts pa WHERE pa.series_id = s.id))\n                      AS \"awaiting_first_download!: bool\",\n                  s.auto_tidy_due_at AS \"auto_tidy_due_at: _\"\n           FROM series s\n           WHERE NOT EXISTS (\n               SELECT 1 FROM files f\n               JOIN issues i ON f.issue_id = i.id\n               WHERE i.series_id = s.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n           )\n           ORDER BY s.sort_title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "sort_title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_matched_count!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "awaiting_first_download!: bool",
+        "ordinal": 7,
+        "type_info": "Null"
+      },
+      {
+        "name": "auto_tidy_due_at: _",
+        "ordinal": 8,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      null,
+      true
+    ]
+  },
+  "hash": "08198f310cebaee3b3c66a268f0e790e5a420a4b7d1f2bc0a74e72a3f2558944"
+}

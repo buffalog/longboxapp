@@ -9,7 +9,7 @@ use longbox_core::{
 };
 use longbox_db::{
     discovered_folders_repo, file_repo, find_candidates, issue_repo, library_root_repo,
-    parsing_pattern_repo, row_to_issue, row_to_series, scan_run_repo, series_repo,
+    parsing_pattern_repo, row_to_issue, row_to_series, scan_run_repo, series_repo, settings_repo,
     DiscoveredFolder, FileUpdate, NewFile, NewScanRun, Pool, ScanCompletion, ScanRunKind,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
@@ -32,6 +32,16 @@ impl Default for ScannerConfig {
         }
     }
 }
+
+/// Consecutive empty scans before a series is marked for automatic
+/// removal (A.9 Step 6b). N=3 absorbs a transient mount blip — one bad
+/// scan — without dragging the mark out indefinitely.
+const AUTO_TIDY_THRESHOLD: i64 = 3;
+
+/// Days a marked series waits in its recovery window before the
+/// scan-end purge hard-deletes it. A wall-clock guarantee, independent
+/// of scan cadence.
+const AUTO_TIDY_RECOVERY_DAYS: i64 = 14;
 
 pub struct Scanner {
     db: Pool,
@@ -123,10 +133,33 @@ impl Scanner {
         // series' matched count (the phantom-transition signal), then
         // detect top-level folders that resolved to no tracked series.
         let series_refreshed = series_repo::refresh_last_matched_counts(&self.db).await?;
+
+        // Auto-tidy (A.9 Step 6b): tick every series' empty-scan
+        // counter, mark series past the debounce threshold for removal,
+        // then purge any whose recovery window has elapsed. The tick
+        // runs first so a series that regained files this scan has its
+        // mark cleared before the purge looks at it.
+        series_repo::tick_empty_scan_counters(&self.db).await?;
+        let auto_tidy_enabled =
+            settings_repo::get_or_default(&self.db, settings_repo::KEY_AUTO_TIDY_ENABLED, true)
+                .await?;
+        let series_marked = if auto_tidy_enabled {
+            let due_at = add_days(utc_now(), AUTO_TIDY_RECOVERY_DAYS);
+            series_repo::mark_for_auto_tidy(&self.db, AUTO_TIDY_THRESHOLD, due_at).await?
+        } else {
+            0
+        };
+        let series_purged = series_repo::purge_due_auto_tidy(&self.db, utc_now()).await?;
+        report.series_auto_marked = u32::try_from(series_marked).unwrap_or(u32::MAX);
+        report.series_auto_purged = u32::try_from(series_purged).unwrap_or(u32::MAX);
+
         let folders_discovered = detect_discovered_folders(&self.db, library_root_id).await?;
         info!(
             target: "longbox_scanner",
             series_refreshed,
+            auto_tidy_enabled,
+            series_marked,
+            series_purged,
             folders_discovered,
             "library_tidy.reconcile_complete"
         );
@@ -663,6 +696,13 @@ fn rebuild_discovered(
 fn utc_now() -> PrimitiveDateTime {
     let n = OffsetDateTime::now_utc();
     PrimitiveDateTime::new(n.date(), n.time())
+}
+
+/// `ts` advanced by whole days. Saturates at the representable range
+/// rather than panicking — a recovery deadline far in the future is
+/// harmless.
+fn add_days(ts: PrimitiveDateTime, days: i64) -> PrimitiveDateTime {
+    ts.saturating_add(time::Duration::days(days))
 }
 
 fn duration_ms(start: PrimitiveDateTime, end: PrimitiveDateTime) -> u64 {

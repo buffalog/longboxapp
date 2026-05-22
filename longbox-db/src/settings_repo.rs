@@ -10,6 +10,11 @@ pub const KEY_MATCH_CONFIDENCE_THRESHOLD: &str = "match_confidence_threshold";
 /// `settings.key` value: filesystem path of the library root.
 pub const KEY_LIBRARY_ROOT_PATH: &str = "library_root_path";
 
+/// `settings.key` value: auto-tidy master switch (`'true'` / `'false'`).
+/// When off, the scanner still ticks `series.consecutive_empty_scans`
+/// but never marks a series for automatic removal.
+pub const KEY_AUTO_TIDY_ENABLED: &str = "auto_tidy_enabled";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,
