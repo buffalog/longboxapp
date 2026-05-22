@@ -6,10 +6,13 @@
   import { ApiError } from '$lib/api/client';
   import {
     addCalendarVolumeToPullList,
+    bulkAddCalendarVolumesToPullList,
     getReleaseCalendar,
     type CalendarRow
   } from '$lib/api/releases';
+  import { createSelection } from '$lib/createSelection.svelte';
   import { toast } from '$lib/stores/toast.svelte';
+  import BulkActionBar from '$lib/components/BulkActionBar.svelte';
   import Button from '$lib/components/Button.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
@@ -23,7 +26,12 @@
   let loading = $state(false);
   let refreshing = $state(false);
   let busyVolume = $state<number | null>(null);
+  let bulkBusy = $state(false);
   let pullFilter = $state<'all' | 'on' | 'off'>('all');
+
+  // Bulk selection keyed by cv_volume_id — the pull-list unit. A volume
+  // shipping several issues this week is one selection across its rows.
+  const sel = createSelection<number>();
 
   const pullFilters: Array<{ value: 'all' | 'on' | 'off'; label: string }> = [
     { value: 'all', label: 'All' },
@@ -44,6 +52,12 @@
           a.volume_name.localeCompare(b.volume_name)
       )
   );
+
+  // The distinct volumes the bulk action can act on — visible rows not
+  // already on the pull list. Drives select-all and the BulkActionBar.
+  const selectableVolumeIds = $derived([
+    ...new Set(visibleRows.filter((r) => !r.on_pull_list).map((r) => r.cv_volume_id))
+  ]);
 
   function pad(n: number): string {
     return String(n).padStart(2, '0');
@@ -101,7 +115,46 @@
     }
   }
 
+  async function bulkAdd(): Promise<void> {
+    const ids = [...sel.selected];
+    if (ids.length === 0) return;
+    bulkBusy = true;
+    error = null;
+    try {
+      const { results } = await bulkAddCalendarVolumesToPullList(ids);
+      const added = results.filter((r) => r.status === 'added').length;
+      const already = results.filter((r) => r.status === 'already_on_list').length;
+      const failed = results.filter((r) => r.status === 'failed').length;
+      // Flip every resolved volume's rows to on_pull_list (a volume can
+      // span several rows); series_id rides along where the API gave one.
+      const seriesByVolume = new Map(
+        results
+          .filter((r) => r.series_id != null)
+          .map((r) => [r.cv_volume_id, r.series_id as number])
+      );
+      rows = rows.map((r) =>
+        seriesByVolume.has(r.cv_volume_id)
+          ? { ...r, series_id: seriesByVolume.get(r.cv_volume_id) ?? r.series_id, on_pull_list: true }
+          : r
+      );
+      sel.clear();
+      const parts = [`${added} added`];
+      if (already > 0) parts.push(`${already} already on pull list`);
+      if (failed > 0) parts.push(`${failed} failed`);
+      const msg = `${parts.join(', ')}.`;
+      if (failed > 0) toast.warning(msg);
+      else toast.success(msg);
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
   const busy = $derived(loading || refreshing);
+  // Any in-flight mutation — gates the add controls so a single add, a
+  // bulk add, and a range reload can't race each other.
+  const anyBusy = $derived(busy || bulkBusy || busyVolume !== null);
 </script>
 
 <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
@@ -177,10 +230,33 @@
     No releases match this filter.
   </p>
 {:else}
+  {#if selectableVolumeIds.length > 0}
+    <BulkActionBar
+      count={sel.size}
+      allSelected={sel.allSelected(selectableVolumeIds)}
+      someSelected={sel.someSelected(selectableVolumeIds)}
+      onToggleAll={() => sel.toggleAll(selectableVolumeIds)}
+      selectAllLabel="Select all addable volumes"
+    >
+      {#snippet action()}
+        <Button
+          size="sm"
+          onclick={bulkAdd}
+          loading={bulkBusy}
+          disabled={anyBusy || sel.size === 0}
+        >
+          {sel.size > 0
+            ? `Add ${sel.size} selected to pull list`
+            : 'Add selected to pull list'}
+        </Button>
+      {/snippet}
+    </BulkActionBar>
+  {/if}
   <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
     <table class="w-full text-sm">
       <thead class="border-b border-slate-200 bg-slate-50 text-left text-xs text-slate-500">
         <tr>
+          <th class="w-8 px-4 py-2"></th>
           <th class="px-4 py-2 font-medium">On sale</th>
           <th class="px-4 py-2 font-medium">Cover</th>
           <th class="px-4 py-2 font-medium">Series</th>
@@ -191,6 +267,18 @@
       <tbody class="divide-y divide-slate-100">
         {#each visibleRows as row (row.cv_issue_id)}
           <tr>
+            <td class="px-4 py-2">
+              {#if !row.on_pull_list}
+                <input
+                  type="checkbox"
+                  class="rounded border-slate-300"
+                  checked={sel.has(row.cv_volume_id)}
+                  onchange={() => sel.toggle(row.cv_volume_id)}
+                  disabled={anyBusy}
+                  aria-label={`Select ${row.volume_name || 'Unknown series'}`}
+                />
+              {/if}
+            </td>
             <td class="whitespace-nowrap px-4 py-2 font-mono text-xs text-slate-600">
               {row.store_date}
             </td>
@@ -230,7 +318,7 @@
                     size="sm"
                     onclick={() => handleAddToPullList(row)}
                     loading={busyVolume === row.cv_volume_id}
-                    disabled={busy || busyVolume !== null}
+                    disabled={anyBusy}
                   >
                     Add to pull list
                   </Button>

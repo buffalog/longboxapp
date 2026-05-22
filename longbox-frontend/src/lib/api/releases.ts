@@ -40,6 +40,25 @@ export function addCalendarVolumeToPullList(
   });
 }
 
+/** Per-volume outcome of a bulk add-to-pull-list. */
+export interface BulkAddResult {
+  cv_volume_id: number;
+  status: 'added' | 'already_on_list' | 'failed';
+  series_id?: number;
+  error?: string;
+}
+
+/** Bulk "add to pull list" — non-transactional; one result per volume,
+ *  each with a 3-way status the caller tallies into a single toast. */
+export function bulkAddCalendarVolumesToPullList(
+  cvVolumeIds: number[]
+): Promise<{ results: BulkAddResult[] }> {
+  return apiFetch('/releases/calendar/pull/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ cv_volume_ids: cvVolumeIds })
+  });
+}
+
 /** One "release of note" — a volume on sale this ship-week whose name
  *  matches a series the user owns and that isn't on the pull list. */
 export interface ReleaseOfNote {

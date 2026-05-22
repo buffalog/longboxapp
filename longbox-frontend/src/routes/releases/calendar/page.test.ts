@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addCalendarVolumeToPullList,
+  bulkAddCalendarVolumesToPullList,
   getReleaseCalendar,
   type CalendarRow
 } from '$lib/api/releases';
@@ -13,7 +14,8 @@ import CalendarPage from './+page.svelte';
 vi.mock('$lib/api/releases', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/releases')>()),
   getReleaseCalendar: vi.fn(),
-  addCalendarVolumeToPullList: vi.fn()
+  addCalendarVolumeToPullList: vi.fn(),
+  bulkAddCalendarVolumesToPullList: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -77,6 +79,30 @@ describe('release calendar page', () => {
       expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
     );
     expect(screen.queryByRole('button', { name: 'Add to pull list' })).not.toBeInTheDocument();
+  });
+
+  it('bulk-adds selected volumes and flips their rows', async () => {
+    vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+      results: [{ cv_volume_id: 100, status: 'added', series_id: 7 }]
+    });
+    render(
+      CalendarPage,
+      pageData([calRow({ cv_volume_id: 100, volume_name: 'Saga', on_pull_list: false })])
+    );
+
+    await fireEvent.click(
+      screen.getByRole('checkbox', { name: 'Select all addable volumes' })
+    );
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+    );
+
+    await waitFor(() =>
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([100])
+    );
+    await waitFor(() =>
+      expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
+    );
   });
 
   it('filters to on-pull-list rows', async () => {
