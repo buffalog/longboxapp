@@ -65,10 +65,13 @@ pub fn parse(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilena
 /// Default seed patterns. The DB migration in `longbox-db` will INSERT
 /// matching rows; this helper keeps the patterns available for in-process
 /// testing without depending on the DB layer.
+///
+/// Priority order — lower runs first. Patterns are listed below in
+/// migration-insertion order (= id order): the original four (ids 1–4,
+/// priorities 5/10/20/30), then the three added by the A.9 parser
+/// hot-fix (ids 5–7, priorities 11/12/15). Keep this list in lockstep
+/// with `longbox-db/migrations/*_parser_patterns.sql`.
 pub fn default_patterns() -> Vec<ParsingPattern> {
-    // Priority order matches the longbox-db migration seed: the volume-aware
-    // pattern runs FIRST (priority 5) so it can claim filenames with volume
-    // markers before the looser patterns absorb them.
     vec![
         ParsingPattern {
             id: 1,
@@ -96,6 +99,44 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             name: "Series_NNN or Series NNN".into(),
             pattern: r"^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7)$".into(),
             priority: 30,
+            enabled: true,
+        },
+        // A.9 parser hot-fix — three shapes the original four miss.
+        // Each carries a permissive `.*?\.<ext>$` tail so trailing
+        // scanlator markers like `(Digital) (Mephisto-Empire)` don't
+        // block the match.
+        ParsingPattern {
+            id: 5,
+            name: "Series N (Xf Y) (YYYY)".into(),
+            // Part-of-N marker between number and year (20th Century
+            // Men 01 (0f 06) (2022).cbr). Conservative literal `Xf Y`
+            // — broader paren-tolerance is a separate fix.
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(\d+f\s*\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 11,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 6,
+            name: "Series N - Subtitle (YYYY)".into(),
+            // Subtitle between number and year (Aama 01 - The Smell
+            // of Warm Dust (2013) (Digital).cbr). New pattern rather
+            // than rewriting id=2 so id=2's existing tests stay
+            // undisturbed.
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+-\s+(?P<title>.+?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 12,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 7,
+            name: "Series (YYYY) NNN".into(),
+            // Year-in-parens BEFORE the number — the user's standard
+            // library convention (Wolverine (2024) 001.cbz). The
+            // load-bearing fix; covers ~75% of pre-hot-fix unmatched
+            // files. Without it, the catch-all (id=4, priority 30)
+            // absorbs these but bakes the year into `series_title`,
+            // which poisons the scanner's title-similarity match.
+            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 15,
             enabled: true,
         },
     ]
@@ -294,5 +335,119 @@ mod tests {
         assert_eq!(p.number, "1");
         assert_eq!(p.year, Some(2003));
         assert_eq!(p.title.as_deref(), Some("Days Gone Bye"));
+    }
+
+    // ---- A.9 parser hot-fix: three shapes the original four miss ----
+
+    #[test]
+    fn matches_series_year_first_then_number_id_7() {
+        // Pattern id=7 (priority 15) — the load-bearing F4c fix. The
+        // user's standard library convention: year-in-parens BEFORE
+        // number. Without this pattern, the catch-all id=4 absorbed
+        // these and baked the year into `series_title` (e.g.
+        // "Wolverine (2024)"), which poisoned the scanner's
+        // title-similarity match against CV's clean sort_title.
+        let p = parse("Wolverine (2024) 001.cbz", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Wolverine");
+        assert_eq!(p.number, "001");
+        assert_eq!(p.year, Some(2024));
+        assert_eq!(p.pattern_id, 7);
+
+        let p = parse("The Walking Dead Deluxe (2020) 152.cbr", &patterns()).unwrap();
+        assert_eq!(p.series_title, "The Walking Dead Deluxe");
+        assert_eq!(p.number, "152");
+        assert_eq!(p.year, Some(2020));
+        assert_eq!(p.pattern_id, 7);
+
+        // Trailing scanlator markers tolerated.
+        let p = parse(
+            "Daredevil (2023) 005 (Digital) (Zone-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Daredevil");
+        assert_eq!(p.number, "005");
+        assert_eq!(p.year, Some(2023));
+        assert_eq!(p.pattern_id, 7);
+    }
+
+    #[test]
+    fn matches_series_number_subtitle_year_id_6() {
+        // Pattern id=6 (priority 12) — F4b. Subtitle between number
+        // and year. New pattern rather than rewriting id=2 so the
+        // existing id=2 tests stay undisturbed.
+        let p = parse(
+            "Aama 01 - The Smell of Warm Dust (2013) (Digital) (Dipole-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Aama");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2013));
+        assert_eq!(p.title.as_deref(), Some("The Smell of Warm Dust"));
+        assert_eq!(p.pattern_id, 6);
+
+        // With `#` prefix on number.
+        let p = parse("Series #1 - A Title Here (2020).cbz", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Series");
+        assert_eq!(p.number, "1");
+        assert_eq!(p.title.as_deref(), Some("A Title Here"));
+        assert_eq!(p.year, Some(2020));
+        assert_eq!(p.pattern_id, 6);
+    }
+
+    #[test]
+    fn matches_series_number_part_marker_year_id_5() {
+        // Pattern id=5 (priority 11) — F4a. Part-of-N marker
+        // between number and year. Conservative literal `Xf Y`;
+        // broader paren-tolerance is a separate fix.
+        let p = parse("20th Century Men 01 (0f 06) (2022).cbr", &patterns()).unwrap();
+        assert_eq!(p.series_title, "20th Century Men");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2022));
+        assert_eq!(p.pattern_id, 5);
+
+        // Trailing scanlator markers tolerated.
+        let p = parse(
+            "20th Century Men 02 (0f 06) (2022) (Digital) (Mephisto-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "20th Century Men");
+        assert_eq!(p.number, "02");
+        assert_eq!(p.year, Some(2022));
+        assert_eq!(p.pattern_id, 5);
+    }
+
+    #[test]
+    fn new_patterns_do_not_steal_claims_from_the_originals() {
+        // Regression bar: the three new patterns must not steal
+        // claims that the original four (ids 1–4) already handle.
+        // Every existing-test case stays on its original pattern_id.
+        // A future pattern-list reorder that silently breaks claim
+        // ordering surfaces here.
+
+        // id=1 (priority 5) — Vol-form runs before every new pattern.
+        let p = parse("Iron Man Vol 1 #100.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 1, "Vol-form still claimed by id=1");
+
+        // id=2 (priority 10) — number-then-year. id=7 needs year
+        // BEFORE number; id=6 needs ` - title `; neither triggers.
+        let p = parse("Saga #1 (2012).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 2, "number-then-year still claimed by id=2");
+
+        let p = parse("Saga #1 (2012) - The Beginning.cbz", &patterns()).unwrap();
+        assert_eq!(
+            p.pattern_id, 2,
+            "number-then-year with trailing title still claimed by id=2"
+        );
+
+        // id=4 (priority 30) — catch-all for no-year filenames.
+        // No new pattern claims a year-less filename.
+        let p = parse("Saga_1.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 4, "underscored no-year shape still claimed by id=4");
+
+        let p = parse("Saga 1.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 4, "spaced no-year shape still claimed by id=4");
     }
 }
