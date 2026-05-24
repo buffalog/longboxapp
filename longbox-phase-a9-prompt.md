@@ -9,12 +9,13 @@ questions, each with a recommendation) → approval → a single
 implementation commit → container rebuild + redeploy.
 
 **Status (2026-05-23):** Steps 4, 6a and 6b shipped; the 6a bulk-convert
-dedup hot-fix shipped (idempotency on `(sort_title, start_year)` plus
-the `discovered_folders` staleness fix). Steps 1–3, 5, 7 and 6c queued.
+dedup hot-fix shipped; the parser hot-fix (three new patterns covering
+`Series (YYYY) NNN`, `Series N - Subtitle (YYYY)`, and
+`Series N (Xf Y) (YYYY)`) shipped. Steps 1–3, 5, 7 and 6c queued.
 The A.8 closeout smoke (`longbox-phase-a8-closeout.md`, Step 13 of the
-A.8 brief) was staged after 6b, paused for the hot-fix, and resumes
-once the hot-fix's cleanup migration has settled the 8 pre-existing
-duplicate-series groups.
+A.8 brief) was staged, paused twice for hot-fixes (dedup, then
+parser), and resumes once the parser hot-fix's post-deploy scan
+populates owned counts on the CV-linked backlog.
 
 ---
 
@@ -202,6 +203,15 @@ being relearned per step.
   idempotency does the existing path provide, and does this one need
   its own equivalent on different keys?"
 
+- **Spot-check anomalies as samples.** When a small unexpected datum
+  surfaces (owned=0 on N=2 of an expected larger population), default
+  to expanding the sample before concluding. A 2-case anomaly is more
+  often a sample of a hidden population than an isolated outlier —
+  the 6a→6b cleanup→parser sequence is the canonical demonstration:
+  what looked like 2 visible Pattern A misses was actually a 4,182-file
+  parser gap, and only an expand-the-sample pass exposed the real
+  scale before another partial fix went out.
+
 ---
 
 ## Deferred items
@@ -229,14 +239,17 @@ rather than accreting in commit messages.
   needs a ComicVine-polling delta detector. Future emit point documented
   in code.
 
-- **Filename parser gaps.** The 6a hot-fix archaeology surfaced two
-  filename shapes the current four `parsing_patterns` rows don't cover:
-  `Series N (Xf Y) (YYYY).ext` (part-of-N marker between number and
-  year — e.g. `20th Century Men 01 (0f 06) (2022).cbr`) and
-  `Series N - Subtitle (YYYY) (Digital) (...).ext` (subtitled — e.g.
-  `Aama 01 - The Smell of Warm Dust (2013) (Digital) (Dipole-Empire).cbr`).
-  Files matching neither stay unmatched after a scan AND have no parsed
-  number for bulk-convert to synthesize an issue from. Adding patterns
-  risks regressions on other filenames, so this gets its own step with
-  an isolated test surface for the new patterns (the precedent: every
-  pattern carries a positive and a negative test).
+- **Catch-all parser match-but-poison signal.** The parser hot-fix
+  showed that pattern 4 (the catch-all `Series_NNN or Series NNN`)
+  silently absorbed `Series (YYYY) NNN.ext` filenames with a
+  corrupted `series_title` that baked the year in. Downstream
+  consumers couldn't tell the difference between "parsed cleanly"
+  and "parsed but the title is structurally wrong." Two candidate
+  design moves: grow `ParsedFilename` a confidence signal (e.g. a
+  `low_confidence: bool` set when the catch-all claims a filename
+  whose series_title contains a parenthesized year-like substring,
+  letting the scanner downgrade or skip), OR teach the catch-all to
+  refuse-to-match when its candidate `series_title` ends in
+  `(YYYY)`. Out of scope for the parser hot-fix; warrants its own
+  design surface because the choice between "annotate" and "refuse"
+  affects every future catch-all-style pattern.

@@ -5,10 +5,12 @@ use longbox_db::{parsing_pattern_repo, DbError, NewParsingPattern};
 
 #[tokio::test]
 async fn list_enabled_returns_seeds_in_priority_order() {
+    // The initial four (5/10/20/30) plus the three the A.9 parser
+    // hot-fix added (11/12/15).
     let pool = fresh_pool().await;
     let rows = parsing_pattern_repo::list_enabled(&pool).await.unwrap();
     let priorities: Vec<i64> = rows.iter().map(|r| r.priority).collect();
-    assert_eq!(priorities, vec![5, 10, 20, 30]);
+    assert_eq!(priorities, vec![5, 10, 11, 12, 15, 20, 30]);
     assert!(rows.iter().all(|r| r.enabled));
 }
 
@@ -21,7 +23,7 @@ async fn set_enabled_false_removes_from_enabled_list() {
         .unwrap();
     let rows = parsing_pattern_repo::list_enabled(&pool).await.unwrap();
     let priorities: Vec<i64> = rows.iter().map(|r| r.priority).collect();
-    assert_eq!(priorities, vec![10, 20, 30]);
+    assert_eq!(priorities, vec![10, 11, 12, 15, 20, 30]);
 }
 
 #[tokio::test]
@@ -99,5 +101,5 @@ async fn list_all_includes_disabled() {
         .await
         .unwrap();
     let all = parsing_pattern_repo::list_all(&pool).await.unwrap();
-    assert_eq!(all.len(), 4);
+    assert_eq!(all.len(), 7);
 }
