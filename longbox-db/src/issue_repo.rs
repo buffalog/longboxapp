@@ -222,6 +222,41 @@ where
     Ok(rows)
 }
 
+/// For `series_id`, ensure each issue number in `numbers` exists as a
+/// number-only issue (no CV/Metron id), and return the resolved
+/// `(id, number)` pairs for *every* number — newly synthesized rows
+/// plus any pre-existing rows (CV-canonical or otherwise) that already
+/// occupied those numbers. Pre-existing rows are returned untouched:
+/// the `DO UPDATE SET number = excluded.number` is a no-op assignment
+/// chosen solely to make `RETURNING` fire on conflict; their CV ids,
+/// titles, dates, and summaries are preserved.
+///
+/// Used by the bulk-convert link mode (A.9 hot-fix): when convert
+/// links a folder to an existing CV-tracked series, parsed numbers
+/// missing from CV are filled in as shallow rows so every file can
+/// attach, but CV-canonical issues for matching numbers stay
+/// authoritative.
+pub async fn upsert_number_only_returning<'e, E>(
+    executor: E,
+    series_id: i64,
+    numbers: &[String],
+) -> Result<Vec<(i64, String)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    if numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("INSERT INTO issues (series_id, number) ");
+    qb.push_values(numbers.iter(), |mut b, n| {
+        b.push_bind(series_id).push_bind(n);
+    });
+    qb.push(" ON CONFLICT(series_id, number) DO UPDATE SET number = excluded.number");
+    qb.push(" RETURNING id, number");
+    let rows: Vec<(i64, String)> = qb.build_query_as().fetch_all(executor).await?;
+    Ok(rows)
+}
+
 /// Insert-or-update by `cv_issue_id`. Used by `POST /api/series/:id/refresh`
 /// when re-fetching from ComicVine: existing rows have their mutable fields
 /// refreshed, new rows are inserted. `cv_issue_id` MUST be `Some(...)` — the

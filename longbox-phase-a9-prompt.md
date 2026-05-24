@@ -8,10 +8,13 @@ precedent it is amended as each step resolves.
 questions, each with a recommendation) → approval → a single
 implementation commit → container rebuild + redeploy.
 
-**Status (2026-05-22):** Steps 4 and 6a shipped. Steps 1–3, 5, 7 and
-6b/6c queued. The A.8 closeout smoke (`longbox-phase-a8-closeout.md`,
-Step 13 of the A.8 brief) runs after Step 6b — once Library Tidy
-reflects accurate disk truth.
+**Status (2026-05-23):** Steps 4, 6a and 6b shipped; the 6a bulk-convert
+dedup hot-fix shipped (idempotency on `(sort_title, start_year)` plus
+the `discovered_folders` staleness fix). Steps 1–3, 5, 7 and 6c queued.
+The A.8 closeout smoke (`longbox-phase-a8-closeout.md`, Step 13 of the
+A.8 brief) was staged after 6b, paused for the hot-fix, and resumes
+once the hot-fix's cleanup migration has settled the 8 pre-existing
+duplicate-series groups.
 
 ---
 
@@ -189,6 +192,16 @@ being relearned per step.
   exists`. `colima restart` re-syncs virtiofs and recovers it. Keep the
   host mount stable through A.9 work. (From the A.8 closeout doc.)
 
+- **Idempotency on new insertion paths.** When a repo has an existing
+  idempotency on key K (e.g. `cv_id` via `add_or_get_from_cv`) and a
+  new code path inserts via a different shape, evaluate whether the
+  new path needs its own idempotency on a different key. The 6a
+  bulk-convert hot-fix surfaced this: the shallow path needed
+  `(sort_title, start_year)` idempotency the cv_id path didn't
+  provide. Forward question for every new insertion path — "what
+  idempotency does the existing path provide, and does this one need
+  its own equivalent on different keys?"
+
 ---
 
 ## Deferred items
@@ -215,3 +228,15 @@ rather than accreting in commit messages.
 - **`new_solicitations` webhook event.** Deferred from A.8 Step 10 — it
   needs a ComicVine-polling delta detector. Future emit point documented
   in code.
+
+- **Filename parser gaps.** The 6a hot-fix archaeology surfaced two
+  filename shapes the current four `parsing_patterns` rows don't cover:
+  `Series N (Xf Y) (YYYY).ext` (part-of-N marker between number and
+  year — e.g. `20th Century Men 01 (0f 06) (2022).cbr`) and
+  `Series N - Subtitle (YYYY) (Digital) (...).ext` (subtitled — e.g.
+  `Aama 01 - The Smell of Warm Dust (2013) (Digital) (Dipole-Empire).cbr`).
+  Files matching neither stay unmatched after a scan AND have no parsed
+  number for bulk-convert to synthesize an issue from. Adding patterns
+  risks regressions on other filenames, so this gets its own step with
+  an isolated test surface for the new patterns (the precedent: every
+  pattern carries a positive and a negative test).

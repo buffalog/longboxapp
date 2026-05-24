@@ -461,3 +461,203 @@ async fn keep_phantom_series_unknown_is_not_found() {
         .unwrap_err();
     assert!(matches!(err, DbError::NotFound));
 }
+
+// -------- A.9 hot-fix: bulk-convert dedup --------
+
+#[tokio::test]
+async fn find_for_dedup_matches_on_exact_sort_title_and_year() {
+    let pool = fresh_pool().await;
+    let saga = insert_series(&pool, "Saga").await;
+    insert_series(&pool, "Other").await;
+
+    let hit = series_repo::find_for_dedup(&pool, "saga", Some(2010))
+        .await
+        .unwrap();
+    assert_eq!(hit.map(|r| r.id), Some(saga));
+
+    // A different year is a different series.
+    let miss = series_repo::find_for_dedup(&pool, "saga", Some(2011))
+        .await
+        .unwrap();
+    assert!(miss.is_none());
+}
+
+#[tokio::test]
+async fn find_for_dedup_treats_null_start_year_as_a_value_not_a_wildcard() {
+    let pool = fresh_pool().await;
+    // Pattern C: a folder lacking `(YYYY)` parses to start_year=None.
+    // SQLite's `=` returns NULL on NULL operands; the repo uses `IS`
+    // so NULL-year rows dedup against each other but not against
+    // non-NULL queries.
+    let sid = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Last Barbarians".into(),
+            sort_title: "last barbarians".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let hit = series_repo::find_for_dedup(&pool, "last barbarians", None)
+        .await
+        .unwrap();
+    assert_eq!(hit.map(|r| r.id), Some(sid));
+
+    // A non-NULL query does not collapse with the NULL-year row.
+    let with_year = series_repo::find_for_dedup(&pool, "last barbarians", Some(2010))
+        .await
+        .unwrap();
+    assert!(with_year.is_none());
+}
+
+#[tokio::test]
+async fn find_for_dedup_prefers_a_cv_id_set_row_over_a_shallow_one() {
+    // In steady state the new idempotency prevents duplicates, but
+    // pre-cleanup dupes can briefly co-exist. The survivor rule:
+    // cv_id-set first, then earliest created_at.
+    let pool = fresh_pool().await;
+    insert_series(&pool, "Same Title").await; // cv_id NULL (shallow)
+    let with_cv = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(99),
+            metron_id: None,
+            title: "Same Title".into(),
+            sort_title: "same title".into(),
+            start_year: Some(2010),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let hit = series_repo::find_for_dedup(&pool, "same title", Some(2010))
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.map(|r| r.id),
+        Some(with_cv),
+        "the cv_id-set row outranks the shallow one"
+    );
+}
+
+#[tokio::test]
+async fn upsert_number_only_returning_creates_missing_and_preserves_existing() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Series").await;
+    // A pre-existing CV-canonical issue at number "2".
+    let existing = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: sid,
+            cv_issue_id: Some(123),
+            metron_issue_id: None,
+            number: "2".into(),
+            title: Some("CV Title".into()),
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Upsert "1", "2", "3" — "2" already exists, "1" and "3" are
+    // synthesized fresh.
+    let resolved = issue_repo::upsert_number_only_returning(
+        &pool,
+        sid,
+        &["1".into(), "2".into(), "3".into()],
+    )
+    .await
+    .unwrap();
+    let by_number: std::collections::HashMap<String, i64> = resolved.into_iter().collect::<Vec<_>>()
+        .into_iter()
+        .map(|(id, n)| (n, id))
+        .collect();
+    assert_eq!(by_number.len(), 3);
+    assert_eq!(
+        by_number["2"], existing.id,
+        "the pre-existing issue's id is returned unchanged"
+    );
+
+    // The pre-existing CV issue's CV id and title are preserved — the
+    // `DO UPDATE SET number = excluded.number` is a no-op assignment
+    // that exists only to make RETURNING fire on conflict.
+    let still = issue_repo::find_by_id(&pool, existing.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.cv_issue_id, Some(123));
+    assert_eq!(still.title.as_deref(), Some("CV Title"));
+}
+
+#[tokio::test]
+async fn upsert_number_only_returning_empty_input_is_a_no_op() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Empty").await;
+    let resolved = issue_repo::upsert_number_only_returning(&pool, sid, &[])
+        .await
+        .unwrap();
+    assert!(resolved.is_empty());
+}
+
+// -------- A.9 hot-fix item F6: discovered_folders auto-dismiss --------
+
+#[tokio::test]
+async fn discovered_folders_dismiss_not_in_clears_stale_open_rows() {
+    let pool = fresh_pool().await;
+    discovered_folders_repo::upsert(&pool, folder("A (2010)", 1))
+        .await
+        .unwrap();
+    discovered_folders_repo::upsert(&pool, folder("B (2011)", 1))
+        .await
+        .unwrap();
+    discovered_folders_repo::upsert(&pool, folder("C (2012)", 1))
+        .await
+        .unwrap();
+
+    // Only A and C are still untracked this scan; B is stale.
+    let keep: std::collections::HashSet<String> =
+        ["A (2010)".into(), "C (2012)".into()].into_iter().collect();
+    let dismissed = discovered_folders_repo::dismiss_not_in(&pool, &keep)
+        .await
+        .unwrap();
+    assert_eq!(dismissed, 1, "exactly the one stale folder is auto-dismissed");
+
+    let names: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(names.contains(&"A (2010)".to_string()));
+    assert!(names.contains(&"C (2012)".to_string()));
+    assert!(!names.contains(&"B (2011)".to_string()));
+}
+
+#[tokio::test]
+async fn discovered_folders_dismiss_not_in_empty_keep_dismisses_every_open_row() {
+    let pool = fresh_pool().await;
+    discovered_folders_repo::upsert(&pool, folder("Whatever", 1))
+        .await
+        .unwrap();
+
+    let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let dismissed = discovered_folders_repo::dismiss_not_in(&pool, &empty)
+        .await
+        .unwrap();
+    assert_eq!(dismissed, 1);
+    assert!(discovered_folders_repo::list(&pool).await.unwrap().is_empty());
+}

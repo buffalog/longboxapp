@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use longbox_core::{normalize_title, parse_filename, FileStatus, MatchMethod, ParsingPattern};
 use longbox_db::{
     discovered_folders_repo, file_repo, issue_repo, library_root_repo, parsing_pattern_repo,
-    series_repo, DiscoveredFolderRow, FileRow, FileUpdate, NewIssue, NewSeries, PhantomSeries,
+    series_repo, DiscoveredFolderRow, FileRow, FileUpdate, NewSeries, PhantomSeries,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, PrimitiveDateTime};
@@ -120,8 +120,11 @@ struct ConvertBody {
     folder_names: Vec<String>,
 }
 
-/// Per-folder outcome of a bulk shallow-convert. `status` is `converted`
-/// or `failed`; `series_id` rides along on success, `error` on failure.
+/// Per-folder outcome of a bulk shallow-convert. `status` is `added`
+/// (the folder became a new tracked series), `linked` (the folder
+/// matched an existing series on `(sort_title, start_year)` and its
+/// files were attached to that survivor — A.9 hot-fix), or `failed`.
+/// `series_id` rides along on success, `error` on failure.
 #[derive(Debug, Serialize)]
 struct ConvertResult {
     folder_name: String,
@@ -297,13 +300,17 @@ async fn bulk_delete_phantoms(
 }
 
 /// Bulk shallow-convert: turn discovered folders into tracked series
-/// without ComicVine. Each selected folder becomes a series (title +
-/// launch year parsed from the folder name) with number-only issue rows
-/// synthesized from its files' parsed filenames; those files attach as
-/// `owned`, so catalog counts are correct immediately. No CV metadata —
-/// covers, descriptions and the canonical issue list arrive later via
-/// the enrichment step. Per-folder atomic; the batch is
-/// non-transactional, so one bad folder never sinks the rest.
+/// without ComicVine. Each selected folder either becomes a NEW series
+/// (status `added`) or — when an existing series matches on
+/// `(sort_title, start_year)` (A.9 hot-fix idempotency) — has its
+/// files attached to that survivor (status `linked`). Either way,
+/// parsed-number issue rows are synthesized as needed and files
+/// attach as `owned`/`FilenameRegex`/confidence 1.0 — the only
+/// attachment shape stable against the next scan's cascade-revert
+/// when a CV-tracked rival exists. No CV metadata; covers and the
+/// canonical issue list arrive later via the enrichment step.
+/// Per-folder atomic; the batch is non-transactional, so one bad
+/// folder never sinks the rest.
 async fn convert(
     State(state): State<AppState>,
     Json(body): Json<ConvertBody>,
@@ -328,9 +335,9 @@ async fn convert(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let result = match convert_one_folder(&state, &folder_name, files, &patterns).await {
-            Ok(series_id) => ConvertResult {
+            Ok((series_id, status)) => ConvertResult {
                 folder_name,
-                status: "converted",
+                status,
                 series_id: Some(series_id),
                 error: None,
             },
@@ -346,34 +353,55 @@ async fn convert(
     Ok(Json(ConvertResponse { results }))
 }
 
-/// Convert one folder, atomically: insert the shallow series, synthesize
-/// a number-only issue per distinct parsed file number, attach the
-/// folder's files to those issues as `owned`, and dismiss the
-/// discovered-folder row. Any failure rolls the whole folder back.
+/// Convert one folder, atomically. Either matches an existing series
+/// on `(sort_title, start_year)` and links the folder to it (status
+/// `linked`), or inserts a new shallow series (status `added`). In
+/// both branches: for every parsed file number, ensure an issue row
+/// exists on the survivor (synthesized as number-only when missing;
+/// pre-existing CV-canonical issues preserved as-is), then attach
+/// each folder file to its resolved issue as
+/// `owned`/`FilenameRegex`/confidence 1.0, and dismiss the
+/// discovered-folders row. Any failure rolls the whole folder back.
+///
+/// The link mode is the A.9 hot-fix: the previous code inserted a
+/// shallow series unconditionally, creating duplicates whenever a
+/// CV-tracked (or earlier-shallow-converted) series with the same
+/// title and launch year already existed.
 async fn convert_one_folder(
     state: &AppState,
     folder_name: &str,
     files: &[FileRow],
     patterns: &[ParsingPattern],
-) -> Result<i64, ApiError> {
+) -> Result<(i64, &'static str), ApiError> {
     let (title, start_year) = parse_folder_name(folder_name);
+    let sort_title = normalize_title(&title);
 
     let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
 
-    let series = series_repo::insert(
-        &mut *tx,
-        NewSeries {
-            cv_id: None,
-            metron_id: None,
-            sort_title: normalize_title(&title),
-            title,
-            start_year,
-            publisher: None,
-            description: None,
-            cover_url: None,
-        },
-    )
-    .await?;
+    // Idempotency on (sort_title, start_year). NULL-safe match handles
+    // Pattern C (folders lacking `(YYYY)` whose start_year parses to
+    // None) — those rows must dedup against each other.
+    let (series_id, status) =
+        match series_repo::find_for_dedup(&mut *tx, &sort_title, start_year).await? {
+            Some(existing) => (existing.id, "linked"),
+            None => {
+                let inserted = series_repo::insert(
+                    &mut *tx,
+                    NewSeries {
+                        cv_id: None,
+                        metron_id: None,
+                        sort_title,
+                        title,
+                        start_year,
+                        publisher: None,
+                        description: None,
+                        cover_url: None,
+                    },
+                )
+                .await?;
+                (inserted.id, "added")
+            }
+        };
 
     // Parse an issue number out of each file's basename. A file whose
     // name doesn't parse is left untouched — it stays unmatched.
@@ -386,34 +414,21 @@ async fn convert_one_folder(
         })
         .collect();
 
-    // One number-only issue per distinct number.
+    // Upsert each distinct parsed number as an issue on the survivor.
+    // `upsert_number_only_returning` synthesizes only the numbers the
+    // survivor doesn't already have — pre-existing CV-canonical issues
+    // for matching numbers stay authoritative.
     let mut numbers: Vec<String> = parsed.iter().map(|(_, n)| n.clone()).collect();
     numbers.sort();
     numbers.dedup();
-    let new_issues: Vec<NewIssue> = numbers
-        .into_iter()
-        .map(|number| NewIssue {
-            series_id: series.id,
-            cv_issue_id: None,
-            metron_issue_id: None,
-            number,
-            title: None,
-            cover_date: None,
-            summary: None,
-            cover_url: None,
-        })
-        .collect();
-    let issue_by_number: HashMap<String, i64> = if new_issues.is_empty() {
-        HashMap::new()
-    } else {
-        issue_repo::bulk_insert(&mut *tx, new_issues)
+    let issue_by_number: HashMap<String, i64> =
+        issue_repo::upsert_number_only_returning(&mut *tx, series_id, &numbers)
             .await?
             .into_iter()
-            .map(|i| (i.number, i.id))
-            .collect()
-    };
+            .map(|(id, n)| (n, id))
+            .collect();
 
-    // Attach each parsed file to its issue as an owned file.
+    // Attach each parsed file to its resolved issue as an owned file.
     let now = utc_now();
     for f in files {
         let Some((_, number)) = parsed.iter().find(|(id, _)| *id == f.id) else {
@@ -442,7 +457,7 @@ async fn convert_one_folder(
     discovered_folders_repo::dismiss(&mut *tx, &[folder_name.to_owned()]).await?;
 
     tx.commit().await.map_err(longbox_db::DbError::from)?;
-    Ok(series.id)
+    Ok((series_id, status))
 }
 
 /// Split a discovered-folder name into (title, start_year). A trailing

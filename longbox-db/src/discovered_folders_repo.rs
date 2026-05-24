@@ -97,3 +97,42 @@ where
     let result = qb.build().execute(executor).await?;
     Ok(result.rows_affected())
 }
+
+/// Auto-dismiss every open `discovered_folders` row whose folder is
+/// NOT in `keep` — the scanner calls this at scan end to clear stale
+/// rows whose files have since been resolved or whose folder is no
+/// longer on disk (A.9 hot-fix, item F6). Without it, an
+/// once-untracked folder stays in /api/reconcile/untracked forever
+/// even after a later CV add resolves its files; that staleness is
+/// what fed bulk-convert dupe candidates pre-hot-fix.
+///
+/// An empty `keep` dismisses every open row — correct when the scan
+/// finds zero unresolved folders.
+///
+/// Scoped per-scan-root only by what the caller passed: with multiple
+/// library roots, scanning root A would dismiss folders from root B
+/// too (the table has no library_root_id). We accept that today —
+/// one-root deployment, consistent with `refresh_last_matched_counts`
+/// and `tick_empty_scan_counters`.
+pub async fn dismiss_not_in<'e, E>(
+    executor: E,
+    keep: &std::collections::HashSet<String>,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "UPDATE discovered_folders SET dismissed_at = CURRENT_TIMESTAMP \
+         WHERE dismissed_at IS NULL",
+    );
+    if !keep.is_empty() {
+        qb.push(" AND folder_name NOT IN (");
+        let mut separated = qb.separated(", ");
+        for name in keep {
+            separated.push_bind(name);
+        }
+        separated.push_unseparated(")");
+    }
+    let result = qb.build().execute(executor).await?;
+    Ok(result.rows_affected())
+}

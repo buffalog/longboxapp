@@ -119,10 +119,15 @@ export function keepPhantom(seriesId: number): Promise<{ kept: number }> {
   return apiFetch(`/reconcile/phantom/${seriesId}/keep`, { method: 'POST' });
 }
 
-/** Per-folder outcome of a bulk shallow-convert. */
+/** Per-folder outcome of a bulk shallow-convert.
+ *  - `added`  — the folder became a new tracked series.
+ *  - `linked` — the folder matched an existing series on
+ *               `(sort_title, start_year)` (A.9 hot-fix idempotency)
+ *               and its files were attached to that survivor.
+ *  - `failed` — the per-folder transaction rolled back. */
 export interface ConvertResult {
   folder_name: string;
-  status: 'converted' | 'failed';
+  status: 'added' | 'linked' | 'failed';
   series_id?: number;
   error?: string;
 }

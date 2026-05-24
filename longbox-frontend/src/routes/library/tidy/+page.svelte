@@ -170,20 +170,27 @@
     if (names.length === 0) return Promise.resolve();
     return run(async () => {
       const { results } = await convertFolders(names);
-      const converted = results.filter((r) => r.status === 'converted').length;
+      const added = results.filter((r) => r.status === 'added').length;
+      const linked = results.filter((r) => r.status === 'linked').length;
       const failed = results.filter((r) => r.status === 'failed').length;
-      // Drop every converted folder — it's a tracked series now.
+      // Drop every resolved folder — it's attached to a tracked series
+      // now, whether the series was new (`added`) or pre-existing
+      // (`linked`).
       const done = new Set(
-        results.filter((r) => r.status === 'converted').map((r) => r.folder_name)
+        results
+          .filter((r) => r.status === 'added' || r.status === 'linked')
+          .map((r) => r.folder_name)
       );
       untracked = untracked.filter((f) => !done.has(f.folder_name));
       folderSel.clear();
       if (failed > 0) {
-        toast.warning(`Converted ${converted}; ${failed} failed.`);
+        toast.warning(`${added} added, ${linked} linked, ${failed} failed.`);
+      } else if (added === 0 && linked > 0) {
+        toast.success(`Linked ${linked} folder${linked === 1 ? '' : 's'} to existing series.`);
+      } else if (linked === 0) {
+        toast.success(`Added ${added} folder${added === 1 ? '' : 's'} as tracked series.`);
       } else {
-        toast.success(
-          `Converted ${converted} folder${converted === 1 ? '' : 's'} to tracked series.`
-        );
+        toast.success(`${added} added, ${linked} linked to existing series.`);
       }
     });
   }

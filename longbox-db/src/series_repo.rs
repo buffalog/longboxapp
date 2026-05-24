@@ -61,6 +61,42 @@ where
     Ok(row)
 }
 
+/// Find an existing series matching `(sort_title, start_year)` for
+/// the bulk-convert dedup path (A.9 hot-fix). NULL-safe equality on
+/// `start_year` via SQLite's `IS` — Pattern C's NULL-year shallow
+/// rows must dedup against each other.
+///
+/// In steady state the new idempotency prevents duplicates, so at
+/// most one row matches. The `ORDER BY` is the fallback survivor
+/// rule for any stale pre-cleanup dupes: cv_id-set first, then
+/// earliest created_at. (The cleanup migration ranks by owned_count
+/// too; here it doesn't matter — by the time convert runs again the
+/// cleanup has already cut the group down to one.)
+pub async fn find_for_dedup<'e, E>(
+    executor: E,
+    sort_title: &str,
+    start_year: Option<i32>,
+) -> Result<Option<SeriesRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query_as!(
+        SeriesRow,
+        r#"SELECT id AS "id!: i64", cv_id, metron_id, title, sort_title,
+                  start_year, publisher, description, cover_url,
+                  created_at AS "created_at: _", updated_at AS "updated_at: _"
+           FROM series
+           WHERE sort_title = ? AND start_year IS ?
+           ORDER BY (cv_id IS NULL) ASC, created_at ASC
+           LIMIT 1"#,
+        sort_title,
+        start_year
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row)
+}
+
 pub async fn find_by_cv_id<'e, E>(executor: E, cv_id: i64) -> Result<Option<SeriesRow>>
 where
     E: SqliteExecutor<'e>,
