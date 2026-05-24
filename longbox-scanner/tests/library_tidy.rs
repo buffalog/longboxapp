@@ -275,3 +275,48 @@ async fn a_marked_series_is_recovered_when_its_folder_returns() {
         "a series whose folder returned is recovered, not a phantom"
     );
 }
+
+// -------- A.9 hot-fix item F6: discovered_folders staleness --------
+
+#[tokio::test]
+async fn a_discovered_folder_is_auto_dismissed_once_its_files_resolve() {
+    // Scan once with no series seeded → the Walking Dead folder shows
+    // as untracked. Add the matching series → next scan's cascade
+    // resolves its files; the `discovered_folders` row is auto-
+    // dismissed. Without F6 it would stay in /api/reconcile/untracked
+    // forever — the proximate cause of bulk-convert dupe candidates
+    // pre-hot-fix.
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    scanner.scan_full(library_root_id).await.unwrap();
+    let before: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(before.contains(&"Walking Dead (2003)".to_string()));
+
+    // Add the series so the fixture's files now resolve to it.
+    seed_walking_dead(&pool).await;
+    let report = scanner.scan_full(library_root_id).await.unwrap();
+    assert!(
+        report.folders_auto_dismissed >= 1,
+        "the scanner reports the auto-dismiss count"
+    );
+
+    let after: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(
+        !after.contains(&"Walking Dead (2003)".to_string()),
+        "the previously-untracked folder is auto-dismissed once its files resolve"
+    );
+}

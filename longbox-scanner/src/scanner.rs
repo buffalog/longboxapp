@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -153,7 +153,9 @@ impl Scanner {
         report.series_auto_marked = u32::try_from(series_marked).unwrap_or(u32::MAX);
         report.series_auto_purged = u32::try_from(series_purged).unwrap_or(u32::MAX);
 
-        let folders_discovered = detect_discovered_folders(&self.db, library_root_id).await?;
+        let (folders_discovered, folders_auto_dismissed) =
+            detect_discovered_folders(&self.db, library_root_id).await?;
+        report.folders_auto_dismissed = folders_auto_dismissed;
         info!(
             target: "longbox_scanner",
             series_refreshed,
@@ -161,6 +163,7 @@ impl Scanner {
             series_marked,
             series_purged,
             folders_discovered,
+            folders_auto_dismissed,
             "library_tidy.reconcile_complete"
         );
 
@@ -521,15 +524,21 @@ impl Scanner {
 }
 
 /// Scan-end reconciliation pass: group the library root's present
-/// files by their top-level folder and upsert any folder whose CBZs
-/// all failed to resolve to a tracked series into `discovered_folders`
-/// for user review. Returns the count of folders upserted.
+/// files by their top-level folder, upsert any folder whose comics all
+/// failed to resolve to a tracked series into `discovered_folders`,
+/// and auto-dismiss any open row whose folder is no longer untracked
+/// (A.9 hot-fix item F6 — stale rows post-CV-add were the proximate
+/// cause of bulk-convert duplicate-series creation). Returns
+/// `(folders_discovered, folders_auto_dismissed)`.
 ///
 /// See `longbox-library-tidy-prompt.md` §2 — the predicate is
 /// match-result-based, and publisher-grouped library layouts are a
 /// documented non-goal (a publisher tier would collapse every series
 /// under one top-level folder).
-async fn detect_discovered_folders(db: &Pool, library_root_id: i64) -> Result<u32, ScanError> {
+async fn detect_discovered_folders(
+    db: &Pool,
+    library_root_id: i64,
+) -> Result<(u32, u32), ScanError> {
     let files = file_repo::list_by_library_root(db, library_root_id).await?;
 
     // top-level folder -> (present file count, any file resolved to a series)
@@ -549,6 +558,7 @@ async fn detect_discovered_folders(db: &Pool, library_root_id: i64) -> Result<u3
     }
 
     let mut discovered: u32 = 0;
+    let mut currently_untracked: HashSet<String> = HashSet::new();
     for (folder_name, (file_count, any_resolved)) in folders {
         if any_resolved {
             continue; // a resolved file means this is a tracked series's folder
@@ -556,14 +566,23 @@ async fn detect_discovered_folders(db: &Pool, library_root_id: i64) -> Result<u3
         discovered_folders_repo::upsert(
             db,
             DiscoveredFolder {
-                folder_name,
+                folder_name: folder_name.clone(),
                 file_count,
             },
         )
         .await?;
+        currently_untracked.insert(folder_name);
         discovered += 1;
     }
-    Ok(discovered)
+
+    // F6: auto-dismiss any open row whose folder is no longer in the
+    // untracked set — its files have since resolved or its folder is
+    // gone. Without this, once a folder is in `discovered_folders` it
+    // stays in /api/reconcile/untracked until manually dismissed.
+    let auto_dismissed = discovered_folders_repo::dismiss_not_in(db, &currently_untracked).await?;
+    let auto_dismissed = u32::try_from(auto_dismissed).unwrap_or(u32::MAX);
+
+    Ok((discovered, auto_dismissed))
 }
 
 /// The first path component of a relative path, when the path has a

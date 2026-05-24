@@ -2984,7 +2984,7 @@ async fn reconcile_convert_shallow_creates_series_and_attaches_files() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
-    assert_eq!(body["results"][0]["status"], "converted");
+    assert_eq!(body["results"][0]["status"], "added");
     let series_id = body["results"][0]["series_id"].as_i64().unwrap();
 
     // Shallow series — title + year parsed from the folder, no cv_id.
@@ -3012,6 +3012,90 @@ async fn reconcile_convert_shallow_creates_series_and_attaches_files() {
     // The folder is no longer untracked.
     let untracked = discovered_folders_repo::list(&app.state.db).await.unwrap();
     assert!(untracked.iter().all(|d| d.folder_name != "Wytches (2014)"));
+}
+
+#[tokio::test]
+async fn reconcile_convert_links_to_existing_series_instead_of_duplicating() {
+    // A.9 hot-fix: a folder whose (sort_title, start_year) matches an
+    // existing series must link to that survivor, not insert a dupe.
+    let app = build_test_app().await;
+    // `sort_title` matches what `normalize_title` would produce from
+    // the folder's parsed title — leading article stripped — so
+    // `find_for_dedup` can match. The CV-add path normalizes the same
+    // way, so a real CV-tracked Walking Dead row has this shape too.
+    let existing = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "The Walking Dead".into(),
+            sort_title: "walking dead".into(),
+            start_year: Some(2003),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // The folder + an unmatched file in it.
+    write_cbz(
+        &app.library_path()
+            .join("The Walking Dead (2003)/The Walking Dead 001 (2003).cbz"),
+        None,
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    // The seeded series had no issues, so the scanned file ends up
+    // unmatched and the folder shows as discovered.
+    let untracked_before = discovered_folders_repo::list(&app.state.db).await.unwrap();
+    assert!(
+        untracked_before
+            .iter()
+            .any(|d| d.folder_name == "The Walking Dead (2003)"),
+        "folder is discovered as untracked"
+    );
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/convert",
+            r#"{"folder_names":["The Walking Dead (2003)"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let result = &body["results"][0];
+    assert_eq!(result["status"], "linked", "matches existing — links, doesn't add");
+    assert_eq!(
+        result["series_id"].as_i64().unwrap(),
+        existing.id,
+        "linked to the pre-existing series id"
+    );
+
+    // No duplicate series row for this (sort_title, start_year).
+    let count = series_repo::find_all(&app.state.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.sort_title == "walking dead" && s.start_year == Some(2003))
+        .count();
+    assert_eq!(count, 1, "no duplicate series row");
+
+    // The file attached to the survivor as owned via FilenameRegex.
+    let owned: Vec<_> = longbox_db::file_repo::list_by_library_root(
+        &app.state.db,
+        app.library_root_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|f| f.status == "owned" && f.match_method == "filename_regex")
+    .collect();
+    assert_eq!(owned.len(), 1);
 }
 
 #[tokio::test]

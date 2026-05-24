@@ -21,6 +21,10 @@ pub struct ScanReport {
     /// Series hard-deleted this scan because their auto-tidy recovery
     /// window elapsed (A.9 Step 6b).
     pub series_auto_purged: u32,
+    /// `discovered_folders` rows auto-dismissed because their folder
+    /// is no longer untracked — files resolved, or folder gone from
+    /// disk (A.9 hot-fix, item F6).
+    pub folders_auto_dismissed: u32,
     pub errors: Vec<ScanFileError>,
 }
 
@@ -47,6 +51,7 @@ impl ScanReport {
             unmatched: 0,
             series_auto_marked: 0,
             series_auto_purged: 0,
+            folders_auto_dismissed: 0,
             errors: Vec::new(),
         }
     }

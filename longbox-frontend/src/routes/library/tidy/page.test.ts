@@ -228,8 +228,8 @@ describe('library tidy page', () => {
   it('bulk-converts selected untracked folders to tracked series', async () => {
     vi.mocked(convertFolders).mockResolvedValue({
       results: [
-        { folder_name: 'Wytches (2014)', status: 'converted', series_id: 10 },
-        { folder_name: 'Saga (2012)', status: 'converted', series_id: 11 }
+        { folder_name: 'Wytches (2014)', status: 'added', series_id: 10 },
+        { folder_name: 'Saga (2012)', status: 'added', series_id: 11 }
       ]
     });
     render(
@@ -253,6 +253,36 @@ describe('library tidy page', () => {
       expect(screen.queryByText('Wytches (2014)')).not.toBeInTheDocument();
       expect(screen.queryByText('Saga (2012)')).not.toBeInTheDocument();
     });
+  });
+
+  it('counts linked results separately in the toast and drops them from untracked', async () => {
+    // A.9 hot-fix: a folder whose (title, year) matches an existing
+    // series surfaces as `linked`, not `added`. The toast splits the
+    // two counts; both kinds drop from the untracked list.
+    vi.mocked(convertFolders).mockResolvedValue({
+      results: [
+        { folder_name: 'Wytches (2014)', status: 'added', series_id: 10 },
+        { folder_name: 'Saga (2012)', status: 'linked', series_id: 7 }
+      ]
+    });
+    render(
+      TidyPage,
+      pageData({
+        untracked: [
+          folder({ folder_name: 'Wytches (2014)' }),
+          folder({ folder_name: 'Saga (2012)' })
+        ]
+      })
+    );
+    await fireEvent.click(screen.getByLabelText('Select all untracked folders'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Convert 2 selected' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Wytches (2014)')).not.toBeInTheDocument();
+      expect(screen.queryByText('Saga (2012)')).not.toBeInTheDocument();
+    });
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('1 added'));
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('1 linked'));
   });
 
   it('adds an untracked folder via the ComicVine modal', async () => {
