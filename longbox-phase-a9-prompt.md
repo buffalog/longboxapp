@@ -8,16 +8,18 @@ precedent it is amended as each step resolves.
 questions, each with a recommendation) → approval → a single
 implementation commit → container rebuild + redeploy.
 
-**Status (2026-05-24):** Steps 4, 6a and 6b shipped; three hot-fixes
+**Status (2026-05-24):** Steps 4, 6a and 6b shipped; four hot-fixes
 shipped — the 6a bulk-convert dedup hot-fix, the parser hot-fix
 (three new patterns covering `Series (YYYY) NNN`,
-`Series N - Subtitle (YYYY)`, and `Series N (Xf Y) (YYYY)`), and the
+`Series N - Subtitle (YYYY)`, and `Series N (Xf Y) (YYYY)`), the
 F6 dismiss-trap hot-fix (split `discovered_folders.dismissed_at`
-into user-permanent vs auto-dismiss columns). Steps 1–3, 5, 7 and 6c
+into user-permanent vs auto-dismiss columns), and the
+shallow-series UX hot-fix (hide CV-only Refresh affordance + adjust
+empty-issues hint when `cv_id` is NULL). Steps 1–3, 5, 7 and 6c
 queued. The A.8 closeout smoke (`longbox-phase-a8-closeout.md`,
-Step 13 of the A.8 brief) was staged, paused three times for
-hot-fixes, and resumes once the F6 fix's post-deploy scan resurfaces
-the ~26 trapped folders and the user bulk-converts them.
+Step 13 of the A.8 brief) was staged, paused four times for
+hot-fixes, and resumes once the user finishes bulk-converting the
+~216 untracked folders surfaced by the F6 fix.
 
 ---
 
@@ -223,6 +225,15 @@ being relearned per step.
   because the catalog state didn't reflect disk truth, and only
   walking the disk per-folder exposed that 22 of 23 folders were
   gone and 26 separate folders were stuck in the F6 dismiss-trap.
+
+- **Every CV-keyed affordance gates on `cv_id` presence.** Shallow
+  series (`cv_id = NULL`) are first-class catalog citizens since 6a.
+  CV-only UI that doesn't conditionally render will 400 the backend
+  or render misleading copy for shallow rows. `SeriesHeader` and
+  `IssueRow` are the right examples (everything CV-flavored sits
+  under `{#if cv_id}` / `{#if cvUrl}`); the series-detail `Refresh`
+  button was the wrong one. Forward question for every new CV
+  affordance — "what happens when the series has no `cv_id`?"
 
 ---
 

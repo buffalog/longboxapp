@@ -55,14 +55,21 @@
 
 <SeriesHeader series={data.series} {ownedCount} {totalCount}>
   {#snippet actions()}
-    <Button
-      variant="secondary"
-      size="sm"
-      loading={refreshing}
-      onclick={handleRefresh}
-    >
-      <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
-    </Button>
+    <!-- Refresh re-fetches the volume + issues from ComicVine, which
+         requires a cv_id. Shallow series (cv_id NULL — bulk-converted
+         folders without a CV link) have nothing to refresh from;
+         hide the affordance entirely rather than render a button that
+         400s. Matches SeriesHeader/IssueRow's cv-conditional pattern. -->
+    {#if data.series.cv_id}
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={refreshing}
+        onclick={handleRefresh}
+      >
+        <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
+      </Button>
+    {/if}
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
 </SeriesHeader>
@@ -71,9 +78,14 @@
   <h2 class="mb-2 text-lg font-semibold">Issues ({totalCount})</h2>
   {#if data.series.issues.length > 0}
     <IssueGrid issues={data.series.issues} />
-  {:else}
+  {:else if data.series.cv_id}
     <p class="text-sm text-slate-500">
       No issues recorded yet for this series. Hit Refresh to fetch from ComicVine.
+    </p>
+  {:else}
+    <p class="text-sm text-slate-500">
+      No issues recorded yet. Files in the corresponding folder will appear
+      here as the next scan parses and attaches them.
     </p>
   {/if}
 </section>
