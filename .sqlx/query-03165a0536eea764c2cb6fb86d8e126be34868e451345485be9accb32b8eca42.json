@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO discovered_folders (folder_name, file_count)\n           VALUES (?, ?)\n           ON CONFLICT(folder_name) DO UPDATE SET\n               last_seen_at = CURRENT_TIMESTAMP,\n               file_count = excluded.file_count,\n               auto_dismissed_at = NULL\n           WHERE dismissed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "03165a0536eea764c2cb6fb86d8e126be34868e451345485be9accb32b8eca42"
+}

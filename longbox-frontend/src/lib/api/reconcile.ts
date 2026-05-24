@@ -33,13 +33,21 @@ export interface PhantomsResponse {
   all_zero_owned: PhantomSeries[];
 }
 
-/** A discovered (untracked) top-level library folder. */
+/** A discovered (untracked) top-level library folder. The list
+ *  endpoint returns only rows where BOTH dismiss columns are NULL,
+ *  so both fields are always `null` in practice — they're typed to
+ *  match the wire shape. */
 export interface DiscoveredFolder {
   id: number;
   folder_name: string;
   first_seen_at: string;
   last_seen_at: string;
+  /** User-permanent dismiss (the Dismiss button). Preserved across
+   *  re-detections. */
   dismissed_at: string | null;
+  /** State-derived dismiss (post-add, post-convert, scanner F6).
+   *  Cleared by the next re-detection of the folder as untracked. */
+  auto_dismissed_at: string | null;
   file_count: number;
 }
 

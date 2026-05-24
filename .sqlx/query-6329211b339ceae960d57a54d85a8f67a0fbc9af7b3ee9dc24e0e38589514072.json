@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", folder_name,\n                  first_seen_at AS \"first_seen_at: _\",\n                  last_seen_at AS \"last_seen_at: _\",\n                  dismissed_at AS \"dismissed_at: _\",\n                  file_count AS \"file_count!: i64\"\n           FROM discovered_folders\n           WHERE dismissed_at IS NULL\n           ORDER BY first_seen_at ASC, folder_name ASC",
+  "query": "SELECT id AS \"id!: i64\", folder_name,\n                  first_seen_at AS \"first_seen_at: _\",\n                  last_seen_at AS \"last_seen_at: _\",\n                  dismissed_at AS \"dismissed_at: _\",\n                  auto_dismissed_at AS \"auto_dismissed_at: _\",\n                  file_count AS \"file_count!: i64\"\n           FROM discovered_folders\n           WHERE dismissed_at IS NULL AND auto_dismissed_at IS NULL\n           ORDER BY first_seen_at ASC, folder_name ASC",
   "describe": {
     "columns": [
       {
@@ -29,8 +29,13 @@
         "type_info": "Datetime"
       },
       {
-        "name": "file_count!: i64",
+        "name": "auto_dismissed_at: _",
         "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "file_count!: i64",
+        "ordinal": 6,
         "type_info": "Int64"
       }
     ],
@@ -43,8 +48,9 @@
       false,
       false,
       true,
+      true,
       false
     ]
   },
-  "hash": "4cd1c6cf20bf1a2d0e610e328912252f0ed625ade0013fb6cd113cbf2d3857b4"
+  "hash": "6329211b339ceae960d57a54d85a8f67a0fbc9af7b3ee9dc24e0e38589514072"
 }

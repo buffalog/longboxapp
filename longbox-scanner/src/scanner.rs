@@ -575,11 +575,15 @@ async fn detect_discovered_folders(
         discovered += 1;
     }
 
-    // F6: auto-dismiss any open row whose folder is no longer in the
-    // untracked set — its files have since resolved or its folder is
-    // gone. Without this, once a folder is in `discovered_folders` it
-    // stays in /api/reconcile/untracked until manually dismissed.
-    let auto_dismissed = discovered_folders_repo::dismiss_not_in(db, &currently_untracked).await?;
+    // F6: auto-dismiss any still-`auto_dismissed_at`-NULL row whose
+    // folder is no longer in the untracked set — its files have
+    // since resolved or its folder is gone. Writes
+    // `auto_dismissed_at`; user-permanent `dismissed_at` stays
+    // untouched. The upsert above clears `auto_dismissed_at` on
+    // re-detection, so an auto-dismissed folder resurfaces the next
+    // time its files re-qualify as untracked (the F6 trap fix).
+    let auto_dismissed =
+        discovered_folders_repo::auto_dismiss_not_in(db, &currently_untracked).await?;
     let auto_dismissed = u32::try_from(auto_dismissed).unwrap_or(u32::MAX);
 
     Ok((discovered, auto_dismissed))
