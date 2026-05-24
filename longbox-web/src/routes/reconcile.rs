@@ -223,7 +223,11 @@ async fn add_one(state: &AppState, folder: &AddFolder) -> Result<i64, ApiError> 
         });
     }
     let (series, _was_new) = add_or_get_from_cv(state, folder.cv_id).await?;
-    discovered_folders_repo::dismiss(&state.db, std::slice::from_ref(&folder.folder_name)).await?;
+    // Auto-dismiss: the folder is now tracked, but if the user later
+    // removes the series the folder must resurface — system action,
+    // not user-permanent.
+    discovered_folders_repo::auto_dismiss(&state.db, std::slice::from_ref(&folder.folder_name))
+        .await?;
     // The folder holds CBZs that didn't resolve to any tracked series;
     // rematch now so they attach to the series we just added instead of
     // it sitting as a phantom until the next full scan.
@@ -454,7 +458,10 @@ async fn convert_one_folder(
         file_repo::update(&mut *tx, f.id, patch).await?;
     }
 
-    discovered_folders_repo::dismiss(&mut *tx, &[folder_name.to_owned()]).await?;
+    // Auto-dismiss: bulk-convert tracks the folder, but if the user
+    // later removes the series the folder must resurface — system
+    // action, not user-permanent.
+    discovered_folders_repo::auto_dismiss(&mut *tx, &[folder_name.to_owned()]).await?;
 
     tx.commit().await.map_err(longbox_db::DbError::from)?;
     Ok((series_id, status))

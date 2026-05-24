@@ -616,7 +616,7 @@ async fn upsert_number_only_returning_empty_input_is_a_no_op() {
 // -------- A.9 hot-fix item F6: discovered_folders auto-dismiss --------
 
 #[tokio::test]
-async fn discovered_folders_dismiss_not_in_clears_stale_open_rows() {
+async fn discovered_folders_auto_dismiss_not_in_clears_stale_open_rows() {
     let pool = fresh_pool().await;
     discovered_folders_repo::upsert(&pool, folder("A (2010)", 1))
         .await
@@ -631,7 +631,7 @@ async fn discovered_folders_dismiss_not_in_clears_stale_open_rows() {
     // Only A and C are still untracked this scan; B is stale.
     let keep: std::collections::HashSet<String> =
         ["A (2010)".into(), "C (2012)".into()].into_iter().collect();
-    let dismissed = discovered_folders_repo::dismiss_not_in(&pool, &keep)
+    let dismissed = discovered_folders_repo::auto_dismiss_not_in(&pool, &keep)
         .await
         .unwrap();
     assert_eq!(dismissed, 1, "exactly the one stale folder is auto-dismissed");
@@ -648,16 +648,103 @@ async fn discovered_folders_dismiss_not_in_clears_stale_open_rows() {
 }
 
 #[tokio::test]
-async fn discovered_folders_dismiss_not_in_empty_keep_dismisses_every_open_row() {
+async fn discovered_folders_auto_dismiss_not_in_empty_keep_dismisses_every_open_row() {
     let pool = fresh_pool().await;
     discovered_folders_repo::upsert(&pool, folder("Whatever", 1))
         .await
         .unwrap();
 
     let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let dismissed = discovered_folders_repo::dismiss_not_in(&pool, &empty)
+    let dismissed = discovered_folders_repo::auto_dismiss_not_in(&pool, &empty)
         .await
         .unwrap();
     assert_eq!(dismissed, 1);
     assert!(discovered_folders_repo::list(&pool).await.unwrap().is_empty());
+}
+
+// -------- A.9 F6 hot-fix: split-source dismiss --------
+
+#[tokio::test]
+async fn auto_dismissed_folder_resurfaces_when_re_detected() {
+    // The F6 trap fix: after auto_dismiss writes auto_dismissed_at,
+    // the next upsert (re-detection) clears it and the row reappears
+    // in `list()`. Pre-fix the WHERE dismissed_at IS NULL guard
+    // silently swallowed re-detection.
+    let pool = fresh_pool().await;
+    discovered_folders_repo::upsert(&pool, folder("Resurrect Me (2020)", 5))
+        .await
+        .unwrap();
+    discovered_folders_repo::auto_dismiss(&pool, &["Resurrect Me (2020)".into()])
+        .await
+        .unwrap();
+    assert!(
+        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        "auto-dismissed row is hidden from the list"
+    );
+
+    // Re-detection: files in this folder became unmatched again.
+    discovered_folders_repo::upsert(&pool, folder("Resurrect Me (2020)", 7))
+        .await
+        .unwrap();
+
+    let rows = discovered_folders_repo::list(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1, "row resurfaces after re-detection");
+    assert_eq!(rows[0].folder_name, "Resurrect Me (2020)");
+    assert_eq!(rows[0].file_count, 7, "refreshed file_count on resurface");
+    assert!(rows[0].auto_dismissed_at.is_none(), "auto_dismissed_at cleared");
+    assert!(rows[0].dismissed_at.is_none(), "user dismissed_at stays null");
+}
+
+#[tokio::test]
+async fn user_dismissed_folder_stays_hidden_when_re_detected() {
+    // User-permanent dismiss: even re-detection cannot resurface a
+    // folder the user explicitly dismissed. The upsert's
+    // `WHERE dismissed_at IS NULL` guard skips the conflict update
+    // entirely, so the row stays as the user left it.
+    let pool = fresh_pool().await;
+    discovered_folders_repo::upsert(&pool, folder("Never Show (2021)", 3))
+        .await
+        .unwrap();
+    discovered_folders_repo::dismiss(&pool, &["Never Show (2021)".into()])
+        .await
+        .unwrap();
+    assert!(discovered_folders_repo::list(&pool).await.unwrap().is_empty());
+
+    // Re-detection attempt — should be a no-op on the user-dismissed row.
+    discovered_folders_repo::upsert(&pool, folder("Never Show (2021)", 99))
+        .await
+        .unwrap();
+
+    assert!(
+        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        "user-dismissed folder stays hidden even after re-detection"
+    );
+}
+
+#[tokio::test]
+async fn combined_user_and_auto_dismiss_stays_hidden_after_auto_clear() {
+    // A folder both user-dismissed and (later) auto-dismissed. An
+    // upsert can clear the auto column, but the user column is
+    // preserved by the WHERE guard — the row stays hidden.
+    let pool = fresh_pool().await;
+    discovered_folders_repo::upsert(&pool, folder("Both Dismissed (2022)", 2))
+        .await
+        .unwrap();
+    discovered_folders_repo::auto_dismiss(&pool, &["Both Dismissed (2022)".into()])
+        .await
+        .unwrap();
+    discovered_folders_repo::dismiss(&pool, &["Both Dismissed (2022)".into()])
+        .await
+        .unwrap();
+
+    discovered_folders_repo::upsert(&pool, folder("Both Dismissed (2022)", 5))
+        .await
+        .unwrap();
+
+    // The upsert is a no-op against a user-dismissed row, so even the
+    // auto column stays set (the WHERE clause guarded the SET).
+    assert!(
+        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        "user-dismiss still hides the row regardless of auto state"
+    );
 }

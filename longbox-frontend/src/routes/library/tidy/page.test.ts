@@ -60,6 +60,7 @@ function folder(over: Partial<DiscoveredFolder> = {}): DiscoveredFolder {
     first_seen_at: '2026-05-01T00:00:00',
     last_seen_at: '2026-05-20T00:00:00',
     dismissed_at: null,
+    auto_dismissed_at: null,
     file_count: 3,
     ...over
   };

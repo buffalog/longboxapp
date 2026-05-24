@@ -8,14 +8,16 @@ precedent it is amended as each step resolves.
 questions, each with a recommendation) → approval → a single
 implementation commit → container rebuild + redeploy.
 
-**Status (2026-05-23):** Steps 4, 6a and 6b shipped; the 6a bulk-convert
-dedup hot-fix shipped; the parser hot-fix (three new patterns covering
-`Series (YYYY) NNN`, `Series N - Subtitle (YYYY)`, and
-`Series N (Xf Y) (YYYY)`) shipped. Steps 1–3, 5, 7 and 6c queued.
-The A.8 closeout smoke (`longbox-phase-a8-closeout.md`, Step 13 of the
-A.8 brief) was staged, paused twice for hot-fixes (dedup, then
-parser), and resumes once the parser hot-fix's post-deploy scan
-populates owned counts on the CV-linked backlog.
+**Status (2026-05-24):** Steps 4, 6a and 6b shipped; three hot-fixes
+shipped — the 6a bulk-convert dedup hot-fix, the parser hot-fix
+(three new patterns covering `Series (YYYY) NNN`,
+`Series N - Subtitle (YYYY)`, and `Series N (Xf Y) (YYYY)`), and the
+F6 dismiss-trap hot-fix (split `discovered_folders.dismissed_at`
+into user-permanent vs auto-dismiss columns). Steps 1–3, 5, 7 and 6c
+queued. The A.8 closeout smoke (`longbox-phase-a8-closeout.md`,
+Step 13 of the A.8 brief) was staged, paused three times for
+hot-fixes, and resumes once the F6 fix's post-deploy scan resurfaces
+the ~26 trapped folders and the user bulk-converts them.
 
 ---
 
@@ -212,6 +214,16 @@ being relearned per step.
   parser gap, and only an expand-the-sample pass exposed the real
   scale before another partial fix went out.
 
+- **Cross-check catalog state against disk/external state during
+  reconciliation archaeology.** Single-source data has blind spots
+  that surface as quantitative-criterion misses after deploy. The
+  37-CV-linked-zero-owned diagnostic missing the 22-ghost /
+  15-no-series-row breakdown is the canonical demonstration — the
+  parser hot-fix's <5 target was right for the wrong population
+  because the catalog state didn't reflect disk truth, and only
+  walking the disk per-folder exposed that 22 of 23 folders were
+  gone and 26 separate folders were stuck in the F6 dismiss-trap.
+
 ---
 
 ## Deferred items
@@ -250,6 +262,10 @@ rather than accreting in commit messages.
   whose series_title contains a parenthesized year-like substring,
   letting the scanner downgrade or skip), OR teach the catch-all to
   refuse-to-match when its candidate `series_title` ends in
-  `(YYYY)`. Out of scope for the parser hot-fix; warrants its own
-  design surface because the choice between "annotate" and "refuse"
-  affects every future catch-all-style pattern.
+  `(YYYY)`. Additional data point from the F6 hot-fix archaeology:
+  `I Hate Fairyland (2022) (2022)` (duplicated `(YYYY)` in the
+  folder name) is another shape pattern 15 absorbs but bakes one of
+  the years into `series_title` — same poison class. Out of scope
+  for the F6 hot-fix; warrants its own design surface because the
+  choice between "annotate" and "refuse" affects every future
+  catch-all-style pattern.

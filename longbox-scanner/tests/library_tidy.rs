@@ -320,3 +320,64 @@ async fn a_discovered_folder_is_auto_dismissed_once_its_files_resolve() {
         "the previously-untracked folder is auto-dismissed once its files resolve"
     );
 }
+
+#[tokio::test]
+async fn an_auto_dismissed_folder_resurfaces_when_its_series_is_removed() {
+    // A.9 F6 hot-fix round-trip: a folder that was once discovered,
+    // then auto-dismissed because its files matched a tracked series,
+    // must resurface in /api/reconcile/untracked if the series is
+    // later removed and the files become unmatched again. Pre-fix,
+    // the upsert's `WHERE dismissed_at IS NULL` guard silently
+    // swallowed re-detection of auto-dismissed rows — the trap.
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    // Scan 1: no Walking Dead series seeded — the folder is discovered.
+    scanner.scan_full(library_root_id).await.unwrap();
+    let names: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(names.contains(&"Walking Dead (2003)".to_string()));
+
+    // Scan 2: seed the series, files resolve, F6 auto-dismisses
+    // the now-resolved folder.
+    let wd = seed_walking_dead(&pool).await;
+    scanner.scan_full(library_root_id).await.unwrap();
+    let names: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(
+        !names.contains(&"Walking Dead (2003)".to_string()),
+        "auto-dismissed after files resolved"
+    );
+
+    // Scan 3: the user removes the series. Files have no match
+    // candidate, become unmatched, the folder re-qualifies as
+    // untracked — and the upsert clears the auto_dismissed_at column,
+    // resurfacing the row.
+    sqlx::query("DELETE FROM series WHERE id = ?")
+        .bind(wd.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    scanner.scan_full(library_root_id).await.unwrap();
+    let names: Vec<String> = discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.folder_name)
+        .collect();
+    assert!(
+        names.contains(&"Walking Dead (2003)".to_string()),
+        "F6 trap fix: the folder resurfaces in /api/reconcile/untracked"
+    );
+}
