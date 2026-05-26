@@ -434,6 +434,7 @@ async fn convert_one_folder(
 
     // Attach each parsed file to its resolved issue as an owned file.
     let now = utc_now();
+    let mut attached = 0u32;
     for f in files {
         let Some((_, number)) = parsed.iter().find(|(id, _)| *id == f.id) else {
             continue;
@@ -456,6 +457,26 @@ async fn convert_one_folder(
             matched_at: file_repo::next_matched_at(f.issue_id, Some(issue_id), f.matched_at, now),
         };
         file_repo::update(&mut *tx, f.id, patch).await?;
+        attached += 1;
+    }
+
+    // A.9 Bug 1a — zero-attachment rollback. If the attach loop didn't
+    // bind a single file to an issue, the convert is structurally
+    // broken: a series row would exist with no owned files and the
+    // discovered folder would auto-dismiss, hiding the un-tracked
+    // problem rather than solving it. Dropping `tx` without commit
+    // undoes the series insert and any synthesized issue rows; the
+    // folder stays visible in /library/tidy. The user gets a clear
+    // signal that none of the folder's filenames parsed.
+    if attached == 0 {
+        return Err(ApiError::Unprocessable {
+            code: "unprocessable.no_parseable_files",
+            message: format!(
+                "0 of {} files in '{}' have parseable issue numbers; no series created and folder remains untracked",
+                files.len(),
+                folder_name,
+            ),
+        });
     }
 
     // Auto-dismiss: bulk-convert tracks the folder, but if the user
