@@ -25,7 +25,7 @@ pub mod intervention;
 pub mod processor;
 pub mod skip;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use notify::{RecursiveMode, Watcher};
@@ -119,7 +119,7 @@ pub async fn start(
 /// library_roots rows. Trailing-slash-tolerant: callers may have
 /// normalized differently than the row stored. Phase A's bootstrap
 /// inserts/finds the row by path; here we only look up.
-async fn resolve_library_root_id(library_root: &PathBuf, db: &longbox_db::Pool) -> Result<i64> {
+async fn resolve_library_root_id(library_root: &Path, db: &longbox_db::Pool) -> Result<i64> {
     let rows = longbox_db::library_root_repo::list_all(db).await?;
     let configured = library_root.to_string_lossy();
     let configured_trimmed = configured.trim_end_matches('/');
@@ -129,7 +129,7 @@ async fn resolve_library_root_id(library_root: &PathBuf, db: &longbox_db::Pool) 
         }
     }
     Err(PostprocessError::LibraryRootNotInCatalog(
-        library_root.clone(),
+        library_root.to_path_buf(),
     ))
 }
 

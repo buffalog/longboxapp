@@ -1238,7 +1238,7 @@ async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
     app.request(json_request(
         "PATCH",
         &format!("/api/files/{file_id}"),
-        &format!(r#"{{"issue_id": {}}}"#, saga_issue_ids[0]),
+        format!(r#"{{"issue_id": {}}}"#, saga_issue_ids[0]),
     ))
     .await;
 
@@ -1462,7 +1462,7 @@ async fn dashboard_activity_lists_recent_series_and_matches() {
         .request(json_request(
             "PATCH",
             &format!("/api/files/{file_id}"),
-            &format!(r#"{{"issue_id": {}}}"#, issue.id),
+            format!(r#"{{"issue_id": {}}}"#, issue.id),
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1735,7 +1735,7 @@ async fn match_folder_does_not_touch_owned_files() {
         .request(json_request(
             "PATCH",
             &format!("/api/files/{file_001}"),
-            &format!(r#"{{"issue_id": {}}}"#, pre_issue.id),
+            format!(r#"{{"issue_id": {}}}"#, pre_issue.id),
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
