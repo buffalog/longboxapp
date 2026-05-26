@@ -586,7 +586,7 @@ fn copy_then_unlink(source: &Path, target: &Path) -> Result<()> {
 }
 
 fn system_time_to_offset(t: SystemTime) -> OffsetDateTime {
-    t.try_into().unwrap_or_else(|_| OffsetDateTime::now_utc())
+    OffsetDateTime::from(t)
 }
 
 fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path) {

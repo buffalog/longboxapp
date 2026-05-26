@@ -6,7 +6,7 @@
 //! File composition (file label → criterion validated):
 //! - **a**: ComicInfo + known series, normal arrival → criteria 1, 2, 3, 6
 //!   (detect, identify, owned import, `matched_at` populated for the
-//!    Phase A.6 activity feed)
+//!   Phase A.6 activity feed)
 //! - **b**: filename-only fallback against a known series → criterion 3
 //!   alternate branch (no ComicInfo, matcher leans on filename)
 //! - **c**: ComicInfo for a series not in the catalog → criterion 4
