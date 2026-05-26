@@ -512,10 +512,96 @@ async fn find_for_dedup_treats_null_start_year_as_a_value_not_a_wildcard() {
     assert_eq!(hit.map(|r| r.id), Some(sid));
 
     // A non-NULL query does not collapse with the NULL-year row.
+    // (A.9 Bug 2 asymmetric design: phase-2 fallback fires only for
+    // NULL incoming, not for year-set incoming.)
     let with_year = series_repo::find_for_dedup(&pool, "last barbarians", Some(2010))
         .await
         .unwrap();
     assert!(with_year.is_none());
+}
+
+#[tokio::test]
+async fn find_for_dedup_null_incoming_falls_back_to_year_set_row() {
+    // A.9 Bug 2: when phase 1 returns nothing AND incoming year is
+    // NULL, phase 2 falls back to a year-set row sharing the
+    // sort_title. The observed shape: user has the same series under
+    // two folder names (`Enfield Gang Massacre (2024)` and
+    // `The Enfield Gang Massacre`) — second convert links to first
+    // instead of creating a dupe.
+    let pool = fresh_pool().await;
+    let with_year = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Enfield Gang Massacre".into(),
+            sort_title: "enfield gang massacre".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let hit = series_repo::find_for_dedup(&pool, "enfield gang massacre", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.map(|r| r.id),
+        Some(with_year),
+        "NULL-year incoming links to the year-set row"
+    );
+}
+
+#[tokio::test]
+async fn find_for_dedup_null_incoming_does_not_match_when_multiple_year_set_rows() {
+    // A.9 Bug 2 multi-match guard: if more than one year-set row
+    // shares the sort_title (e.g. 1964 + 2024 Daredevil both
+    // catalogued), phase 2 refuses the link. Ambiguous case returns
+    // None; the convert creates a fresh shallow row and the user
+    // resolves the merge manually.
+    let pool = fresh_pool().await;
+    series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(1001),
+            metron_id: None,
+            title: "Daredevil".into(),
+            sort_title: "daredevil".into(),
+            start_year: Some(1964),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(2024),
+            metron_id: None,
+            title: "Daredevil".into(),
+            sort_title: "daredevil".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = series_repo::find_for_dedup(&pool, "daredevil", None)
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "ambiguous match (multiple year-set rows) refuses to link"
+    );
 }
 
 #[tokio::test]

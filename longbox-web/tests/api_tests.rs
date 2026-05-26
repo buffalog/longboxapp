@@ -3099,6 +3099,74 @@ async fn reconcile_convert_links_to_existing_series_instead_of_duplicating() {
 }
 
 #[tokio::test]
+async fn reconcile_convert_null_year_folder_links_to_existing_year_set_series() {
+    // A.9 Bug 2: a discovered folder lacking `(YYYY)` (so the
+    // converter parses start_year=None) must link to an existing
+    // year-set series sharing the normalized sort_title, instead of
+    // creating a duplicate row. Observed shape: the user has
+    // `Enfield Gang Massacre (2024)` and `The Enfield Gang Massacre`
+    // on disk as separate folders carrying different issues — the
+    // catalog should record them as one series.
+    let app = build_test_app().await;
+    let existing = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Enfield Gang Massacre".into(),
+            sort_title: "enfield gang massacre".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // The NULL-year folder on disk: leading "The" gets stripped by
+    // normalize_title, so its sort_title matches the existing row.
+    write_cbz(
+        &app.library_path()
+            .join("The Enfield Gang Massacre/The Enfield Gang Massacre 001.cbr"),
+        None,
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/convert",
+            r#"{"folder_names":["The Enfield Gang Massacre"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let result = &body["results"][0];
+    assert_eq!(
+        result["status"], "linked",
+        "NULL-year folder links to the year-set existing row via phase-2 fallback"
+    );
+    assert_eq!(
+        result["series_id"].as_i64().unwrap(),
+        existing.id,
+        "linked to the pre-existing series id, not a duplicate"
+    );
+
+    // No duplicate series row for this sort_title.
+    let count = series_repo::find_all(&app.state.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.sort_title == "enfield gang massacre")
+        .count();
+    assert_eq!(count, 1, "no duplicate series row");
+}
+
+#[tokio::test]
 async fn reconcile_convert_with_zero_attachments_rolls_back() {
     // A.9 Bug 1a: a convert in which the parser cannot extract an
     // issue number from any of the folder's files must roll back the

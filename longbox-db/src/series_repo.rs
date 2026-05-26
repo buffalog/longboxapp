@@ -62,16 +62,40 @@ where
 }
 
 /// Find an existing series matching `(sort_title, start_year)` for
-/// the bulk-convert dedup path (A.9 hot-fix). NULL-safe equality on
-/// `start_year` via SQLite's `IS` — Pattern C's NULL-year shallow
-/// rows must dedup against each other.
+/// the bulk-convert dedup path (A.9 hot-fix). Two-phase semantics:
+///
+/// **Phase 1 (strict):** NULL-safe equality on `start_year` via
+/// SQLite's `IS`. Two folders both lacking `(YYYY)` and converted
+/// under the same normalized title dedup against each other; two
+/// folders with different year-set values are kept distinct (1980
+/// Daredevil vs 2024 Daredevil reboot — same title, different
+/// series).
+///
+/// **Phase 2 (NULL-incoming fallback, A.9 Bug 2):** when phase 1
+/// returns nothing AND the incoming `start_year` is NULL, match
+/// against any year-set row sharing the sort_title. Handles the
+/// observed shape where the user has the same series under two
+/// folder names — `Enfield Gang Massacre (2024)` and
+/// `The Enfield Gang Massacre`. The "The "-stripped sort_title is
+/// identical; the NULL-incoming convert links to the year-set
+/// survivor instead of creating a dupe.
+///
+/// Phase 2 is **asymmetric on purpose**: a year-set incoming does
+/// NOT fall back to a NULL-year row, because that risks linking a
+/// reboot to a stale shallow row.
+///
+/// Phase 2 also has a **multi-match guard**: refuse the link if
+/// more than one year-set row shares the sort_title (e.g. both
+/// 1964 + 2024 Daredevil catalogued — can't pick confidently;
+/// preference tiebreaker would just pick blindly). Ambiguous case
+/// returns None; the convert creates a fresh shallow row and the
+/// user resolves manually.
 ///
 /// In steady state the new idempotency prevents duplicates, so at
-/// most one row matches. The `ORDER BY` is the fallback survivor
-/// rule for any stale pre-cleanup dupes: cv_id-set first, then
-/// earliest created_at. (The cleanup migration ranks by owned_count
-/// too; here it doesn't matter — by the time convert runs again the
-/// cleanup has already cut the group down to one.)
+/// most one row matches each phase. The `ORDER BY` is the survivor
+/// rule for any stale pre-cleanup dupes: phase-1 wins over phase-2,
+/// then cv_id-set first, then year-set first, then earliest
+/// created_at.
 pub async fn find_for_dedup<'e, E>(
     executor: E,
     sort_title: &str,
@@ -80,14 +104,50 @@ pub async fn find_for_dedup<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    // Single CTE keeps the generic executor signature working for
+    // both pool-based test callers and transaction-bound convert
+    // callers. The `?2 IS NULL` guard inside `fallback_pool` is what
+    // makes phase 2 asymmetric — it never fires for year-set incomings.
     let row = sqlx::query_as!(
         SeriesRow,
-        r#"SELECT id AS "id!: i64", cv_id, metron_id, title, sort_title,
+        r#"WITH strict AS (
+               SELECT id, cv_id, metron_id, title, sort_title, start_year,
+                      publisher, description, cover_url, created_at, updated_at
+               FROM series
+               WHERE sort_title = ?1 AND start_year IS ?2
+           ),
+           fallback_pool AS (
+               SELECT id, cv_id, metron_id, title, sort_title, start_year,
+                      publisher, description, cover_url, created_at, updated_at
+               FROM series
+               WHERE ?2 IS NULL
+                 AND sort_title = ?1
+                 AND start_year IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM strict)
+           ),
+           fallback AS (
+               SELECT * FROM fallback_pool
+               WHERE (SELECT COUNT(*) FROM fallback_pool) = 1
+           ),
+           combined AS (
+               SELECT 1 AS phase, id, cv_id, metron_id, title, sort_title,
+                      start_year, publisher, description, cover_url,
+                      created_at, updated_at
+               FROM strict
+               UNION ALL
+               SELECT 2 AS phase, id, cv_id, metron_id, title, sort_title,
+                      start_year, publisher, description, cover_url,
+                      created_at, updated_at
+               FROM fallback
+           )
+           SELECT id AS "id!: i64", cv_id, metron_id, title, sort_title,
                   start_year, publisher, description, cover_url,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
-           FROM series
-           WHERE sort_title = ? AND start_year IS ?
-           ORDER BY (cv_id IS NULL) ASC, created_at ASC
+           FROM combined
+           ORDER BY phase ASC,
+                    (cv_id IS NULL) ASC,
+                    (start_year IS NULL) ASC,
+                    created_at ASC
            LIMIT 1"#,
         sort_title,
         start_year
