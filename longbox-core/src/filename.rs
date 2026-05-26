@@ -139,6 +139,49 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             priority: 15,
             enabled: true,
         },
+        // A.9 Bug 1b — three more shapes Bug 1a's rollback surfaced.
+        // Specific markers (Book, vN-Subtitle) get low priority so
+        // they claim before the strict patterns; the permissive
+        // YYYY[-MM] catcher sits at priority 25 just above the
+        // catch-all so it only fires on what the strict patterns miss.
+        ParsingPattern {
+            id: 8,
+            name: "Series vN - Subtitle (YYYY)".into(),
+            // TPB volume + subtitle: `Fear Agent v01 - Re-Ignition
+            // (2007) (digital) (Son of Ultron-Empire).cbr`. Captures
+            // the volume number AS the issue number — pragmatic for
+            // TPB-only series. Hybrid series with both single-issue
+            // #N and TPB vN would collide; see A.9 prompt's deferred
+            // items.
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+)\s+-\s+.+?\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 6,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 9,
+            name: "Series Book N (YYYY)".into(),
+            // Literal `Book N` marker: `Promethea Book 1 (1999)
+            // (digital) (Tithe-Empire).cbr`. Strips "Book" from the
+            // series capture so the catalog records "Promethea" not
+            // "Promethea Book".
+            pattern: r"^(?P<series>.+?)\s+(?i:book)\s+(?P<number>\d+)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 7,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 10,
+            name: "Series NNN (YYYY[-MM]) permissive".into(),
+            // Permissive tail + optional year-month stamp:
+            // `The Authority Revolution 001 (2004-12) (DeadmanWade-DCP)
+            // (digital).cbr`. Sits BELOW all strict-year patterns so
+            // they win first — preserves id=2's title capture on
+            // `Saga 001 (2014) - Volume One.cbz`. Title group uses
+            // `[^()]+` so a trailing scanlator paren-group is not
+            // consumed as title.
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})(?:-\d{1,2})?\)(?:\s+-\s+(?P<title>[^()]+))?.*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 25,
+            enabled: true,
+        },
     ]
 }
 
@@ -449,5 +492,153 @@ mod tests {
 
         let p = parse("Saga 1.cbz", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 4, "spaced no-year shape still claimed by id=4");
+    }
+
+    // ---- A.9 Bug 1b: three more shapes Bug 1a's rollback surfaced ----
+
+    #[test]
+    fn matches_series_vol_subtitle_year_id_8() {
+        // Pattern id=8 (priority 6) — TPB volume + subtitle:
+        // `Fear Agent v01 - Re-Ignition (2007) (digital) (Son of
+        // Ultron-Empire).cbr`. Captures the volume number AS the
+        // issue number — pragmatic for TPB-only series.
+        let p = parse(
+            "Fear Agent v01 - Re-Ignition (2007) (digital) (Son of Ultron-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Fear Agent");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2007));
+        assert_eq!(p.pattern_id, 8);
+
+        // Uppercase `V` works (case-insensitive marker).
+        let p = parse(
+            "Fear Agent V04 - Hatchet Job (2008) (digital) (Minutemen-InnerDemons).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Fear Agent");
+        assert_eq!(p.number, "04");
+        assert_eq!(p.year, Some(2008));
+        assert_eq!(p.pattern_id, 8);
+
+        // Spelled-out "Volume" also works.
+        let p = parse(
+            "Ranma 1/2 Volume 3 - Some Subtitle (1995).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.number, "3");
+        assert_eq!(p.year, Some(1995));
+        assert_eq!(p.pattern_id, 8);
+    }
+
+    #[test]
+    fn matches_series_book_number_year_id_9() {
+        // Pattern id=9 (priority 7) — TPB Book N:
+        // `Promethea Book 1 (1999) (digital) (Tithe-Empire).cbr`.
+        // The literal "Book" marker is stripped from series_title so
+        // the catalog records the series as "Promethea" not
+        // "Promethea Book".
+        let p = parse(
+            "Promethea Book 1 (1999) (digital) (Tithe-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Promethea");
+        assert_eq!(p.number, "1");
+        assert_eq!(p.year, Some(1999));
+        assert_eq!(p.pattern_id, 9);
+
+        // No scanlator suffix still works.
+        let p = parse("Promethea Book 5 (2003).cbr", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Promethea");
+        assert_eq!(p.number, "5");
+        assert_eq!(p.year, Some(2003));
+        assert_eq!(p.pattern_id, 9);
+    }
+
+    #[test]
+    fn matches_series_number_year_month_id_10() {
+        // Pattern id=10 (priority 25) — permissive tail + optional
+        // year-month stamp: `The Authority Revolution 001 (2004-12)
+        // (DeadmanWade-DCP) (digital).cbr`. Year capture is the YYYY
+        // portion only; the `-MM` suffix is consumed but discarded.
+        let p = parse(
+            "The Authority Revolution 001 (2004-12) (DeadmanWade-DCP) (digital).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "The Authority Revolution");
+        assert_eq!(p.number, "001");
+        assert_eq!(p.year, Some(2004));
+        assert_eq!(p.pattern_id, 10);
+
+        // Plain (YYYY) + trailing scanlator (no dash, no subtitle)
+        // — id=2 strict ending fails, id=10 catches the fallthrough.
+        let p = parse(
+            "Some Series 042 (2023) (digital) (Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Some Series");
+        assert_eq!(p.number, "042");
+        assert_eq!(p.year, Some(2023));
+        assert_eq!(p.pattern_id, 10);
+
+        // Subtitle case: a hypothetical `Title 001 (2024-01) - Side
+        // Story (digital).cbz` would be caught here (id=2 fails on
+        // the year-month stamp), and id=10's `[^()]+` title group
+        // captures only the subtitle without the trailing
+        // scanlator. Not a shape seen in the user's library yet but
+        // worth locking the capture semantics.
+        let p = parse(
+            "Title 001 (2024-01) - Side Story (digital).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Title");
+        assert_eq!(p.number, "001");
+        assert_eq!(p.year, Some(2024));
+        assert_eq!(p.title.as_deref(), Some("Side Story"));
+        assert_eq!(p.pattern_id, 10);
+    }
+
+    #[test]
+    fn new_patterns_do_not_steal_claims_from_originals_v2() {
+        // The kickoff's load-bearing regression check: ids 8/9/10
+        // must not steal claims the existing patterns handle. The
+        // Saga test case is the most important — it confirms
+        // id=10's permissive tail does not undercut id=2's title
+        // capture on a plain `(YYYY) - Subtitle.cbz` shape.
+
+        // id=2 (priority 10) wins on plain-year subtitle shape.
+        // Without the priority-25 placement, id=10 would steal this
+        // and lose the title capture (title regex uses `[^()]+`
+        // which differs from id=2's greedy `.+`).
+        let p = parse("Saga 001 (2014) - Volume One.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 2, "plain-year subtitle still claimed by id=2");
+        assert_eq!(p.title.as_deref(), Some("Volume One"));
+
+        // id=2 still wins on plain-year no-subtitle shape.
+        let p = parse("Saga 001 (2014).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 2, "plain-year no-subtitle still claimed by id=2");
+        assert_eq!(p.year, Some(2014));
+
+        // id=7 (year-first) still wins on Wolverine shape.
+        let p = parse("Wolverine (2024) 001.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 7, "year-first still claimed by id=7");
+
+        // id=5/6 (part-of-N, subtitle-between) still win on their
+        // respective shapes — id=8 needs `v`/`vol` prefix, not
+        // applicable here.
+        let p = parse("Aama 01 - The Smell of Warm Dust (2013).cbr", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 6, "subtitle-between still claimed by id=6");
+
+        // id=4 (catch-all) still wins on year-less filenames — none
+        // of the new patterns claim a no-year shape.
+        let p = parse("Saga 1.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 4, "spaced no-year still claimed by id=4");
     }
 }
