@@ -68,11 +68,12 @@ async fn seed_settings_row_present() {
 
 #[tokio::test]
 async fn seed_parsing_patterns_at_correct_priorities() {
-    // The original four (priorities 5/10/20/30) plus the three the
-    // A.9 parser hot-fix added (11/12/15) for year-before-number,
-    // subtitled, and part-of-N shapes. Update both this assertion
-    // and `longbox-core::filename::default_patterns` together when
-    // adding more.
+    // The original four (5/10/20/30), the A.9 parser hot-fix three
+    // (11/12/15) for year-before-number / subtitled / part-of-N
+    // shapes, and the A.9 Bug 1b three (6/7/25) for TPB-vN /
+    // TPB-Book / permissive-date-stamp shapes. Update both this
+    // assertion and `longbox-core::filename::default_patterns`
+    // together when adding more.
     let pool = fresh_pool().await;
     let patterns = longbox_db::parsing_pattern_repo::list_enabled(&pool)
         .await
@@ -85,11 +86,14 @@ async fn seed_parsing_patterns_at_correct_priorities() {
         prio_names,
         vec![
             (5, "Series Vol N #M"),
+            (6, "Series vN - Subtitle (YYYY)"),
+            (7, "Series Book N (YYYY)"),
             (10, "Series #NNN (YYYY)"),
             (11, "Series N (Xf Y) (YYYY)"),
             (12, "Series N - Subtitle (YYYY)"),
             (15, "Series (YYYY) NNN"),
             (20, "Series NNN (YYYY)"),
+            (25, "Series NNN (YYYY[-MM]) permissive"),
             (30, "Series_NNN or Series NNN"),
         ]
     );
