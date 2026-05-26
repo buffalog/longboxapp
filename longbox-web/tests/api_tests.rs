@@ -3099,6 +3099,75 @@ async fn reconcile_convert_links_to_existing_series_instead_of_duplicating() {
 }
 
 #[tokio::test]
+async fn reconcile_convert_with_zero_attachments_rolls_back() {
+    // A.9 Bug 1a: a convert in which the parser cannot extract an
+    // issue number from any of the folder's files must roll back the
+    // entire transaction — no series row created, no auto-dismiss of
+    // the discovered folder. The previous code created a shallow
+    // series with zero issues and auto-dismissed the folder, hiding
+    // the unparseable-files problem behind a clean Untracked list
+    // ("ghost series" shape).
+    let app = build_test_app().await;
+    // Filenames with no digits anywhere — every parsing pattern
+    // requires a `\d+` number capture, so all seven fail.
+    write_cbz(
+        &app.library_path()
+            .join("Unparseable Folder (2024)/Unparseable Folder - Foreword.cbz"),
+        None,
+    );
+    write_cbz(
+        &app.library_path()
+            .join("Unparseable Folder (2024)/Unparseable Folder - Afterword.cbz"),
+        None,
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/reconcile/convert",
+            r#"{"folder_names":["Unparseable Folder (2024)"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let result = &body["results"][0];
+    assert_eq!(result["status"], "failed");
+    assert!(result["series_id"].is_null());
+    let err = result["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("0 of 2") && err.contains("no series created"),
+        "error message should explain the rollback: got {err:?}"
+    );
+
+    // No series row exists for the rolled-back convert. The (title,
+    // year) was clean enough to have inserted if not for the rollback.
+    let leftover = series_repo::find_all(&app.state.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.sort_title == "unparseable folder" && s.start_year == Some(2024));
+    assert!(
+        leftover.is_none(),
+        "no series row should survive a zero-attachment convert"
+    );
+
+    // The folder stays visible as untracked — neither user-dismissed
+    // nor auto-dismissed.
+    let untracked = discovered_folders_repo::list(&app.state.db).await.unwrap();
+    assert!(
+        untracked
+            .iter()
+            .any(|d| d.folder_name == "Unparseable Folder (2024)"),
+        "discovered folder should still be untracked after a rolled-back convert"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_phantoms_partitions_transition_and_steady() {
     let app = build_test_app().await;
     let transition = seed_pull_series(&app, "Lost Series").await;
