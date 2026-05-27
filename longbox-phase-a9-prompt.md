@@ -280,3 +280,25 @@ rather than accreting in commit messages.
   for the F6 hot-fix; warrants its own design surface because the
   choice between "annotate" and "refuse" affects every future
   catch-all-style pattern.
+
+- **vN-as-issue-number collision (Bug 1b id=8 semantic).** Pattern
+  id=8 (`Series vN - Subtitle (YYYY) ...`, priority 6) maps the
+  volume number `N` to the issue number. Pragmatic for TPB-only
+  series (Fear Agent, Promethea) where there's no underlying
+  per-issue catalog. Hybrid series with both single-issue `#1` and
+  TPB `v01` would collide on issue number 1 — same pattern would
+  match BOTH the single issue and the TPB volume to "issue 1",
+  failing the (series_id, number) unique constraint or attaching
+  to the wrong row. Not blocking; flagging the semantic.
+
+- **Bug 2 migration didn't auto-apply on container startup.**
+  `20260526100000_dedup_series_across_null_year.sql` is embedded in
+  the binary (confirmed via `strings`) and applies cleanly via
+  `sqlx migrate run` CLI against the same DB, but did NOT auto-run
+  on container startup after a `--no-cache` rebuild. Workaround:
+  applied via CLI + DB swap. Root cause unknown — could be a sqlx
+  0.7 `migrate!` macro quirk, a Docker build-context artifact, or
+  something with the migration file content the macro silently
+  skips. Tracked as a deferred investigation; if it recurs, it
+  becomes a workflow rule ("apply migrations via CLI as belt-and-
+  suspenders after each hot-fix deploy" or similar).
