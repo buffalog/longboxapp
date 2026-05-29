@@ -204,4 +204,53 @@ Anything that didn't match expectations — surprises, workarounds,
 follow-up bugs, deferred items that turned out to matter. If this
 section stays empty, the run was clean.
 
-> ____
+### Smoke-run blockers (Scenario 1, 2026-05-26)
+
+Scenario 1's pull-to-catalog chain surfaced three blockers before
+the chain could complete. Tracked here so the closeout has a
+canonical home for them — A and B are config-side and need a
+deployment decision; C is a code bug being fixed in Bug 3.
+
+- **Issue A — no filesystem bridge between SAB output and the
+  LongBox watch folder.** SAB runs on a remote Windows machine
+  (`192.168.1.163`) and writes completed downloads to
+  `C:\Users\jerem\Downloads\complete\`. The LongBox watch folder
+  is on the Mac at `/Users/jeremy/longbox-phase-b-watch/`. No
+  filesystem bridge exists. Resolution paths (Jeremy to pick):
+  (1) install SAB locally on the Mac and point `comics` category
+  complete_dir at the watch folder; (2) set up SMB/NFS between
+  Windows SAB output and Mac watch folder; (3) pause Scenario 1
+  and run Scenarios 2 + 3 first, return to Scenario 1 once a
+  bridge is in place. **Status:** open, awaiting decision before
+  smoke resumes.
+
+- **Issue B — SAB ignores LongBox's `category=7030`.**
+  `downloader_config.category` is set to the newznab cat code
+  (`7030`), but SAB's valid category names are
+  `*, movies, comics, books, tv, prowlarr, music`. SAB falls back
+  to the default `*` category silently. **Resolution:** edit the
+  downloader config in /downloader UI, set `category = "comics"`.
+  One-click config change, no code fix needed. **Status:** open,
+  trivial fix pending deploy of Bug 3.
+
+- **Issue C — newznab `select_best` grabs wrong-series releases.**
+  Pull for "Odin 1" grabbed "Beware the Eye of Odin 001"; pull
+  for "The Darkness 1" grabbed "Justice League - Road To Dark
+  Crisis 001". Indexer's full-text returns partial-match results
+  and `select_best` ranks them only by format + grabs + recency —
+  no series-title similarity check. Compounded by the pull engine
+  not passing `year` to `find_release_excluding`, so volume
+  disambiguation is off too. **Status:** fixed by Bug 3 (this
+  session's commit) — series-title similarity post-filter using
+  the catalog matcher's primitive at threshold 0.75, plus year
+  passed from `series.start_year`. Mismatch outcomes recorded as
+  `pull_attempts.status='mismatched'` (the reserved-but-unused
+  enum value) and surfaced on `/needs-attention` under a new
+  `series_mismatch` category. See `longbox-phase-a9-prompt.md`
+  Deferred items for the Bug 3 derivatives (park lifecycle, no-
+  year wrong-volume residual).
+
+**Smoke resumes when:** A is resolved (deployment decision lands a
+bridge), B is fixed (one config click), C is shipped (Bug 3
+deploy). C is on this session; A and B are user-driven.
+

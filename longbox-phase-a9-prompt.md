@@ -302,3 +302,67 @@ rather than accreting in commit messages.
   skips. Tracked as a deferred investigation; if it recurs, it
   becomes a workflow rule ("apply migrations via CLI as belt-and-
   suspenders after each hot-fix deploy" or similar).
+
+- **Newznab `select_best` has no series-title similarity filter.**
+  Surfaced in A.8 Scenario 1 smoke (2026-05-26) as Issue C: a pull
+  for "Odin 1" matched "Beware the Eye of Odin 001"; "The Darkness
+  1" matched "Justice League - Road To Dark Crisis 001". The
+  newznab query is just `{series} {issue}` text against the
+  indexer's full-text search, and `select_best` ranks the returned
+  pool only by format (cbz>cbr) + grabs + recency — no check that
+  the release title actually corresponds to the requested series.
+  Compounded by `longbox-pull::engine::sweep_series` not passing
+  `year` to `find_release_excluding`, so volume disambiguation is
+  off too. **Resolved by Bug 3 (2026-05-28):** series-title
+  similarity post-filter at threshold 0.75 using the catalog
+  matcher's primitive (`longbox-core::similarity::similarity` +
+  `normalize_title`), reusing `longbox-core::parse_filename` to
+  extract the release-title's series segment (no parallel parser);
+  `engine::sweep_series` now passes `series.start_year` so the
+  newznab query narrows server-side; mismatch outcomes recorded as
+  `pull_attempts.status='mismatched'` (previously reserved-but-
+  unused) and surfaced on `/needs-attention` under a new
+  `series_mismatch` category. Threshold stored as setting
+  `pull_indexer_match_threshold`, read per-sweep so tuning needs
+  no restart. Derivatives below.
+
+- **Park lifecycle for eventually-available pulls (Bug 3
+  derivative).** Bug 3 has mismatches share `retry_count` with
+  hard failures: 3 mismatches in a row → issue parks and fires a
+  `pull_failed` webhook. Two failure modes share this budget:
+  (a) misconfigured subscription whose title disagrees with the
+  indexer's naming — *should* park to surface the bad config;
+  (b) legitimately-not-yet-posted issue whose pool is noise —
+  *shouldn't* park, the issue may post next week. The real cost
+  of false-park isn't just the click — it's the **re-ping
+  cadence**: user retries → re-mismatch → re-`pull_failed` Slack
+  ping within a few sweeps until the issue actually posts. The
+  fix shape is "don't re-notify on a known-unavailable issue,"
+  not just "give it a bigger retry budget." Candidate moves:
+  (1) separate `mismatch_count` with a higher cap (e.g. 10),
+  distinct from `failure_count`, so a not-yet-posted issue gets
+  ~30 hours of retries before parking; (2) grace period — first
+  mismatch records and webhooks normally, subsequent ones within
+  N days suppress the webhook (state persisted on the attempt
+  row); (3) hybrid — separate budget AND webhook-suppression on
+  the silent-retry tail. Whichever shape: the surface that
+  shouldn't accept v2 is "fire a fresh `pull_failed` every retry
+  cycle on a known-unavailable issue."
+
+- **No-year release passes year-gate by default (Bug 3
+  derivative).** Bug 3's year filter drops releases whose
+  `parsed.year` is `Some(y)` and `y != requested_year`. Releases
+  with `parsed.year = None` pass through the year filter
+  (defensive: newznab titles sometimes lack year stamps; rejecting
+  on missing data would over-filter). A wrong-volume same-series
+  release whose name omits the year passes both gates (similarity
+  matches on series, year doesn't reject because None). Same
+  class as the catch-all match-but-poison surface — silent wrong-
+  grab under a different code path. Eventual tightening: when
+  `series.start_year` is set, require year match — accept a
+  no-year release only if it's the **only candidate** in the
+  pool (single-candidate fallback preserves the indexers-that-
+  strip-year coverage without opening the wrong-volume hole when
+  the indexer does have year-stamped alternatives). Co-located
+  with the year-filter logic so the tightening is discoverable
+  next to what it modifies.
