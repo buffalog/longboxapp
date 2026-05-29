@@ -436,3 +436,94 @@ rather than accreting in commit messages.
   preflight guard's event payload to carry enough info that any
   auto-remount layer can dispatch on `path` + `kind` without a
   schema change.
+
+- **Year-pass mismatch: indexer release-year vs
+  `series.start_year`.** Surfaced 2026-05-28 during A.8 smoke
+  resumption while probing pull-able candidates. Bug 3's year-pass
+  narrows the newznab query on `series.start_year`, which is the
+  *original publication year* from CV metadata. Indexer Scene-named
+  release titles encode the *digital-repost year* — the year the
+  scan was packaged, not the year the comic was first published.
+  For current ongoing series these usually align (a Wolverine 2024
+  ongoing issue ships in 2024, gets posted in 2024,
+  `Wolverine.001.2024.Group` matches `Wolverine 001 (2024)`).
+  For vintage reissues they don't: the 1982 Wolverine mini, when
+  available, is posted as e.g. `Wolverine.001.2018.Digital.Group`
+  and our query `Wolverine 001 (1982)` filters it out at the
+  indexer. Verbatim live observation from the smoke probe — 17
+  catalog issues for `Wolverine` (id=886, start_year=2024) probed
+  against Prowlarr year-tagged: every issue returned 0 results
+  (issue 1 returned 8 hits but all variants/cross-overs like
+  `Wolverine - Revenge`, `Savage Wolverine`, `Wolverine 88
+  Facsimile Edition`, etc., none matching the main-series Scene
+  shape). The 1982 Wolverine mini (4 issues): all returned 0 hits
+  year-tagged. Fix shape: year as a *ranking signal*, not a *hard
+  indexer-query filter*. Drop `(YYYY)` from the search term;
+  similarity-filter the result pool as today; then within the
+  passing-similarity pool, prefer releases whose parsed year is
+  within ±N years of `series.start_year` over those that diverge
+  more, BUT still allow a parse-mismatched year to win if it's
+  the only candidate. This preserves the wrong-volume protection
+  (Bug 3 move b's original goal) for the canonical case while
+  not over-rejecting vintage-reissue and missing-main-series
+  cases. Threshold for "within ±N years" wants archaeology — too
+  tight reintroduces the wrong-volume hole, too loose grabs
+  digital-only one-shots.
+
+- **Scanner-side pull-list attribution (direct-to-library
+  delivery).** Real bug — surfaced 2026-05-28 when the SMB share
+  layout was characterized. In the default deployment topology
+  (SAB writes to a complete_dir that is *also* the library mount,
+  not a separate /watch), files land directly in `/library` and
+  the scanner picks them up on its 3-hour tick. Phase B's watcher
+  never sees them. `match_method='pull_list'` is set only in
+  `processor::import_as_owned`, so the scanner-imported file is
+  attributed as `FilenameRegex` / `ComicInfoXml` / `WebUrlCv`
+  instead — provenance is lost. **More importantly** the
+  `pull_attempts.status='submitted'` row stays in-flight forever
+  from the engine's perspective, gets polled by `poll_in_flight`,
+  SAB no longer has the job in queue or history (long since
+  removed), the engine sees three consecutive `Unknown` statuses
+  (`UNKNOWN_POLL_LIMIT = 3`), transitions to `'failed'`, fires a
+  `pull_failed` webhook — for a download the user actually has.
+  False-failure notifications for successful direct-to-library
+  deliveries. Severity moderate: trust-erosion on the alerting
+  layer + potential for masking real failures. Fix shape: the
+  scanner's match cascade (in `longbox-scanner::scanner::process_file`
+  after `match_file` returns `Some`) calls
+  `pull_attempt_repo::has_in_flight_attempt(series_id, issue_id)`;
+  if true, sets `match_method='pull_list'` and calls
+  `mark_grabbed_for_issue` the same way Phase B does. Same
+  attribution logic, two entry points. Hard rule: keep the
+  attribution decision in one helper so Phase B and scanner can't
+  drift on the predicate. Note this also resolves the
+  orphan-row leak independent of the topology question — even a
+  Phase-B-routing deployment can have race conditions where the
+  scanner sees a file before Phase B does (large initial sweep,
+  manual re-scan during a sweep).
+
+- **Phase B watcher cannot see SMB-remote writes (notify-only,
+  no polling fallback).** Surfaced 2026-05-28 while validating
+  the second half of the pull-to-catalog chain. Verified via
+  reading: `longbox-postprocess::start` uses
+  `notify::recommended_watcher` (platform-native, inotify in the
+  Linux container) + a single `initial_sweep` at startup. No
+  periodic re-walk. The structural failure mode: a remote host
+  (Windows SAB box) writing to an SMB share doesn't cause the
+  Mac kernel to emit local FSEvents — no Mac process touched the
+  file — so virtiofs has nothing to forward into the container,
+  so inotify in the container never fires. Files appear silently
+  in the directory listing but the consumer task never wakes.
+  Once the container is started, new SMB-remote arrivals are
+  invisible until next container restart triggers `initial_sweep`
+  again. Fix shape: add a `notify::PollWatcher` fallback OR a
+  periodic `walkdir` re-sweep on an interval (60-120s typical),
+  gated by a setting like `watch_polling_enabled` or auto-enabled
+  when the watch path's `stat` indicates a network filesystem
+  (Linux exposes this via `statfs.f_type` matching one of the
+  known network-fs constants). The polling fallback also handles
+  the Colima-virtiofs flakiness deferred elsewhere — virtiofs
+  itself is known to drop events under load. Tightly coupled with
+  the auto-remount + mount-preflight items above: same broader
+  topology (host-side mounts and their lifecycle) that all need a
+  more disciplined layer.
