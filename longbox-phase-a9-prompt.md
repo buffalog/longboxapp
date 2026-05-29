@@ -388,3 +388,51 @@ rather than accreting in commit messages.
   — `parse_filename` lives in `longbox-core` and is shared with
   disk-file parsing, where a more permissive number→year span is
   the exact match-but-poison surface Bug 1 hardened.
+
+- **Mount-preflight guard.** Two mount paths the container depends
+  on are externally fragile: (a) `LIBRARY_ROOT_PATH` →
+  `/Volumes/Comics` virtiofs bind into the Colima VM, which goes
+  stale on host unmount/remount/sleep (the Colima caveat already
+  codified as a workflow rule); (b) `DOWNLOAD_WATCH_HOST` →
+  `/watch`, which in Jeremy's deployment is an SMB share to a
+  Windows SAB box that disconnects across the host's network
+  state changes. Neither breakage produces a hard error; the
+  scanner sees an empty `/library`, Phase B sees an empty
+  `/watch`, and downstream effects look like "nothing to do" until
+  someone notices the catalog stopped updating or auto-tidy is
+  about to purge real series. Fix shape: a startup + periodic
+  guard that (1) `stat`s each configured root, (2) compares
+  observed file count against a stored low-water mark per root in
+  `settings` (e.g. `library_root_mount_lwm`,
+  `watch_path_mount_lwm`, set after a known-good scan and only
+  ever monotonically increased), (3) refuses to start a scan /
+  Phase B sweep if the observed count is suspiciously low
+  relative to the LWM and surfaces a `mount_stale` event with the
+  affected path. The LWM approach handles the common case
+  (mount completely gone or near-empty) without producing false
+  positives on legitimate large deletions (which still cross the
+  threshold but only on extreme deltas). Surface: dashboard
+  banner + webhook event. The SMB reconnect Jeremy has to do by
+  hand today is exactly the failure mode this catches.
+
+- **Auto-remount on detected stale mount.** Follow-on to the
+  preflight guard: when the guard fires, attempt to recover
+  automatically rather than waiting for manual intervention. Two
+  realistic actions: (a) for the SMB watch path, invoke a
+  configured `mount_smbfs` (or platform equivalent) from a stored
+  credential reference — needs a credential-storage design
+  (`watch_mount_recovery` settings group: protocol, host, share,
+  credential locator, retry policy); (b) for the Colima virtiofs
+  bind, attempt `colima restart` via a host-side helper since the
+  container itself can't restart its own VM — would need an
+  out-of-band mechanism (LongBox writes a recovery-requested
+  marker file the host watches, or shells out via a privileged
+  sidecar). Both have non-trivial design surface (credentials,
+  host-side privilege model, restart loops) so the realistic
+  shape may be: guard fires → notification only (v1); guard
+  fires → SMB-side auto-remount (v2, watch-folder-only because
+  it's lower-risk); guard fires → full Colima recovery
+  (v3, requires host-side cooperation). Worth designing the
+  preflight guard's event payload to carry enough info that any
+  auto-remount layer can dispatch on `path` + `kind` without a
+  schema change.
