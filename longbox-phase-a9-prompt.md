@@ -502,28 +502,71 @@ rather than accreting in commit messages.
   scanner sees a file before Phase B does (large initial sweep,
   manual re-scan during a sweep).
 
-- **Phase B watcher cannot see SMB-remote writes (notify-only,
-  no polling fallback).** Surfaced 2026-05-28 while validating
-  the second half of the pull-to-catalog chain. Verified via
-  reading: `longbox-postprocess::start` uses
-  `notify::recommended_watcher` (platform-native, inotify in the
-  Linux container) + a single `initial_sweep` at startup. No
-  periodic re-walk. The structural failure mode: a remote host
-  (Windows SAB box) writing to an SMB share doesn't cause the
-  Mac kernel to emit local FSEvents — no Mac process touched the
-  file — so virtiofs has nothing to forward into the container,
-  so inotify in the container never fires. Files appear silently
-  in the directory listing but the consumer task never wakes.
-  Once the container is started, new SMB-remote arrivals are
-  invisible until next container restart triggers `initial_sweep`
-  again. Fix shape: add a `notify::PollWatcher` fallback OR a
-  periodic `walkdir` re-sweep on an interval (60-120s typical),
-  gated by a setting like `watch_polling_enabled` or auto-enabled
-  when the watch path's `stat` indicates a network filesystem
+- **Phase B watcher is blind to ALL host-side writes under
+  Colima virtiofs (not just SMB).** Initial framing 2026-05-28
+  was "SMB-remote writes only." Verified live 2026-05-29 with a
+  splitter test: identical Mac-local `mv` into `/watch` produced
+  silence (44+ minutes), while a `docker exec longbox sh -c 'echo
+  ... > /watch/intest.cbz'` from inside the container fired the
+  watcher in 2.0s (exactly the `STABILITY_WINDOW`). The finding
+  is the *runtime layer*, not the *delivery layer*: any
+  filesystem event originating outside the container — Mac-local
+  process, SMB-remote process, NZBGet, manual drag, anything —
+  fails to propagate from the host kernel through virtiofs into
+  the container's inotify. The watcher only sees writes the
+  *container itself* makes, which no real download flow does.
+  Continuous-operation Phase B is effectively a dead path under
+  this runtime; only `initial_sweep` (a `walkdir` pass at
+  container start) catches files, so an arrival is invisible
+  until the next container restart. Verified via reading:
+  `longbox-postprocess::start` uses
+  `notify::recommended_watcher` (inotify in the container) plus
+  one-shot `initial_sweep`. No `PollWatcher`, no periodic re-walk.
+  Implications: re-routing SAB's complete_dir to a dedicated watch
+  share (paths "i"/"ii" from the earlier mount-topology
+  discussion) does NOT help — the failure is one layer down. Fix
+  shape: add `notify::PollWatcher` fallback OR periodic
+  `walkdir` re-sweep on an interval (60-120s typical), gated by
+  a setting like `watch_polling_enabled` or auto-enabled when
+  the watch path's `stat` indicates a non-local backing
   (Linux exposes this via `statfs.f_type` matching one of the
-  known network-fs constants). The polling fallback also handles
-  the Colima-virtiofs flakiness deferred elsewhere — virtiofs
-  itself is known to drop events under load. Tightly coupled with
-  the auto-remount + mount-preflight items above: same broader
-  topology (host-side mounts and their lifecycle) that all need a
-  more disciplined layer.
+  known FUSE/virtio/network-fs constants). The polling fallback
+  also addresses general virtiofs event-drop flakiness under
+  load. Tightly coupled with the auto-remount + mount-preflight
+  items above: same broader topology (host-side mounts + their
+  event semantics) that all need a more disciplined layer.
+
+- **Matcher same-titled-same-year duplicate disambiguation.**
+  Verified live 2026-05-29 during Phase B real-I/O isolation.
+  Catalog had two `'The Darkness'` series both with
+  `start_year=2025` — `id=761` (shallow, `cv_id=NULL`) and
+  `id=877` (CV-linked, `cv_id=169122`). Dropped a synthetic CBZ
+  `The Darkness 001 (2025).cbz`; seeded a `pull_attempts` row
+  for `(series_id=877, issue_id=6715, status='submitted')`. The
+  matcher's `best_candidate_match` scored both candidates at
+  similarity=1.0, year_hint tied (both 2025), final tiebreaker
+  (lower `series.id`) picked **761**. Phase B looked up
+  `has_in_flight_attempt(761, 6092)` — false (the seeded row
+  was for 877, not 761) — and attributed `match_method='phase_b'`.
+  The seeded `(877, 6715)` row orphaned, exactly the failure
+  mode (iii)'s deferred item describes — except the
+  disambiguation bug is upstream of the attribution: the matcher
+  itself picks wrong, so adding `has_in_flight_attempt` to the
+  scanner (the (iii) fix) doesn't help on its own when the
+  series choice is wrong before attribution runs. Bug 2's
+  multi-match safety guard correctly left both Darkness rows in
+  place (refused to auto-merge under the ambiguous condition);
+  that's correct dedup behavior but it leaves the runtime
+  disambiguation problem live. Fix shape: when a pull is
+  in-flight for a specific series_id, the matcher should
+  *prefer* that series_id among same-score candidates — not by
+  rewriting `best_candidate_match`'s scoring, but by passing a
+  hint set of `preferred_series_ids` derived from
+  `pull_attempt_repo::list_in_flight_series_ids()` and applying
+  it as a tiebreaker before the lower-id fallback. Same matcher
+  change covers both Phase B and the scanner. Note: this also
+  raises a Bug 2 follow-up question — whether two same-titled
+  same-year duplicates should remain in the catalog at all, or
+  whether one is necessarily a stale shallow row that should be
+  merged with user confirmation. That's a UX question, not a
+  matcher question, but worth not losing.

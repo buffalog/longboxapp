@@ -34,7 +34,20 @@ bottom; that section is the actual point of the doc.
   run` CLI + DB swap. Live DB has both migration entries and the
   cleanup result. Smoke runs against the same live DB. The
   auto-run mismatch is tracked as a deferred item.
-- **Result:** ☐ pass ☐ pass-with-notes ☐ blocked
+- **Result:** ☐ pass ☒ pass-with-notes ☐ blocked
+
+  Pass-with-notes against: rejection path live-verified against
+  the exact 5-26 wrong-grab guid (Bug 3 + 3a); wiremock chain
+  coverage for the full Match → submit → grab → attribute path;
+  Phase B import_as_owned end-to-end on real I/O including
+  pull_list attribution + idempotency-by-mechanism. The
+  unvalidated legs are unvalidatable today, not skipped:
+  (1) live indexer happy-path can't fire — catalog × indexer ×
+  year-pass mismatch (Issue D); (2) cross-machine SMB delivery
+  can't fire — virtiofs-inotify gap blocks all host-side writes
+  from waking Phase B's watcher regardless of mount topology
+  (Issue E). Both are A.9-era deferred items with known fix
+  shapes, not A.8 bugs.
 
 ---
 
@@ -102,16 +115,48 @@ flows all the way into the catalog attributed to the pull engine.
    the scheduled `PULL_SCHEDULE_TIME` slot.
 3. Watch the downloader queue, the watch folder, then the catalog.
 
-- [ ] Sweep ran (check logs / the pull-list "last pull" column).
-- [ ] NZB submitted to the downloader — appears in its queue.
-- [ ] Download completed; file landed in the watch folder.
-- [ ] Phase B caught the file and moved it into the library.
-- [ ] The issue is `owned` in the catalog.
-- [ ] **`match_method = 'pull_list'`** on the resulting file row.
+- [x] Sweep ran (check logs / the pull-list "last pull" column).
+- [-] NZB submitted to the downloader — appears in its queue.
+- [-] Download completed; file landed in the watch folder.
+- [x] Phase B caught the file and moved it into the library
+      (verified 2026-05-29 via synthetic Phase B real-I/O
+      isolation — `initial_sweep` walkdir path, not inotify).
+- [x] The issue is `owned` in the catalog.
+- [x] **`match_method = 'pull_list'`** on the resulting file row
+      (seeded `pull_attempts.status='submitted'` for the target
+      `(series_id=644, issue_id=5148)`, dropped a valid CBZ,
+      Phase B processed, attributed correctly).
 
-Observed:
+`[x]` = verified, `[-]` = unreachable in current
+configuration / unverifiable today (see Unexpected observations).
 
-> ____
+Observed (2026-05-29 Phase B real-I/O isolation):
+
+> Synthetic seed + drop validated the full Phase B chain on real
+> filesystem I/O — `phase_b.pull_attributed series_id=644
+> issue_id=5148 attempts=1` immediately followed by
+> `phase_b.processed file_id=7543` at 17:39:23 UTC. Diagnostic
+> transition: seeded `pull_attempts.id=26` went
+> `submitted → grabbed`; new `files` row at file_id=7543 with
+> `match_method='pull_list'`; source `/watch/Odin 001 (2026).cbz`
+> unlinked, target `/library/Odin (2026)/Odin (2026) 001.cbz`
+> created with ComicInfo.xml rewritten in (size 181 → 528 bytes).
+> Idempotency characterized via two passes: Pass A (target
+> exists) → `phase_b.skipped reason=conflict`, populates
+> pending-intervention cache, no double-insert (filesystem
+> pre-filter); Pass B (target deleted, source re-dropped) →
+> `phase_b.processed` with the SAME `file_id=7543`, confirming
+> `file_repo::upsert_imported` UPDATE branch fires
+> (DB-level idempotency, not masked by the pre-filter). Both
+> mechanisms confirmed by mechanism, not just by count.
+> Crucially: the live indexer/SAB legs (`NZB submitted`,
+> `Download completed`) are NOT validated end-to-end today —
+> the catalog × indexer × year-pass mismatch prevents the
+> happy-path chain from firing naturally (see Issue D below),
+> AND the watcher-virtiofs gap (Issue E) blocks any external
+> delivery path including the SMB route reconfigure would have
+> enabled. The indexer leg is covered by wiremock integration
+> tests, not live observation.
 
 ---
 
@@ -281,4 +326,65 @@ deployment decision; C is a code bug being fixed in Bug 3.
 reconnect on the host), B is fixed (one click in /downloader to
 set `category = "comics"`), C is shipped (Bug 3 + 3a, done). C is
 green. A and B are user-driven operational steps.
+
+- **Issue D — catalog × indexer × year-pass mismatch (surfaced
+  during smoke resumption).** Bug 3's year-pass narrows the
+  newznab query on `series.start_year`, which is CV's original
+  publication year. Scene release titles in indexer responses
+  encode the digital-repost year. For current ongoings these
+  usually align; for vintage reissues and main-series releases
+  whose Prowlarr coverage lags or is structured differently they
+  don't. Probed live: 17 catalog issues of `Wolverine` (id=886,
+  start_year=2024) — every year-tagged query returned 0
+  main-series hits (issue 1 returned 8 hits but all variants
+  like `Wolverine - Revenge`, `Savage Wolverine`,
+  `Wolverine 88 Facsimile Edition`). The 1982 mini probes
+  (issues 1-4): all 0 hits. Across the 16 paused-with-eligible
+  candidates pool + extended Wolverine probe, no series produced
+  a year-tagged Prowlarr hit whose release title would pass
+  Bug 3's similarity filter as a legitimate Match. **Status:**
+  fix-shape known (year as ranking signal, not hard
+  indexer-query filter) — tracked in
+  `longbox-phase-a9-prompt.md` Deferred items. **Smoke
+  implication:** the live indexer-side happy-path can't fire
+  naturally against this catalog × this indexer with the
+  current year-pass enforcement. NOT a code bug; a real
+  catalog/indexer state observation.
+
+- **Issue E — Phase B watcher is blind to ALL host-side writes
+  under Colima virtiofs (not just SMB-remote).** Initial framing
+  in the Bug 3 deferred items had this as SMB-specific. Verified
+  live 2026-05-29: identical Mac-local `mv` into `/watch`
+  produced 44 minutes of silence; `docker exec longbox sh -c
+  'echo > /watch/intest.cbz'` from inside the container fired
+  the watcher in 2.0s (exactly `STABILITY_WINDOW`). The failure
+  is at the runtime layer — virtiofs doesn't propagate host
+  kernel filesystem events into container inotify regardless of
+  who/what wrote them. Phase B is effectively dead-pathed for
+  continuous operation; only `initial_sweep` at container
+  restart picks anything up. The synthetic seed + drop we used
+  to validate Phase B's attribution chain had to fire via
+  `initial_sweep` (a `walkdir` pass), not the watcher's notify
+  callback. **Status:** fix-shape known (`notify::PollWatcher`
+  fallback or periodic `walkdir` re-sweep, gated by setting or
+  auto-enabled on network-fs detection) — tracked in
+  `longbox-phase-a9-prompt.md` Deferred items, broadened from
+  the original SMB-only framing. **Smoke implication:** the
+  cross-machine delivery leg of Scenario 1 can't be validated
+  live until this is fixed. Reconfiguring SAB's complete_dir
+  to a dedicated watch share (paths "i"/"ii" considered
+  during the smoke) does NOT help — the gap is one layer down.
+
+- **Bonus finding — matcher same-titled-same-year disambiguation
+  in the duplicate-Darkness case.** When the Phase B isolation
+  test was first run against `The Darkness` (chosen for being
+  Scenario 1's original target), the matcher's lower-id
+  tiebreaker routed to series 761 (shallow `cv_id=NULL`) instead
+  of 877 (CV-linked, the one the seeded pull_attempt referenced).
+  Concrete demonstration of the (iii) deferred item's
+  predicted failure mode plus a previously-unflagged extension:
+  even Phase B (not just the scanner) is vulnerable to it, AND
+  the fix has to be in the matcher itself, not in Phase B's
+  attribution check downstream. Captured + extended in
+  `longbox-phase-a9-prompt.md` Deferred items.
 
