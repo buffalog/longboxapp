@@ -1241,6 +1241,7 @@ dependencies = [
  "longbox-core",
  "pretty_assertions",
  "quick-xml 0.36.2",
+ "regex",
  "reqwest",
  "thiserror 1.0.69",
  "time",

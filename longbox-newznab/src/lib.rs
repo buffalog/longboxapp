@@ -29,5 +29,5 @@ pub use client::{
     test_connection, FindOutcome,
 };
 pub use error::{IndexerError, NewznabError};
-pub use select::{FilterOutcome, MismatchDiagnostic};
+pub use select::{normalize_scene_title, FilterOutcome, MismatchDiagnostic};
 pub use types::{ArchiveFormat, IndexerConfig, IndexerId, Release};
