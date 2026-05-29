@@ -447,3 +447,122 @@ async fn upsert_with_cv_fields_handles_fractional_issue_number() {
         Some("Promethea Half — refreshed")
     );
 }
+
+/// 6c.1 amendment: the disagreement-coexist case for issue
+/// numbers. The risk path is CV returning the textual form
+/// `"1/2"` while the parser captured the literal character `"½"`
+/// from a folder/filename. These are genuinely-different keys
+/// under SQLite's `(series_id, number)` UNIQUE — no normalization
+/// happens at the column level — so the upsert must INSERT a new
+/// row rather than silently collapsing onto the ½ row.
+///
+/// Locks the "no silent collapse" property: a naive normalize-and-
+/// merge would clobber the synthesized ½ row's identity and orphan
+/// any files attached to it. The two rows must coexist; the user
+/// disambiguates via the Change Match modal if needed.
+#[tokio::test]
+async fn upsert_with_cv_fields_disagreement_coexists_no_silent_collapse() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+
+    // Synthesized row from the parser, literal-character form.
+    let half = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "½".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Attach a file to the synthesized ½ row so the silent-collapse
+    // failure would be observable: if the upsert clobbers ½, this
+    // file orphans.
+    let library_root_id = longbox_db::library_root_repo::insert(
+        &pool,
+        longbox_db::NewLibraryRoot {
+            path: "/tmp/disagreement-test".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let file_row = sqlx::query!(
+        r#"INSERT INTO files (issue_id, library_root_id, path_relative, size_bytes,
+                              mtime, last_scanned_at, match_method, match_confidence,
+                              status, is_present, last_seen_at)
+           VALUES (?, ?, 'series/issue-half-literal.cbz', 100, '2024-01-01 00:00:00',
+                   '2024-01-01 00:00:00', 'phase_b', 1.0, 'owned', 1,
+                   '2024-01-01 00:00:00')
+           RETURNING id AS "id!: i64""#,
+        half.id,
+        library_root_id,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let half_file_id = file_row.id;
+
+    // CV returns the textual form "1/2" for the same conceptual
+    // issue. The upsert MUST treat this as a distinct
+    // (series_id, number) key and INSERT a fresh row — not collapse
+    // onto the ½ row.
+    let textual_form = issue_repo::upsert_by_series_id_and_number_with_cv_fields(
+        &pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: Some(8888),
+            metron_issue_id: None,
+            number: "1/2".into(),
+            title: Some("Promethea Half (CV)".into()),
+            cover_date: Some("2000-06-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The two rows have distinct ids and distinct numbers.
+    assert_ne!(textual_form.id, half.id, "must not collapse onto ½ row");
+    assert_eq!(textual_form.number, "1/2");
+
+    // The original ½ row is untouched — still synthesized, still
+    // referenced by the same file.
+    let half_after = issue_repo::find_by_id(&pool, half.id)
+        .await
+        .unwrap()
+        .expect("½ row must still exist");
+    assert_eq!(half_after.number, "½");
+    assert!(half_after.cv_issue_id.is_none(), "½ row's cv_issue_id must NOT be clobbered");
+    assert!(half_after.title.is_none(), "½ row's title must NOT be overwritten");
+
+    // The attached file still resolves to the ½ row, not the CV row.
+    let file_check = sqlx::query!(
+        r#"SELECT issue_id AS "issue_id?: i64" FROM files WHERE id = ?"#,
+        half_file_id,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        file_check.issue_id,
+        Some(half.id),
+        "file's issue_id must still point at the ½ row, not orphan or re-attribute to CV"
+    );
+
+    // Both rows present in the series listing — the user sees both,
+    // can disambiguate via Change Match if needed.
+    let listed = issue_repo::list_by_series(&pool, series_id).await.unwrap();
+    let numbers: Vec<&str> = listed.iter().map(|r| r.number.as_str()).collect();
+    assert!(numbers.contains(&"½"));
+    assert!(numbers.contains(&"1/2"));
+    assert_eq!(listed.len(), 2, "two distinct issue numbers expected");
+}
