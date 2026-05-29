@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "PRAGMA table_info(series)",
+  "describe": {
+    "columns": [
+      {
+        "name": "cid",
+        "ordinal": 0,
+        "type_info": "Int"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "notnull",
+        "ordinal": 3,
+        "type_info": "Int"
+      },
+      {
+        "name": "dflt_value",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "pk",
+        "ordinal": 5,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ecaa52cfa5a984266fee8af1cc1c62fea2f2ea773a9525f40f5edec7b807fc11"
+}

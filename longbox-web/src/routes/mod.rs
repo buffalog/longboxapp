@@ -12,6 +12,7 @@ pub mod calendar;
 pub mod cv_search;
 pub mod dashboard;
 pub mod downloader;
+pub mod enrichment;
 pub mod files;
 pub mod health;
 pub mod indexers;
@@ -57,7 +58,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(pull::router())
         .merge(reconcile::router())
         .merge(calendar::router())
-        .merge(needs_attention::router());
+        .merge(needs_attention::router())
+        .merge(enrichment::router());
 
     Router::new()
         .nest("/api", api)

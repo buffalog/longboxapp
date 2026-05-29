@@ -49,5 +49,8 @@ pub type Pool = sqlx::SqlitePool;
 pub use scan_run_repo::{
     NewScanRun, ScanCompletion, ScanProgress, ScanRunKind, ScanRunRow, ScanRunStatus,
 };
-pub use series_repo::{NewSeries, PhantomSeries, SeriesRow, SeriesUpdate, SeriesWithCounts};
+pub use series_repo::{
+    CandidateSelectionMode, NewSeries, PhantomSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
+    ShallowEnrichmentCandidate,
+};
 pub use settings_repo::{KEY_LIBRARY_ROOT_PATH, KEY_MATCH_CONFIDENCE_THRESHOLD};

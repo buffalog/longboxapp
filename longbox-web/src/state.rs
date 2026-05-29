@@ -29,6 +29,11 @@ pub struct AppState {
     /// the daily scan runs through the same `scan_status` guard as the
     /// manual scan route.
     pub scan_scheduler: longbox_scan_scheduler::ScanSchedulerHandle,
+    /// Handle to the A.9 Step 6c.2 CV enrichment worker. Always present;
+    /// the worker enforces its own startup migration check and refuses
+    /// to attempt anything if the 6c.1 columns are missing, so this
+    /// handle is safe to expose regardless of schema state.
+    pub enrichment: longbox_cv_enrichment::EnrichmentHandle,
 }
 
 /// In-memory mid-scan status. The "current" pill in the UI reads from

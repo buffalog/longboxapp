@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_enrichment_attempt_at AS \"ts: time::PrimitiveDateTime\",\n                  last_enrichment_outcome AS \"outcome: String\"\n           FROM series WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "ts: time::PrimitiveDateTime",
+        "ordinal": 0,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "outcome: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "db39fa6de366ae7d006d4dcb0fee2b9d690db15d6fa236aa2d89d424548af9cc"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                WITH title_collision AS (\n                    SELECT sort_title FROM series\n                    GROUP BY sort_title HAVING COUNT(*) >= 2\n                ),\n                owned_counts AS (\n                    SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count\n                    FROM issues i\n                    JOIN files f ON f.issue_id = i.id\n                    WHERE f.status = 'owned' AND f.is_present = 1\n                    GROUP BY i.series_id\n                ),\n                issue_counts AS (\n                    SELECT series_id, COUNT(*) AS issue_count\n                    FROM issues GROUP BY series_id\n                ),\n                eligible AS (\n                    SELECT\n                        s.id AS series_id,\n                        s.title AS title,\n                        s.start_year,\n                        COALESCE(ic.issue_count, 0) AS issue_count,\n                        COALESCE(oc.owned_count, 0) AS owned_count,\n                        CASE WHEN tc.sort_title IS NOT NULL THEN 1 ELSE 0 END AS collision_flag,\n                        s.last_matched_count AS lmc\n                    FROM series s\n                    LEFT JOIN owned_counts oc ON oc.series_id = s.id\n                    LEFT JOIN issue_counts ic ON ic.series_id = s.id\n                    LEFT JOIN title_collision tc ON tc.sort_title = s.sort_title\n                    WHERE s.cv_id IS NULL\n                      AND (\n                          s.last_enrichment_attempt_at IS NULL\n                          OR s.last_enrichment_attempt_at < datetime('now', ?1)\n                      )\n                ),\n                easy_bucket AS (\n                    SELECT * FROM eligible\n                    WHERE start_year IS NOT NULL AND collision_flag = 0\n                    ORDER BY owned_count DESC, lmc DESC, series_id ASC\n                    LIMIT ?2\n                ),\n                discipline_bucket AS (\n                    SELECT * FROM eligible\n                    WHERE start_year IS NULL AND collision_flag = 0\n                    ORDER BY owned_count DESC, lmc DESC, series_id ASC\n                    LIMIT ?3\n                ),\n                collision_bucket AS (\n                    SELECT * FROM eligible\n                    WHERE collision_flag = 1\n                    ORDER BY owned_count DESC, lmc DESC, series_id ASC\n                    LIMIT ?4\n                )\n                SELECT\n                    series_id AS \"series_id!: i64\",\n                    title AS \"title!: String\",\n                    start_year,\n                    issue_count AS \"issue_count!: i64\",\n                    owned_count AS \"owned_count!: i64\",\n                    collision_flag AS \"catalog_title_collision!: bool\"\n                FROM (\n                    SELECT * FROM easy_bucket\n                    UNION ALL\n                    SELECT * FROM discipline_bucket\n                    UNION ALL\n                    SELECT * FROM collision_bucket\n                )\n                ORDER BY owned_count DESC, lmc DESC, series_id ASC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_count!: i64",
+        "ordinal": 3,
+        "type_info": "Int"
+      },
+      {
+        "name": "owned_count!: i64",
+        "ordinal": 4,
+        "type_info": "Int"
+      },
+      {
+        "name": "catalog_title_collision!: bool",
+        "ordinal": 5,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e1b4a452626e0b7fb2179bebbe418be7fd50218e6a013386360f3b565ab31419"
+}

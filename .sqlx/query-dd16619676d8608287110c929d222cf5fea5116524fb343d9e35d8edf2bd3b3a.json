@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_enrichment_outcome AS \"outcome: String\", COUNT(*) AS \"n!: i64\"\n           FROM series\n           WHERE cv_id IS NULL AND last_enrichment_outcome IS NOT NULL\n           GROUP BY last_enrichment_outcome",
+  "describe": {
+    "columns": [
+      {
+        "name": "outcome: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "dd16619676d8608287110c929d222cf5fea5116524fb343d9e35d8edf2bd3b3a"
+}

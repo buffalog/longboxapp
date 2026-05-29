@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                WITH title_collision AS (\n                    SELECT sort_title FROM series\n                    GROUP BY sort_title HAVING COUNT(*) >= 2\n                ),\n                owned_counts AS (\n                    SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count\n                    FROM issues i\n                    JOIN files f ON f.issue_id = i.id\n                    WHERE f.status = 'owned' AND f.is_present = 1\n                    GROUP BY i.series_id\n                ),\n                issue_counts AS (\n                    SELECT series_id, COUNT(*) AS issue_count\n                    FROM issues GROUP BY series_id\n                )\n                SELECT\n                    s.id AS \"series_id!: i64\",\n                    s.title AS \"title!: String\",\n                    s.start_year,\n                    COALESCE(ic.issue_count, 0) AS \"issue_count!: i64\",\n                    COALESCE(oc.owned_count, 0) AS \"owned_count!: i64\",\n                    CASE\n                        WHEN tc.sort_title IS NOT NULL THEN 1\n                        ELSE 0\n                    END AS \"catalog_title_collision!: bool\"\n                FROM series s\n                LEFT JOIN owned_counts oc ON oc.series_id = s.id\n                LEFT JOIN issue_counts ic ON ic.series_id = s.id\n                LEFT JOIN title_collision tc ON tc.sort_title = s.sort_title\n                WHERE s.cv_id IS NULL\n                  AND (\n                      s.last_enrichment_attempt_at IS NULL\n                      OR s.last_enrichment_attempt_at < datetime('now', ?)\n                  )\n                ORDER BY owned_count DESC, s.last_matched_count DESC, s.id ASC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_count!: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "owned_count!: i64",
+        "ordinal": 4,
+        "type_info": "Int"
+      },
+      {
+        "name": "catalog_title_collision!: bool",
+        "ordinal": 5,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fc243b8be17dd4a5b7017e24b2c7a1b6e43448a5ff2c8f32583f9f4da44d7cce"
+}

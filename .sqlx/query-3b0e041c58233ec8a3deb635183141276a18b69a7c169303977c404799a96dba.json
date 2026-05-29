@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET last_enrichment_attempt_at = CURRENT_TIMESTAMP,\n               last_enrichment_outcome = ?,\n               last_enrichment_error = ?,\n               updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3b0e041c58233ec8a3deb635183141276a18b69a7c169303977c404799a96dba"
+}
