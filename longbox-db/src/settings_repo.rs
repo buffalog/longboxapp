@@ -43,6 +43,15 @@ pub const KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS: &str =
 /// 0 disables the bound (full backlog).
 pub const KEY_CV_ENRICHMENT_MAX_RUN: &str = "cv_enrichment_max_run";
 
+/// Bug 4a kill switch. Worker reads per-cycle and idles when
+/// false. Code default is true (forward-compatible); the Bug 4a
+/// migration inserts the row with 'false' to hold the worker down
+/// while the Bug 4 padding-mismatch repair lands. Flip with
+/// `UPDATE settings SET value='true' WHERE key='cv_enrichment_enabled'`
+/// to resume; takes effect within one config-read iteration, no
+/// restart needed.
+pub const KEY_CV_ENRICHMENT_ENABLED: &str = "cv_enrichment_enabled";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,

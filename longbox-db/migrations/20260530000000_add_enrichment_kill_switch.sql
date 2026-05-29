@@ -1,0 +1,23 @@
+-- Bug 4a: cv_enrichment_enabled kill switch.
+--
+-- Sequences the Bug 4 deploy safely: this migration sets the
+-- kill-switch row to 'false' so when the next container starts,
+-- the enrichment worker reads the flag and idles instead of
+-- attempting any series. That gives Bug 4's repair-then-constrain
+-- migration room to land + verify (Ferocious sweep, file-count
+-- lock, UNIQUE index applied) without the worker simultaneously
+-- attempting fresh series under the new schema.
+--
+-- The CODE default (longbox-cv-enrichment::config) is `true` —
+-- forward-compatible for future fresh deploys that haven't gone
+-- through this Bug 4 sequencing. A row in `settings` with value
+-- 'false' overrides the code default for *this* deploy.
+--
+-- To resume the worker post-Bug-4-verification:
+--   UPDATE settings SET value='true' WHERE key='cv_enrichment_enabled';
+--
+-- The worker reads this per-cycle (via EnrichmentConfig::load),
+-- so the flip takes effect within one config-read loop iteration
+-- — no container restart required.
+
+INSERT INTO settings (key, value) VALUES ('cv_enrichment_enabled', 'false');
