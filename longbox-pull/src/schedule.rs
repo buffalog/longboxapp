@@ -96,6 +96,7 @@ async fn scheduler_loop(
                 no_match = s.no_match,
                 submission_failed = s.submission_failed,
                 grab_failed = s.grab_failed,
+                series_mismatched = s.series_mismatched,
                 indexer_errors = s.indexer_errors,
                 "pull.sweep_complete"
             ),

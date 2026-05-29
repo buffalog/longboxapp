@@ -242,9 +242,9 @@ async fn grab_retry_excludes_an_already_tried_release() {
     // The indexer offers both the tried release and a fresh one.
     let two = r#"<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
       <channel>
-        <item><title>Saga 001 a.cbz</title><guid>guid-old</guid>
+        <item><title>Saga 001 (2012) a.cbz</title><guid>guid-old</guid>
               <enclosure url="http://nzb.example/old.nzb"/></item>
-        <item><title>Saga 001 b.cbz</title><guid>guid-new</guid>
+        <item><title>Saga 001 (2012) b.cbz</title><guid>guid-new</guid>
               <enclosure url="http://nzb.example/new.nzb"/></item>
       </channel>
     </rss>"#;

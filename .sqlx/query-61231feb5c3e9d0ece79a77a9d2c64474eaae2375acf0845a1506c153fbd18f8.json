@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n             AND NOT EXISTS (\n               SELECT 1 FROM pull_attempts pa\n               WHERE pa.issue_id = i.id\n                 AND (pa.status IN ('pending', 'submitted', 'grabbed', 'mismatched')\n                      OR pa.retry_count >= 3)\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
+  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n             AND NOT EXISTS (\n               SELECT 1 FROM pull_attempts pa\n               WHERE pa.issue_id = i.id\n                 AND (pa.status IN ('pending', 'submitted', 'grabbed')\n                      OR pa.retry_count >= 3)\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -76,5 +76,5 @@
       false
     ]
   },
-  "hash": "2bef1f3a4c1919b0c278287eae1a5f6815a168b7c15f94f20218742a9a728c02"
+  "hash": "61231feb5c3e9d0ece79a77a9d2c64474eaae2375acf0845a1506c153fbd18f8"
 }

@@ -23,8 +23,11 @@ pub fn router() -> Router<AppState> {
 }
 
 /// A pull failure plus its category. `category` is derived from
-/// `release_id`: a failed attempt that never carried a release is a
-/// submission failure; one that did is a grab failure.
+/// `status` + `release_id`: `'mismatched'` → `series_mismatch` (Bug 3 —
+/// no release survived the pull engine's pre-grab series-title filter);
+/// `'failed'` + no `release_id` → `submission_failed` (the downloader
+/// never accepted the NZB); `'failed'` + `release_id` → `grab_failed`
+/// (the download itself errored).
 #[derive(Debug, Serialize)]
 struct PullFailureRow {
     #[serde(flatten)]
@@ -45,10 +48,10 @@ async fn pull_failures(
         .await?
         .into_iter()
         .map(|failure| {
-            let category = if failure.release_id.is_none() {
-                "submission_failed"
-            } else {
-                "grab_failed"
+            let category = match failure.status.as_str() {
+                "mismatched" => "series_mismatch",
+                _ if failure.release_id.is_none() => "submission_failed",
+                _ => "grab_failed",
             };
             PullFailureRow { failure, category }
         })
