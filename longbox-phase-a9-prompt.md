@@ -235,6 +235,54 @@ being relearned per step.
   button was the wrong one. Forward question for every new CV
   affordance — "what happens when the series has no `cv_id`?"
 
+- **Live-DB mutation discipline — never `docker cp` for SQLite
+  modifications.** Surfaced 2026-05-29 during the 6c.3 cycle resume:
+  the host-side `docker cp` → modify → `docker cp` back pattern lost
+  20 rows of cycle results (15 cv_id promotions + 5 refusal-outcome
+  records) because the WAL contained the cycle's writes and `cp main
+  only` captured stale data. The clobber-back then deleted the WAL,
+  forcing SQLite to read only the stale main on restart. Recurring
+  failure mode — happened multiple times in the same session before
+  being codified.
+
+  The mechanic is fundamental: SQLite's WAL holds uncommitted (and
+  recently-committed-but-not-yet-checkpointed) pages relative to the
+  main file. Any host-side mutation of `longbox.db` without
+  coordinating WAL+SHM is a coin-flip between data loss (WAL pages
+  silently dropped on restore) and corruption (WAL pages replayed
+  against a modified main).
+
+  **Forbidden:** `docker cp longbox:/data/longbox.db /tmp/x.db && sqlite3 /tmp/x.db '...' && docker cp /tmp/x.db longbox:/data/longbox.db`
+
+  **Two safe paths:**
+
+  1. **API path (preferred).** Use existing endpoints —
+     `PATCH /api/pull-list/:id` for paused state,
+     `PUT /api/downloader` for downloader config, etc. If no
+     endpoint exists for what you need to change, add one before
+     mutating. The Bug 4a pattern of "tunable via settings row,
+     read per-cycle" is the same shape — change becomes a single
+     API call away.
+
+  2. **In-container sidecar.** Stop the container, then:
+     ```
+     docker run --rm --volumes-from longbox alpine \
+       sh -c "apk add --no-cache sqlite && \
+              sqlite3 /data/longbox.db < /your-changes.sql && \
+              chown -R 1000:1000 /data"
+     docker start longbox
+     ```
+     `sqlite3` opens the DB inside the container's volume, runs the
+     changes within a single connection that exits cleanly so the
+     WAL gets checkpointed properly. No file split, no main/WAL
+     desync. The `chown` step restores the container's expected
+     ownership.
+
+  Same standing as the `--force-recreate` and `sqlx prepare`
+  rules: do this every time, not as a remembered intention. The
+  recurring failures in one session prove that "I'll be careful"
+  is not load-bearing — the rule has to be the rule.
+
 ---
 
 ## Deferred items
