@@ -471,6 +471,38 @@ mod tests {
         assert!(msg.contains("below threshold"));
     }
 
+    /// Score-first ordering guard. A pool that mixes (a) a release
+    /// scoring above threshold but failing the year gate with (b) a
+    /// release passing the year gate but scoring below threshold should
+    /// land as silent no-match — the year-mismatched release proves the
+    /// indexer has the right series, just wrong volume. A naive
+    /// year-first refactor would mark this as a series-mismatch because
+    /// best_similarity would only see (b)'s low score. This locks the
+    /// corrected mid-implementation behavior in place.
+    #[test]
+    fn filter_year_mismatch_silent_holds_even_with_below_threshold_companion() {
+        let patterns = default_patterns();
+        let pool = vec![
+            // (a) Right series, wrong year — year filter rejects silently.
+            release("Wolverine 5 (2024).cbz", Some(50)),
+            // (b) Wrong series, year matches — similarity rejects.
+            release("Wolverine MAX 5 (1982).cbz", Some(20)),
+        ];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Wolverine",
+            Some(1982),
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        );
+        assert!(outcome.kept.is_empty());
+        assert!(
+            outcome.mismatch.is_none(),
+            "year-rejected (a) proves indexer has right series — must stay silent. got {:?}",
+            outcome.mismatch
+        );
+    }
+
     #[test]
     fn filter_empty_pool_is_no_match_not_mismatch() {
         // An indexer that returned zero results: empty pool in, empty
