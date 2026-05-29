@@ -3,11 +3,39 @@
 
 use std::time::Duration;
 
+use longbox_core::ParsingPattern;
+
 use crate::error::{IndexerError, NewznabError};
 use crate::parse::parse_response;
 use crate::query::{build_search_term, build_url};
-use crate::select::select_best;
+use crate::select::{filter_by_series_title, select_best, MismatchDiagnostic};
 use crate::types::{IndexerConfig, IndexerId, Release};
+
+/// Outcome of a multi-indexer search with the Bug 3 series-title filter.
+/// `find_release_excluding_filtered` returns this rather than a bare
+/// `Option<(IndexerId, Release)>` so the caller can distinguish a real
+/// match from a series-title mismatch (worth surfacing on
+/// `/needs-attention`) from a silent no-match (retried next sweep).
+#[derive(Debug, Clone)]
+pub enum FindOutcome {
+    /// A release passed both gates and was selected.
+    Match {
+        indexer: IndexerId,
+        release: Release,
+    },
+    /// At least one indexer returned releases but none survived the
+    /// series-title filter. Diagnostic is from the highest-priority
+    /// indexer that produced a mismatch (lower-priority indexers'
+    /// mismatches are dropped — one row per sweep is enough surfacing).
+    Mismatch {
+        indexer: IndexerId,
+        diagnostic: MismatchDiagnostic,
+    },
+    /// No indexer returned a usable pool — either every indexer was
+    /// empty, every indexer's results were year-filtered out, or both.
+    /// Retry next sweep, no `pull_attempts` row.
+    NoMatch,
+}
 
 /// Per-request timeout. Newznab indexers are usually fast; a slow one
 /// shouldn't stall the whole pull sweep.
@@ -191,6 +219,98 @@ pub async fn find_release_excluding(
     }
 }
 
+/// [`find_release_excluding`] with the Bug 3 series-title correctness
+/// filter applied per-indexer before selection. The bare variant remains
+/// for tests and lower-level callers; production (the pull engine) goes
+/// through this one.
+///
+/// `patterns` are the catalog's filename-parsing rules (`parsing_patterns`
+/// table). Reused on release titles so the same parser hardening covers
+/// both file imports and newznab pre-grab.
+///
+/// `similarity_threshold` is the cutoff below which a release is dropped
+/// as a series mismatch. Default
+/// [`longbox_core::PULL_INDEXER_MATCH_THRESHOLD`] (0.75); the engine
+/// re-reads it per-sweep from the `pull_indexer_match_threshold` setting
+/// so tuning needs no restart.
+///
+/// Multi-indexer policy: first indexer whose post-filter pool is
+/// non-empty wins (Match). A pool that is empty post-filter due to
+/// series-mismatch is remembered (the *first* such — highest-priority);
+/// later indexers can still produce a Match and override. If no indexer
+/// produces a Match but at least one produced a mismatch, the remembered
+/// diagnostic is returned. Pools emptied by the year-filter alone leave
+/// no diagnostic — they're silent fall-through.
+pub async fn find_release_excluding_filtered(
+    indexers: &[IndexerConfig],
+    series: &str,
+    issue: &str,
+    year: Option<i32>,
+    exclude_guids: &[String],
+    patterns: &[ParsingPattern],
+    similarity_threshold: f64,
+) -> Result<FindOutcome, NewznabError> {
+    if indexers.is_empty() {
+        return Ok(FindOutcome::NoMatch);
+    }
+
+    // Defensive: sort by priority so the caller need not pre-order.
+    let mut ordered: Vec<&IndexerConfig> = indexers.iter().collect();
+    ordered.sort_by_key(|i| i.priority);
+
+    let client = http_client();
+    let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
+    let mut first_mismatch: Option<(IndexerId, MismatchDiagnostic)> = None;
+
+    for indexer in ordered {
+        match search_one_indexer(&client, indexer, series, issue, year).await {
+            Ok(results) => {
+                let kept_pre_filter: Vec<Release> = results
+                    .into_iter()
+                    .filter(|r| !exclude_guids.iter().any(|g| g == &r.guid))
+                    .collect();
+                let outcome =
+                    filter_by_series_title(kept_pre_filter, patterns, series, year, similarity_threshold);
+                if !outcome.kept.is_empty() {
+                    if let Some(best) = select_best(outcome.kept) {
+                        return Ok(FindOutcome::Match {
+                            indexer: indexer.id,
+                            release: best,
+                        });
+                    }
+                }
+                if let Some(diag) = outcome.mismatch {
+                    if first_mismatch.is_none() {
+                        first_mismatch = Some((indexer.id, diag));
+                    }
+                }
+                // outcome.mismatch.is_none() AND kept.is_empty() = silent
+                // (year-only or no results) — fall through.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_newznab",
+                    indexer = %indexer.name,
+                    error = %e,
+                    "indexer query failed"
+                );
+                failures.push((indexer.id, e));
+            }
+        }
+    }
+
+    if failures.len() == indexers.len() {
+        return Err(NewznabError::AllIndexersFailed(failures));
+    }
+    if let Some((indexer, diagnostic)) = first_mismatch {
+        return Ok(FindOutcome::Mismatch {
+            indexer,
+            diagnostic,
+        });
+    }
+    Ok(FindOutcome::NoMatch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +416,99 @@ mod tests {
         .await
         .unwrap();
         assert!(exhausted.is_none());
+    }
+
+    /// Bug 3 integration test. An indexer pool that contains both a
+    /// wrong-series release (would have grabbed pre-Bug-3) and the
+    /// correct release. The filter drops the wrong-series candidate and
+    /// `select_best` lands on the right one.
+    #[tokio::test]
+    async fn find_release_excluding_filtered_picks_correct_series_from_mixed_pool() {
+        const MIXED_RSS: &str = r#"<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+          <channel>
+            <item>
+              <title>Beware the Eye of Odin 001 (2022) (digital).cbr</title>
+              <guid>wrong-series</guid>
+              <enclosure url="https://idx/nzb/wrong"/>
+              <newznab:attr name="grabs" value="150"/>
+            </item>
+            <item>
+              <title>Odin 001 (2014).cbz</title>
+              <guid>correct-series</guid>
+              <enclosure url="https://idx/nzb/correct"/>
+              <newznab:attr name="grabs" value="20"/>
+            </item>
+          </channel>
+        </rss>"#;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(MIXED_RSS))
+            .mount(&server)
+            .await;
+        let indexers = [cfg(server.uri())];
+        let patterns = longbox_core::filename::default_patterns();
+
+        let outcome = find_release_excluding_filtered(
+            &indexers,
+            "Odin",
+            "1",
+            None,
+            &[],
+            &patterns,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            FindOutcome::Match { indexer, release } => {
+                assert_eq!(indexer, IndexerId(1));
+                assert_eq!(
+                    release.guid, "correct-series",
+                    "filter must drop wrong-series despite its higher grabs"
+                );
+            }
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    /// All-wrong pool surfaces as Mismatch with a populated diagnostic
+    /// the engine renders into the `pull_attempts.error_message`.
+    #[tokio::test]
+    async fn find_release_excluding_filtered_returns_mismatch_when_pool_is_all_wrong() {
+        const WRONG_ONLY: &str = r#"<rss><channel>
+          <item><title>Beware the Eye of Odin 001 (2022).cbr</title>
+                <guid>wrong-1</guid><enclosure url="https://idx/1"/></item>
+          <item><title>Justice League - Road To Dark Crisis 001 (2022).cbz</title>
+                <guid>wrong-2</guid><enclosure url="https://idx/2"/></item>
+        </channel></rss>"#;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(WRONG_ONLY))
+            .mount(&server)
+            .await;
+        let indexers = [cfg(server.uri())];
+        let patterns = longbox_core::filename::default_patterns();
+
+        let outcome = find_release_excluding_filtered(
+            &indexers,
+            "Odin",
+            "1",
+            None,
+            &[],
+            &patterns,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        )
+        .await
+        .unwrap();
+        let diag = match outcome {
+            FindOutcome::Mismatch { diagnostic, .. } => diagnostic,
+            other => panic!("expected Mismatch, got {other:?}"),
+        };
+        assert_eq!(diag.total_results, 2);
+        assert_eq!(diag.parseable_count, 2);
+        assert!(diag.best_similarity.unwrap() < 0.5);
     }
 }

@@ -19,17 +19,17 @@
 
 use std::cmp::Ordering;
 
-use longbox_core::IssueNumber;
+use longbox_core::{IssueNumber, ParsingPattern, PULL_INDEXER_MATCH_THRESHOLD};
 use longbox_db::{
-    downloader_config_repo, indexer_config_repo, issue_repo, pull_attempt_repo, pull_list_repo,
-    series_repo, webhook_config_repo, DownloaderConfigRow, IndexerConfigRow, IssueRow,
-    NewPullAttempt, Pool, PullListRow,
+    downloader_config_repo, indexer_config_repo, issue_repo, parsing_pattern_repo,
+    pull_attempt_repo, pull_list_repo, series_repo, settings_repo, webhook_config_repo,
+    DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool, PullListRow,
 };
 use longbox_downloader::{
     connect, AnyDownloader, DownloadHandle, DownloadStatus, Downloader, DownloaderAuth,
     DownloaderConfig,
 };
-use longbox_newznab::{IndexerConfig, IndexerId, NewznabError};
+use longbox_newznab::{FindOutcome, IndexerConfig, IndexerId, NewznabError};
 use longbox_webhooks::WebhookEvent;
 
 use crate::dispatch;
@@ -61,6 +61,11 @@ pub struct SweepSummary {
     pub no_match: usize,
     /// Submission failures — the downloader rejected or was unreachable.
     pub submission_failed: usize,
+    /// Series-title mismatches (Bug 3) — indexer returned releases but
+    /// none survived the pre-grab similarity filter. Recorded as
+    /// `pull_attempts.status='mismatched'`; counts toward retry_count
+    /// like a failure.
+    pub series_mismatched: usize,
     /// Candidate issues skipped because every indexer errored.
     pub indexer_errors: usize,
 }
@@ -92,10 +97,48 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     }
     let indexers: Vec<IndexerConfig> = indexer_rows.into_iter().map(to_indexer_config).collect();
 
+    // Bug 3: load filename-parser patterns + the pre-grab similarity
+    // threshold once per sweep. Re-loading per-sweep (not at startup)
+    // means a settings change tunes the next sweep without restart.
+    let patterns = load_patterns(db).await?;
+    let similarity_threshold = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_PULL_INDEXER_MATCH_THRESHOLD,
+        PULL_INDEXER_MATCH_THRESHOLD,
+    )
+    .await?;
+
     for entry in pull_list_repo::list_active(db).await? {
-        sweep_series(db, &entry, &indexers, &downloader, &mut summary).await?;
+        sweep_series(
+            db,
+            &entry,
+            &indexers,
+            &downloader,
+            &patterns,
+            similarity_threshold,
+            &mut summary,
+        )
+        .await?;
     }
     Ok(summary)
+}
+
+/// Load active parsing patterns from the catalog, mapping the row form
+/// into `longbox-core`'s `ParsingPattern`. Used by Bug 3 to feed release-
+/// title parsing inside the newznab pre-grab filter — same parser the
+/// scanner uses on disk filenames, so any pattern hardening propagates.
+async fn load_patterns(db: &Pool) -> Result<Vec<ParsingPattern>, PullError> {
+    Ok(parsing_pattern_repo::list_enabled(db)
+        .await?
+        .into_iter()
+        .map(|r| ParsingPattern {
+            id: r.id,
+            name: r.name,
+            pattern: r.pattern,
+            priority: i32::try_from(r.priority).unwrap_or(i32::MAX),
+            enabled: r.enabled,
+        })
+        .collect())
 }
 
 /// Phase 1 — check every `submitted` attempt against the downloader.
@@ -161,6 +204,8 @@ async fn sweep_series(
     entry: &PullListRow,
     indexers: &[IndexerConfig],
     downloader: &AnyDownloader,
+    patterns: &[ParsingPattern],
+    similarity_threshold: f64,
     summary: &mut SweepSummary,
 ) -> Result<(), PullError> {
     let Some(series) = series_repo::find_by_id(db, entry.series_id).await? else {
@@ -169,6 +214,10 @@ async fn sweep_series(
     };
     let candidates = issue_repo::list_pull_candidates(db, entry.series_id).await?;
     let candidates = apply_start_floor(candidates, entry.start_issue.as_deref());
+    // Bug 3: pass series.start_year to the newznab call so the query
+    // narrows server-side AND the per-release year filter has a value
+    // to compare against.
+    let year_hint = series.start_year.map(|y| y as i32);
 
     let mut any_submitted = false;
     let mut any_failed = false;
@@ -180,20 +229,30 @@ async fn sweep_series(
         // failure records none, so its release is retried as-is (the
         // downloader, not the NZB, was the suspect).
         let exclude: Vec<String> = prior.iter().filter_map(|a| a.release_id.clone()).collect();
-        // The new row's retry_count is the cumulative failed count; the
-        // candidate query parks the issue once any row reaches 3.
-        let failed_count = prior.iter().filter(|a| a.status == "failed").count() as i64;
+        // Bug 3: failure-class for retry-count budget covers both
+        // 'failed' and 'mismatched'; the candidate query parks the
+        // issue once any row reaches retry_count >= 3 regardless of
+        // which kind it is.
+        let failed_count = prior
+            .iter()
+            .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
+            .count() as i64;
 
-        match longbox_newznab::find_release_excluding(
+        match longbox_newznab::find_release_excluding_filtered(
             indexers,
             &series.title,
             &issue.number,
-            None,
+            year_hint,
             &exclude,
+            patterns,
+            similarity_threshold,
         )
         .await
         {
-            Ok(Some((indexer_id, release))) => {
+            Ok(FindOutcome::Match {
+                indexer: indexer_id,
+                release,
+            }) => {
                 let name = format!("{} {}", series.title, issue.number);
                 match downloader.submit(&release.nzb_url, &name).await {
                     Ok(handle) => {
@@ -239,7 +298,29 @@ async fn sweep_series(
                     }
                 }
             }
-            Ok(None) => {
+            Ok(FindOutcome::Mismatch {
+                indexer: indexer_id,
+                diagnostic,
+            }) => {
+                // Bug 3: indexer returned releases but none survived the
+                // series-title filter. Record as 'mismatched' (counts
+                // toward retry_count like a submission failure) and let
+                // the existing cap+webhook path handle the surfacing.
+                let reason = diagnostic.into_error_message(&series.title, similarity_threshold);
+                pull_attempt_repo::record_mismatch(
+                    db,
+                    entry.series_id,
+                    issue.id,
+                    Some(indexer_id.0),
+                    &reason,
+                    failed_count,
+                )
+                .await?;
+                summary.series_mismatched += 1;
+                any_failed = true;
+                maybe_fire_pull_failed(db, entry.series_id, issue.id, &reason).await;
+            }
+            Ok(FindOutcome::NoMatch) => {
                 // No indexer match — no attempt row; retried next sweep.
                 summary.no_match += 1;
             }
@@ -271,14 +352,19 @@ async fn sweep_series(
     Ok(())
 }
 
-/// Fire a `pull_failed` webhook event when this issue's failed-attempt
-/// count has reached [`RETRY_CAP`] — the point at which the engine
-/// parks it and retries no further. A no-op below the cap. Delivery is
-/// spawned by [`dispatch::dispatch`], so this never blocks the sweep on
-/// webhook HTTP.
+/// Fire a `pull_failed` webhook event when this issue's failure-class
+/// attempt count has reached [`RETRY_CAP`] — the point at which the
+/// engine parks it and retries no further. A no-op below the cap.
+/// Delivery is spawned by [`dispatch::dispatch`], so this never blocks
+/// the sweep on webhook HTTP. Bug 3 widened the count to include
+/// `'mismatched'` so series-mismatches cap-cross the same way submission
+/// and grab failures do.
 async fn maybe_fire_pull_failed(db: &Pool, series_id: i64, issue_id: i64, reason: &str) {
     let failed = match pull_attempt_repo::list_for_issue(db, series_id, issue_id).await {
-        Ok(attempts) => attempts.iter().filter(|a| a.status == "failed").count() as i64,
+        Ok(attempts) => attempts
+            .iter()
+            .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
+            .count() as i64,
         Err(e) => {
             tracing::warn!(target: "longbox_pull", error = %e, "pull.failed_event_check_failed");
             return;

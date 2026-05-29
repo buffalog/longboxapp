@@ -119,11 +119,11 @@ where
 /// owned, and not already settled or parked in `pull_attempts`.
 ///
 /// Excluded `pull_attempts` states: in-flight (`pending`/`submitted`),
-/// done (`grabbed`), manual-only (`mismatched`), and parked — any
-/// attempt with `retry_count >= 3`, the give-up threshold. A `failed`
-/// attempt below the threshold leaves the issue eligible (the engine
-/// retries it). The `start_issue` floor is applied by the caller —
-/// natural issue-number order isn't expressible in SQL.
+/// done (`grabbed`), and parked — any attempt with `retry_count >= 3`,
+/// the give-up threshold. `failed` and `mismatched` (Bug 3) below the
+/// threshold leave the issue eligible (the engine retries it). The
+/// `start_issue` floor is applied by the caller — natural issue-number
+/// order isn't expressible in SQL.
 pub async fn list_pull_candidates<'e, E>(executor: E, series_id: i64) -> Result<Vec<IssueRow>>
 where
     E: SqliteExecutor<'e>,
@@ -148,7 +148,7 @@ where
              AND NOT EXISTS (
                SELECT 1 FROM pull_attempts pa
                WHERE pa.issue_id = i.id
-                 AND (pa.status IN ('pending', 'submitted', 'grabbed', 'mismatched')
+                 AND (pa.status IN ('pending', 'submitted', 'grabbed')
                       OR pa.retry_count >= 3)
              )
            ORDER BY i.cover_date ASC, i.id ASC"#,

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pull_attempts\n               (series_id, issue_id, indexer_id, release_id, status,\n                error_message, retry_count, download_handle, unknown_polls)\n           VALUES (?, ?, ?, NULL, 'mismatched', ?, ?, NULL, 0)\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "22095264ac980289fdf36805afba939f2c08d2f7fcce12b35d4ca4957793fade"
+}

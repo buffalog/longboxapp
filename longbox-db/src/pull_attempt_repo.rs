@@ -102,26 +102,34 @@ where
 }
 
 /// A pull failure for the needs-attention surface — the latest attempt
-/// for an issue, when that attempt is `failed`, joined with the display
-/// fields a `pull_attempts` row lacks. One row per issue.
+/// for an issue, when that attempt is `failed` or `mismatched`, joined
+/// with the display fields a `pull_attempts` row lacks. One row per
+/// issue.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
 pub struct FailedPull {
     pub series_id: i64,
     pub issue_id: i64,
     pub series_title: String,
     pub issue_number: String,
-    /// `None` for a submission failure (no release ever landed); `Some`
-    /// for a grab failure (a submitted release that then failed).
+    /// `None` for a submission failure or a series mismatch (no release
+    /// ever landed); `Some` for a grab failure (a submitted release that
+    /// then failed). Together with `status` lets the route handler
+    /// categorize into submission_failed / grab_failed / series_mismatch.
     pub release_id: Option<String>,
+    /// `'failed'` or `'mismatched'` — the route handler routes on this
+    /// alongside `release_id` to derive the user-facing category.
+    pub status: String,
     pub error_message: Option<String>,
     pub retry_count: i64,
     pub attempted_at: PrimitiveDateTime,
 }
 
-/// Issues whose most-recent pull attempt is `failed` — the pull side of
-/// the needs-attention surface. One row per issue (its latest attempt);
-/// an issue retried since (latest attempt `submitted`/`grabbed`) drops
-/// off.
+/// Issues whose most-recent pull attempt is in a failure-class state
+/// (`'failed'` or `'mismatched'`) — the pull side of the needs-attention
+/// surface. One row per issue (its latest attempt); an issue retried
+/// since (latest attempt `submitted`/`grabbed`) drops off. Bug 3 added
+/// `'mismatched'` to the listed set so series-mismatch outcomes surface
+/// the same way submission/grab failures do.
 pub async fn list_failed<'e, E>(executor: E) -> Result<Vec<FailedPull>>
 where
     E: SqliteExecutor<'e>,
@@ -130,13 +138,15 @@ where
         FailedPull,
         r#"SELECT pa.series_id AS "series_id!: i64", pa.issue_id AS "issue_id!: i64",
                   s.title AS "series_title!: String", i.number AS "issue_number!: String",
-                  pa.release_id, pa.error_message,
+                  pa.release_id,
+                  pa.status AS "status!: String",
+                  pa.error_message,
                   pa.retry_count AS "retry_count!: i64",
                   pa.attempted_at AS "attempted_at: _"
            FROM pull_attempts pa
            JOIN series s ON pa.series_id = s.id
            JOIN issues i ON pa.issue_id = i.id
-           WHERE pa.status = 'failed'
+           WHERE pa.status IN ('failed', 'mismatched')
              AND pa.id = (
                  SELECT MAX(p2.id) FROM pull_attempts p2
                  WHERE p2.series_id = pa.series_id AND p2.issue_id = pa.issue_id
@@ -148,10 +158,10 @@ where
     Ok(rows)
 }
 
-/// Delete an issue's `failed` pull attempts — the "Retry" un-park. With
-/// the failure history gone the candidate query no longer treats the
-/// issue as parked, so the next sweep attempts it fresh. Returns the
-/// number of rows cleared.
+/// Delete an issue's failure-class pull attempts (`'failed'` and
+/// `'mismatched'`) — the "Retry" un-park. With the failure history gone
+/// the candidate query no longer treats the issue as parked, so the
+/// next sweep attempts it fresh. Returns the number of rows cleared.
 pub async fn clear_failed_for_issue<'e, E>(
     executor: E,
     series_id: i64,
@@ -162,13 +172,55 @@ where
 {
     let result = sqlx::query!(
         r#"DELETE FROM pull_attempts
-           WHERE series_id = ? AND issue_id = ? AND status = 'failed'"#,
+           WHERE series_id = ?
+             AND issue_id = ?
+             AND status IN ('failed', 'mismatched')"#,
         series_id,
         issue_id
     )
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Record a Bug 3 series-title mismatch — no release survived the pull
+/// engine's pre-grab newznab filter. Inserts a fresh `pull_attempts`
+/// row with `status='mismatched'`, `release_id=NULL`,
+/// `download_handle=NULL`, mirroring the engine's submission-failure
+/// shape so that 3 mismatches in a row park the issue via the candidate
+/// query's `retry_count >= 3` check.
+///
+/// `prior_failure_count` is the running cumulative count the engine
+/// already maintains for the issue (it's the same value passed to a
+/// submission-failure insert). The new row's `retry_count` is
+/// `prior_failure_count + 1`.
+pub async fn record_mismatch<'e, E>(
+    executor: E,
+    series_id: i64,
+    issue_id: i64,
+    indexer_id: Option<i64>,
+    error_message: &str,
+    prior_failure_count: i64,
+) -> Result<i64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let new_retry = prior_failure_count + 1;
+    let row = sqlx::query!(
+        r#"INSERT INTO pull_attempts
+               (series_id, issue_id, indexer_id, release_id, status,
+                error_message, retry_count, download_handle, unknown_polls)
+           VALUES (?, ?, ?, NULL, 'mismatched', ?, ?, NULL, 0)
+           RETURNING id AS "id!: i64""#,
+        series_id,
+        issue_id,
+        indexer_id,
+        error_message,
+        new_retry,
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(row.id)
 }
 
 /// Every `submitted` attempt — the pull engine's in-flight set, polled

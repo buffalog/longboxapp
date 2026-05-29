@@ -1238,6 +1238,7 @@ dependencies = [
 name = "longbox-newznab"
 version = "0.0.1"
 dependencies = [
+ "longbox-core",
  "pretty_assertions",
  "quick-xml 0.36.2",
  "reqwest",

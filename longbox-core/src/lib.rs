@@ -43,6 +43,18 @@ pub const FILENAME_CONFIDENCE_CEILING: f64 = 0.90;
 /// post-hoc to classify status from `MatchResult.confidence`.
 pub const DEFAULT_MATCH_THRESHOLD: f64 = 0.85;
 
+/// Default similarity threshold for the pull engine's pre-grab newznab
+/// series-title filter (Bug 3). Stricter than the catalog matcher's
+/// `NEEDS_REVIEW_FLOOR` because pre-grab errors are asymmetrically costly:
+/// a wrong NZB consumes bandwidth, churns SAB, and pollutes the catalog
+/// when post-process imports it, while a missed legitimate match is a
+/// visible, recoverable park. Calibrated at the Wolverine-MAX boundary
+/// (`wolverine` vs `wolverine max` scores ~0.69, which 0.65 wrongly
+/// accepts and 0.75 correctly rejects). Storable as
+/// `settings.pull_indexer_match_threshold`; the engine re-reads
+/// per-sweep so tuning needs no restart.
+pub const PULL_INDEXER_MATCH_THRESHOLD: f64 = 0.75;
+
 /// Free-function form of [`ComicInfo::parse`].
 pub fn parse_comicinfo(xml: &[u8]) -> Result<ComicInfo> {
     ComicInfo::parse(xml)
