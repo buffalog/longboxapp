@@ -16,11 +16,84 @@
 //! Both functions are pure — they take inputs by value/ref and own no I/O.
 
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 use longbox_core::similarity::similarity;
-use longbox_core::{normalize_title, parse_filename, ParsingPattern};
+use longbox_core::{normalize_title, parse_filename, ParsedFilename, ParsingPattern};
+use regex::Regex;
 
 use crate::types::{ArchiveFormat, Release};
+
+/// Bounded plausible-publishing-year window for the Scene normalizer's
+/// year-wrap step. 1950 floor doubles as an issue-number guard — no real
+/// series has reached issue #1950, so an issue number that happens to be
+/// a 4-digit value (e.g. Action Comics #1000) won't get false-wrapped as
+/// a year. 2039 ceiling covers near-future solicitations. Widening only
+/// warranted if Golden-Age original-year tags surface as real misses.
+static SCENE_YEAR_RE: OnceLock<Regex> = OnceLock::new();
+fn scene_year_re() -> &'static Regex {
+    SCENE_YEAR_RE.get_or_init(|| Regex::new(r"\b(19[5-9]\d|20[0-3]\d)\b").unwrap())
+}
+
+/// Scene-format → canonical-filename shape adapter (Bug 3a). Scene
+/// release titles are dot-separated, year-token-bare, extension-less:
+/// `Beware.the.Eye.of.Odin.001.2022.Digital.Mephisto-Empire`. The
+/// canonical parser cascade expects space-separated, parenthesized-year,
+/// extension-bearing inputs: `Beware the Eye of Odin 001 (2022).cbz`.
+/// Three transforms close the gap:
+///
+/// 1. **Dots → spaces, blanket.** Title-internal dots
+///    (`S.W.O.R.D.`, `G.I.Joe`) lose their structure but the matcher's
+///    `normalize_title` reduces both sides to the same punctuation-free
+///    form, so similarity scoring isn't affected.
+///
+/// 2. **Wrap the rightmost in-range bare year as `(YYYY)`.** Scene
+///    format places the release year last, after the issue number, so
+///    rightmost = release year. Wrapping only the rightmost match
+///    preserves title-internal years (`2000 AD` is a real series whose
+///    name contains a year-range number — wrapping it as the year would
+///    break the parse).
+///
+/// 3. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor in
+///    every pattern matches. The fact that Scene NZBs aren't actually
+///    CBZs is irrelevant — we're feeding the *parser*, not the
+///    downloader.
+///
+/// Called as a fall-back from [`filter_by_series_title`] only after
+/// `parse_filename` returns `None` on the raw title — canonical inputs
+/// short-circuit before reaching here, avoiding any double-wrap of
+/// already-parenthesized years.
+pub fn normalize_scene_title(input: &str) -> String {
+    // 1. dots → spaces
+    let with_spaces = input.replace('.', " ");
+    // 2. rightmost-only year wrap
+    let re = scene_year_re();
+    let wrapped = if let Some(last) = re.find_iter(&with_spaces).last() {
+        let (start, end) = (last.start(), last.end());
+        let mut out = String::with_capacity(with_spaces.len() + 2);
+        out.push_str(&with_spaces[..start]);
+        out.push('(');
+        out.push_str(&with_spaces[start..end]);
+        out.push(')');
+        out.push_str(&with_spaces[end..]);
+        out
+    } else {
+        with_spaces
+    };
+    // 3. append .cbz
+    format!("{wrapped}.cbz")
+}
+
+/// Run the parser on the raw title; fall back to the Scene normalizer
+/// if the raw parse fails. The canonical case (raw title parses) never
+/// reaches the normalizer, so already-parenthesized years can't get
+/// double-wrapped.
+fn parse_release_title(title: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilename> {
+    if let Some(parsed) = parse_filename(title, patterns) {
+        return Some(parsed);
+    }
+    parse_filename(&normalize_scene_title(title), patterns)
+}
 
 /// Outcome of [`filter_by_series_title`] — the kept pool plus, when the
 /// kept pool is empty, an optional diagnostic for the caller's error
@@ -107,7 +180,7 @@ pub fn filter_by_series_title(
     let mut best_series_segment: Option<String> = None;
 
     for release in releases {
-        let Some(parsed) = parse_filename(&release.title, patterns) else {
+        let Some(parsed) = parse_release_title(&release.title, patterns) else {
             continue; // unparseable — counted as wrong-series implicitly
         };
         parseable_count += 1;
@@ -501,6 +574,263 @@ mod tests {
             "year-rejected (a) proves indexer has right series — must stay silent. got {:?}",
             outcome.mismatch
         );
+    }
+
+    // -------- normalize_scene_title (Bug 3a) --------
+    //
+    // Baseline: the 11 archaeology cases that parsed cleanly under the
+    // normalizer. These lock the contract between normalize_scene_title
+    // and parse_filename — a future change to either side that breaks
+    // these will fail loudly. The 2 graceful-failure cases lock the
+    // unparseable-fall-through behavior.
+
+    fn check_normalized_parses_to(
+        raw: &str,
+        expected_series: &str,
+        expected_number: &str,
+        expected_year: Option<i32>,
+    ) {
+        let patterns = default_patterns();
+        let parsed = parse_release_title(raw, &patterns)
+            .unwrap_or_else(|| panic!("Bug 3a: expected to parse {raw:?}"));
+        assert_eq!(
+            parsed.series_title.to_lowercase(),
+            expected_series.to_lowercase(),
+            "series for {raw:?}"
+        );
+        assert_eq!(parsed.number, expected_number, "number for {raw:?}");
+        assert_eq!(parsed.year, expected_year, "year for {raw:?}");
+    }
+
+    #[test]
+    fn normalize_real_wolverine_patch() {
+        check_normalized_parses_to(
+            "Wolverine.-.Patch.005.2022.Digital.Zone-Empire",
+            "Wolverine - Patch",
+            "005",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn normalize_real_life_of_wolverine_infinity_comic() {
+        check_normalized_parses_to(
+            "Life.of.Wolverine.-.Infinity.Comic.005.2022.digital-mobile.Empire",
+            "Life of Wolverine - Infinity Comic",
+            "005",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn normalize_real_hello_darkness() {
+        check_normalized_parses_to(
+            "Hello.Darkness.001.2024.digital.Son.of.Ultron-Empire",
+            "Hello Darkness",
+            "001",
+            Some(2024),
+        );
+    }
+
+    #[test]
+    fn normalize_real_beware_eye_of_odin_5_26_false_positive() {
+        // The exact 5-26 wrong-grab. Under Bug 3a this NOW parses
+        // (correctly extracting "Beware the Eye of Odin"), and the
+        // similarity filter rejects it against requested "Odin".
+        check_normalized_parses_to(
+            "Beware.the.Eye.of.Odin.001.2022.Digital.Mephisto-Empire",
+            "Beware the Eye of Odin",
+            "001",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn normalize_real_thanos_death_notes_cross_result() {
+        check_normalized_parses_to(
+            "Thanos.-.Death.Notes.001.2023.Digital.Zone-Empire",
+            "Thanos - Death Notes",
+            "001",
+            Some(2023),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_number_leading_title() {
+        check_normalized_parses_to(
+            "20th.Century.Men.001.2022.Digital.Mephisto-Empire",
+            "20th Century Men",
+            "001",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_article_multi_word() {
+        check_normalized_parses_to(
+            "The.Walking.Dead.100.2012.Digital.Zone-Empire",
+            "The Walking Dead",
+            "100",
+            Some(2012),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_vintage_number_leading() {
+        check_normalized_parses_to(
+            "100.Bullets.050.2002.Digital.Zone-Empire",
+            "100 Bullets",
+            "050",
+            Some(2002),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_title_internal_dots() {
+        // S.W.O.R.D. — the title-internal-dots worst case. Dots → spaces
+        // loses the structure but the matcher's normalize_title reduces
+        // both "S.W.O.R.D." and "S W O R D" to identical normalized form,
+        // so similarity scoring is preserved.
+        check_normalized_parses_to(
+            "S.W.O.R.D..001.2010.Digital.Zone-Empire",
+            "S W O R D",
+            "001",
+            Some(2010),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_short_word() {
+        check_normalized_parses_to(
+            "Sex.001.2013.Digital.Image-Empire",
+            "Sex",
+            "001",
+            Some(2013),
+        );
+    }
+
+    #[test]
+    fn normalize_synth_sibling_under_scene_format() {
+        // Confirms the Wolverine-MAX boundary case (sibling-series
+        // collision) survives under Scene format — series extraction
+        // yields "Wolverine MAX", which similarity vs "Wolverine"
+        // scores below 0.75 the same way the canonical-format case did.
+        check_normalized_parses_to(
+            "Wolverine.MAX.001.2024.Digital.Zone-Empire",
+            "Wolverine MAX",
+            "001",
+            Some(2024),
+        );
+    }
+
+    /// **The 2000 AD fixture** — title containing a year-range number.
+    /// Rightmost-year-only wrapping must wrap the release year (2023)
+    /// and leave the title-internal 2000 alone. Global wrap would
+    /// produce "(2000) AD" and break the parse.
+    #[test]
+    fn normalize_2000_ad_rightmost_year_only() {
+        check_normalized_parses_to(
+            "2000.AD.2350.2023.Digital.Zone-Empire",
+            "2000 AD",
+            "2350",
+            Some(2023),
+        );
+    }
+
+    /// **Graceful failure 1**: editorial annotation between number and
+    /// year (the real G.I. Joe `Larry Hama Cut` case). Falls through to
+    /// the unparseable→mismatch path. Deferred for a future normalizer-
+    /// local strip-known-annotation-tokens step; NOT a parser-cascade
+    /// change.
+    #[test]
+    fn normalize_gi_joe_edition_annotation_still_no_parse() {
+        let patterns = default_patterns();
+        let parsed = parse_release_title(
+            "G.I.Joe.A.Real.American.Hero.001.Larry.Hama.Cut.2023.digital.Knight.Ripper-Empire",
+            &patterns,
+        );
+        assert!(
+            parsed.is_none(),
+            "Edition-annotation-between-number-and-year: graceful unparseable expected. got {parsed:?}"
+        );
+    }
+
+    /// **Graceful failure 2**: no year in title. Falls through to
+    /// unparseable→mismatch — under-determined input, no year to anchor
+    /// on.
+    #[test]
+    fn normalize_no_year_still_no_parse() {
+        let patterns = default_patterns();
+        let parsed =
+            parse_release_title("Wolverine.005.Digital.Mephisto-Empire", &patterns);
+        assert!(
+            parsed.is_none(),
+            "No-year Scene title: graceful unparseable expected. got {parsed:?}"
+        );
+    }
+
+    /// Canonical filename input MUST NOT reach the normalizer — that'd
+    /// double-wrap the year. Raw parse short-circuits the fall-back.
+    #[test]
+    fn normalize_canonical_input_uses_raw_parse_path() {
+        check_normalized_parses_to(
+            "Wolverine 005 (2024) (digital).cbz",
+            "Wolverine",
+            "005",
+            Some(2024),
+        );
+    }
+
+    // -------- End-to-end filter (Scene-format) --------
+
+    /// Bug 3 + Bug 3a composed: the exact 5-26 wrong-grab now parses
+    /// (via the normalizer), but the similarity filter rejects it on
+    /// title-mismatch — diagnostic shape changes from "none parseable"
+    /// (Bug 3) to "below threshold" (Bug 3a).
+    #[test]
+    fn filter_rejects_odin_false_positive_via_similarity_path_under_scene_format() {
+        let patterns = default_patterns();
+        let pool = vec![release(
+            "Beware.the.Eye.of.Odin.001.2022.Digital.Mephisto-Empire",
+            Some(24),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Odin",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        );
+        assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
+        let diag = outcome.mismatch.expect("must produce a mismatch row");
+        assert_eq!(diag.parseable_count, 1, "Scene title is now parseable via normalizer");
+        let score = diag.best_similarity.expect("similarity scored");
+        assert!(score < 0.5, "Odin vs Beware-the-Eye-of-Odin should score low, got {score}");
+        let msg = diag.into_error_message("Odin", 0.75);
+        assert!(
+            msg.contains("below threshold"),
+            "expected similarity-path wording, got {msg}"
+        );
+    }
+
+    /// Bug 3a positive control: clean Scene-format Hello Darkness 001
+    /// parses + accepts.
+    #[test]
+    fn filter_accepts_clean_scene_format_hello_darkness() {
+        let patterns = default_patterns();
+        let pool = vec![release(
+            "Hello.Darkness.001.2024.digital.Son.of.Ultron-Empire",
+            Some(50),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Hello Darkness",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        );
+        assert_eq!(outcome.kept.len(), 1);
+        assert!(outcome.mismatch.is_none());
     }
 
     #[test]

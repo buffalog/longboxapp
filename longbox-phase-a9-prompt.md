@@ -366,3 +366,25 @@ rather than accreting in commit messages.
   the indexer does have year-stamped alternatives). Co-located
   with the year-filter logic so the tightening is discoverable
   next to what it modifies.
+
+- **Scene special-edition annotations between issue number and
+  release year (Bug 3a graceful failure).** Bug 3a's Scene
+  normalizer claims 11 of 13 real + realistic Scene-format release
+  titles tested in archaeology. The two graceful failures: (a)
+  no-year titles like `Wolverine.005.Digital.Mephisto-Empire`
+  (under-determined, nothing to anchor on); (b) editorial annotation
+  tokens between the issue number and the year like the real
+  `G.I.Joe.A.Real.American.Hero.001.Larry.Hama.Cut.2023.digital.Knight.Ripper-Empire`
+  — pattern 10 requires `\s+\(YYYY\)` immediately after the number,
+  and "Larry Hama Cut" breaks the immediate-adjacency.
+  Both fall to the existing graceful unparseable→mismatch path
+  (visible on `/needs-attention` under `series_mismatch`); we're
+  not silently wrong-grabbing. The annotation case is also
+  *arguably correct* behavior: a "Larry Hama Cut" reprint is a
+  variant edition, not the canonical #1, and auto-grabbing it as
+  the user's pull would be silently wrong. Fix path when this
+  becomes a real need: a normalizer-local strip-known-annotation-
+  tokens step (newznab-local), **not** a parser-cascade widening
+  — `parse_filename` lives in `longbox-core` and is shared with
+  disk-file parsing, where a more permissive number→year span is
+  the exact match-but-poison surface Bug 1 hardened.
