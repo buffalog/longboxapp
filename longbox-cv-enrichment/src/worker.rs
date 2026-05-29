@@ -127,6 +127,26 @@ async fn worker_loop(
             }
         };
 
+        // Bug 4a kill switch. Disabled → idle 60s before re-reading
+        // (so flipping the setting via SQL takes effect within ~1
+        // minute, no restart needed).
+        if !config.enabled {
+            tracing::debug!(
+                target: "longbox_cv_enrichment",
+                "cv_enrichment.disabled (cv_enrichment_enabled=false)"
+            );
+            tokio::select! {
+                msg = trigger.recv() => {
+                    if msg.is_none() {
+                        tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+            }
+            continue;
+        }
+
         let bg = BackgroundCvClient::new(
             Arc::clone(&inner_cv),
             Duration::from_secs(config.request_interval_seconds),

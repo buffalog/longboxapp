@@ -8,6 +8,12 @@ use longbox_db::{settings_repo, Pool};
 
 #[derive(Debug, Clone)]
 pub struct EnrichmentConfig {
+    /// Bug 4a kill switch. `false` makes the worker idle on every
+    /// cycle without attempting any series. Code default is `true`
+    /// (forward-compatible for future fresh deploys); the Bug 4a
+    /// migration row holds it down at `false` for the Bug 4 deploy
+    /// specifically.
+    pub enabled: bool,
     pub thresholds: EnrichmentThresholds,
     pub cooldown_days: i64,
     pub request_interval_seconds: u64,
@@ -20,6 +26,14 @@ pub struct EnrichmentConfig {
 
 impl EnrichmentConfig {
     pub async fn load(db: &Pool) -> Result<Self, longbox_db::DbError> {
+        // Bug 4a: kill-switch read FIRST. Code default `true` —
+        // a fresh deploy with no settings row enables the worker.
+        // The Bug 4a migration inserts an explicit 'false' row
+        // for this deploy.
+        let enabled: bool =
+            settings_repo::get_or_default(db, settings_repo::KEY_CV_ENRICHMENT_ENABLED, true)
+                .await?;
+
         let title_known: f64 = settings_repo::get_or_default(
             db,
             settings_repo::KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_KNOWN,
@@ -81,6 +95,7 @@ impl EnrichmentConfig {
             settings_repo::get_or_default(db, "cv_enrichment_first_run_collision_quota", 5).await?;
 
         Ok(Self {
+            enabled,
             thresholds: EnrichmentThresholds {
                 title_threshold_year_known: title_known,
                 title_threshold_year_unknown: title_unknown,
