@@ -295,6 +295,65 @@ where
     Ok(row)
 }
 
+/// Row-id-preserving upsert for CV enrichment (Step 6c.1).
+///
+/// Inserts a new `(series_id, number)` row OR updates the existing
+/// match — keyed on the `UNIQUE(series_id, number)` index — writing
+/// the CV-side fields while preserving the row id. This preservation
+/// is the entire correctness point: `files.issue_id` references the
+/// surviving row, so the file attachment carries through the
+/// shallow-to-CV-linked promotion without re-attribution.
+///
+/// Used by the cv_enrichment worker (Step 6c.2) when a shallow
+/// series acquires a `cv_id` and its issue list is fetched from
+/// ComicVine. Each CV issue gets upserted; existing synthesized
+/// issues (`cv_issue_id IS NULL`) for the same `(series_id, number)`
+/// have their CV-side fields filled in.
+///
+/// Catalog-only numbers (rows in the catalog but absent from CV's
+/// issue list — i.e., numbers in the catalog that this method is
+/// never called for) are NOT touched. The worker counts them
+/// separately and records `partial_merge` on the series row so the
+/// stranded provenance is visible. This is the loudness-not-silence
+/// discipline applied to the merge surface (compare Bug 3's
+/// `pull_attempts.status='mismatched'`).
+pub async fn upsert_by_series_id_and_number_with_cv_fields<'e, E>(
+    executor: E,
+    input: NewIssue,
+) -> Result<IssueRow>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query_as!(
+        IssueRow,
+        r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
+                               title, cover_date, summary, cover_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(series_id, number) DO UPDATE
+           SET cv_issue_id = excluded.cv_issue_id,
+               title = excluded.title,
+               cover_date = excluded.cover_date,
+               summary = excluded.summary,
+               cover_url = excluded.cover_url,
+               updated_at = CURRENT_TIMESTAMP
+           RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
+                     cv_issue_id, metron_issue_id, number, title, cover_date,
+                     summary, cover_url,
+                     created_at AS "created_at: _", updated_at AS "updated_at: _""#,
+        input.series_id,
+        input.cv_issue_id,
+        input.metron_issue_id,
+        input.number,
+        input.title,
+        input.cover_date,
+        input.summary,
+        input.cover_url,
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(row)
+}
+
 pub async fn update<'e, E>(executor: E, id: i64, patch: IssueUpdate) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,

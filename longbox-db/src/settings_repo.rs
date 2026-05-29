@@ -22,6 +22,27 @@ pub const KEY_AUTO_TIDY_ENABLED: &str = "auto_tidy_enabled";
 /// recovery cost of a wrong NZB grab.
 pub const KEY_PULL_INDEXER_MATCH_THRESHOLD: &str = "pull_indexer_match_threshold";
 
+/// CV enrichment tunables (Step 6c.1). Worker reads each per-cycle so
+/// flipping a value tunes the next attempt with no restart. Defaults
+/// are the conservative-to-a-fault choices from the kickoff and
+/// codified in the 20260529 migration.
+pub const KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_KNOWN: &str =
+    "cv_enrichment_title_threshold_year_known";
+pub const KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_UNKNOWN: &str =
+    "cv_enrichment_title_threshold_year_unknown";
+pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_KNOWN: &str =
+    "cv_enrichment_count_window_year_known";
+pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_UNKNOWN: &str =
+    "cv_enrichment_count_window_year_unknown";
+pub const KEY_CV_ENRICHMENT_DOMINANT_GAP: &str = "cv_enrichment_dominant_gap";
+pub const KEY_CV_ENRICHMENT_COOLDOWN_DAYS: &str = "cv_enrichment_cooldown_days";
+pub const KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS: &str =
+    "cv_enrichment_request_interval_seconds";
+/// Bounded-sample gate enforcing the 6c.3 observation step
+/// structurally. Worker stops after this many attempts per cycle;
+/// 0 disables the bound (full backlog).
+pub const KEY_CV_ENRICHMENT_MAX_RUN: &str = "cv_enrichment_max_run";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,
