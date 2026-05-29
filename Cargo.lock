@@ -1184,6 +1184,7 @@ name = "longbox-comicvine"
 version = "0.0.1"
 dependencies = [
  "governor",
+ "longbox-core",
  "pretty_assertions",
  "reqwest",
  "serde",

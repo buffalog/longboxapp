@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO files (issue_id, library_root_id, path_relative, size_bytes,\n                              mtime, last_scanned_at, match_method, match_confidence,\n                              status, is_present, last_seen_at)\n           VALUES (?, ?, 'series/issue-10.cbz', 100, '2024-01-01 00:00:00',\n                   '2024-01-01 00:00:00', 'phase_b', 1.0, 'owned', 1,\n                   '2024-01-01 00:00:00')\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "554a64bddd8e1c2553ba8c8b79f7ae2d7d78c753c5f5f97dee2ce4ce25919d1a"
+}

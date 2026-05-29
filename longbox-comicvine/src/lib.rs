@@ -7,6 +7,7 @@
 //! [`CvIssueDetail`].
 
 pub mod client;
+pub mod enrichment;
 pub mod error;
 pub mod projection;
 
@@ -14,5 +15,6 @@ mod models;
 mod rate_limit;
 
 pub use client::{ComicVineClient, ComicVineClientConfig};
+pub use enrichment::{pick_volume, EnrichmentCandidateInput, EnrichmentThresholds, PickOutcome};
 pub use error::CvError;
 pub use projection::{CvCalendarItem, CvIssueDetail, CvVolumeDetail, SeriesSearchResult};
