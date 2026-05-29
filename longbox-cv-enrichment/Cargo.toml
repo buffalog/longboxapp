@@ -1,0 +1,26 @@
+[package]
+name = "longbox-cv-enrichment"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LongBox shallow-series CV enrichment worker."
+
+[lints]
+workspace = true
+
+[dependencies]
+longbox-comicvine = { path = "../longbox-comicvine" }
+longbox-core = { path = "../longbox-core" }
+longbox-db = { path = "../longbox-db" }
+governor = "0.6"
+time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"
+pretty_assertions = "1"

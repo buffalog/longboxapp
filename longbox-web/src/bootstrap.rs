@@ -148,10 +148,19 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         },
     );
 
-    // 10. Compose state.
+    // 10. CV enrichment worker (Step 6c.2). Performs its own
+    //     startup migration assertion before doing any work. If the
+    //     6c.1 columns are missing on the live DB, the worker
+    //     refuses to start, logs at ERROR, and the returned handle's
+    //     request_run() is a no-op — the rest of the web layer
+    //     continues running.
+    let cv_arc = Arc::new(cv);
+    let enrichment = longbox_cv_enrichment::spawn(db.clone(), Arc::clone(&cv_arc));
+
+    // 11. Compose state.
     Ok(AppState {
         db,
-        cv: Arc::new(cv),
+        cv: cv_arc,
         scanner,
         config: Arc::new(config),
         scan_status,
@@ -159,6 +168,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         pending_cache,
         pull,
         scan_scheduler,
+        enrichment,
     })
 }
 

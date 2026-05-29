@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT number AS \"number!: String\"\n           FROM issues\n           WHERE series_id = ? AND cv_issue_id IS NULL\n           ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "number!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc482c1456ecff2b1403b61d68eb1183bd5a7908dbfe8fe7b2c44b0286612eac"
+}

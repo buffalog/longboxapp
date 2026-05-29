@@ -174,6 +174,37 @@ where
     Ok(row)
 }
 
+/// Promote a shallow series to CV-linked (Step 6c.2). Single-purpose;
+/// the existing [`SeriesUpdate`] excludes `cv_id` as immutable. This
+/// is the one sanctioned path to assign cv_id post-creation.
+///
+/// Defensive predicate: `WHERE id = ? AND cv_id IS NULL`. The
+/// predicate is *not* redundant with the worker's queue filter — it's
+/// a race guard. Two workers attempting the same series, or a worker
+/// racing a manual user link via the UI, both resolve correctly:
+/// whichever's UPDATE lands first wins; the second writer's UPDATE
+/// matches zero rows. The DB-level `UNIQUE(cv_id)` constraint is the
+/// backstop against two different series receiving the same cv_id.
+///
+/// Returns the number of rows updated. **The caller MUST treat
+/// `rows_affected == 0` as a real outcome** ("someone else claimed
+/// this series first") and log it explicitly — not silently succeed.
+pub async fn set_cv_id<'e, E>(executor: E, series_id: i64, cv_id: i64) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET cv_id = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND cv_id IS NULL"#,
+        cv_id,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn find_by_metron_id<'e, E>(executor: E, metron_id: &str) -> Result<Option<SeriesRow>>
 where
     E: SqliteExecutor<'e>,
@@ -625,6 +656,294 @@ where
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// One shallow-series candidate for the enrichment worker (Step
+/// 6c.2). The `catalog_title_collision` flag is computed in the
+/// candidate query via a `sort_title` aggregate so [`pick_volume`]
+/// gets it without a second round-trip — the pure function stays
+/// pure (it receives the flag, doesn't compute it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShallowEnrichmentCandidate {
+    pub series_id: i64,
+    pub title: String,
+    pub start_year: Option<i64>,
+    pub issue_count: i64,
+    pub owned_count: i64,
+    /// `true` when ≥ 2 catalog rows share this series's normalized
+    /// `sort_title`. The enrichment auto-pick disables CV attempts
+    /// when this is `true` *and* `start_year IS NULL` (year-known
+    /// collision is disambiguated by the year gate; year-unknown
+    /// collision is the highest false-positive surface).
+    pub catalog_title_collision: bool,
+}
+
+/// Sub-population modes for the bounded-sample first-run gate
+/// (6c.3). The worker reads `cv_enrichment_first_run_sample_mode`
+/// per cycle; when `true`, the candidate query enforces the
+/// deliberate three-bucket mix (highest-owned year-known
+/// title-unique + year-unknown title-unique + collision-disabled)
+/// so 6c.3's outcome distribution exercises both auto-link and
+/// refusal paths, not just the easy path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSelectionMode {
+    /// First-run sample composition. The query returns at most:
+    /// - `easy_quota` highest-owned year-known title-unique
+    /// - `discipline_quota` year-unknown title-unique
+    /// - `collision_quota` collision-disabled (year-unknown + ≥ 2
+    ///   catalog siblings) — included as explicit positive records
+    ///   so 6c.3's bucketed report shows "N: collision_disabled" as
+    ///   a signal the pre-filter ran, not as absence.
+    FirstRunSample {
+        easy_quota: i64,
+        discipline_quota: i64,
+        collision_quota: i64,
+    },
+    /// Steady-state: plain priority order (owned_count DESC,
+    /// last_matched_count DESC, id ASC), bounded only by the
+    /// caller's `limit`.
+    PriorityOrder,
+}
+
+/// List shallow-series candidates for the next enrichment cycle.
+/// Filters:
+/// - `cv_id IS NULL` (only shallow)
+/// - cooldown window: `last_enrichment_attempt_at IS NULL OR < now
+///   - cooldown_days`
+///
+/// Sort + grouping depends on [`CandidateSelectionMode`]. The
+/// `catalog_title_collision` flag is computed in-query via a
+/// `sort_title`-grouping subquery so each candidate carries the
+/// correct flag and the worker doesn't have to fan out per-series.
+pub async fn list_shallow_for_enrichment<'e, E>(
+    executor: E,
+    cooldown_days: i64,
+    mode: CandidateSelectionMode,
+) -> Result<Vec<ShallowEnrichmentCandidate>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let cooldown = format!("-{cooldown_days} days");
+    match mode {
+        CandidateSelectionMode::PriorityOrder => {
+            let rows = sqlx::query_as!(
+                ShallowEnrichmentCandidate,
+                r#"
+                WITH title_collision AS (
+                    SELECT sort_title FROM series
+                    GROUP BY sort_title HAVING COUNT(*) >= 2
+                ),
+                owned_counts AS (
+                    SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count
+                    FROM issues i
+                    JOIN files f ON f.issue_id = i.id
+                    WHERE f.status = 'owned' AND f.is_present = 1
+                    GROUP BY i.series_id
+                ),
+                issue_counts AS (
+                    SELECT series_id, COUNT(*) AS issue_count
+                    FROM issues GROUP BY series_id
+                )
+                SELECT
+                    s.id AS "series_id!: i64",
+                    s.title AS "title!: String",
+                    s.start_year,
+                    COALESCE(ic.issue_count, 0) AS "issue_count!: i64",
+                    COALESCE(oc.owned_count, 0) AS "owned_count!: i64",
+                    CASE
+                        WHEN tc.sort_title IS NOT NULL THEN 1
+                        ELSE 0
+                    END AS "catalog_title_collision!: bool"
+                FROM series s
+                LEFT JOIN owned_counts oc ON oc.series_id = s.id
+                LEFT JOIN issue_counts ic ON ic.series_id = s.id
+                LEFT JOIN title_collision tc ON tc.sort_title = s.sort_title
+                WHERE s.cv_id IS NULL
+                  AND (
+                      s.last_enrichment_attempt_at IS NULL
+                      OR s.last_enrichment_attempt_at < datetime('now', ?)
+                  )
+                ORDER BY owned_count DESC, s.last_matched_count DESC, s.id ASC
+                "#,
+                cooldown,
+            )
+            .fetch_all(executor)
+            .await?;
+            Ok(rows)
+        }
+        CandidateSelectionMode::FirstRunSample {
+            easy_quota,
+            discipline_quota,
+            collision_quota,
+        } => {
+            // The first-run query is three unioned slices, each
+            // already ordered + limited. The worker treats the
+            // combined Vec as its cycle's candidates.
+            let rows = sqlx::query_as!(
+                ShallowEnrichmentCandidate,
+                r#"
+                WITH title_collision AS (
+                    SELECT sort_title FROM series
+                    GROUP BY sort_title HAVING COUNT(*) >= 2
+                ),
+                owned_counts AS (
+                    SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count
+                    FROM issues i
+                    JOIN files f ON f.issue_id = i.id
+                    WHERE f.status = 'owned' AND f.is_present = 1
+                    GROUP BY i.series_id
+                ),
+                issue_counts AS (
+                    SELECT series_id, COUNT(*) AS issue_count
+                    FROM issues GROUP BY series_id
+                ),
+                eligible AS (
+                    SELECT
+                        s.id AS series_id,
+                        s.title AS title,
+                        s.start_year,
+                        COALESCE(ic.issue_count, 0) AS issue_count,
+                        COALESCE(oc.owned_count, 0) AS owned_count,
+                        CASE WHEN tc.sort_title IS NOT NULL THEN 1 ELSE 0 END AS collision_flag,
+                        s.last_matched_count AS lmc
+                    FROM series s
+                    LEFT JOIN owned_counts oc ON oc.series_id = s.id
+                    LEFT JOIN issue_counts ic ON ic.series_id = s.id
+                    LEFT JOIN title_collision tc ON tc.sort_title = s.sort_title
+                    WHERE s.cv_id IS NULL
+                      AND (
+                          s.last_enrichment_attempt_at IS NULL
+                          OR s.last_enrichment_attempt_at < datetime('now', ?1)
+                      )
+                ),
+                easy_bucket AS (
+                    SELECT * FROM eligible
+                    WHERE start_year IS NOT NULL AND collision_flag = 0
+                    ORDER BY owned_count DESC, lmc DESC, series_id ASC
+                    LIMIT ?2
+                ),
+                discipline_bucket AS (
+                    SELECT * FROM eligible
+                    WHERE start_year IS NULL AND collision_flag = 0
+                    ORDER BY owned_count DESC, lmc DESC, series_id ASC
+                    LIMIT ?3
+                ),
+                collision_bucket AS (
+                    SELECT * FROM eligible
+                    WHERE collision_flag = 1
+                    ORDER BY owned_count DESC, lmc DESC, series_id ASC
+                    LIMIT ?4
+                )
+                SELECT
+                    series_id AS "series_id!: i64",
+                    title AS "title!: String",
+                    start_year,
+                    issue_count AS "issue_count!: i64",
+                    owned_count AS "owned_count!: i64",
+                    collision_flag AS "catalog_title_collision!: bool"
+                FROM (
+                    SELECT * FROM easy_bucket
+                    UNION ALL
+                    SELECT * FROM discipline_bucket
+                    UNION ALL
+                    SELECT * FROM collision_bucket
+                )
+                ORDER BY owned_count DESC, lmc DESC, series_id ASC
+                "#,
+                cooldown,
+                easy_quota,
+                discipline_quota,
+                collision_quota,
+            )
+            .fetch_all(executor)
+            .await?;
+            Ok(rows)
+        }
+    }
+}
+
+/// Whether the three 6c.1 enrichment-tracking columns exist on
+/// `series`. The enrichment worker calls this at startup; missing
+/// columns trip the loud-fail-at-boot defense around the deferred
+/// migration-not-applied-on-startup gremlin. Returns the missing
+/// columns sorted (empty vec = schema OK).
+pub async fn enrichment_schema_check<'e, E>(executor: E) -> Result<Vec<String>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(r#"PRAGMA table_info(series)"#)
+        .fetch_all(executor)
+        .await?;
+    let present: std::collections::HashSet<String> = rows.into_iter().map(|r| r.name).collect();
+    let required = [
+        "last_enrichment_attempt_at",
+        "last_enrichment_outcome",
+        "last_enrichment_error",
+    ];
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|c| !present.contains(**c))
+        .map(|c| (*c).to_string())
+        .collect();
+    Ok(missing)
+}
+
+/// List `(series_id, number)` of issues still synthesized
+/// (`cv_issue_id IS NULL`) for a given series. Called *inside* the
+/// enrichment merge transaction, *after* the per-CV-issue upserts.
+/// At that point CV-numbered rows that just got matched-and-updated
+/// by number already have `cv_issue_id` set and drop out of this
+/// filter — so what comes back is genuinely the orphan set (catalog
+/// numbers CV's issue list didn't cover). Order is load-bearing in
+/// the worker; pre-upsert this would count every synthesized row
+/// as orphan.
+pub async fn list_orphan_synthesized_numbers<'e, E>(
+    executor: E,
+    series_id: i64,
+) -> Result<Vec<String>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT number AS "number!: String"
+           FROM issues
+           WHERE series_id = ? AND cv_issue_id IS NULL
+           ORDER BY id ASC"#,
+        series_id,
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.number).collect())
+}
+
+/// Record the result of an enrichment attempt on a shallow series.
+/// Called inside the per-attempt transaction so the outcome write
+/// rolls back atomically with the merge writes — the attempt
+/// timestamp staying unset on rollback is the proof the
+/// transaction boundary holds.
+pub async fn record_enrichment_outcome<'e, E>(
+    executor: E,
+    series_id: i64,
+    outcome: &str,
+    error_or_diagnostic: Option<&str>,
+) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    sqlx::query!(
+        r#"UPDATE series
+           SET last_enrichment_attempt_at = CURRENT_TIMESTAMP,
+               last_enrichment_outcome = ?,
+               last_enrichment_error = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        outcome,
+        error_or_diagnostic,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// "Keep" a phantom: clear every auto-tidy signal in one shot —

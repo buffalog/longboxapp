@@ -23,6 +23,7 @@ longbox-newznab = { path = "../longbox-newznab" }
 longbox-downloader = { path = "../longbox-downloader" }
 longbox-pull = { path = "../longbox-pull" }
 longbox-scan-scheduler = { path = "../longbox-scan-scheduler" }
+longbox-cv-enrichment = { path = "../longbox-cv-enrichment" }
 longbox-webhooks = { path = "../longbox-webhooks" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

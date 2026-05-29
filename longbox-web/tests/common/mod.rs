@@ -91,10 +91,12 @@ pub async fn build_test_app() -> TestApp {
         longbox_scan_scheduler::ScanSchedulerConfig::default(),
         || async {},
     );
+    let cv_arc = Arc::new(cv);
+    let enrichment = longbox_cv_enrichment::spawn(pool.clone(), Arc::clone(&cv_arc));
 
     let state = AppState {
         db: pool,
-        cv: Arc::new(cv),
+        cv: cv_arc,
         scanner: Arc::new(scanner),
         config: Arc::new(config),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
@@ -102,6 +104,7 @@ pub async fn build_test_app() -> TestApp {
         pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
         pull,
         scan_scheduler,
+        enrichment,
     };
 
     let router = build_router(state.clone());

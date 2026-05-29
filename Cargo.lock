@@ -1208,6 +1208,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "longbox-cv-enrichment"
+version = "0.0.1"
+dependencies = [
+ "governor",
+ "longbox-comicvine",
+ "longbox-core",
+ "longbox-db",
+ "pretty_assertions",
+ "sqlx",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "longbox-db"
 version = "0.0.1"
 dependencies = [
@@ -1325,6 +1342,7 @@ dependencies = [
  "hyper",
  "longbox-comicvine",
  "longbox-core",
+ "longbox-cv-enrichment",
  "longbox-db",
  "longbox-downloader",
  "longbox-newznab",

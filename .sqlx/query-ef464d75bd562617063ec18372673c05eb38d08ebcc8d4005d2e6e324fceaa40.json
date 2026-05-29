@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET cv_id = ?, updated_at = CURRENT_TIMESTAMP\n           WHERE id = ? AND cv_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ef464d75bd562617063ec18372673c05eb38d08ebcc8d4005d2e6e324fceaa40"
+}
