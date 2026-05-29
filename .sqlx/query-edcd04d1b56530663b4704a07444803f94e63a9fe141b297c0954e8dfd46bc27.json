@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,\n                               title, cover_date, summary, cover_url)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT(series_id, number) DO UPDATE\n           SET cv_issue_id = excluded.cv_issue_id,\n               title = excluded.title,\n               cover_date = excluded.cover_date,\n               summary = excluded.summary,\n               cover_url = excluded.cover_url,\n               updated_at = CURRENT_TIMESTAMP\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     cv_issue_id, metron_issue_id, number, title, cover_date,\n                     summary, cover_url,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
+  "query": "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,\n                               title, cover_date, summary, cover_url)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT(series_id, canonical_number) DO UPDATE\n           SET cv_issue_id = excluded.cv_issue_id,\n               title = excluded.title,\n               cover_date = excluded.cover_date,\n               summary = excluded.summary,\n               cover_url = excluded.cover_url,\n               updated_at = CURRENT_TIMESTAMP\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     cv_issue_id, metron_issue_id, number, title, cover_date,\n                     summary, cover_url,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
   "describe": {
     "columns": [
       {
@@ -76,5 +76,5 @@
       false
     ]
   },
-  "hash": "28d3b00765d1ed8caca5f51b4a2df15efee197352dadeef60175134ad0c65fc0"
+  "hash": "edcd04d1b56530663b4704a07444803f94e63a9fe141b297c0954e8dfd46bc27"
 }

@@ -833,6 +833,33 @@ where
                     WHERE collision_flag = 1
                     ORDER BY owned_count DESC, lmc DESC, series_id ASC
                     LIMIT ?4
+                ),
+                -- Bug 4 bucket-ordering fix: rank each bucket
+                -- internally, then interleave via (rank, bucket_order).
+                -- 6c.3's first run had the discipline bucket
+                -- monopolize the first 6 attempts because year-unknown
+                -- series have systematically higher owned counts than
+                -- easy-bucket year-known ones. Interleaving guarantees
+                -- the easy bucket actually gets reached before
+                -- max_run cuts off the cycle.
+                ranked AS (
+                    SELECT series_id, title, start_year, issue_count,
+                           owned_count, collision_flag,
+                           1 AS bucket_order,
+                           ROW_NUMBER() OVER (ORDER BY owned_count DESC, lmc DESC, series_id ASC) AS rank
+                    FROM easy_bucket
+                    UNION ALL
+                    SELECT series_id, title, start_year, issue_count,
+                           owned_count, collision_flag,
+                           2 AS bucket_order,
+                           ROW_NUMBER() OVER (ORDER BY owned_count DESC, lmc DESC, series_id ASC) AS rank
+                    FROM discipline_bucket
+                    UNION ALL
+                    SELECT series_id, title, start_year, issue_count,
+                           owned_count, collision_flag,
+                           3 AS bucket_order,
+                           ROW_NUMBER() OVER (ORDER BY owned_count DESC, lmc DESC, series_id ASC) AS rank
+                    FROM collision_bucket
                 )
                 SELECT
                     series_id AS "series_id!: i64",
@@ -841,14 +868,8 @@ where
                     issue_count AS "issue_count!: i64",
                     owned_count AS "owned_count!: i64",
                     collision_flag AS "catalog_title_collision!: bool"
-                FROM (
-                    SELECT * FROM easy_bucket
-                    UNION ALL
-                    SELECT * FROM discipline_bucket
-                    UNION ALL
-                    SELECT * FROM collision_bucket
-                )
-                ORDER BY owned_count DESC, lmc DESC, series_id ASC
+                FROM ranked
+                ORDER BY rank ASC, bucket_order ASC
                 "#,
                 cooldown,
                 easy_quota,

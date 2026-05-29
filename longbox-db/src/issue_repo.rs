@@ -251,7 +251,9 @@ where
     qb.push_values(numbers.iter(), |mut b, n| {
         b.push_bind(series_id).push_bind(n);
     });
-    qb.push(" ON CONFLICT(series_id, number) DO UPDATE SET number = excluded.number");
+    // Bug 4: conflict on canonical_number — bulk-convert is the
+    // second biting path. "001" and "1" now collide as expected.
+    qb.push(" ON CONFLICT(series_id, canonical_number) DO UPDATE SET number = excluded.number");
     qb.push(" RETURNING id, number");
     let rows: Vec<(i64, String)> = qb.build_query_as().fetch_all(executor).await?;
     Ok(rows)
@@ -324,12 +326,19 @@ pub async fn upsert_by_series_id_and_number_with_cv_fields<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    // Bug 4: conflict target is (series_id, canonical_number) — the
+    // STORED generated column that strips leading zeros so "001" and
+    // "1" collide as the same conceptual issue. `excluded.number`
+    // stays the original-write form on UPDATE so display is preserved
+    // verbatim. The matcher's `IssueNumber::matches()` already
+    // canonicalizes at lookup time; this aligns the DB-level
+    // uniqueness with that semantic.
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
                                title, cover_date, summary, cover_url)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(series_id, number) DO UPDATE
+           ON CONFLICT(series_id, canonical_number) DO UPDATE
            SET cv_issue_id = excluded.cv_issue_id,
                title = excluded.title,
                cover_date = excluded.cover_date,

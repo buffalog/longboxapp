@@ -54,6 +54,11 @@ fn parse_unique_violation(msg: &str) -> Option<&'static str> {
         "issues.cv_issue_id" => "cv_issue_id",
         "issues.metron_issue_id" => "metron_issue_id",
         "issues.series_id, issues.number" => "issues_series_id_number",
+        // Bug 4: canonical_number unique index — same conceptual
+        // violation as the raw-number one for callers; same field
+        // tag so application-level matchers don't need to know
+        // which form (raw vs canonical) tripped first.
+        "issues.series_id, issues.canonical_number" => "issues_series_id_number",
         "library_roots.path" => "path",
         "files.library_root_id, files.path_relative" => "files_library_root_id_path_relative",
         "publisher_filters.publisher_name" => "publisher_name",

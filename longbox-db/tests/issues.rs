@@ -448,6 +448,67 @@ async fn upsert_with_cv_fields_handles_fractional_issue_number() {
     );
 }
 
+// -------- Bug 4: canonical_number unique index --------
+
+/// The canonical key collapses padding-equivalent strings ("001"
+/// and "1") onto the same conceptual issue. The upsert MUST see
+/// them as the same key and UPDATE rather than INSERT.
+#[tokio::test]
+async fn upsert_with_cv_fields_padding_equivalent_keys_collapse() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+    // Insert padded form first (matches what the parser would produce).
+    let padded = issue_repo::insert(&pool, new_issue(series_id, "001", None))
+        .await
+        .unwrap();
+    // Now upsert unpadded form (what CV returns). Bug 4's canonical
+    // key MUST collapse these: same row id, no new INSERT.
+    let after = issue_repo::upsert_by_series_id_and_number_with_cv_fields(
+        &pool,
+        cv_filled_issue(series_id, "1", 4001),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        after.id, padded.id,
+        "padded \"001\" and unpadded \"1\" must collapse onto the same row"
+    );
+    // The original-write form is preserved on UPDATE (excluded.number
+    // is NOT in the SET clause), so the row's number stays "001"
+    // even though we upserted with "1".
+    assert_eq!(after.number, "001", "display form preserved verbatim");
+    assert_eq!(after.cv_issue_id, Some(4001));
+}
+
+/// Distinct issue forms that AREN'T padding-equivalent must still
+/// stay distinct. The disagreement-coexist test from 6c.1 still
+/// holds under Bug 4 — "½" and "1/2" are genuinely different
+/// string forms with different canonicalizations.
+#[tokio::test]
+async fn upsert_with_cv_fields_genuine_disagreement_still_coexists() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+    let half = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "½".into(),
+            ..new_issue(series_id, "½", None)
+        },
+    )
+    .await
+    .unwrap();
+    let one_half = issue_repo::upsert_by_series_id_and_number_with_cv_fields(
+        &pool,
+        cv_filled_issue(series_id, "1/2", 5001),
+    )
+    .await
+    .unwrap();
+    assert_ne!(one_half.id, half.id, "½ and 1/2 stay distinct");
+}
+
 /// 6c.1 amendment: the disagreement-coexist case for issue
 /// numbers. The risk path is CV returning the textual form
 /// `"1/2"` while the parser captured the literal character `"½"`
