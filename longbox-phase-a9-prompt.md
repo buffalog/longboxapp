@@ -168,11 +168,19 @@ Cross-cutting build, verification, and deploy rules that surfaced
 mid-phase. Recorded here so they bind every remaining step rather than
 being relearned per step.
 
-- **Redeploy with `docker-compose up -d --force-recreate`.** Plain
+- **Redeploy with `docker-compose up -d --build --force-recreate`.** Plain
   `up -d` no-op'd on the 6a deploy — it reported the container "Running"
-  and left it on the stale pre-rebuild image. `--force-recreate` always
-  recreates the container against the freshly built image. Use it as the
-  standard redeploy command.
+  and left it on the stale pre-rebuild image. **`--force-recreate` alone
+  reuses the existing image and serves a stale binary** — it recreates the
+  container but does NOT rebuild. That gap is the leading-but-unconfirmed
+  cause of the Bug 4 missed-migration incident (Bug 5 archaeology, 2026-05-29):
+  a stale-image deploy would have shipped a binary missing the latest
+  migrations, exactly matching the observed symptom of `migrate.run()`
+  returning Ok in 8ms with rows absent. The two flags together are the
+  rule: `--build` re-runs the image build, `--force-recreate` swaps the
+  container against the fresh image. Use both, every time. The
+  Bug 5 boot-time integrity assertion (`MigrationGap` error) is the
+  loudness backstop if this rule is ever forgotten.
 
 - **`cargo clippy --workspace --all-targets` per step.** A plain `clippy`
   check skips test code; the CBR hot-fix surfaced 6 pre-existing warnings
