@@ -5,7 +5,6 @@
   import { CalendarDays, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
-    addCalendarVolumeToPullList,
     bulkAddCalendarVolumesToPullList,
     getReleaseCalendar,
     type CalendarRow
@@ -25,7 +24,6 @@
   let error = $state<ApiError | null>(null);
   let loading = $state(false);
   let refreshing = $state(false);
-  let busyVolume = $state<number | null>(null);
   let bulkBusy = $state(false);
   let pullFilter = $state<'all' | 'on' | 'off'>('all');
 
@@ -97,24 +95,6 @@
     void loadRange();
   }
 
-  async function handleAddToPullList(row: CalendarRow): Promise<void> {
-    busyVolume = row.cv_volume_id;
-    error = null;
-    try {
-      const { series_id } = await addCalendarVolumeToPullList(row.cv_volume_id);
-      // A volume can ship several issues in one week — flip every row
-      // that shares the volume, not just the clicked one.
-      rows = rows.map((r) =>
-        r.cv_volume_id === row.cv_volume_id ? { ...r, series_id, on_pull_list: true } : r
-      );
-      toast.success(`${row.volume_name} added to the pull list.`);
-    } catch (e) {
-      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
-    } finally {
-      busyVolume = null;
-    }
-  }
-
   async function bulkAdd(): Promise<void> {
     const ids = [...sel.selected];
     if (ids.length === 0) return;
@@ -152,9 +132,9 @@
   }
 
   const busy = $derived(loading || refreshing);
-  // Any in-flight mutation — gates the add controls so a single add, a
-  // bulk add, and a range reload can't race each other.
-  const anyBusy = $derived(busy || bulkBusy || busyVolume !== null);
+  // Any in-flight mutation — gates the add controls so a bulk add and
+  // a range reload can't race each other.
+  const anyBusy = $derived(busy || bulkBusy);
 </script>
 
 <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
@@ -313,15 +293,6 @@
                   >
                     On pull list
                   </span>
-                {:else}
-                  <Button
-                    size="sm"
-                    onclick={() => handleAddToPullList(row)}
-                    loading={busyVolume === row.cv_volume_id}
-                    disabled={anyBusy}
-                  >
-                    Add to pull list
-                  </Button>
                 {/if}
               </div>
             </td>

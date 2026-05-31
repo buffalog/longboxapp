@@ -4,7 +4,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  addCalendarVolumeToPullList,
   bulkAddCalendarVolumesToPullList,
   getReleaseCalendar,
   type CalendarRow
@@ -14,7 +13,6 @@ import CalendarPage from './+page.svelte';
 vi.mock('$lib/api/releases', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/releases')>()),
   getReleaseCalendar: vi.fn(),
-  addCalendarVolumeToPullList: vi.fn(),
   bulkAddCalendarVolumesToPullList: vi.fn()
 }));
 
@@ -63,22 +61,13 @@ describe('release calendar page', () => {
     expect(screen.getByText('No releases in this range')).toBeInTheDocument();
   });
 
-  it('adds a volume to the pull list and flips the row', async () => {
-    vi.mocked(addCalendarVolumeToPullList).mockResolvedValue({ series_id: 42 });
+  it('disables the bulk-add button when no volumes are selected', () => {
     render(
       CalendarPage,
       pageData([calRow({ cv_volume_id: 100, volume_name: 'Saga', on_pull_list: false })])
     );
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Add to pull list' }));
-
-    await waitFor(() => expect(addCalendarVolumeToPullList).toHaveBeenCalledWith(100));
-    // The row badge is a <span>; the filter pill is a <button> with the
-    // same text — scope to the badge.
-    await waitFor(() =>
-      expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
-    );
-    expect(screen.queryByRole('button', { name: 'Add to pull list' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add selected to pull list' })).toBeDisabled();
   });
 
   it('bulk-adds selected volumes and flips their rows', async () => {
