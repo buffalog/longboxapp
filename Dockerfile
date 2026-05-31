@@ -43,6 +43,7 @@ COPY longbox-core/ ./longbox-core/
 COPY longbox-archive/ ./longbox-archive/
 COPY longbox-db/ ./longbox-db/
 COPY longbox-comicvine/ ./longbox-comicvine/
+COPY longbox-metron/ ./longbox-metron/
 COPY longbox-newznab/ ./longbox-newznab/
 COPY longbox-downloader/ ./longbox-downloader/
 COPY longbox-scanner/ ./longbox-scanner/

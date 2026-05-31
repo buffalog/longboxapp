@@ -1253,6 +1253,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "longbox-metron"
+version = "0.0.1"
+dependencies = [
+ "governor",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "longbox-newznab"
 version = "0.0.1"
 dependencies = [
