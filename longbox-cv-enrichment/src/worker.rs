@@ -21,8 +21,8 @@ use longbox_comicvine::{
     EnrichmentCandidateInput, PickOutcome, SeriesSearchResult,
 };
 use longbox_db::{
-    issue_repo, series_repo, CandidateSelectionMode, NewIssue, Pool,
-    ShallowEnrichmentCandidate, VolumeRefreshCandidate,
+    cv_volume_cache_repo, issue_repo, series_repo, CandidateSelectionMode, CvVolumePending,
+    NewIssue, Pool, ShallowEnrichmentCandidate, VolumeRefreshCandidate,
 };
 use tokio::sync::mpsc;
 
@@ -184,10 +184,48 @@ async fn worker_loop(
                 }
             };
 
-            if refresh.is_empty() {
+            if !refresh.is_empty() {
+                running.store(true, Ordering::SeqCst);
+                let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
+                running.store(false, Ordering::SeqCst);
+
+                tracing::info!(
+                    target: "longbox_cv_enrichment",
+                    attempts = attempts_this_cycle,
+                    max_run = config.max_run,
+                    pass = "refresh",
+                    "cv_enrichment.cycle_complete"
+                );
+
+                if trigger.is_closed() {
+                    tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
+                    return;
+                }
+                continue;
+            }
+
+            // Refresh empty — try the cv_volume_cache fill pass (Item E
+            // v2): per-volume publisher/description/start_year for
+            // non-catalog volumes that the calendar handler queued as
+            // pending rows. Lowest priority — runs only when catalog
+            // completeness work (shallow + refresh) is fully drained.
+            let cache_fill = match cv_volume_cache_repo::list_pending(&db).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "longbox_cv_enrichment",
+                        error = %e,
+                        "cv_enrichment.cache_fill_candidate_query_failed"
+                    );
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+            };
+
+            if cache_fill.is_empty() {
                 tracing::debug!(
                     target: "longbox_cv_enrichment",
-                    "cv_enrichment.idle (no candidates, no refresh backlog)"
+                    "cv_enrichment.idle (no shallow, refresh, or cache-fill backlog)"
                 );
                 // Idle: wait for trigger OR 5-minute timeout.
                 tokio::select! {
@@ -203,14 +241,14 @@ async fn worker_loop(
             }
 
             running.store(true, Ordering::SeqCst);
-            let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
+            let attempts_this_cycle = run_cache_fill_cycle(&db, &bg, &config, cache_fill).await;
             running.store(false, Ordering::SeqCst);
 
             tracing::info!(
                 target: "longbox_cv_enrichment",
                 attempts = attempts_this_cycle,
                 max_run = config.max_run,
-                pass = "refresh",
+                pass = "cache_fill",
                 "cv_enrichment.cycle_complete"
             );
 
@@ -301,6 +339,75 @@ async fn run_refresh_cycle(
         attempts += 1;
     }
     attempts
+}
+
+/// Cache-fill pass: drain the cv_volume_cache pending set (rows
+/// with fetched_at IS NULL, queued by calendar responses for
+/// non-catalog volumes). One fetch_volume per id, writes publisher
+/// / description / start_year + sets fetched_at. Same gate, same
+/// max_run; no cooldown for failures (rare; next cycle re-attempts).
+async fn run_cache_fill_cycle(
+    db: &Pool,
+    bg: &BackgroundCvClient,
+    config: &EnrichmentConfig,
+    candidates: Vec<CvVolumePending>,
+) -> usize {
+    let mut attempts = 0usize;
+    for c in candidates {
+        if config.max_run > 0 && attempts >= config.max_run as usize {
+            break;
+        }
+        cache_fill_one(db, bg, c.cv_volume_id).await;
+        attempts += 1;
+    }
+    attempts
+}
+
+/// Fetch one CV volume and write its metadata to cv_volume_cache.
+/// On success, fetched_at is set so the row drops out of the
+/// pending list. On failure (warn-logged), the row stays pending
+/// and the next cycle re-attempts.
+async fn cache_fill_one(db: &Pool, bg: &BackgroundCvClient, cv_volume_id: i64) {
+    let volume = match bg.fetch_volume(cv_volume_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                cv_volume_id,
+                error = %e,
+                "cv_volume_cache.fetch_failed"
+            );
+            return;
+        }
+    };
+    match cv_volume_cache_repo::mark_fetched(
+        db,
+        cv_volume_id,
+        volume.publisher.as_deref(),
+        volume.description.as_deref(),
+        volume.start_year,
+    )
+    .await
+    {
+        Ok(rows) => {
+            tracing::info!(
+                target: "longbox_cv_enrichment",
+                cv_volume_id,
+                publisher = ?volume.publisher,
+                start_year = ?volume.start_year,
+                rows_affected = rows,
+                "cv_volume_cache.filled"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                cv_volume_id,
+                error = %e,
+                "cv_volume_cache.write_failed"
+            );
+        }
+    }
 }
 
 /// Refresh one CV-linked series: fetch the volume detail and
