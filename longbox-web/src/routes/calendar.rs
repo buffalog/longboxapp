@@ -17,7 +17,8 @@ use axum::{Json, Router};
 use longbox_comicvine::CvCalendarItem;
 use longbox_core::normalize_title;
 use longbox_db::{
-    pull_list_repo, release_cache_repo, series_repo, NewPullEntry, NewReleaseCacheEntry,
+    cv_volume_cache_repo, pull_list_repo, release_cache_repo, series_repo, NewPullEntry,
+    NewReleaseCacheEntry,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, PrimitiveDateTime};
@@ -336,35 +337,81 @@ async fn load_calendar(
     Ok(items)
 }
 
-/// Enrich CV calendar items with live tracked-series / pull-list state.
-/// The `by_cv` map carries `(series_id, publisher)` per CV volume id —
-/// publisher is the 6c.5 JOIN that powers Item E's publisher grouping
-/// in the calendar UI. CV's `/issues/` query returns no publisher, so
-/// without this JOIN every calendar row would be "Unknown Publisher".
+/// Enrich CV calendar items with live tracked-series / pull-list state
+/// plus the publisher resolution chain.
+///
+/// **Publisher resolution** (Item E v2):
+///   1. Series JOIN — when the volume maps to a tracked series with
+///      publisher populated, that wins.
+///   2. cv_volume_cache fallback — for volumes NOT in the catalog (or
+///      catalog rows whose publisher is still NULL), look up the
+///      per-volume cache. Populated by the enrichment worker's
+///      cache-fill pass; rows that haven't been filled yet carry NULL
+///      publisher in the cache.
+///   3. NULL — the frontend groups these under "Unknown Publisher".
+///
+/// CV's `/issues/` query returns no publisher (see this file's
+/// module docs), so the JOIN + cache fallback is the only path.
+///
+/// Both lookups are HashMaps built from one query each: never a
+/// per-item DB call inside the loop. Calendar weeks routinely have
+/// 100+ items; per-item queries would mean 100+ round trips per
+/// request, which is unacceptable for the calendar's load shape.
+///
+/// **Queue side effect**: any item whose cv_volume_id is neither in
+/// the series JOIN nor in cv_volume_cache gets bulk-INSERT-OR-IGNORE'd
+/// as a pending cache row before the function returns. The worker's
+/// cache-fill pass drains those on its next iteration. Synchronous
+/// rather than fire-and-forget: the insert is trivially fast (~1ms
+/// for 99 ids, single transaction) and removes the race where a user
+/// reloads before a spawned task completes the queue write.
 async fn enrich(
     state: &AppState,
     items: Vec<CvCalendarItem>,
 ) -> Result<Vec<CalendarRow>, ApiError> {
     // cv_volume_id -> (series_id, publisher), for every series LongBox
     // tracks by cv_id. publisher is None for CV-linked series whose
-    // refresh-pass hasn't run yet — the frontend groups those under
-    // "Unknown Publisher" until the backfill completes.
+    // 6c.5 refresh-pass hasn't run yet.
     let by_cv: HashMap<i64, (i64, Option<String>)> = series_repo::find_all(&state.db)
         .await?
         .into_iter()
         .filter_map(|s| s.cv_id.map(|cv| (cv, (s.id, s.publisher))))
+        .collect();
+    // cv_volume_id -> publisher, for every row in cv_volume_cache.
+    // Rows queued but not yet filled carry publisher = None and read
+    // through to "Unknown Publisher" client-side.
+    let cache_pub: HashMap<i64, Option<String>> = cv_volume_cache_repo::list_all_publishers(&state.db)
+        .await?
+        .into_iter()
+        .map(|e| (e.cv_volume_id, e.publisher))
         .collect();
     let on_list: HashSet<i64> = pull_list_repo::list_all(&state.db)
         .await?
         .into_iter()
         .map(|e| e.series_id)
         .collect();
-    Ok(items
+
+    // Pass 1: build the response rows, applying the publisher chain.
+    // While we're walking the items, collect the cv_volume_ids that
+    // are NEITHER in the series JOIN NOR in the cache map — those are
+    // the queue targets for the cache-fill worker pass.
+    let mut to_queue: HashSet<i64> = HashSet::new();
+    let rows: Vec<CalendarRow> = items
         .into_iter()
         .map(|item| {
-            let entry = by_cv.get(&item.cv_volume_id);
-            let series_id = entry.map(|(sid, _)| *sid);
-            let publisher = entry.and_then(|(_, pub_opt)| pub_opt.clone());
+            let series_entry = by_cv.get(&item.cv_volume_id);
+            let series_id = series_entry.map(|(sid, _)| *sid);
+            let series_publisher = series_entry.and_then(|(_, pub_opt)| pub_opt.clone());
+            let cache_hit = cache_pub.get(&item.cv_volume_id);
+            // Resolution chain: series JOIN publisher, then cache, then None.
+            let publisher = series_publisher.or_else(|| cache_hit.and_then(|p| p.clone()));
+            // Queue if the volume has no series JOIN at all (i.e., not
+            // a tracked series) AND has never been seen by the cache.
+            // Catalog-linked series belong to the refresh pass, not the
+            // cache pass — don't double-queue them.
+            if series_entry.is_none() && cache_hit.is_none() {
+                to_queue.insert(item.cv_volume_id);
+            }
             let on_pull_list = series_id.is_some_and(|sid| on_list.contains(&sid));
             CalendarRow {
                 item,
@@ -373,7 +420,27 @@ async fn enrich(
                 publisher,
             }
         })
-        .collect())
+        .collect();
+
+    // Synchronous queue write: bulk INSERT OR IGNORE inside one tx.
+    // Trivially fast even at 99-ish ids; never grows past a single
+    // week's worth on any one call.
+    if !to_queue.is_empty() {
+        let ids: Vec<i64> = to_queue.into_iter().collect();
+        // Swallow the error after logging — a queue write failure must
+        // not break the calendar response. The worker will catch the
+        // missed ids on the next calendar load.
+        if let Err(e) = cv_volume_cache_repo::bulk_queue_pending(&state.db, &ids).await {
+            tracing::warn!(
+                target: "longbox_web",
+                error = %e,
+                count = ids.len(),
+                "cv_volume_cache.queue_failed"
+            );
+        }
+    }
+
+    Ok(rows)
 }
 
 /// Whether a cache row is still inside [`CALENDAR_CACHE_TTL`]. `cached_at`
