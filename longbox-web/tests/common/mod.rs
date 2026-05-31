@@ -60,6 +60,7 @@ pub async fn build_test_app() -> TestApp {
         api_key: "test-key".into(),
         base_url: format!("{}/", cv_server.uri()),
         timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(1),
         // Effectively unbounded for tests.
         rate_limit_per_hour: 360_000,
         max_wait_for_slot: Duration::from_secs(1),

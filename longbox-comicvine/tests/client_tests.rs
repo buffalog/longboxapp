@@ -20,6 +20,7 @@ fn client_for(server: &MockServer) -> ComicVineClient {
         // base_url to end in `/` so relative paths join cleanly.
         base_url: format!("{}/", server.uri()),
         timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(1),
         // Massive rate so the limiter is effectively a no-op in tests.
         rate_limit_per_hour: 360_000,
         max_wait_for_slot: Duration::from_secs(1),

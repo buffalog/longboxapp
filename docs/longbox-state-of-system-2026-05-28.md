@@ -665,7 +665,7 @@ library_roots 1───* files
 
 The nine rules currently codified in the A.9 prompt:
 
-1. **`--force-recreate` on redeploy** — `docker-compose up -d` alone no-ops on stale images; `--force-recreate` always rebuilds the container against the freshly-built image.
+1. **`docker compose up -d --build --force-recreate` on redeploy** — `up -d` alone no-ops on stale images; `--force-recreate` alone reuses the existing image and serves stale binaries (the leading-but-unconfirmed cause of Bug 4's missed-migration incident — Bug 5 archaeology 2026-05-29). The two flags compose: `--build` re-runs the image build, `--force-recreate` swaps the container against the fresh image. Bug 5's boot-time `MigrationGap` assertion in `pool::open` is the loudness backstop if this rule is ever forgotten.
 2. **`cargo clippy --workspace --all-targets`** — not just default scope; test code surfaces lints the default scope misses.
 3. **`sqlx prepare --workspace -- --all-targets`** — same reason; the `.sqlx` offline cache must cover test queries or the SQLX_OFFLINE container build fails.
 4. **Dockerfile crate-COPY rule** — every new workspace crate needs its stage-2 `COPY` line added in the same commit.
