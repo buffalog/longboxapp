@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cv_volume_id AS \"cv_volume_id!: i64\"\n           FROM cv_volume_cache\n           WHERE fetched_at IS NULL\n           ORDER BY first_seen_at ASC, cv_volume_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "cv_volume_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "337811f080bd7cbbd5cd6e4b2d1c4ec78fd79a443ad11edf5457ef638944e929"
+}

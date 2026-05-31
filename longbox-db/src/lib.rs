@@ -5,6 +5,7 @@
 //! statements or `&mut Transaction<'_, Sqlite>` for transactional work.
 
 pub mod candidate;
+pub mod cv_volume_cache_repo;
 pub mod discovered_folders_repo;
 pub mod downloader_config_repo;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod settings_repo;
 pub mod webhook_config_repo;
 
 pub use candidate::{find_candidates, row_to_issue, row_to_series};
+pub use cv_volume_cache_repo::{CvVolumeCacheRow, CvVolumePending, CvVolumePublisherEntry};
 pub use discovered_folders_repo::{DiscoveredFolder, DiscoveredFolderRow};
 pub use downloader_config_repo::{DownloaderConfigRow, NewDownloaderConfig};
 pub use error::{DbError, Result};

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO cv_volume_cache (cv_volume_id) VALUES (?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e0222bb31641406b7f18e81f4d9952ad69b081dd6980af1eddea8d399dddc17e"
+}

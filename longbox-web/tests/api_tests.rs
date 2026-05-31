@@ -6,9 +6,9 @@ use std::path::Path;
 use axum::http::StatusCode;
 use common::{build_test_app, empty_request, json_request, response_json};
 use longbox_db::{
-    discovered_folders_repo, issue_repo, pull_attempt_repo, pull_list_repo, release_cache_repo,
-    series_repo, webhook_config_repo, DiscoveredFolder, NewIssue, NewPullAttempt, NewPullEntry,
-    NewReleaseCacheEntry, NewSeries, NewWebhookConfig,
+    cv_volume_cache_repo, discovered_folders_repo, issue_repo, pull_attempt_repo, pull_list_repo,
+    release_cache_repo, series_repo, webhook_config_repo, DiscoveredFolder, NewIssue,
+    NewPullAttempt, NewPullEntry, NewReleaseCacheEntry, NewSeries, NewWebhookConfig,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -3853,6 +3853,132 @@ async fn calendar_publisher_comes_from_series_join_not_cv_payload() {
     let untracked = rows.iter().find(|r| r["cv_volume_id"] == 9999).unwrap();
     assert!(untracked["series_id"].is_null());
     assert!(untracked["publisher"].is_null());
+}
+
+/// Item E v2 piece 1: the calendar falls back to `cv_volume_cache` for
+/// items whose volume is not in the catalog (series_id = None), AND it
+/// synchronously queues any uncached cv_volume_ids as pending rows for
+/// the worker's cache-fill pass to drain. Together these mean:
+///   - calendar rendering shows real publishers for non-catalog volumes
+///     that have been previously cached
+///   - calendar requests are the queue producers; the worker's
+///     cache-fill pass is the consumer
+async fn build_test_app_local() -> common::TestApp {
+    build_test_app().await
+}
+
+#[tokio::test]
+async fn calendar_falls_back_to_cv_volume_cache_for_untracked_volumes() {
+    let app = build_test_app_local().await;
+
+    // Pre-seed the cache: an untracked volume that we previously
+    // resolved. Calendar must surface its publisher.
+    cv_volume_cache_repo::mark_fetched(
+        &app.state.db,
+        7777,
+        Some("Boom! Studios"),
+        Some("A short series description."),
+        Some(2023),
+    )
+    .await
+    .unwrap();
+    // Seed an INSERT-OR-IGNORE'd pending row first to satisfy the
+    // mark_fetched UPDATE — the calendar's queue-insert does the same
+    // thing in production.
+    cv_volume_cache_repo::bulk_queue_pending(&app.state.db, &[7777])
+        .await
+        .ok();
+    cv_volume_cache_repo::mark_fetched(
+        &app.state.db,
+        7777,
+        Some("Boom! Studios"),
+        Some("A short series description."),
+        Some(2023),
+    )
+    .await
+    .unwrap();
+
+    mount_cv_calendar(
+        &app,
+        "2026-05-13",
+        "2026-05-19",
+        r#"[
+            { "id": 60001, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 7777, "name": "Cached Publisher Vol" },
+              "site_detail_url": "https://cv/4000-60001/" },
+            { "id": 60002, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 8888, "name": "Brand New Volume" },
+              "site_detail_url": "https://cv/4000-60002/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // (a) Cache hit → publisher surfaces from cv_volume_cache.
+    let cached = rows.iter().find(|r| r["cv_volume_id"] == 7777).unwrap();
+    assert!(cached["series_id"].is_null());
+    assert_eq!(
+        cached["publisher"], "Boom! Studios",
+        "publisher must come from cv_volume_cache for non-catalog volumes"
+    );
+
+    // (b) Brand-new volume → no cache row yet → publisher null in this
+    // response, but the queue MUST have a pending row written for it
+    // so the worker's cache-fill pass picks it up next iteration.
+    let pending = rows.iter().find(|r| r["cv_volume_id"] == 8888).unwrap();
+    assert!(pending["series_id"].is_null());
+    assert!(
+        pending["publisher"].is_null(),
+        "first-sight volume reads as null in this response"
+    );
+
+    let queued = cv_volume_cache_repo::find_by_id(&app.state.db, 8888)
+        .await
+        .unwrap();
+    assert!(
+        queued.is_some(),
+        "first-sight volume MUST be queued as a pending cache row"
+    );
+    let queued = queued.unwrap();
+    assert!(
+        queued.fetched_at.is_none(),
+        "queued row is pending — fetched_at NULL"
+    );
+    assert!(queued.publisher.is_none());
+
+    // (c) A second calendar request that sees volume 7777 again must
+    // NOT re-queue it (already-fetched row remains untouched). And
+    // it must NOT re-queue 8888 (already pending). The bulk-INSERT-
+    // OR-IGNORE on cv_volume_id PK is the guarantee.
+    let body2 = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await,
+    )
+    .await;
+    let _ = body2;
+    let pending_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cv_volume_cache")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_count, 2,
+        "two distinct cv_volume_ids in the cache after two requests — re-requests are no-ops"
+    );
 }
 
 #[tokio::test]
