@@ -166,49 +166,29 @@ async fn worker_loop(
         };
 
         if candidates.is_empty() {
-            // Primary set exhausted — try the volume-refresh pass
-            // (6c.5): CV-linked series with NULL publisher, the
-            // backlog from pre-6c.5 merges that discarded the
-            // descriptive volume detail. Drained at the same
-            // background-throttle as the primary pass.
-            let refresh = match series_repo::list_volume_refresh_candidates(&db).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "longbox_cv_enrichment",
-                        error = %e,
-                        "cv_enrichment.refresh_candidate_query_failed"
-                    );
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    continue;
-                }
-            };
+            // Primary (shallow) set exhausted. Two secondary passes
+            // remain, in this priority order:
+            //
+            //   1. cache-fill  — Item E v2 v2.1: cv_volume_cache pending
+            //      rows queued by recent calendar responses. Backs the
+            //      publisher grouping in the *calendar view the user is
+            //      currently looking at*. If this trails by hours, the
+            //      calendar shows "Unknown Publisher" for high-profile
+            //      non-catalog vols (Batman, Superman, etc.) — visibly
+            //      broken UX.
+            //
+            //   2. refresh     — 6c.5: CV-linked series with NULL
+            //      publisher. Populates publisher on already-owned
+            //      series (library detail view, lower urgency). Drains
+            //      after cache-fill so a fresh calendar load doesn't
+            //      sit behind hours of library backlog.
+            //
+            // Priority flipped on 2026-05-31 after the initial Item E
+            // v2 deploy showed cache-fill queued for ~2.5 hours behind
+            // a 187-series refresh backlog. Cache-fill first means
+            // first-load -> publishers visible in ~50 min instead of
+            // ~150.
 
-            if !refresh.is_empty() {
-                running.store(true, Ordering::SeqCst);
-                let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
-                running.store(false, Ordering::SeqCst);
-
-                tracing::info!(
-                    target: "longbox_cv_enrichment",
-                    attempts = attempts_this_cycle,
-                    max_run = config.max_run,
-                    pass = "refresh",
-                    "cv_enrichment.cycle_complete"
-                );
-
-                if trigger.is_closed() {
-                    tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
-                    return;
-                }
-                continue;
-            }
-
-            // Refresh empty — try the cv_volume_cache fill pass (Item E
-            // v2): per-volume publisher/description/start_year for
-            // non-catalog volumes that the calendar handler queued as
-            // pending rows. Lowest priority — runs only when catalog
-            // completeness work (shallow + refresh) is fully drained.
             let cache_fill = match cv_volume_cache_repo::list_pending(&db).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -222,10 +202,44 @@ async fn worker_loop(
                 }
             };
 
-            if cache_fill.is_empty() {
+            if !cache_fill.is_empty() {
+                running.store(true, Ordering::SeqCst);
+                let attempts_this_cycle = run_cache_fill_cycle(&db, &bg, &config, cache_fill).await;
+                running.store(false, Ordering::SeqCst);
+
+                tracing::info!(
+                    target: "longbox_cv_enrichment",
+                    attempts = attempts_this_cycle,
+                    max_run = config.max_run,
+                    pass = "cache_fill",
+                    "cv_enrichment.cycle_complete"
+                );
+
+                if trigger.is_closed() {
+                    tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
+                    return;
+                }
+                continue;
+            }
+
+            // Cache-fill empty — drain refresh next.
+            let refresh = match series_repo::list_volume_refresh_candidates(&db).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "longbox_cv_enrichment",
+                        error = %e,
+                        "cv_enrichment.refresh_candidate_query_failed"
+                    );
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+            };
+
+            if refresh.is_empty() {
                 tracing::debug!(
                     target: "longbox_cv_enrichment",
-                    "cv_enrichment.idle (no shallow, refresh, or cache-fill backlog)"
+                    "cv_enrichment.idle (no shallow, cache-fill, or refresh backlog)"
                 );
                 // Idle: wait for trigger OR 5-minute timeout.
                 tokio::select! {
@@ -241,14 +255,14 @@ async fn worker_loop(
             }
 
             running.store(true, Ordering::SeqCst);
-            let attempts_this_cycle = run_cache_fill_cycle(&db, &bg, &config, cache_fill).await;
+            let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
             running.store(false, Ordering::SeqCst);
 
             tracing::info!(
                 target: "longbox_cv_enrichment",
                 attempts = attempts_this_cycle,
                 max_run = config.max_run,
-                pass = "cache_fill",
+                pass = "refresh",
                 "cv_enrichment.cycle_complete"
             );
 
