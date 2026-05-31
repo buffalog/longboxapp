@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH owned_counts AS (\n            SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count\n            FROM issues i\n            JOIN files f ON f.issue_id = i.id\n            WHERE f.status = 'owned' AND f.is_present = 1\n            GROUP BY i.series_id\n        )\n        SELECT\n            s.id AS \"series_id!: i64\",\n            s.cv_id AS \"cv_id!: i64\",\n            s.title AS \"title!: String\",\n            COALESCE(oc.owned_count, 0) AS \"owned_count!: i64\"\n        FROM series s\n        LEFT JOIN owned_counts oc ON oc.series_id = s.id\n        WHERE s.cv_id IS NOT NULL\n          AND s.publisher IS NULL\n        ORDER BY owned_count DESC, s.last_matched_count DESC, s.id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "owned_count!: i64",
+        "ordinal": 3,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "658d90d350c11806838c9b576fb3cd7a1e415fc8a10f3f3a489aa23cb48ba9d3"
+}

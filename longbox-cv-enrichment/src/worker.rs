@@ -22,7 +22,7 @@ use longbox_comicvine::{
 };
 use longbox_db::{
     issue_repo, series_repo, CandidateSelectionMode, NewIssue, Pool,
-    ShallowEnrichmentCandidate,
+    ShallowEnrichmentCandidate, VolumeRefreshCandidate,
 };
 use tokio::sync::mpsc;
 
@@ -166,19 +166,57 @@ async fn worker_loop(
         };
 
         if candidates.is_empty() {
-            tracing::debug!(
-                target: "longbox_cv_enrichment",
-                "cv_enrichment.idle (no candidates)"
-            );
-            // Idle: wait for trigger OR 5-minute timeout to re-poll.
-            tokio::select! {
-                msg = trigger.recv() => {
-                    if msg.is_none() {
-                        tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
-                        return;
-                    }
+            // Primary set exhausted — try the volume-refresh pass
+            // (6c.5): CV-linked series with NULL publisher, the
+            // backlog from pre-6c.5 merges that discarded the
+            // descriptive volume detail. Drained at the same
+            // background-throttle as the primary pass.
+            let refresh = match series_repo::list_volume_refresh_candidates(&db).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "longbox_cv_enrichment",
+                        error = %e,
+                        "cv_enrichment.refresh_candidate_query_failed"
+                    );
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
                 }
-                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+            };
+
+            if refresh.is_empty() {
+                tracing::debug!(
+                    target: "longbox_cv_enrichment",
+                    "cv_enrichment.idle (no candidates, no refresh backlog)"
+                );
+                // Idle: wait for trigger OR 5-minute timeout.
+                tokio::select! {
+                    msg = trigger.recv() => {
+                        if msg.is_none() {
+                            tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
+                            return;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                }
+                continue;
+            }
+
+            running.store(true, Ordering::SeqCst);
+            let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
+            running.store(false, Ordering::SeqCst);
+
+            tracing::info!(
+                target: "longbox_cv_enrichment",
+                attempts = attempts_this_cycle,
+                max_run = config.max_run,
+                pass = "refresh",
+                "cv_enrichment.cycle_complete"
+            );
+
+            if trigger.is_closed() {
+                tracing::info!(target: "longbox_cv_enrichment", "cv_enrichment.stopped");
+                return;
             }
             continue;
         }
@@ -191,6 +229,7 @@ async fn worker_loop(
             target: "longbox_cv_enrichment",
             attempts = attempts_this_cycle,
             max_run = config.max_run,
+            pass = "shallow",
             "cv_enrichment.cycle_complete"
         );
 
@@ -238,6 +277,85 @@ async fn run_cycle(
         attempts += 1;
     }
     attempts
+}
+
+/// Refresh pass: drain the volume-refresh candidate set (CV-linked
+/// series with NULL publisher) by calling only `fetch_volume` per
+/// series — one CV call vs the primary pass's three (search +
+/// fetch_volume + fetch_issues). Same background-throttle, same
+/// `max_run` bound; success writes publisher/description/cover_url
+/// to the series row. Failures log a warn and move on (next cycle
+/// re-attempts).
+async fn run_refresh_cycle(
+    db: &Pool,
+    bg: &BackgroundCvClient,
+    config: &EnrichmentConfig,
+    candidates: Vec<VolumeRefreshCandidate>,
+) -> usize {
+    let mut attempts = 0usize;
+    for c in candidates {
+        if config.max_run > 0 && attempts >= config.max_run as usize {
+            break;
+        }
+        refresh_one(db, bg, &c).await;
+        attempts += 1;
+    }
+    attempts
+}
+
+/// Refresh one CV-linked series: fetch the volume detail and
+/// persist `publisher`, `description`, `cover_url`. No transaction
+/// (single UPDATE is atomic on its own; no multi-row consistency
+/// to worry about). Failures don't write any state — the candidate
+/// stays in the refresh set and is re-attempted next cycle.
+async fn refresh_one(
+    db: &Pool,
+    bg: &BackgroundCvClient,
+    candidate: &VolumeRefreshCandidate,
+) {
+    let volume = match bg.fetch_volume(candidate.cv_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                series_id = candidate.series_id,
+                cv_id = candidate.cv_id,
+                title = %candidate.title,
+                error = %e,
+                "cv_enrichment.refresh_fetch_failed"
+            );
+            return;
+        }
+    };
+    match series_repo::update_series_volume_detail(
+        db,
+        candidate.series_id,
+        volume.publisher.as_deref(),
+        volume.description.as_deref(),
+        volume.cover_url.as_deref(),
+    )
+    .await
+    {
+        Ok(rows) => {
+            tracing::info!(
+                target: "longbox_cv_enrichment",
+                series_id = candidate.series_id,
+                cv_id = candidate.cv_id,
+                title = %candidate.title,
+                publisher = ?volume.publisher,
+                rows_affected = rows,
+                "cv_enrichment.refreshed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                series_id = candidate.series_id,
+                error = %e,
+                "cv_enrichment.refresh_write_failed"
+            );
+        }
+    }
 }
 
 /// **The load-bearing per-series procedure.** Two phases:
@@ -415,7 +533,7 @@ async fn commit_merge(
     series_id: i64,
     cv_id: i64,
     score: f64,
-    _volume: &CvVolumeDetail,
+    volume: &CvVolumeDetail,
     cv_issues: Vec<CvIssueDetail>,
 ) -> Result<AttemptOutcome, longbox_db::DbError> {
     let mut tx = db.begin().await.map_err(longbox_db::DbError::from)?;
@@ -438,6 +556,21 @@ async fn commit_merge(
         record_outcome_standalone(db, series_id, &outcome).await;
         return Ok(outcome);
     }
+
+    // (a.1) Persist the descriptive volume detail (publisher,
+    // description, cover_url) carried in the CvVolumeDetail. All
+    // three would otherwise be discarded — the calendar's publisher
+    // grouping (and the series detail view's description / cover)
+    // depend on these. Inside the same transaction so they roll
+    // back atomically with the rest of the merge.
+    series_repo::update_series_volume_detail(
+        &mut *tx,
+        series_id,
+        volume.publisher.as_deref(),
+        volume.description.as_deref(),
+        volume.cover_url.as_deref(),
+    )
+    .await?;
 
     // (b) Merge each CV issue via the row-id-preserving upsert.
     let mut cv_numbers: HashSet<String> = HashSet::with_capacity(cv_issues.len());

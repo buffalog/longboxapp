@@ -187,6 +187,21 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
     let promoted = series_repo::set_cv_id(&mut *tx, series_id, 9999).await.unwrap();
     assert_eq!(promoted, 1, "set_cv_id succeeded inside tx");
 
+    // 6c.5: the merge also persists publisher / description /
+    // cover_url from the fetched CvVolumeDetail. These must roll
+    // back atomically with the rest of the transaction on
+    // cancellation — proving the descriptive payload is inside the
+    // transaction boundary, not adjacent to it.
+    series_repo::update_series_volume_detail(
+        &mut *tx,
+        series_id,
+        Some("Image Comics"),
+        Some("A sweeping space-fantasy saga."),
+        Some("https://cv/cover.jpg"),
+    )
+    .await
+    .unwrap();
+
     issue_repo::upsert_by_series_id_and_number_with_cv_fields(
         &mut *tx,
         NewIssue {
@@ -245,6 +260,23 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
         row.outcome.is_none(),
         "outcome string must roll back too"
     );
+
+    // (4) 6c.5: publisher / description / cover_url rolled back too.
+    // The three descriptive fields must be NULL — if any survives
+    // the rollback, update_series_volume_detail is escaping the
+    // transaction boundary.
+    assert!(
+        s.publisher.is_none(),
+        "publisher must roll back with the transaction"
+    );
+    assert!(
+        s.description.is_none(),
+        "description must roll back with the transaction"
+    );
+    assert!(
+        s.cover_url.is_none(),
+        "cover_url must roll back with the transaction"
+    );
 }
 
 /// **Post-commit durability.** A transaction that successfully
@@ -258,6 +290,18 @@ async fn committed_enrichment_is_durable() {
 
     let mut tx = pool.begin().await.unwrap();
     series_repo::set_cv_id(&mut *tx, series_id, 12345).await.unwrap();
+    // 6c.5: persist the descriptive volume detail inside the same
+    // transaction. Asserted below to verify the three fields land
+    // durably alongside cv_id and the per-issue upserts.
+    series_repo::update_series_volume_detail(
+        &mut *tx,
+        series_id,
+        Some("Image Comics"),
+        Some("A sweeping space-fantasy saga."),
+        Some("https://cv/cover.jpg"),
+    )
+    .await
+    .unwrap();
     for n in ["1", "2"] {
         issue_repo::upsert_by_series_id_and_number_with_cv_fields(
             &mut *tx,
@@ -283,6 +327,10 @@ async fn committed_enrichment_is_durable() {
     // Re-acquire (simulates fresh connection / process restart).
     let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
     assert_eq!(s.cv_id, Some(12345));
+    // 6c.5: all three descriptive fields land durably.
+    assert_eq!(s.publisher.as_deref(), Some("Image Comics"));
+    assert_eq!(s.description.as_deref(), Some("A sweeping space-fantasy saga."));
+    assert_eq!(s.cover_url.as_deref(), Some("https://cv/cover.jpg"));
     let issues = issue_repo::list_by_series(&pool, series_id).await.unwrap();
     let cv_ids: HashSet<Option<i64>> = issues.iter().map(|i| i.cv_issue_id).collect();
     assert!(cv_ids.contains(&Some(5001)));
@@ -323,4 +371,78 @@ async fn shallow_query_marks_collision_flag_correctly() {
     assert_eq!(by_id.get(&a), Some(&true), "Sex (a) flagged collision");
     assert_eq!(by_id.get(&b), Some(&true), "Sex (b) flagged collision");
     assert_eq!(by_id.get(&c), Some(&false), "Invincible NOT flagged");
+}
+
+// ===== 6c.5: update_series_volume_detail + list_volume_refresh_candidates =====
+
+/// Standalone write path the refresh pass uses (not the merge tx).
+/// Verifies all three descriptive fields are persisted in a single
+/// UPDATE and rows-affected is 1 for an existing series.
+#[tokio::test]
+async fn update_series_volume_detail_writes_all_three_fields() {
+    let pool = fresh_pool().await;
+    let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1"]).await;
+    series_repo::set_cv_id(&pool, series_id, 46568).await.unwrap();
+
+    let rows = series_repo::update_series_volume_detail(
+        &pool,
+        series_id,
+        Some("Image Comics"),
+        Some("Space fantasy."),
+        Some("https://cv/saga-cover.jpg"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1, "exactly one series row updated");
+
+    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    assert_eq!(s.publisher.as_deref(), Some("Image Comics"));
+    assert_eq!(s.description.as_deref(), Some("Space fantasy."));
+    assert_eq!(s.cover_url.as_deref(), Some("https://cv/saga-cover.jpg"));
+}
+
+/// The refresh-pass candidate query returns CV-linked series with
+/// `publisher IS NULL` only — shallow series and CV-linked series
+/// whose publisher is already populated are excluded.
+#[tokio::test]
+async fn volume_refresh_candidates_excludes_shallow_and_publisher_populated() {
+    let pool = fresh_pool().await;
+
+    // (a) Shallow series — must NOT appear (cv_id IS NULL).
+    let _shallow = seed_shallow_series_with_issues(&pool, "Shallow", None, &["1"]).await;
+
+    // (b) CV-linked, publisher NULL — IS a refresh candidate.
+    let needs_refresh =
+        seed_shallow_series_with_issues(&pool, "Needs Refresh", Some(2020), &["1"]).await;
+    series_repo::set_cv_id(&pool, needs_refresh, 1111).await.unwrap();
+
+    // (c) CV-linked, publisher populated — must NOT appear.
+    let already_done =
+        seed_shallow_series_with_issues(&pool, "Already Done", Some(2021), &["1"]).await;
+    series_repo::set_cv_id(&pool, already_done, 2222).await.unwrap();
+    series_repo::update_series_volume_detail(
+        &pool,
+        already_done,
+        Some("Some Publisher"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let candidates = series_repo::list_volume_refresh_candidates(&pool).await.unwrap();
+    let ids: HashSet<i64> = candidates.iter().map(|c| c.series_id).collect();
+    assert!(
+        ids.contains(&needs_refresh),
+        "CV-linked + publisher NULL must be a candidate"
+    );
+    assert!(
+        !ids.contains(&already_done),
+        "CV-linked + publisher set must NOT be a candidate"
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "exactly the one CV-linked-publisher-NULL series, nothing else"
+    );
 }
