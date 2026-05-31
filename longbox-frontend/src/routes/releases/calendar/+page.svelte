@@ -260,10 +260,24 @@
       {group.publisher}
     </h2>
     <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <table class="w-full text-sm">
+      <!-- table-fixed + explicit colgroup widths so every publisher
+           group's table aligns identically. Without table-layout:
+           fixed, each table sizes columns independently based on its
+           own content, and narrow groups visibly misalign with wide
+           ones. The Series column intentionally has no width — it
+           absorbs the remaining space. -->
+      <table class="w-full table-fixed text-sm">
+        <colgroup>
+          <col style="width: 40px" />
+          <col style="width: 120px" />
+          <col style="width: 72px" />
+          <col />
+          <col style="width: 80px" />
+          <col style="width: 160px" />
+        </colgroup>
         <thead class="border-b border-slate-200 bg-slate-50 text-left text-xs text-slate-500">
           <tr>
-            <th class="w-8 px-4 py-2"></th>
+            <th class="px-4 py-2"></th>
             <th class="px-4 py-2 font-medium">On sale</th>
             <th class="px-4 py-2 font-medium">Cover</th>
             <th class="px-4 py-2 font-medium">Series</th>
