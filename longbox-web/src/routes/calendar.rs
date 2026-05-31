@@ -54,13 +54,18 @@ struct CalendarQuery {
 
 /// A calendar issue plus the live pull-list enrichment. `series_id` is
 /// set when the issue's volume maps to a tracked series; `on_pull_list`
-/// when that series is subscribed.
+/// when that series is subscribed; `publisher` carries the tracked
+/// series's `publisher` column (sourced from the 6c.5 enrichment merge
+/// and refresh-pass), because CV's `/issues/` query never returns
+/// publisher data. Untracked volumes get `publisher: null` — the
+/// frontend groups them under "Unknown Publisher".
 #[derive(Debug, Serialize)]
 struct CalendarRow {
     #[serde(flatten)]
     item: CvCalendarItem,
     series_id: Option<i64>,
     on_pull_list: bool,
+    publisher: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,15 +337,22 @@ async fn load_calendar(
 }
 
 /// Enrich CV calendar items with live tracked-series / pull-list state.
+/// The `by_cv` map carries `(series_id, publisher)` per CV volume id —
+/// publisher is the 6c.5 JOIN that powers Item E's publisher grouping
+/// in the calendar UI. CV's `/issues/` query returns no publisher, so
+/// without this JOIN every calendar row would be "Unknown Publisher".
 async fn enrich(
     state: &AppState,
     items: Vec<CvCalendarItem>,
 ) -> Result<Vec<CalendarRow>, ApiError> {
-    // cv_volume_id -> series_id, for every series LongBox tracks by cv_id.
-    let by_cv: HashMap<i64, i64> = series_repo::find_all(&state.db)
+    // cv_volume_id -> (series_id, publisher), for every series LongBox
+    // tracks by cv_id. publisher is None for CV-linked series whose
+    // refresh-pass hasn't run yet — the frontend groups those under
+    // "Unknown Publisher" until the backfill completes.
+    let by_cv: HashMap<i64, (i64, Option<String>)> = series_repo::find_all(&state.db)
         .await?
         .into_iter()
-        .filter_map(|s| s.cv_id.map(|cv| (cv, s.id)))
+        .filter_map(|s| s.cv_id.map(|cv| (cv, (s.id, s.publisher))))
         .collect();
     let on_list: HashSet<i64> = pull_list_repo::list_all(&state.db)
         .await?
@@ -350,12 +362,15 @@ async fn enrich(
     Ok(items
         .into_iter()
         .map(|item| {
-            let series_id = by_cv.get(&item.cv_volume_id).copied();
+            let entry = by_cv.get(&item.cv_volume_id);
+            let series_id = entry.map(|(sid, _)| *sid);
+            let publisher = entry.and_then(|(_, pub_opt)| pub_opt.clone());
             let on_pull_list = series_id.is_some_and(|sid| on_list.contains(&sid));
             CalendarRow {
                 item,
                 series_id,
                 on_pull_list,
+                publisher,
             }
         })
         .collect())

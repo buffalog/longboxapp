@@ -3757,6 +3757,104 @@ async fn calendar_queries_cv_cold_and_enriches_pull_list_state() {
     assert_eq!(untracked["on_pull_list"], false);
 }
 
+/// 6c.5: the calendar response's `publisher` field must come from the
+/// tracked series row (populated by the enrichment merge or refresh
+/// pass), NOT from the CV `/issues/` payload (which never carries
+/// publisher — see calendar.rs:5-8). Without this JOIN the calendar
+/// can't group by publisher (Item E).
+#[tokio::test]
+async fn calendar_publisher_comes_from_series_join_not_cv_payload() {
+    let app = build_test_app().await;
+
+    // (a) Tracked series with publisher populated (post-enrichment shape).
+    let tracked = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(4050),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: Some("Image Comics".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // (b) Tracked series with publisher NULL (pre-refresh-pass shape).
+    let no_publisher = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(4099),
+            metron_id: None,
+            title: "Pre-Refresh".into(),
+            sort_title: "pre-refresh".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    mount_cv_calendar(
+        &app,
+        "2026-05-13",
+        "2026-05-19",
+        r#"[
+            { "id": 50001, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 4050, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-50001/" },
+            { "id": 50002, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 4099, "name": "Pre-Refresh" },
+              "site_detail_url": "https://cv/4000-50002/" },
+            { "id": 50003, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 9999, "name": "Untracked" },
+              "site_detail_url": "https://cv/4000-50003/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // Tracked + publisher populated → publisher surfaces from the JOIN.
+    let saga = rows.iter().find(|r| r["cv_volume_id"] == 4050).unwrap();
+    assert_eq!(saga["series_id"], tracked.id);
+    assert_eq!(
+        saga["publisher"], "Image Comics",
+        "publisher must come from the series JOIN, not CV"
+    );
+
+    // Tracked + publisher NULL → publisher null (will group as
+    // "Unknown Publisher" client-side until the refresh pass fills
+    // the column).
+    let pre = rows.iter().find(|r| r["cv_volume_id"] == 4099).unwrap();
+    assert_eq!(pre["series_id"], no_publisher.id);
+    assert!(
+        pre["publisher"].is_null(),
+        "tracked-but-not-yet-refreshed series carries publisher null"
+    );
+
+    // Untracked → publisher null (no series row to JOIN to).
+    let untracked = rows.iter().find(|r| r["cv_volume_id"] == 9999).unwrap();
+    assert!(untracked["series_id"].is_null());
+    assert!(untracked["publisher"].is_null());
+}
+
 #[tokio::test]
 async fn calendar_serves_a_fresh_cache_entry_without_hitting_cv() {
     let app = build_test_app().await;
