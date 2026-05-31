@@ -15,6 +15,11 @@ export interface CalendarRow {
   /** The tracked series this volume maps to, if LongBox knows it. */
   series_id: number | null;
   on_pull_list: boolean;
+  /** Publisher name sourced from `series.publisher`, populated by the
+   *  6c.5 enrichment merge and refresh-pass. `null` for untracked
+   *  volumes AND for CV-linked series whose refresh pass hasn't run
+   *  yet — the calendar groups both under "Unknown Publisher". */
+  publisher: string | null;
 }
 
 /** Fetch the release calendar for `[from, to]` (both `YYYY-MM-DD`).

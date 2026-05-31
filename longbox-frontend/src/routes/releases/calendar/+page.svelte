@@ -51,8 +51,29 @@
       )
   );
 
+  // 6c.5 Item E: group visible rows by publisher for the calendar.
+  // CV-linked series whose publisher hasn't been backfilled yet, and
+  // untracked volumes, both fall under "Unknown Publisher" until the
+  // enrichment refresh-pass populates them. Groups are alphabetical;
+  // "Unknown Publisher" sorts naturally with the others (no special
+  // last-place pinning).
+  const UNKNOWN_PUBLISHER = 'Unknown Publisher';
+  const groupedRows = $derived.by(() => {
+    const map = new Map<string, CalendarRow[]>();
+    for (const row of visibleRows) {
+      const key = row.publisher ?? UNKNOWN_PUBLISHER;
+      const arr = map.get(key);
+      if (arr) arr.push(row);
+      else map.set(key, [row]);
+    }
+    return [...map.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([publisher, groupRows]) => ({ publisher, rows: groupRows }));
+  });
+
   // The distinct volumes the bulk action can act on — visible rows not
   // already on the pull list. Drives select-all and the BulkActionBar.
+  // Spans all publisher groups; the bulk control is global, not per-group.
   const selectableVolumeIds = $derived([
     ...new Set(visibleRows.filter((r) => !r.on_pull_list).map((r) => r.cv_volume_id))
   ]);
@@ -232,73 +253,80 @@
       {/snippet}
     </BulkActionBar>
   {/if}
-  <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
-    <table class="w-full text-sm">
-      <thead class="border-b border-slate-200 bg-slate-50 text-left text-xs text-slate-500">
-        <tr>
-          <th class="w-8 px-4 py-2"></th>
-          <th class="px-4 py-2 font-medium">On sale</th>
-          <th class="px-4 py-2 font-medium">Cover</th>
-          <th class="px-4 py-2 font-medium">Series</th>
-          <th class="px-4 py-2 font-medium">Issue</th>
-          <th class="px-4 py-2"></th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-slate-100">
-        {#each visibleRows as row (row.cv_issue_id)}
+  {#each groupedRows as group (group.publisher)}
+    <h2
+      class="mt-4 mb-2 text-sm font-semibold uppercase tracking-wide text-slate-600 first:mt-0"
+    >
+      {group.publisher}
+    </h2>
+    <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <table class="w-full text-sm">
+        <thead class="border-b border-slate-200 bg-slate-50 text-left text-xs text-slate-500">
           <tr>
-            <td class="px-4 py-2">
-              {#if !row.on_pull_list}
-                <input
-                  type="checkbox"
-                  class="rounded border-slate-300"
-                  checked={sel.has(row.cv_volume_id)}
-                  onchange={() => sel.toggle(row.cv_volume_id)}
-                  disabled={anyBusy}
-                  aria-label={`Select ${row.volume_name || 'Unknown series'}`}
-                />
-              {/if}
-            </td>
-            <td class="whitespace-nowrap px-4 py-2 font-mono text-xs text-slate-600">
-              {row.store_date}
-            </td>
-            <td class="px-4 py-2">
-              {#if row.cover_url}
-                <img
-                  src={row.cover_url}
-                  alt=""
-                  class="size-10 rounded bg-slate-100 object-cover"
-                  loading="lazy"
-                />
-              {:else}
-                <div class="size-10 rounded bg-slate-100" aria-hidden="true"></div>
-              {/if}
-            </td>
-            <td class="px-4 py-2">
-              <a
-                href={row.site_detail_url}
-                target="_blank"
-                rel="noreferrer"
-                class="font-medium text-blue-600 hover:underline"
-              >
-                {row.volume_name || 'Unknown series'}
-              </a>
-            </td>
-            <td class="px-4 py-2 font-mono text-slate-600">#{row.issue_number}</td>
-            <td class="px-4 py-2">
-              <div class="flex justify-end">
-                {#if row.on_pull_list}
-                  <span
-                    class="rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700"
-                  >
-                    On pull list
-                  </span>
-                {/if}
-              </div>
-            </td>
+            <th class="w-8 px-4 py-2"></th>
+            <th class="px-4 py-2 font-medium">On sale</th>
+            <th class="px-4 py-2 font-medium">Cover</th>
+            <th class="px-4 py-2 font-medium">Series</th>
+            <th class="px-4 py-2 font-medium">Issue</th>
+            <th class="px-4 py-2"></th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {#each group.rows as row (row.cv_issue_id)}
+            <tr>
+              <td class="px-4 py-2">
+                {#if !row.on_pull_list}
+                  <input
+                    type="checkbox"
+                    class="rounded border-slate-300"
+                    checked={sel.has(row.cv_volume_id)}
+                    onchange={() => sel.toggle(row.cv_volume_id)}
+                    disabled={anyBusy}
+                    aria-label={`Select ${row.volume_name || 'Unknown series'}`}
+                  />
+                {/if}
+              </td>
+              <td class="whitespace-nowrap px-4 py-2 font-mono text-xs text-slate-600">
+                {row.store_date}
+              </td>
+              <td class="px-4 py-2">
+                {#if row.cover_url}
+                  <img
+                    src={row.cover_url}
+                    alt=""
+                    class="size-10 rounded bg-slate-100 object-cover"
+                    loading="lazy"
+                  />
+                {:else}
+                  <div class="size-10 rounded bg-slate-100" aria-hidden="true"></div>
+                {/if}
+              </td>
+              <td class="px-4 py-2">
+                <a
+                  href={row.site_detail_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  class="font-medium text-blue-600 hover:underline"
+                >
+                  {row.volume_name || 'Unknown series'}
+                </a>
+              </td>
+              <td class="px-4 py-2 font-mono text-slate-600">#{row.issue_number}</td>
+              <td class="px-4 py-2">
+                <div class="flex justify-end">
+                  {#if row.on_pull_list}
+                    <span
+                      class="rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700"
+                    >
+                      On pull list
+                    </span>
+                  {/if}
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/each}
 {/if}

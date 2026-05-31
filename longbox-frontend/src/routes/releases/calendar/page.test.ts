@@ -31,12 +31,18 @@ function calRow(over: Partial<CalendarRow> = {}): CalendarRow {
     site_detail_url: 'https://cv/4000-1/',
     series_id: null,
     on_pull_list: false,
+    publisher: null,
     ...over
   };
 }
 
 function pageData(rows: CalendarRow[]) {
-  return { props: { data: { from: '2026-05-13', to: '2026-05-19', rows } } };
+  // `libraryRoot` is merged into the page's `data` prop by the layout
+  // load (see src/routes/+layout.ts). Mirroring it here matches the
+  // convention used in other route tests (e.g. pull-list/page.test.ts).
+  return {
+    props: { data: { libraryRoot: null, from: '2026-05-13', to: '2026-05-19', rows } }
+  };
 }
 
 beforeEach(() => {
@@ -126,5 +132,77 @@ describe('release calendar page', () => {
       expect(getReleaseCalendar).toHaveBeenCalledWith('2026-05-13', '2026-05-19', true)
     );
     await waitFor(() => expect(screen.getByText('Fresh Pull')).toBeInTheDocument());
+  });
+
+  // 6c.5 Item E: publisher grouping.
+
+  it('groups rows by publisher under their own headers', () => {
+    render(
+      CalendarPage,
+      pageData([
+        calRow({
+          cv_issue_id: 1,
+          cv_volume_id: 100,
+          volume_name: 'Saga',
+          publisher: 'Image Comics'
+        }),
+        calRow({
+          cv_issue_id: 2,
+          cv_volume_id: 200,
+          volume_name: 'Batman',
+          publisher: 'DC Comics'
+        }),
+        calRow({
+          cv_issue_id: 3,
+          cv_volume_id: 300,
+          volume_name: 'Invincible',
+          publisher: 'Image Comics'
+        })
+      ])
+    );
+    // Two publisher group headings render, both as <h2>.
+    expect(screen.getByRole('heading', { level: 2, name: 'DC Comics' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Image Comics' })).toBeInTheDocument();
+    // All three rows are present somewhere on the page.
+    expect(screen.getByText('Saga')).toBeInTheDocument();
+    expect(screen.getByText('Batman')).toBeInTheDocument();
+    expect(screen.getByText('Invincible')).toBeInTheDocument();
+  });
+
+  it('falls back to "Unknown Publisher" for rows whose publisher is null', () => {
+    render(
+      CalendarPage,
+      pageData([
+        calRow({ cv_issue_id: 1, cv_volume_id: 100, volume_name: 'Saga', publisher: null }),
+        calRow({
+          cv_issue_id: 2,
+          cv_volume_id: 200,
+          volume_name: 'Batman',
+          publisher: 'DC Comics'
+        })
+      ])
+    );
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Unknown Publisher' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'DC Comics' })).toBeInTheDocument();
+  });
+
+  it('orders publisher groups alphabetically', () => {
+    render(
+      CalendarPage,
+      pageData([
+        calRow({ cv_issue_id: 1, cv_volume_id: 100, volume_name: 'Saga', publisher: 'Image' }),
+        calRow({ cv_issue_id: 2, cv_volume_id: 200, volume_name: 'Batman', publisher: 'DC' }),
+        calRow({ cv_issue_id: 3, cv_volume_id: 300, volume_name: 'Hellboy', publisher: 'Dark Horse' })
+      ])
+    );
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map((h) => h.textContent?.trim());
+    // localeCompare is case-insensitive: "Dark Horse" sorts before
+    // "DC" because 'a' < 'c'. That's the right semantic — alphabetical
+    // order should ignore case — so the expected order encodes it.
+    expect(headings).toEqual(['Dark Horse', 'DC', 'Image']);
   });
 });
