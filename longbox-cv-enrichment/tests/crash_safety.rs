@@ -12,7 +12,7 @@ mod common;
 use std::collections::HashSet;
 
 use common::{ensure_library_root, fresh_pool, seed_shallow_series_with_issues};
-use longbox_db::{issue_repo, series_repo, NewIssue};
+use longbox_db::{cv_volume_cache_repo, issue_repo, series_repo, NewIssue};
 
 // ===== Q4 confirmation: set_cv_id rows-affected is a real outcome =====
 
@@ -445,4 +445,134 @@ async fn volume_refresh_candidates_excludes_shallow_and_publisher_populated() {
         1,
         "exactly the one CV-linked-publisher-NULL series, nothing else"
     );
+}
+
+// ===== Item E v2: cv_volume_cache (queue, fill, list_pending) =====
+
+/// bulk_queue_pending is the calendar's queue producer. INSERT OR
+/// IGNORE means a duplicate cv_volume_id is a clean no-op rather
+/// than a failure — the calendar can call this every request without
+/// caring whether the ids are already queued (or already filled).
+#[tokio::test]
+async fn cv_volume_cache_queue_is_idempotent_on_duplicate_ids() {
+    let pool = fresh_pool().await;
+
+    // First insert — all four ids are new.
+    let inserted1 = cv_volume_cache_repo::bulk_queue_pending(&pool, &[100, 200, 300, 400])
+        .await
+        .unwrap();
+    assert_eq!(inserted1, 4);
+
+    // Second call with overlap — only the truly-new ids are inserted.
+    let inserted2 = cv_volume_cache_repo::bulk_queue_pending(&pool, &[300, 400, 500, 600])
+        .await
+        .unwrap();
+    assert_eq!(inserted2, 2, "300 + 400 are no-ops; only 500 + 600 insert");
+
+    // All six end up in the table.
+    let row = cv_volume_cache_repo::find_by_id(&pool, 600).await.unwrap();
+    assert!(row.is_some());
+    let row = row.unwrap();
+    assert!(row.fetched_at.is_none(), "freshly queued — fetched_at NULL");
+    assert!(row.publisher.is_none());
+}
+
+/// list_pending only returns rows with fetched_at IS NULL. A
+/// successfully filled row drops out of the pending set even if its
+/// publisher came back NULL from CV — fetched_at, not publisher
+/// non-null, is the "I've done the work" signal.
+#[tokio::test]
+async fn cv_volume_cache_list_pending_excludes_fetched_rows() {
+    let pool = fresh_pool().await;
+
+    // Queue three.
+    cv_volume_cache_repo::bulk_queue_pending(&pool, &[111, 222, 333])
+        .await
+        .unwrap();
+
+    // Fill 222 with a real publisher.
+    cv_volume_cache_repo::mark_fetched(
+        &pool,
+        222,
+        Some("Image Comics"),
+        Some("desc"),
+        Some(2012),
+    )
+    .await
+    .unwrap();
+
+    // Fill 333 with a NULL publisher (CV returned no publisher data).
+    // fetched_at MUST still be set — otherwise the worker re-attempts
+    // forever on volumes that legitimately have no publisher field.
+    cv_volume_cache_repo::mark_fetched(&pool, 333, None, None, None)
+        .await
+        .unwrap();
+
+    let pending = cv_volume_cache_repo::list_pending(&pool).await.unwrap();
+    let pending_ids: HashSet<i64> = pending.iter().map(|p| p.cv_volume_id).collect();
+    assert!(
+        pending_ids.contains(&111),
+        "111 still pending — fetched_at is NULL"
+    );
+    assert!(
+        !pending_ids.contains(&222),
+        "222 fetched with publisher — drops out of pending"
+    );
+    assert!(
+        !pending_ids.contains(&333),
+        "333 fetched with NULL publisher — also drops out (fetched_at is set)"
+    );
+    assert_eq!(pending.len(), 1);
+}
+
+/// mark_fetched persists publisher + description + start_year together
+/// in a single UPDATE and sets fetched_at. The repo behavior is what
+/// the worker's cache_fill_one relies on.
+#[tokio::test]
+async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
+    let pool = fresh_pool().await;
+
+    cv_volume_cache_repo::bulk_queue_pending(&pool, &[42])
+        .await
+        .unwrap();
+    let rows = cv_volume_cache_repo::mark_fetched(
+        &pool,
+        42,
+        Some("Dark Horse"),
+        Some("Long description."),
+        Some(2024),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let row = cv_volume_cache_repo::find_by_id(&pool, 42).await.unwrap().unwrap();
+    assert_eq!(row.publisher.as_deref(), Some("Dark Horse"));
+    assert_eq!(row.description.as_deref(), Some("Long description."));
+    assert_eq!(row.start_year, Some(2024));
+    assert!(row.fetched_at.is_some(), "fetched_at set on success");
+}
+
+/// list_pending order: FIFO by first_seen_at. Older queue entries
+/// drain first — more likely to be hit by repeat calendar loads, so
+/// the user-visible "Unknown Publisher" stays in front for the
+/// shortest time.
+#[tokio::test]
+async fn cv_volume_cache_pending_orders_oldest_first() {
+    let pool = fresh_pool().await;
+
+    // Queue in two batches with a delay to force distinct first_seen_at.
+    cv_volume_cache_repo::bulk_queue_pending(&pool, &[1000, 1001])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    cv_volume_cache_repo::bulk_queue_pending(&pool, &[1002, 1003])
+        .await
+        .unwrap();
+
+    let pending = cv_volume_cache_repo::list_pending(&pool).await.unwrap();
+    let ids: Vec<i64> = pending.iter().map(|p| p.cv_volume_id).collect();
+    // The first batch (1000, 1001) must come before the second
+    // batch (1002, 1003). Within a batch, order is by cv_volume_id ASC.
+    assert_eq!(ids, vec![1000, 1001, 1002, 1003]);
 }
