@@ -168,6 +168,10 @@ impl From<longbox_db::DbError> for ApiError {
                 message: format!("migration failed: {m}"),
                 source: anyhow::anyhow!("MigrationFailed"),
             },
+            longbox_db::DbError::MigrationGap { .. } => ApiError::Internal {
+                message: err.to_string(),
+                source: anyhow::anyhow!("MigrationGap"),
+            },
             longbox_db::DbError::Other(e) => ApiError::Internal {
                 message: format!("database error: {e}"),
                 source: anyhow::anyhow!(e),

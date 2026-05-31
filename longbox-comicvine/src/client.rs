@@ -23,6 +23,12 @@ pub struct ComicVineClientConfig {
     pub api_key: String,
     pub base_url: String,
     pub timeout: Duration,
+    /// Caps the connect/DNS/TLS-handshake phase independently of
+    /// `timeout` (which bounds the whole request). Without this,
+    /// flaky connects can stall for minutes through OS-level TCP
+    /// retries and glibc resolver chains, dragging the enrichment
+    /// worker's pace.
+    pub connect_timeout: Duration,
     pub rate_limit_per_hour: u32,
     pub max_wait_for_slot: Duration,
     pub user_agent: String,
@@ -34,6 +40,7 @@ impl Default for ComicVineClientConfig {
             api_key: String::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(5),
             rate_limit_per_hour: 180,
             max_wait_for_slot: Duration::from_secs(60),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
@@ -70,6 +77,7 @@ impl ComicVineClient {
         })?;
         let http = HttpClient::builder()
             .timeout(config.timeout)
+            .connect_timeout(config.connect_timeout)
             .user_agent(config.user_agent)
             .build()?;
         let limiter = CvRateLimiter::new(

@@ -17,6 +17,14 @@ pub enum DbError {
     #[error("migration failed: {0}")]
     MigrationFailed(String),
 
+    #[error("migration integrity gap: embedded (max={embedded_max}, count={embedded_count}) != applied (max={applied_max}, count={applied_count}) — the running image may predate recent migrations. Rebuild: docker compose up -d --build --force-recreate.")]
+    MigrationGap {
+        embedded_max: i64,
+        embedded_count: i64,
+        applied_max: i64,
+        applied_count: i64,
+    },
+
     #[error(transparent)]
     Other(sqlx::Error),
 }

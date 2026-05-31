@@ -46,10 +46,34 @@ pub async fn open(url: &str) -> Result<SqlitePool> {
 
     let pool = pool_options.connect_with(options).await?;
 
-    sqlx::migrate!("./migrations")
+    let migrator = sqlx::migrate!("./migrations");
+    migrator
         .run(&pool)
         .await
         .map_err(|e| DbError::MigrationFailed(e.to_string()))?;
+
+    // Bug 5 defense: assert that what the binary embedded matches what
+    // the DB applied. Catches the silent-gap case (migrate.run() returns
+    // Ok but the new migrations weren't actually applied) regardless of
+    // mechanism — stale image, sqlx anomaly, cache quirk. Loudness-not-
+    // silence: refuse to boot on divergence, name the likely fix.
+    let embedded_max: i64 = migrator.iter().map(|m| m.version).max().unwrap_or(0);
+    let embedded_count: i64 = migrator.iter().count() as i64;
+    let applied_max: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await?;
+    let applied_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await?;
+    if embedded_max != applied_max || embedded_count != applied_count {
+        return Err(DbError::MigrationGap {
+            embedded_max,
+            embedded_count,
+            applied_max,
+            applied_count,
+        });
+    }
 
     Ok(pool)
 }
