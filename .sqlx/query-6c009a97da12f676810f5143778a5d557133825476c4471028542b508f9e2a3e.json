@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET publisher = ?, description = ?, cover_url = ?,\n               updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "6c009a97da12f676810f5143778a5d557133825476c4471028542b508f9e2a3e"
+}

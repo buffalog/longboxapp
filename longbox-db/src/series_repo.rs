@@ -205,6 +205,44 @@ where
     Ok(result.rows_affected())
 }
 
+/// Persist the descriptive volume detail (`publisher`, `description`,
+/// `cover_url`) from a fetched `CvVolumeDetail` onto an existing
+/// series row. Separate from [`set_cv_id`] on purpose: the latter
+/// establishes CV identity (the race-guarded identity column), this
+/// writes the descriptive payload. Reused by the enrichment merge
+/// (inside the per-attempt transaction so the three fields roll back
+/// atomically with `set_cv_id` + per-issue upserts) and the volume-
+/// refresh pass (standalone update for already-linked series whose
+/// publisher was previously discarded).
+///
+/// Returns rows-affected. 0 means the series row no longer exists
+/// (deleted between fetch and write) — caller's choice whether to
+/// treat that as a real outcome or absorb silently.
+pub async fn update_series_volume_detail<'e, E>(
+    executor: E,
+    series_id: i64,
+    publisher: Option<&str>,
+    description: Option<&str>,
+    cover_url: Option<&str>,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET publisher = ?, description = ?, cover_url = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        publisher,
+        description,
+        cover_url,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn find_by_metron_id<'e, E>(executor: E, metron_id: &str) -> Result<Option<SeriesRow>>
 where
     E: SqliteExecutor<'e>,
@@ -881,6 +919,64 @@ where
             Ok(rows)
         }
     }
+}
+
+/// A CV-linked series whose descriptive volume detail (`publisher`)
+/// was never persisted — the secondary "refresh pass" candidate set.
+/// All series the enrichment worker promoted before 6c.5 land here
+/// (the merge wrote only `cv_id`, discarding the publisher field
+/// carried in `CvVolumeDetail`). After 6c.5 ships, this set grows
+/// only via race conditions or future series whose volume detail
+/// fetch failed partway.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VolumeRefreshCandidate {
+    pub series_id: i64,
+    pub cv_id: i64,
+    pub title: String,
+    pub owned_count: i64,
+}
+
+/// CV-linked series with `publisher IS NULL`, ordered by the same
+/// priority the shallow-candidate query uses (owned_count DESC,
+/// last_matched_count DESC, id ASC). The worker drains this set as
+/// a secondary pass *after* the primary shallow set exhausts, using
+/// only `fetch_volume` (not the full search/fetch_volume/fetch_issues
+/// chain) — same background-throttle, ~30s per series.
+///
+/// No cooldown filter: a CV-linked series whose publisher is NULL is
+/// data we owe the user, not a previously-refused attempt to back off
+/// from.
+pub async fn list_volume_refresh_candidates<'e, E>(
+    executor: E,
+) -> Result<Vec<VolumeRefreshCandidate>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        VolumeRefreshCandidate,
+        r#"
+        WITH owned_counts AS (
+            SELECT i.series_id, COUNT(DISTINCT i.id) AS owned_count
+            FROM issues i
+            JOIN files f ON f.issue_id = i.id
+            WHERE f.status = 'owned' AND f.is_present = 1
+            GROUP BY i.series_id
+        )
+        SELECT
+            s.id AS "series_id!: i64",
+            s.cv_id AS "cv_id!: i64",
+            s.title AS "title!: String",
+            COALESCE(oc.owned_count, 0) AS "owned_count!: i64"
+        FROM series s
+        LEFT JOIN owned_counts oc ON oc.series_id = s.id
+        WHERE s.cv_id IS NOT NULL
+          AND s.publisher IS NULL
+        ORDER BY owned_count DESC, s.last_matched_count DESC, s.id ASC
+        "#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
 }
 
 /// Whether the three 6c.1 enrichment-tracking columns exist on
