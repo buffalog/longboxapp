@@ -3632,8 +3632,12 @@ async fn e2e_delete_folder_transitions_to_phantom_then_remove() {
     assert_eq!(phantoms["all_zero_owned"].as_array().unwrap().len(), 0);
 
     // The user deletes the folder; the next scan walks it, marks the
-    // file missing, and the series transitions to a phantom.
+    // file missing, and the series transitions to a phantom. Drop a
+    // non-archive placeholder first so the mount-health preflight
+    // doesn't refuse to scan a now-empty library root (the walker
+    // filters by extension; non-cbz/cbr files are invisible to it).
     std::fs::remove_dir_all(app.library_path().join("Chew")).unwrap();
+    std::fs::write(app.library_path().join(".placeholder"), b"preflight keepalive").unwrap();
     app.state
         .scanner
         .scan_full(app.library_root_id)

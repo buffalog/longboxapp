@@ -277,6 +277,12 @@ impl From<longbox_scanner::ScanError> for ApiError {
                 resource: "library_root",
                 id: id.to_string(),
             },
+            longbox_scanner::ScanError::PreflightFailed { reason } => {
+                ApiError::ServiceUnavailable {
+                    code: "scan_preflight_failed",
+                    message: reason,
+                }
+            }
             longbox_scanner::ScanError::Db(db_err) => ApiError::from(db_err),
             other => ApiError::Internal {
                 message: format!("scanner: {other}"),

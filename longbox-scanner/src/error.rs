@@ -28,4 +28,12 @@ pub enum ScanError {
 
     #[error("invalid path {path:?}: {reason}")]
     InvalidPath { path: PathBuf, reason: String },
+
+    /// Mount-health guard tripped: the library root is unreadable or
+    /// empty. Returned BEFORE the scan_run is recorded and BEFORE any
+    /// destructive pass (mark-missing, auto-tidy) can run, so a
+    /// degraded SMB mount can never silently flip the catalog to
+    /// "everything is gone" and trigger auto-tidy purges.
+    #[error("scan preflight failed: {reason}")]
+    PreflightFailed { reason: String },
 }
