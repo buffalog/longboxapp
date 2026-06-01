@@ -318,6 +318,70 @@ async fn six_file_acceptance_smoke() {
     );
     assert!(!a_path.exists(), "source (a) must have moved out of watch");
 
+    // Imported CBZ carries both ComicInfo.xml and MetronInfo.xml at the
+    // archive root. The names must be exactly those — no subdirectory
+    // prefix — because every consumer (Perdoo, ComicRack CE, Codex,
+    // Comicbox, Komga, Kavita) reads them from root only.
+    let imported_cbz = f
+        .library
+        .path()
+        .join("Saga (2012)")
+        .join("Saga (2012) 001.cbz");
+    let cbz_bytes = std::fs::read(&imported_cbz).expect("imported CBZ must exist");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(cbz_bytes)).expect("imported CBZ must be a valid ZIP");
+    let entry_names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_owned())
+        .collect();
+    assert!(
+        entry_names.iter().any(|n| n == "ComicInfo.xml"),
+        "ComicInfo.xml at root (regression): entries = {entry_names:?}"
+    );
+    assert!(
+        entry_names.iter().any(|n| n == "MetronInfo.xml"),
+        "MetronInfo.xml at root: entries = {entry_names:?}"
+    );
+    // Explicitly assert no subdirectory-nested copy snuck in — the
+    // load-bearing "at root, not in a subdirectory" guarantee.
+    assert!(
+        !entry_names
+            .iter()
+            .any(|n| n.contains('/') && n.ends_with("MetronInfo.xml")),
+        "MetronInfo.xml must only live at root, never under a subdir: entries = {entry_names:?}"
+    );
+
+    // Read MetronInfo.xml and verify the core fields land. We're not
+    // re-testing the writer's full output (the writer's own golden
+    // tests do that); this checks the wiring from
+    // (SeriesRow, IssueRow) → on-disk archive really fires.
+    let mut metron_entry = archive
+        .by_name("MetronInfo.xml")
+        .expect("MetronInfo.xml openable by name");
+    let mut metron_xml = String::new();
+    std::io::Read::read_to_string(&mut metron_entry, &mut metron_xml)
+        .expect("MetronInfo.xml is UTF-8");
+    drop(metron_entry);
+    assert!(
+        metron_xml.contains("<MetronInfo"),
+        "root element present: {metron_xml}"
+    );
+    assert!(
+        metron_xml.contains("<Name>Saga</Name>"),
+        "series name landed: {metron_xml}"
+    );
+    assert!(
+        metron_xml.contains("<Number>1</Number>"),
+        "issue number landed: {metron_xml}"
+    );
+    assert!(
+        metron_xml.contains("<StartYear>2012</StartYear>"),
+        "series start year landed: {metron_xml}"
+    );
+    assert!(
+        metron_xml.contains("<LastModified>"),
+        "LastModified timestamp present: {metron_xml}"
+    );
+
     // Criterion 3 alt — file (b): filename-only match.
     let row_b =
         file_repo::find_by_path(&f.db, f.library_root_id, "Saga (2012)/Saga (2012) 002.cbz")
