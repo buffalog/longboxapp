@@ -269,9 +269,20 @@ async fn start_phase_b(
     };
     let watch_path = std::path::PathBuf::from(crate::config::normalize_path(raw));
     let library_root = std::path::PathBuf::from(&config.library_root_path);
+    // Poll interval from the settings table. get_or_default falls back
+    // to 30 on a missing row or an unparseable value — defensive enough
+    // that a typo in the row can't kill Phase B.
+    let poll_interval_seconds: u64 = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_PHASE_B_POLL_INTERVAL_SECONDS,
+        30u64,
+    )
+    .await
+    .unwrap_or(30);
     let postprocess_config = longbox_postprocess::PostprocessConfig {
         watch_path: watch_path.clone(),
         library_root,
+        poll_interval: Duration::from_secs(poll_interval_seconds),
     };
     match longbox_postprocess::start(postprocess_config, db.clone(), cache).await {
         Ok(()) => {}

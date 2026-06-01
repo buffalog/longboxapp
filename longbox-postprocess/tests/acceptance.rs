@@ -209,6 +209,10 @@ async fn six_file_acceptance_smoke() {
     let config = PostprocessConfig {
         watch_path: f.watch.path().to_path_buf(),
         library_root: f.library.path().to_path_buf(),
+        // Tight poll for the acceptance test — the test post-drops
+        // files and waits ~5s for them to land. Default 30s would
+        // make the test wall-time absurd.
+        poll_interval: Duration::from_millis(500),
     };
     longbox_postprocess::start(config, f.db.clone(), Arc::clone(&cache))
         .await
