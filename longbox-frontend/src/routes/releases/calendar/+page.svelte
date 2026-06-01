@@ -286,7 +286,7 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
-          {#each group.rows as row (row.cv_issue_id)}
+          {#each group.rows as row (row.cv_issue_id ?? row.metron_issue_id)}
             <tr>
               <td class="px-4 py-2">
                 {#if !row.on_pull_list}
