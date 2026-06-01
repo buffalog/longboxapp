@@ -23,9 +23,10 @@ vi.mock('$lib/stores/toast.svelte', () => ({
 function calRow(over: Partial<CalendarRow> = {}): CalendarRow {
   return {
     cv_issue_id: 1,
+    cv_volume_id: 100,
+    metron_issue_id: null,
     issue_number: '1',
     store_date: '2026-05-14',
-    cv_volume_id: 100,
     volume_name: 'Saga',
     cover_url: null,
     site_detail_url: 'https://cv/4000-1/',

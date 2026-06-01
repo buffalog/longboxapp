@@ -3981,6 +3981,217 @@ async fn calendar_falls_back_to_cv_volume_cache_for_untracked_volumes() {
     );
 }
 
+// ============ Item A v2 piece 3: forward calendar via Metron ============
+
+/// Forward-week request when `state.metron = None` (kill switch off OR
+/// credentials missing/invalid) returns an empty Vec, NOT an error.
+/// The user clicking "Next week" with Metron disabled sees an empty
+/// state, not a 500. The CV path is untouched.
+#[tokio::test]
+async fn forward_week_returns_empty_when_metron_disabled() {
+    let app = build_test_app().await;
+    // state.metron is None by default. No Metron mock to mount.
+
+    // Use a far-future date — guaranteed `from > today_utc()`. The
+    // dispatch rule must short-circuit to empty here without hitting
+    // any external API.
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2099-01-01&to=2099-01-07",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert!(rows.is_empty(), "forward week with Metron disabled → empty");
+}
+
+/// Forward-week request when `state.metron = Some(client)` runs the
+/// hydration path: list endpoint + per-issue detail fetches in
+/// parallel, publisher resolved inline from Metron's issue-detail
+/// payload, cached as fully-hydrated JSON.
+///
+/// **The load-bearing assertion is `publisher == "DC Comics"`** —
+/// not just non-null but the actual expected name. A test that
+/// asserted only `is_some` would pass even if hydration silently
+/// stored Metron's list-endpoint output (which has publisher: None)
+/// instead of the detail-endpoint payload. The whole point of
+/// piece 3 is that the issue-detail step ran and resolved publisher
+/// before the cache write.
+#[tokio::test]
+async fn forward_week_hydrates_publisher_inline_from_metron_detail() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    // Metron list response — has issues but no publisher / series.id
+    // inline (matches the real shape probed in the archaeology).
+    let list_payload = serde_json::json!({
+        "count": 2,
+        "next": null,
+        "previous": null,
+        "results": [
+            {
+                "id": 170031,
+                "series": {"name": "Absolute Green Lantern", "volume": 1, "year_began": 2025},
+                "number": "15",
+                "issue": "Absolute Green Lantern (2025) #15",
+                "cover_date": "2099-03-01",
+                "store_date": "2099-01-03",
+                "image": "https://cv/cover-1.jpg",
+                "cover_hash": null,
+                "modified": null
+            },
+            {
+                "id": 170032,
+                "series": {"name": "Action Comics", "volume": 3, "year_began": 2016},
+                "number": "1099",
+                "issue": "Action Comics (2016) #1099",
+                "cover_date": "2099-03-01",
+                "store_date": "2099-01-05",
+                "image": null,
+                "cover_hash": null,
+                "modified": null
+            }
+        ]
+    })
+    .to_string();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/"))
+        .and(wiremock::matchers::query_param("store_date_range_after", "2099-01-01"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(list_payload))
+        .mount(&metron_server)
+        .await;
+
+    // Detail responses — publisher inline. The hydration step must
+    // walk these to get publisher onto the rows.
+    let detail_payload = |id: i64, series_name: &str, pub_name: &str| {
+        serde_json::json!({
+            "id": id,
+            "publisher": {"id": 2, "name": pub_name},
+            "imprint": null,
+            "series": {
+                "id": id * 10,
+                "name": series_name,
+                "sort_name": series_name,
+                "volume": 1,
+                "year_began": 2025
+            },
+            "number": "1",
+            "alt_number": "",
+            "title": "",
+            "cover_date": "2099-03-01",
+            "store_date": "2099-01-03",
+            "foc_date": "2098-12-15",
+            "price": "4.99",
+            "desc": "",
+            "image": null,
+            "cv_id": null,
+            "gcd_id": null,
+            "resource_url": format!("https://metron.cloud/issue/{}", id),
+            "modified": null
+        })
+        .to_string()
+    };
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/170031/"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_string(detail_payload(170031, "Absolute Green Lantern", "DC Comics")),
+        )
+        .mount(&metron_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/170032/"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_string(detail_payload(170032, "Action Comics", "DC Comics")),
+        )
+        .mount(&metron_server)
+        .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2099-01-01&to=2099-01-07",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "both forward-week rows return");
+
+    for row in rows {
+        // Source identity: Metron-sourced rows always have
+        // metron_issue_id; cv_issue_id stays null until CV catalogs.
+        assert!(
+            !row["metron_issue_id"].is_null(),
+            "Metron-sourced row must carry metron_issue_id"
+        );
+        // THE LOAD-BEARING ASSERTION — hydration actually walked the
+        // detail endpoint and resolved publisher to a real string.
+        assert_eq!(
+            row["publisher"], "DC Comics",
+            "publisher must be hydrated from Metron's detail endpoint, not None from the list endpoint"
+        );
+    }
+
+    // Cache must have been written with the hydrated payload — the
+    // 24h TTL means a second request reads from cache. Verify the
+    // cache row exists post-fetch.
+    let cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metron_calendar_cache")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(cache_count, 1, "cache row written on miss");
+}
+
+/// Current-week request must NOT route through Metron even when it's
+/// enabled. The CV path stays unchanged; the dispatch boundary is
+/// strictly `from > today_utc()`.
+#[tokio::test]
+async fn current_week_unaffected_by_metron_when_enabled() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    // Mount NO Metron mocks. If the dispatch wrongly routes a
+    // current-week request through Metron, the unmocked call surfaces
+    // as a 404 from wiremock's catch-all → MetronError → 502 here.
+    // A successful 200 with the CV-sourced rows proves the dispatch
+    // stayed on the CV path.
+    mount_cv_calendar(
+        &app,
+        "2026-05-13",
+        "2026-05-19",
+        r#"[
+            { "id": 50001, "issue_number": "1", "name": null, "cover_date": null,
+              "store_date": "2026-05-14", "description": null, "image": null,
+              "volume": { "id": 4050, "name": "Saga" },
+              "site_detail_url": "https://cv/4000-50001/" }
+        ]"#,
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2026-05-13&to=2026-05-19",
+        ))
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    // CV-sourced row: cv_issue_id populated, metron_issue_id null.
+    assert!(!rows[0]["cv_issue_id"].is_null(), "CV path populates cv_issue_id");
+    assert!(
+        rows[0]["metron_issue_id"].is_null(),
+        "CV path leaves metron_issue_id null"
+    );
+}
+
 #[tokio::test]
 async fn calendar_serves_a_fresh_cache_entry_without_hitting_cv() {
     let app = build_test_app().await;

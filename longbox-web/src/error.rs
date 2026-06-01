@@ -180,6 +180,46 @@ impl From<longbox_db::DbError> for ApiError {
     }
 }
 
+impl From<longbox_metron::MetronError> for ApiError {
+    fn from(err: longbox_metron::MetronError) -> Self {
+        match err {
+            longbox_metron::MetronError::Auth => ApiError::Internal {
+                message: "Metron credentials misconfigured".into(),
+                source: anyhow::anyhow!("MetronError::Auth"),
+            },
+            longbox_metron::MetronError::NotFound => ApiError::NotFound {
+                resource: "metron_resource",
+                id: "unspecified".into(),
+            },
+            longbox_metron::MetronError::RateLimited {
+                retry_after_seconds,
+            } => ApiError::RateLimited {
+                retry_after_seconds,
+            },
+            longbox_metron::MetronError::Http { status, body } => ApiError::Upstream {
+                service: "metron",
+                status,
+                message: truncate(&body, 200).to_owned(),
+            },
+            longbox_metron::MetronError::Network(e) => ApiError::Upstream {
+                service: "metron",
+                status: 0,
+                message: format!("network: {e}"),
+            },
+            longbox_metron::MetronError::Timeout => ApiError::Upstream {
+                service: "metron",
+                status: 0,
+                message: "request timed out".into(),
+            },
+            longbox_metron::MetronError::Malformed { message, .. } => ApiError::Upstream {
+                service: "metron",
+                status: 0,
+                message,
+            },
+        }
+    }
+}
+
 impl From<longbox_comicvine::CvError> for ApiError {
     fn from(err: longbox_comicvine::CvError) -> Self {
         match err {

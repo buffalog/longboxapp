@@ -2,23 +2,34 @@
 // cache-backed server-side.
 import { apiFetch } from './client';
 
-/** One release-calendar row: a CV issue plus live pull-list enrichment. */
+/** One release-calendar row. Source-unified: a CV-sourced row (current /
+ *  past weeks) populates `cv_issue_id` + `cv_volume_id` and leaves
+ *  `metron_issue_id = null`; a Metron-sourced row (forward weeks)
+ *  always populates `metron_issue_id` and populates `cv_*` only when
+ *  Metron carries those cross-references inline.
+ *
+ *  At least one of `cv_issue_id` or `metron_issue_id` is always
+ *  populated — the page's keyed-each uses
+ *  `row.cv_issue_id ?? row.metron_issue_id` as the unique key. */
 export interface CalendarRow {
-  cv_issue_id: number;
+  cv_issue_id: number | null;
+  cv_volume_id: number | null;
+  /** Metron's issue id (Item A v2). Populated only on forward-week
+   *  rows; null on every CV-sourced row. */
+  metron_issue_id: number | null;
   issue_number: string;
   /** On-sale date, `YYYY-MM-DD`. */
   store_date: string;
-  cv_volume_id: number;
   volume_name: string;
   cover_url: string | null;
   site_detail_url: string;
   /** The tracked series this volume maps to, if LongBox knows it. */
   series_id: number | null;
   on_pull_list: boolean;
-  /** Publisher name sourced from `series.publisher`, populated by the
-   *  6c.5 enrichment merge and refresh-pass. `null` for untracked
-   *  volumes AND for CV-linked series whose refresh pass hasn't run
-   *  yet — the calendar groups both under "Unknown Publisher". */
+  /** Publisher name. CV-sourced rows chain series JOIN -> cv_volume_cache
+   *  -> null. Metron-sourced rows chain series JOIN (via cv_id or
+   *  metron_id) -> Metron-inline -> null. Frontend groups null rows
+   *  under "Unknown Publisher". */
   publisher: string | null;
 }
 

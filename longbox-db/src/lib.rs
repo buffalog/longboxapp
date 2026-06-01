@@ -13,6 +13,7 @@ pub mod file_repo;
 pub mod indexer_config_repo;
 pub mod issue_repo;
 pub mod library_root_repo;
+pub mod metron_calendar_cache_repo;
 pub mod parsing_pattern_repo;
 pub mod pool;
 pub mod publisher_filter_repo;
@@ -40,6 +41,7 @@ pub use publisher_filter_repo::{
 };
 pub use pull_attempt_repo::{FailedPull, NewPullAttempt, PullAttemptRow};
 pub use pull_list_repo::{NewPullEntry, PullListRow, PullListWithSeries};
+pub use metron_calendar_cache_repo::{MetronCalendarCacheRow, NewMetronCalendarCacheEntry};
 pub use release_cache_repo::{NewReleaseCacheEntry, ReleaseCacheRow};
 pub use webhook_config_repo::{NewWebhookConfig, WebhookConfigRow, WebhookConfigUpdate};
 

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", date_from, date_to,\n                  payload_json, cached_at AS \"cached_at: _\"\n           FROM metron_calendar_cache\n           WHERE date_from = ? AND date_to = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "date_from",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "date_to",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_at: _",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "25d01c2e74e2111c8f41d913f4d712f77d5990b2022ef7c00f190d4e26626fb3"
+}

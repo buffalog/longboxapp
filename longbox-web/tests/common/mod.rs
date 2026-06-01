@@ -11,6 +11,7 @@ use axum::http::Request;
 use axum::Router;
 use longbox_comicvine::{ComicVineClient, ComicVineClientConfig};
 use longbox_db::{library_root_repo, NewLibraryRoot, Pool};
+use longbox_metron::{MetronClient, MetronClientConfig};
 use longbox_scanner::{Scanner, ScannerConfig};
 use longbox_web::{build_router, AppConfig, AppState, ScanStatus};
 use tempfile::TempDir;
@@ -37,6 +38,28 @@ impl TestApp {
 
     pub fn library_path(&self) -> PathBuf {
         self.library_dir.path().to_path_buf()
+    }
+
+    /// Wire up a Metron client backed by `server` and rebuild the
+    /// router from the modified state. Subsequent requests route
+    /// through the new client. Item A v2 piece-3 tests use this to
+    /// stand up a `state.metron = Some(...)` configuration without
+    /// duplicating the full `build_test_app` setup body.
+    #[allow(dead_code)]
+    pub fn enable_metron(&mut self, server: &MockServer) {
+        let metron = MetronClient::new(MetronClientConfig {
+            username: "test_user".into(),
+            password: "test_pass".into(),
+            base_url: format!("{}/", server.uri()),
+            timeout: Duration::from_secs(2),
+            connect_timeout: Duration::from_secs(1),
+            rate_limit_per_hour: 360_000,
+            max_wait_for_slot: Duration::from_secs(1),
+            user_agent: "longbox-test/0.0".into(),
+        })
+        .unwrap();
+        self.state.metron = Some(Arc::new(metron));
+        self.router = build_router(self.state.clone());
     }
 }
 
