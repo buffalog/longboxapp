@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use longbox_core::{
     classify_status, match_file, ComicInfo, ComicInfoMetadata, CoverDate, FileStatus, LibraryPath,
-    MatchMethod, ParsingPattern,
+    MatchMethod, MetronInfoMetadata, ParsingPattern,
 };
 use longbox_db::{
     file_repo, find_candidates, issue_repo, parsing_pattern_repo, pull_attempt_repo, series_repo,
@@ -240,6 +240,12 @@ async fn import_as_owned(
 
     let metadata = compose_metadata(&series, &issue);
     let xml = metadata.to_xml();
+    // MetronInfo.xml lives alongside ComicInfo.xml in the same archive
+    // for maximum compatibility (Perdoo, ComicRack CE, Comicbox, Codex,
+    // Metron-Tagger all read it). Built from the same (SeriesRow,
+    // IssueRow) — no extra DB queries.
+    let metron_metadata = compose_metroninfo_metadata(&series, &issue);
+    let metron_xml = metron_metadata.to_xml();
 
     // Two-stage move so the consumer can distinguish ComicInfo-write
     // failures from move failures in the pending-intervention list.
@@ -249,10 +255,11 @@ async fn import_as_owned(
     // failure surface is precise.
     let source_owned = source.to_path_buf();
     let target_owned = target_abs.clone();
-    let rewrite_res =
-        tokio::task::spawn_blocking(move || rewrite_to_temp(&source_owned, &target_owned, &xml))
-            .await
-            .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+    let rewrite_res = tokio::task::spawn_blocking(move || {
+        rewrite_to_temp(&source_owned, &target_owned, &xml, &metron_xml)
+    })
+    .await
+    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
 
     let temp = match rewrite_res {
         Ok(t) => t,
@@ -468,6 +475,42 @@ fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
     }
 }
 
+/// Build the MetronInfo write set from the same catalog rows. Mirrors
+/// [`compose_metadata`] — same inputs, different schema. `sort_title`
+/// only surfaces as `<SortName>` when it differs from the canonical
+/// title; the writer omits the element when they're equal.
+fn compose_metroninfo_metadata(series: &SeriesRow, issue: &IssueRow) -> MetronInfoMetadata {
+    let cover_date = parse_cover_date(issue.cover_date.as_deref());
+    let series_sort = if series.sort_title == series.title {
+        None
+    } else {
+        Some(series.sort_title.clone())
+    };
+    MetronInfoMetadata {
+        cv_issue_id: issue.cv_issue_id,
+        metron_issue_id: issue.metron_issue_id.clone(),
+        publisher: series.publisher.clone(),
+        cv_series_id: series.cv_id,
+        series: series.title.clone(),
+        series_sort,
+        start_year: series.start_year.map(|y| y as i32),
+        number: issue.number.clone(),
+        cover_date,
+        summary: issue.summary.clone(),
+        last_modified: OffsetDateTime::now_utc(),
+    }
+}
+
+/// Whether `name` is one of the metadata entries Phase B regenerates
+/// on import. Case-insensitive — different writers use different
+/// casing, and we want to drop every variant before re-emitting the
+/// canonical form. Anything matching here is skipped during the
+/// rewrite so the output archive contains only LongBox's freshly-
+/// written copies.
+fn is_metadata_entry(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ComicInfo.xml") || name.eq_ignore_ascii_case("MetronInfo.xml")
+}
+
 /// CV's cover_date is `YYYY-MM-DD` or `YYYY-MM` or just `YYYY`.
 /// Only the full form populates Year/Month/Day; partials drop.
 fn parse_cover_date(raw: Option<&str>) -> Option<CoverDate> {
@@ -485,8 +528,10 @@ fn parse_cover_date(raw: Option<&str>) -> Option<CoverDate> {
 
 /// Stage 1 of the rewrite-and-move flow: re-emit the source archive
 /// into a fresh ZIP temp sited next to the target (so the eventual
-/// rename is same-filesystem), with a freshly regenerated
-/// `ComicInfo.xml` replacing any the source carried. Returns the
+/// rename is same-filesystem), with freshly regenerated
+/// `ComicInfo.xml` and `MetronInfo.xml` replacing any the source
+/// carried. Both files land at the archive root (the spec for each
+/// format — readers don't search subdirectories). Returns the
 /// `NamedTempFile` for stage 2 to persist.
 ///
 /// A **CBZ** source is raw-copied entry-by-entry — compressed bytes
@@ -503,6 +548,7 @@ fn rewrite_to_temp(
     source: &Path,
     target: &Path,
     comic_info_xml: &str,
+    metron_info_xml: &str,
 ) -> Result<tempfile::NamedTempFile> {
     let target_dir = target.parent().ok_or_else(|| {
         PostprocessError::Io(std::io::Error::other("target has no parent directory"))
@@ -522,7 +568,7 @@ fn rewrite_to_temp(
             // CBR: no RAR writer exists, so decompress every entry via
             // libunrar and recompress it into the ZIP.
             for entry in longbox_archive::read_entries(source)? {
-                if entry.name.eq_ignore_ascii_case("ComicInfo.xml") {
+                if is_metadata_entry(&entry.name) {
                     continue;
                 }
                 writer.start_file(&entry.name, deflated)?;
@@ -534,7 +580,7 @@ fn rewrite_to_temp(
             let mut archive = ZipArchive::new(src_file)?;
             for i in 0..archive.len() {
                 let entry = archive.by_index(i)?;
-                if entry.name().eq_ignore_ascii_case("ComicInfo.xml") {
+                if is_metadata_entry(entry.name()) {
                     continue;
                 }
                 writer.raw_copy_file(entry)?;
@@ -543,6 +589,8 @@ fn rewrite_to_temp(
 
         writer.start_file("ComicInfo.xml", deflated)?;
         writer.write_all(comic_info_xml.as_bytes())?;
+        writer.start_file("MetronInfo.xml", deflated)?;
+        writer.write_all(metron_info_xml.as_bytes())?;
         writer.finish()?;
     }
 
@@ -637,6 +685,139 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
                 duration_ms,
                 "phase_b.failed"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn series_fixture() -> SeriesRow {
+        SeriesRow {
+            id: 1,
+            cv_id: Some(42215),
+            metron_id: Some("10959".into()),
+            title: "Saga".into(),
+            sort_title: "Saga".into(),
+            start_year: Some(2012),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+            created_at: datetime!(2026-01-01 00:00:00),
+            updated_at: datetime!(2026-01-01 00:00:00),
+        }
+    }
+
+    fn issue_fixture() -> IssueRow {
+        IssueRow {
+            id: 10,
+            series_id: 1,
+            cv_issue_id: Some(364354),
+            metron_issue_id: Some("99999".into()),
+            number: "1".into(),
+            title: Some("The Will".into()),
+            cover_date: Some("2012-03-14".into()),
+            summary: Some("Galactic war epic.".into()),
+            cover_url: None,
+            created_at: datetime!(2026-01-01 00:00:00),
+            updated_at: datetime!(2026-01-01 00:00:00),
+        }
+    }
+
+    #[test]
+    fn compose_full_fixture_populates_every_field() {
+        let m = compose_metroninfo_metadata(&series_fixture(), &issue_fixture());
+        assert_eq!(m.cv_issue_id, Some(364354));
+        assert_eq!(m.metron_issue_id.as_deref(), Some("99999"));
+        assert_eq!(m.publisher.as_deref(), Some("Image"));
+        assert_eq!(m.cv_series_id, Some(42215));
+        assert_eq!(m.series, "Saga");
+        // sort_title == title, so series_sort lands as None.
+        assert_eq!(m.series_sort, None);
+        assert_eq!(m.start_year, Some(2012));
+        assert_eq!(m.number, "1");
+        assert_eq!(
+            m.cover_date,
+            Some(CoverDate {
+                year: 2012,
+                month: 3,
+                day: 14
+            })
+        );
+        assert_eq!(m.summary.as_deref(), Some("Galactic war epic."));
+    }
+
+    #[test]
+    fn compose_with_no_cv_issue_id_leaves_field_none() {
+        let issue = IssueRow {
+            cv_issue_id: None,
+            ..issue_fixture()
+        };
+        let m = compose_metroninfo_metadata(&series_fixture(), &issue);
+        assert_eq!(m.cv_issue_id, None);
+        // Metron path still populates its ID.
+        assert_eq!(m.metron_issue_id.as_deref(), Some("99999"));
+    }
+
+    #[test]
+    fn compose_with_no_metron_issue_id_leaves_field_none() {
+        let issue = IssueRow {
+            metron_issue_id: None,
+            ..issue_fixture()
+        };
+        let m = compose_metroninfo_metadata(&series_fixture(), &issue);
+        assert_eq!(m.metron_issue_id, None);
+        // CV side still populates.
+        assert_eq!(m.cv_issue_id, Some(364354));
+    }
+
+    #[test]
+    fn compose_distinct_sort_title_surfaces_as_series_sort() {
+        let series = SeriesRow {
+            title: "The Walking Dead Deluxe".into(),
+            sort_title: "Walking Dead Deluxe".into(),
+            ..series_fixture()
+        };
+        let m = compose_metroninfo_metadata(&series, &issue_fixture());
+        assert_eq!(m.series_sort.as_deref(), Some("Walking Dead Deluxe"));
+    }
+
+    #[test]
+    fn compose_partial_cover_date_collapses_to_none() {
+        // CV / Metron sometimes return cover_date as just "YYYY-MM" or
+        // "YYYY". The writer requires a full date for xs:date validity,
+        // so partials must collapse to None at compose time.
+        for partial in ["2012", "2012-03", "", "not-a-date"] {
+            let issue = IssueRow {
+                cover_date: Some(partial.into()),
+                ..issue_fixture()
+            };
+            let m = compose_metroninfo_metadata(&series_fixture(), &issue);
+            assert_eq!(m.cover_date, None, "expected None for {partial:?}");
+        }
+    }
+
+    #[test]
+    fn is_metadata_entry_catches_both_filenames_case_insensitively() {
+        for n in [
+            "ComicInfo.xml",
+            "comicinfo.xml",
+            "COMICINFO.XML",
+            "MetronInfo.xml",
+            "metroninfo.xml",
+            "METRONINFO.XML",
+        ] {
+            assert!(is_metadata_entry(n), "{n} should be treated as metadata");
+        }
+        for n in [
+            "page-001.jpg",
+            "subdir/ComicInfo.xml", // path-prefixed: NOT a root metadata entry
+            "ComicInfo.json",
+            "MetronInfo",
+        ] {
+            assert!(!is_metadata_entry(n), "{n} should not match");
         }
     }
 }
