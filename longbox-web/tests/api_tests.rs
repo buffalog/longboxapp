@@ -4192,6 +4192,208 @@ async fn current_week_unaffected_by_metron_when_enabled() {
     );
 }
 
+// ===== Item A v2 piece 4: Option C subscription resolution =====
+
+/// Subscribing via the existing `cv_volume_id` path stays exactly as
+/// it was before Option C — no Metron round trip, no behavioral
+/// change. Belt-and-suspenders against the body-shape extension.
+#[tokio::test]
+async fn subscribe_via_cv_volume_id_path_unchanged() {
+    let app = build_test_app().await;
+    mount_cv_volume(&app, 7001, "Bone").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"cv_volume_id":7001}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let series_id = response_json(resp).await["series_id"].as_i64().unwrap();
+    let series = series_repo::find_by_cv_id(&app.state.db, 7001)
+        .await
+        .unwrap()
+        .expect("series created");
+    assert_eq!(series.id, series_id);
+    // CV-path doesn't touch metron_id.
+    assert!(series.metron_id.is_none(), "CV path leaves metron_id NULL");
+}
+
+/// THE load-bearing test. Subscribing via `metron_series_id` must:
+/// 1. Resolve cv_id via Metron's `fetch_series_detail`
+/// 2. Use that cv_id for the standard `try_add_one` flow
+/// 3. Backfill `series.metron_id` after the subscription
+/// 4. ON A SECOND CALL FOR THE SAME METRON SERIES: hit the catalog
+///    cache (verified by counting Metron mock invocations — must be
+///    exactly 1 after two subscription attempts).
+#[tokio::test]
+async fn subscribe_via_metron_series_id_resolves_cv_id_and_writes_back() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    // Pre-existing tracked series — Item A v2 Option C resolves cv_id
+    // from Metron, then add_or_get_from_cv resolves to this existing
+    // row rather than creating a new one. CV mock not needed because
+    // the series already exists.
+    let existing = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(8001),
+            metron_id: None,
+            title: "Absolute Catwoman".into(),
+            sort_title: "absolute catwoman".into(),
+            start_year: Some(2026),
+            publisher: Some("DC Comics".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Mock Metron series detail — returns cv_id = 8001 matching our
+    // pre-existing row. `expect(1)` is the load-bearing assertion:
+    // after two subscription attempts for the same metron_series_id,
+    // this mock must have been called exactly once. The second call
+    // is the catalog-cache path proof.
+    let detail_payload = serde_json::json!({
+        "id": 12345,
+        "name": "Absolute Catwoman",
+        "sort_name": "Absolute Catwoman",
+        "volume": 1,
+        "year_began": 2026,
+        "year_end": null,
+        "publisher": {"id": 2, "name": "DC Comics"},
+        "imprint": null,
+        "cv_id": 8001,
+        "gcd_id": null,
+        "issue_count": 5
+    })
+    .to_string();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/series/12345/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(detail_payload))
+        .expect(1)
+        .mount(&metron_server)
+        .await;
+
+    // First subscription — uses Metron, succeeds, writes back metron_id.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"metron_series_id":12345}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let series_id = response_json(resp).await["series_id"].as_i64().unwrap();
+    assert_eq!(series_id, existing.id, "resolves to existing series via cv_id");
+
+    // Verify backfill ran — series.metron_id is now populated.
+    let series = series_repo::find_by_id(&app.state.db, existing.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        series.metron_id.as_deref(),
+        Some("12345"),
+        "metron_id backfilled with stringified series id"
+    );
+
+    // Second subscription for same metron_series_id — must hit the
+    // catalog cache, NOT Metron. The mock's `expect(1)` enforces this
+    // when MockServer drops at the end of the test; the assert below
+    // is the user-visible success.
+    let resp2 = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"metron_series_id":12345}"#,
+        ))
+        .await;
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let series_id2 = response_json(resp2).await["series_id"].as_i64().unwrap();
+    assert_eq!(series_id2, existing.id, "second call resolves same series");
+
+    // Drop the MockServer to trigger expect() verification. If the
+    // catalog-cache path failed and a second Metron call fired, this
+    // panics with "expected 1 calls but got 2".
+    drop(metron_server);
+}
+
+/// When Metron returns the series detail but cv_id is None (the series
+/// isn't yet indexed by CV), surface a clean 422 with the
+/// user-actionable fallback message.
+#[tokio::test]
+async fn subscribe_via_metron_series_id_returns_422_when_cv_id_absent() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    let detail_payload = serde_json::json!({
+        "id": 99999,
+        "name": "Brand New Indie",
+        "sort_name": "Brand New Indie",
+        "volume": 1,
+        "year_began": 2026,
+        "year_end": null,
+        "publisher": {"id": 99, "name": "Indie Press"},
+        "imprint": null,
+        "cv_id": null,
+        "gcd_id": null,
+        "issue_count": 1
+    })
+    .to_string();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/series/99999/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(detail_payload))
+        .mount(&metron_server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"metron_series_id":99999}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await;
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("isn't yet indexed by ComicVine"),
+        "user-facing fallback message: {message}"
+    );
+}
+
+/// When Metron is disabled (kill switch off OR credentials bad), a
+/// `metron_series_id`-only request can't be resolved. The catalog
+/// cache might cover it for previously-resolved series — but for
+/// brand-new ones with no catalog row, the resolution path needs
+/// `state.metron`. Surface 503 with a clear code, not 500.
+#[tokio::test]
+async fn subscribe_returns_503_when_metron_disabled_and_only_metron_series_id_present() {
+    let app = build_test_app().await;
+    // state.metron is None — default for build_test_app.
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"metron_series_id":77777}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(resp).await;
+    let code = body["error"]["code"].as_str().unwrap();
+    assert!(
+        code.contains("metron_not_configured"),
+        "code identifies the misconfig: {code}"
+    );
+}
+
 #[tokio::test]
 async fn calendar_serves_a_fresh_cache_entry_without_hitting_cv() {
     let app = build_test_app().await;
@@ -4402,11 +4604,12 @@ async fn calendar_bulk_add_returns_per_volume_status() {
     .unwrap();
 
     // 6001 -> added, 6002 -> already_on_list, 0 -> failed (must be > 0).
+    // Item A v2 Option C: bulk-add body is now `items: [{cv_volume_id|metron_series_id}]`.
     let resp = app
         .request(json_request(
             "POST",
             "/api/releases/calendar/pull/bulk",
-            r#"{"cv_volume_ids":[6001,6002,0]}"#,
+            r#"{"items":[{"cv_volume_id":6001},{"cv_volume_id":6002},{"cv_volume_id":0}]}"#,
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);

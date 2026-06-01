@@ -25,6 +25,7 @@ function calRow(over: Partial<CalendarRow> = {}): CalendarRow {
     cv_issue_id: 1,
     cv_volume_id: 100,
     metron_issue_id: null,
+    metron_series_id: null,
     issue_number: '1',
     store_date: '2026-05-14',
     volume_name: 'Saga',
@@ -79,7 +80,9 @@ describe('release calendar page', () => {
 
   it('bulk-adds selected volumes and flips their rows', async () => {
     vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
-      results: [{ cv_volume_id: 100, status: 'added', series_id: 7 }]
+      results: [
+        { cv_volume_id: 100, metron_series_id: null, status: 'added', series_id: 7 }
+      ]
     });
     render(
       CalendarPage,
@@ -94,7 +97,51 @@ describe('release calendar page', () => {
     );
 
     await waitFor(() =>
-      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([100])
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
+        { cv_volume_id: 100 }
+      ])
+    );
+    await waitFor(() =>
+      expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
+    );
+  });
+
+  it('bulk-adds a Metron-only row via metron_series_id', async () => {
+    vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+      results: [
+        {
+          cv_volume_id: null,
+          metron_series_id: 7777,
+          status: 'added',
+          series_id: 42
+        }
+      ]
+    });
+    render(
+      CalendarPage,
+      pageData([
+        calRow({
+          cv_issue_id: null,
+          cv_volume_id: null,
+          metron_issue_id: 9001,
+          metron_series_id: 7777,
+          volume_name: 'Forward Week Indie',
+          on_pull_list: false
+        })
+      ])
+    );
+
+    await fireEvent.click(
+      screen.getByRole('checkbox', { name: 'Select all addable volumes' })
+    );
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+    );
+
+    await waitFor(() =>
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
+        { metron_series_id: 7777 }
+      ])
     );
     await waitFor(() =>
       expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()

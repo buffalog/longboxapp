@@ -7,7 +7,8 @@
   import {
     bulkAddCalendarVolumesToPullList,
     getReleaseCalendar,
-    type CalendarRow
+    type CalendarRow,
+    type SubscribeTarget
   } from '$lib/api/releases';
   import { createSelection } from '$lib/createSelection.svelte';
   import { toast } from '$lib/stores/toast.svelte';
@@ -27,9 +28,33 @@
   let bulkBusy = $state(false);
   let pullFilter = $state<'all' | 'on' | 'off'>('all');
 
-  // Bulk selection keyed by cv_volume_id — the pull-list unit. A volume
-  // shipping several issues this week is one selection across its rows.
-  const sel = createSelection<number>();
+  // Bulk selection keyed by a discriminator string. `cv:{cv_volume_id}`
+  // for CV-sourced rows (and Metron rows that carry cv_volume_id inline);
+  // `metron:{metron_series_id}` for Metron-sourced rows whose volume_id
+  // isn't known yet. A volume/series shipping several issues this week
+  // is one selection across its rows.
+  const sel = createSelection<string>();
+
+  // Build the row's selection/subscription key, or null if the row has
+  // no resolvable subscription target (shouldn't happen for unsubscribed
+  // rows; the bulk control silently skips them if it does).
+  function rowKey(row: CalendarRow): string | null {
+    if (row.cv_volume_id != null) return `cv:${row.cv_volume_id}`;
+    if (row.metron_series_id != null) return `metron:${row.metron_series_id}`;
+    return null;
+  }
+
+  function keyToTarget(key: string): SubscribeTarget | null {
+    if (key.startsWith('cv:')) {
+      const id = Number(key.slice(3));
+      return Number.isFinite(id) ? { cv_volume_id: id } : null;
+    }
+    if (key.startsWith('metron:')) {
+      const id = Number(key.slice(7));
+      return Number.isFinite(id) ? { metron_series_id: id } : null;
+    }
+    return null;
+  }
 
   const pullFilters: Array<{ value: 'all' | 'on' | 'off'; label: string }> = [
     { value: 'all', label: 'All' },
@@ -71,11 +96,17 @@
       .map(([publisher, groupRows]) => ({ publisher, rows: groupRows }));
   });
 
-  // The distinct volumes the bulk action can act on — visible rows not
-  // already on the pull list. Drives select-all and the BulkActionBar.
-  // Spans all publisher groups; the bulk control is global, not per-group.
-  const selectableVolumeIds = $derived([
-    ...new Set(visibleRows.filter((r) => !r.on_pull_list).map((r) => r.cv_volume_id))
+  // The distinct subscription targets the bulk action can act on —
+  // visible rows not already on the pull list, deduped by their row key.
+  // Drives select-all and the BulkActionBar. Spans all publisher groups;
+  // the bulk control is global, not per-group.
+  const selectableRowKeys = $derived([
+    ...new Set(
+      visibleRows
+        .filter((r) => !r.on_pull_list)
+        .map(rowKey)
+        .filter((k): k is string => k !== null)
+    )
   ]);
 
   function pad(n: number): string {
@@ -117,27 +148,35 @@
   }
 
   async function bulkAdd(): Promise<void> {
-    const ids = [...sel.selected];
-    if (ids.length === 0) return;
+    const keys = [...sel.selected];
+    const items = keys
+      .map(keyToTarget)
+      .filter((t): t is SubscribeTarget => t !== null);
+    if (items.length === 0) return;
     bulkBusy = true;
     error = null;
     try {
-      const { results } = await bulkAddCalendarVolumesToPullList(ids);
+      const { results } = await bulkAddCalendarVolumesToPullList(items);
       const added = results.filter((r) => r.status === 'added').length;
       const already = results.filter((r) => r.status === 'already_on_list').length;
       const failed = results.filter((r) => r.status === 'failed').length;
-      // Flip every resolved volume's rows to on_pull_list (a volume can
+      // Flip every resolved row to on_pull_list (a volume/series can
       // span several rows); series_id rides along where the API gave one.
-      const seriesByVolume = new Map(
-        results
-          .filter((r) => r.series_id != null)
-          .map((r) => [r.cv_volume_id, r.series_id as number])
-      );
-      rows = rows.map((r) =>
-        seriesByVolume.has(r.cv_volume_id)
-          ? { ...r, series_id: seriesByVolume.get(r.cv_volume_id) ?? r.series_id, on_pull_list: true }
-          : r
-      );
+      // Each result echoes back whichever id was sent — index by the
+      // same discriminator string the selection used.
+      const seriesByKey = new Map<string, number>();
+      for (const r of results) {
+        if (r.series_id == null) continue;
+        if (r.cv_volume_id != null) seriesByKey.set(`cv:${r.cv_volume_id}`, r.series_id);
+        else if (r.metron_series_id != null)
+          seriesByKey.set(`metron:${r.metron_series_id}`, r.series_id);
+      }
+      rows = rows.map((r) => {
+        const k = rowKey(r);
+        if (k === null) return r;
+        const sid = seriesByKey.get(k);
+        return sid != null ? { ...r, series_id: sid, on_pull_list: true } : r;
+      });
       sel.clear();
       const parts = [`${added} added`];
       if (already > 0) parts.push(`${already} already on pull list`);
@@ -231,12 +270,12 @@
     No releases match this filter.
   </p>
 {:else}
-  {#if selectableVolumeIds.length > 0}
+  {#if selectableRowKeys.length > 0}
     <BulkActionBar
       count={sel.size}
-      allSelected={sel.allSelected(selectableVolumeIds)}
-      someSelected={sel.someSelected(selectableVolumeIds)}
-      onToggleAll={() => sel.toggleAll(selectableVolumeIds)}
+      allSelected={sel.allSelected(selectableRowKeys)}
+      someSelected={sel.someSelected(selectableRowKeys)}
+      onToggleAll={() => sel.toggleAll(selectableRowKeys)}
       selectAllLabel="Select all addable volumes"
     >
       {#snippet action()}
@@ -287,14 +326,15 @@
         </thead>
         <tbody class="divide-y divide-slate-100">
           {#each group.rows as row (row.cv_issue_id ?? row.metron_issue_id)}
+            {@const key = rowKey(row)}
             <tr>
               <td class="px-4 py-2">
-                {#if !row.on_pull_list}
+                {#if !row.on_pull_list && key !== null}
                   <input
                     type="checkbox"
                     class="rounded border-slate-300"
-                    checked={sel.has(row.cv_volume_id)}
-                    onchange={() => sel.toggle(row.cv_volume_id)}
+                    checked={sel.has(key)}
+                    onchange={() => sel.toggle(key)}
                     disabled={anyBusy}
                     aria-label={`Select ${row.volume_name || 'Unknown series'}`}
                   />
