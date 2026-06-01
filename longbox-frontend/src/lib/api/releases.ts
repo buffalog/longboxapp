@@ -17,6 +17,11 @@ export interface CalendarRow {
   /** Metron's issue id (Item A v2). Populated only on forward-week
    *  rows; null on every CV-sourced row. */
   metron_issue_id: number | null;
+  /** Metron's series id (Item A v2 piece 4 / Option C). Populated on
+   *  Metron-sourced rows whose volume_id wasn't carried inline; used
+   *  by the subscribe flow as the resolution key when `cv_volume_id`
+   *  is null. */
+  metron_series_id: number | null;
   issue_number: string;
   /** On-sale date, `YYYY-MM-DD`. */
   store_date: string;
@@ -45,33 +50,46 @@ export function getReleaseCalendar(
   return apiFetch(`/releases/calendar?${params.toString()}`);
 }
 
+/** One subscription target — exactly one of `cv_volume_id` or
+ *  `metron_series_id` is set. CV-sourced calendar rows use the former;
+ *  Metron-sourced forward-week rows that lack an inline volume_id use
+ *  the latter and the server resolves it via Metron's series detail. */
+export interface SubscribeTarget {
+  cv_volume_id?: number;
+  metron_series_id?: number;
+}
+
 /** Compound "add to pull list": creates the series from ComicVine when
- *  LongBox doesn't track the volume yet, then subscribes it. Idempotent. */
+ *  LongBox doesn't track the volume yet, then subscribes it. Idempotent.
+ *  Pass exactly one of `cv_volume_id` or `metron_series_id`. */
 export function addCalendarVolumeToPullList(
-  cvVolumeId: number
+  target: SubscribeTarget
 ): Promise<{ series_id: number }> {
   return apiFetch('/releases/calendar/pull', {
     method: 'POST',
-    body: JSON.stringify({ cv_volume_id: cvVolumeId })
+    body: JSON.stringify(target)
   });
 }
 
-/** Per-volume outcome of a bulk add-to-pull-list. */
+/** Per-volume outcome of a bulk add-to-pull-list. Echoes back whichever
+ *  of `cv_volume_id` / `metron_series_id` the caller sent so the toast
+ *  can correlate results to rows. */
 export interface BulkAddResult {
-  cv_volume_id: number;
+  cv_volume_id: number | null;
+  metron_series_id: number | null;
   status: 'added' | 'already_on_list' | 'failed';
   series_id?: number;
   error?: string;
 }
 
-/** Bulk "add to pull list" — non-transactional; one result per volume,
+/** Bulk "add to pull list" — non-transactional; one result per item,
  *  each with a 3-way status the caller tallies into a single toast. */
 export function bulkAddCalendarVolumesToPullList(
-  cvVolumeIds: number[]
+  items: SubscribeTarget[]
 ): Promise<{ results: BulkAddResult[] }> {
   return apiFetch('/releases/calendar/pull/bulk', {
     method: 'POST',
-    body: JSON.stringify({ cv_volume_ids: cvVolumeIds })
+    body: JSON.stringify({ items })
   });
 }
 

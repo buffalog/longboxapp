@@ -57,7 +57,9 @@ describe('ReleasesOfNoteWidget', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add to pull list' }));
 
-    await waitFor(() => expect(addCalendarVolumeToPullList).toHaveBeenCalledWith(100));
+    await waitFor(() =>
+      expect(addCalendarVolumeToPullList).toHaveBeenCalledWith({ cv_volume_id: 100 })
+    );
     // The row stays — with the "On pull list" badge in place of the button.
     expect(screen.getByText('Saga')).toBeInTheDocument();
     await waitFor(() =>
@@ -73,8 +75,8 @@ describe('ReleasesOfNoteWidget', () => {
   it('bulk-adds selected releases and badges them in place', async () => {
     vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
       results: [
-        { cv_volume_id: 100, status: 'added', series_id: 5 },
-        { cv_volume_id: 200, status: 'added', series_id: 6 }
+        { cv_volume_id: 100, metron_series_id: null, status: 'added', series_id: 5 },
+        { cv_volume_id: 200, metron_series_id: null, status: 'added', series_id: 6 }
       ]
     });
     render(ReleasesOfNoteWidget, {
@@ -94,7 +96,10 @@ describe('ReleasesOfNoteWidget', () => {
     );
 
     await waitFor(() =>
-      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([100, 200])
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
+        { cv_volume_id: 100 },
+        { cv_volume_id: 200 }
+      ])
     );
     await waitFor(() =>
       expect(screen.getAllByText('On pull list', { selector: 'span' })).toHaveLength(2)

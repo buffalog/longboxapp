@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET metron_id = ?, updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?\n             AND (metron_id IS NULL OR metron_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "1df3267e649e8cc318e8da6a5c6fbaf23904185ccd3aeb675ac9d4351f6e0ae1"
+}

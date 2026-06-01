@@ -205,6 +205,39 @@ where
     Ok(result.rows_affected())
 }
 
+/// Race-guarded write of `series.metron_id`. Idempotent: re-writing the
+/// same value is a clean no-op (matches `WHERE id = ?` AND the value
+/// is either NULL or already what we're setting). Concurrent writes of
+/// DIFFERENT values are refused — the existing value stays.
+///
+/// Returns rows-affected: 1 = wrote, 0 = no change. **The caller must
+/// treat 0 as "nothing to do, not an error"** — used by the Option C
+/// subscription path's best-effort lazy backfill, where a zero-row
+/// outcome means either a concurrent resolution already wrote the id
+/// (fine) or the series_id no longer exists (shouldn't happen but is
+/// harmless). Either case is logged at warn and not surfaced.
+pub async fn set_metron_id<'e, E>(
+    executor: E,
+    series_id: i64,
+    metron_id: &str,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET metron_id = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?
+             AND (metron_id IS NULL OR metron_id = ?)"#,
+        metron_id,
+        series_id,
+        metron_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Persist the descriptive volume detail (`publisher`, `description`,
 /// `cover_url`) from a fetched `CvVolumeDetail` onto an existing
 /// series row. Separate from [`set_cv_id`] on purpose: the latter

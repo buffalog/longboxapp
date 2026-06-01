@@ -33,6 +33,9 @@ pub enum ApiError {
     #[error("rate limited; retry after {retry_after_seconds}s")]
     RateLimited { retry_after_seconds: u64 },
 
+    #[error("service unavailable ({code}): {message}")]
+    ServiceUnavailable { code: &'static str, message: String },
+
     #[error("internal error: {message}")]
     Internal {
         message: String,
@@ -57,6 +60,7 @@ impl ApiError {
             Self::Unprocessable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Upstream { .. } => StatusCode::BAD_GATEWAY,
             Self::RateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -70,6 +74,7 @@ impl ApiError {
             Self::Unprocessable { code, .. } => (*code).to_string(),
             Self::Upstream { service, .. } => format!("upstream.{service}"),
             Self::RateLimited { .. } => "rate_limited".into(),
+            Self::ServiceUnavailable { code, .. } => format!("service_unavailable.{code}"),
             Self::Internal { .. } => "internal".into(),
         }
     }
@@ -87,6 +92,7 @@ impl ApiError {
             Self::RateLimited {
                 retry_after_seconds,
             } => format!("Rate limited; retry after {retry_after_seconds}s"),
+            Self::ServiceUnavailable { message, .. } => message.clone(),
             // 500s deliberately hide the underlying message from the client.
             Self::Internal { .. } => "Internal server error".into(),
         }

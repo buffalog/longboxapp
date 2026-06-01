@@ -80,6 +80,12 @@ struct CalendarRow {
     cv_issue_id: Option<i64>,
     cv_volume_id: Option<i64>,
     metron_issue_id: Option<i64>,
+    /// Metron's series id. Populated on Metron-sourced rows; the
+    /// Option C subscription path sends it back so the handler can
+    /// resolve a cv_volume_id (via catalog-first lookup, falling
+    /// through to `fetch_series_detail`) before continuing the CV-side
+    /// flow.
+    metron_series_id: Option<i64>,
     issue_number: String,
     store_date: String,
     volume_name: String,
@@ -90,22 +96,40 @@ struct CalendarRow {
     publisher: Option<String>,
 }
 
+/// Add-to-pull-list request. Item A v2 Option C extension: accepts
+/// either `cv_volume_id` (CV-sourced calendar rows, existing flow) OR
+/// `metron_series_id` (Metron-sourced forward-week rows, resolved to a
+/// cv_volume_id via the Metron series-detail endpoint at subscription
+/// time). Exactly one must be present.
 #[derive(Debug, Deserialize)]
 struct AddToPullBody {
-    cv_volume_id: i64,
+    #[serde(default)]
+    cv_volume_id: Option<i64>,
+    #[serde(default)]
+    metron_series_id: Option<i64>,
 }
 
+/// Bulk-add request — same one-of-two-fields per item as the single
+/// add.
 #[derive(Debug, Deserialize)]
 struct BulkAddBody {
-    cv_volume_ids: Vec<i64>,
+    items: Vec<AddToPullBody>,
 }
 
-/// Per-volume outcome of a bulk add. `status` is one of `added`,
-/// `already_on_list`, or `failed`; `series_id` rides along on the two
-/// success statuses, `error` on `failed`.
+/// Per-item outcome of a bulk add. `status` is one of `added`,
+/// `already_on_list`, or `failed`. `cv_volume_id` is the cv_id the
+/// subscription resolved to (the request value for CV-sourced items,
+/// the resolved value for Metron-sourced items); `None` when
+/// resolution itself failed (e.g. Metron series with no cv_id).
+/// `metron_series_id` echoes the request's value when the item used
+/// the Metron path, so the frontend can correlate results back to
+/// request items without relying on order.
 #[derive(Debug, Serialize)]
 struct BulkAddResult {
-    cv_volume_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cv_volume_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metron_series_id: Option<i64>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     series_id: Option<i64>,
@@ -223,37 +247,66 @@ async fn try_add_one(state: &AppState, cv_volume_id: i64) -> Result<(i64, &'stat
     Ok((series.id, status))
 }
 
-/// Compound "add to pull list": resolve the volume to a series (creating
-/// it via ComicVine when LongBox doesn't track it yet), then subscribe
-/// it. Idempotent — a volume already subscribed is a clean no-op `200`.
+/// Compound "add to pull list": resolve the request to a cv_volume_id
+/// (CV path direct, Metron path via [`resolve_cv_id_via_metron`]), then
+/// subscribe via the shared [`try_add_one`]. Idempotent — a volume
+/// already subscribed is a clean no-op `200`. When the request used
+/// `metron_series_id`, the resolved `series_id` is backfilled with the
+/// metron_id cross-reference on a best-effort basis (warn-on-failure,
+/// never propagates to the response).
 async fn add_to_pull_list(
     State(state): State<AppState>,
     Json(body): Json<AddToPullBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (series_id, _status) = try_add_one(&state, body.cv_volume_id).await?;
+    let (cv_volume_id, metron_origin) = resolve_subscription_target(&state, &body).await?;
+    let (series_id, _status) = try_add_one(&state, cv_volume_id).await?;
+    if let Some(metron_series_id) = metron_origin {
+        backfill_metron_id(&state, series_id, metron_series_id).await;
+    }
     Ok(Json(serde_json::json!({ "series_id": series_id })))
 }
 
-/// Bulk "add to pull list" — one [`try_add_one`] per volume,
-/// non-transactional: a per-volume CV failure (rate limit, unknown
-/// volume, network) is captured as a `failed` result and never aborts
-/// the batch. Each result carries the 3-way `status` the UI tallies
-/// into one "N added, M already on pull list, K failed" toast.
+/// Bulk "add to pull list" — one [`try_add_one`] per item,
+/// non-transactional: a per-item failure (CV rate limit, unknown
+/// volume, network, Metron series with no cv_id, etc.) is captured as
+/// a `failed` result and never aborts the batch. Each result carries
+/// the 3-way `status` the UI tallies into one "N added, M already on
+/// pull list, K failed" toast.
 async fn add_to_pull_list_bulk(
     State(state): State<AppState>,
     Json(body): Json<BulkAddBody>,
 ) -> Result<Json<BulkAddResponse>, ApiError> {
-    let mut results = Vec::with_capacity(body.cv_volume_ids.len());
-    for cv_volume_id in body.cv_volume_ids {
-        let result = match try_add_one(&state, cv_volume_id).await {
-            Ok((series_id, status)) => BulkAddResult {
-                cv_volume_id,
-                status,
-                series_id: Some(series_id),
-                error: None,
+    let mut results = Vec::with_capacity(body.items.len());
+    for item in body.items {
+        // Resolve first — failures here (e.g. Metron series without
+        // cv_id) become per-item `failed` results, not 4xx on the
+        // whole batch.
+        let resolution = resolve_subscription_target(&state, &item).await;
+        let result = match resolution {
+            Ok((cv_volume_id, metron_origin)) => match try_add_one(&state, cv_volume_id).await {
+                Ok((series_id, status)) => {
+                    if let Some(metron_series_id) = metron_origin {
+                        backfill_metron_id(&state, series_id, metron_series_id).await;
+                    }
+                    BulkAddResult {
+                        cv_volume_id: Some(cv_volume_id),
+                        metron_series_id: metron_origin,
+                        status,
+                        series_id: Some(series_id),
+                        error: None,
+                    }
+                }
+                Err(e) => BulkAddResult {
+                    cv_volume_id: Some(cv_volume_id),
+                    metron_series_id: metron_origin,
+                    status: "failed",
+                    series_id: None,
+                    error: Some(e.to_string()),
+                },
             },
             Err(e) => BulkAddResult {
-                cv_volume_id,
+                cv_volume_id: item.cv_volume_id,
+                metron_series_id: item.metron_series_id,
                 status: "failed",
                 series_id: None,
                 error: Some(e.to_string()),
@@ -262,6 +315,101 @@ async fn add_to_pull_list_bulk(
         results.push(result);
     }
     Ok(Json(BulkAddResponse { results }))
+}
+
+/// Item A v2 Option C: resolve a request's identity to a CV volume id,
+/// taking the catalog-first cache path before any Metron API call.
+/// Returns `(cv_volume_id, metron_origin)` — `metron_origin` is the
+/// `metron_series_id` from the request when that path was used, so the
+/// caller can fire the lazy backfill after a successful subscription.
+async fn resolve_subscription_target(
+    state: &AppState,
+    body: &AddToPullBody,
+) -> Result<(i64, Option<i64>), ApiError> {
+    match (body.cv_volume_id, body.metron_series_id) {
+        // Both present: cv_volume_id wins (faster path, no Metron round trip).
+        (Some(cv), _) => Ok((cv, None)),
+        (None, Some(metron_series_id)) => {
+            let cv = resolve_cv_id_via_metron(state, metron_series_id).await?;
+            Ok((cv, Some(metron_series_id)))
+        }
+        (None, None) => Err(ApiError::BadRequest {
+            message: "exactly one of `cv_volume_id` or `metron_series_id` is required".into(),
+        }),
+    }
+}
+
+/// Item A v2 Option C — resolve a Metron series id to a cv_volume_id
+/// via the two-tier chain:
+///
+///  1. **Catalog-first cache.** Look up `series.metron_id` in the
+///     local catalog. If the series exists AND has `cv_id` populated,
+///     return that cv_id with zero API calls. This is the optimization
+///     that makes second-and-later subscriptions for the same series
+///     free of Metron round-trips.
+///  2. **Metron series-detail fallback.** Catalog miss (or series
+///     exists but cv_id is NULL) → call `client.fetch_series_detail`.
+///     If the detail carries a cv_id, return it (the caller fires
+///     the lazy backfill after subscription succeeds). If not,
+///     return 422 with the user-facing fallback message — coverage
+///     is good but not 100%, and the user-actionable message handles
+///     the miss case gracefully.
+async fn resolve_cv_id_via_metron(
+    state: &AppState,
+    metron_series_id: i64,
+) -> Result<i64, ApiError> {
+    // ---- Tier 1: catalog-first cache ----
+    let metron_id_str = metron_series_id.to_string();
+    if let Some(series) = series_repo::find_by_metron_id(&state.db, &metron_id_str).await? {
+        if let Some(cv_id) = series.cv_id {
+            return Ok(cv_id);
+        }
+    }
+
+    // ---- Tier 2: Metron API ----
+    let Some(client) = &state.metron else {
+        return Err(ApiError::ServiceUnavailable {
+            code: "metron_not_configured",
+            message: "Metron integration not configured".into(),
+        });
+    };
+    let detail = client.fetch_series_detail(metron_series_id).await?;
+    detail.cv_id.ok_or_else(|| ApiError::Unprocessable {
+        code: "metron_series_not_in_cv",
+        message: "This series isn't yet indexed by ComicVine — try again after the next release cycle.".into(),
+    })
+}
+
+/// Lazy backfill of `series.metron_id` after a successful Metron-path
+/// subscription. **Non-critical** — the subscription has already
+/// committed by the time this runs. Failures (concurrent write, series
+/// deleted, DB hiccup) log at warn and never propagate to the response.
+async fn backfill_metron_id(state: &AppState, series_id: i64, metron_series_id: i64) {
+    let metron_id_str = metron_series_id.to_string();
+    match series_repo::set_metron_id(&state.db, series_id, &metron_id_str).await {
+        Ok(0) => {
+            // Zero rows = either a concurrent resolution already wrote
+            // (idempotent — fine), or the series_id was deleted out
+            // from under us (shouldn't happen but harmless). Neither
+            // is an error worth surfacing.
+            tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                metron_series_id,
+                "metron_id backfill: zero rows affected (concurrent or stale)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                metron_series_id,
+                error = %e,
+                "metron_id backfill: write failed (non-critical)"
+            );
+        }
+    }
 }
 
 /// "Releases of note" — the current ship-week's calendar, narrowed to
@@ -477,6 +625,7 @@ async fn enrich(
                 cv_issue_id: Some(item.cv_issue_id),
                 cv_volume_id: Some(item.cv_volume_id),
                 metron_issue_id: None,
+                metron_series_id: None,
                 issue_number: item.issue_number,
                 store_date: item.store_date,
                 volume_name: item.volume_name,
@@ -652,6 +801,7 @@ async fn project_metron_items(
                 cv_issue_id: item.cv_issue_id,
                 cv_volume_id: None,
                 metron_issue_id: Some(item.metron_issue_id),
+                metron_series_id: item.metron_series_id,
                 issue_number: item.issue_number,
                 store_date: item.store_date.unwrap_or_default(),
                 volume_name: item.series_name,

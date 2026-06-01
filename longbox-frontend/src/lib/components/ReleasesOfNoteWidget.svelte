@@ -48,7 +48,7 @@
   async function add(row: ReleaseOfNote): Promise<void> {
     busyVolume = row.cv_volume_id;
     try {
-      await addCalendarVolumeToPullList(row.cv_volume_id);
+      await addCalendarVolumeToPullList({ cv_volume_id: row.cv_volume_id });
       added = new Set(added).add(row.cv_volume_id);
       toast.success(`${row.volume_name} added to the pull list.`);
     } catch (e) {
@@ -63,12 +63,16 @@
     if (ids.length === 0) return;
     bulkBusy = true;
     try {
-      const { results } = await bulkAddCalendarVolumesToPullList(ids);
+      const items = ids.map((id) => ({ cv_volume_id: id }));
+      const { results } = await bulkAddCalendarVolumesToPullList(items);
       const addedN = results.filter((r) => r.status === 'added').length;
       const already = results.filter((r) => r.status === 'already_on_list').length;
       const failed = results.filter((r) => r.status === 'failed').length;
       const next = new Set(added);
-      for (const r of results) if (r.status !== 'failed') next.add(r.cv_volume_id);
+      for (const r of results) {
+        if (r.status === 'failed') continue;
+        if (r.cv_volume_id != null) next.add(r.cv_volume_id);
+      }
       added = next;
       sel.clear();
       const parts = [`${addedN} added`];
