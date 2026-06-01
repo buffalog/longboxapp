@@ -148,6 +148,102 @@ describe('release calendar page', () => {
     );
   });
 
+  it('selecting a single per-row checkbox selects only that row', async () => {
+    // Regression for forward-week Metron rows: clicking one box
+    // shouldn't flip every other row. cv_issue_id stays null so the
+    // each-block falls back to metron_issue_id as the keyed-each key.
+    render(
+      CalendarPage,
+      pageData([
+        calRow({
+          cv_issue_id: null,
+          cv_volume_id: null,
+          metron_issue_id: 9001,
+          metron_series_id: 10959,
+          volume_name: 'Absolute Green Lantern',
+          publisher: 'DC Comics',
+          on_pull_list: false
+        }),
+        calRow({
+          cv_issue_id: null,
+          cv_volume_id: null,
+          metron_issue_id: 9002,
+          metron_series_id: 10958,
+          volume_name: 'Amazing Spider-Man',
+          publisher: 'Marvel',
+          on_pull_list: false
+        }),
+        calRow({
+          cv_issue_id: null,
+          cv_volume_id: null,
+          metron_issue_id: 9003,
+          metron_series_id: 14958,
+          volume_name: 'Cyclops',
+          publisher: 'Marvel',
+          on_pull_list: false
+        })
+      ])
+    );
+
+    const gl = screen.getByRole('checkbox', { name: 'Select Absolute Green Lantern' });
+    const asm = screen.getByRole('checkbox', { name: 'Select Amazing Spider-Man' });
+    const cyc = screen.getByRole('checkbox', { name: 'Select Cyclops' });
+
+    await fireEvent.click(gl);
+
+    expect(gl).toBeChecked();
+    expect(asm).not.toBeChecked();
+    expect(cyc).not.toBeChecked();
+    // BulkActionBar count badge — exactly one selected.
+    expect(
+      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+    ).toBeInTheDocument();
+  });
+
+  it('bulk-add of one Metron row sends only that row, not its siblings', async () => {
+    vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+      results: [
+        { cv_volume_id: null, metron_series_id: 10959, status: 'added', series_id: 42 }
+      ]
+    });
+    render(
+      CalendarPage,
+      pageData([
+        calRow({
+          cv_issue_id: 101,
+          cv_volume_id: null,
+          metron_issue_id: 9001,
+          metron_series_id: 10959,
+          volume_name: 'Absolute Green Lantern',
+          publisher: 'DC Comics',
+          on_pull_list: false
+        }),
+        calRow({
+          cv_issue_id: 102,
+          cv_volume_id: null,
+          metron_issue_id: 9002,
+          metron_series_id: 10958,
+          volume_name: 'Amazing Spider-Man',
+          publisher: 'Marvel',
+          on_pull_list: false
+        })
+      ])
+    );
+
+    await fireEvent.click(
+      screen.getByRole('checkbox', { name: 'Select Absolute Green Lantern' })
+    );
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+    );
+
+    await waitFor(() =>
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
+        { metron_series_id: 10959 }
+      ])
+    );
+  });
+
   it('filters to on-pull-list rows', async () => {
     render(
       CalendarPage,
