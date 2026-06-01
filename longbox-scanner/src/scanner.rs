@@ -72,6 +72,16 @@ impl Scanner {
                 id: library_root_id,
             })?;
 
+        // Mount-health preflight. Returning Err here short-circuits the
+        // scan BEFORE scan_run_repo::insert, so:
+        //   - no scan_run row records a phantom scan,
+        //   - file_repo::mark_files_not_seen_since never runs,
+        //   - series_repo::tick_empty_scan_counters never runs,
+        //   - auto-tidy never sees this scan.
+        // Caller (scheduler or manual route) gets a clean Err; the
+        // scheduler's next-day tick retries naturally.
+        preflight_library_root(Path::new(&library_root.path))?;
+
         let scan_run_id = scan_run_repo::insert(
             &self.db,
             NewScanRun {
@@ -187,6 +197,11 @@ impl Scanner {
             .ok_or(ScanError::LibraryRootNotFound {
                 id: library_root_id,
             })?;
+
+        // No mark-missing here, but a degraded mount would still
+        // produce a 600-per-file IO-error report — confusing UX. Same
+        // guard as scan_full for symmetry.
+        preflight_library_root(Path::new(&library_root.path))?;
 
         let scan_run_id = scan_run_repo::insert(
             &self.db,
@@ -731,6 +746,45 @@ fn add_days(ts: PrimitiveDateTime, days: i64) -> PrimitiveDateTime {
 fn duration_ms(start: PrimitiveDateTime, end: PrimitiveDateTime) -> u64 {
     let duration = end.assume_utc() - start.assume_utc();
     u64::try_from(duration.whole_milliseconds().max(0)).unwrap_or(0)
+}
+
+/// Mount-health guard for library-root scans. Two failure modes
+/// matter inside the container:
+///
+/// 1. **Mount inaccessible** — virtiofs/SMB share dropped, the bind
+///    mount evaporates, `read_dir` errors with ENOENT/EIO.
+/// 2. **Mount stale and empty** — the bind mount still resolves but
+///    the SMB layer is in a degraded state where it reports zero
+///    entries. `read_dir` succeeds, the iterator yields nothing.
+///
+/// Both modes look identical to walkdir: zero files surfaced. Without
+/// this guard, the scan proceeds, `mark_files_not_seen_since` flips
+/// every catalogued file to `is_present=false`, and auto-tidy starts
+/// its 14-day countdown to hard-delete every series. A multi-day SMB
+/// outage would silently nuke the catalog.
+///
+/// The check is cheap: one `read_dir` syscall and one iterator step.
+/// On a healthy 600-series library the cost is ~1ms; on a broken
+/// mount the syscall fails fast.
+///
+/// A genuinely empty fresh-install library trips this too, which is
+/// the right behavior — there is nothing for the scanner to do and
+/// no catalog entries to corrupt. The user will see the WARN log and
+/// retry once they have content.
+fn preflight_library_root(root: &Path) -> Result<(), ScanError> {
+    let mut entries = std::fs::read_dir(root).map_err(|e| ScanError::PreflightFailed {
+        reason: format!("library root unreadable at {}: {e}", root.display()),
+    })?;
+    if entries.next().is_none() {
+        return Err(ScanError::PreflightFailed {
+            reason: format!(
+                "library root {} is empty — refusing to scan (likely mount failure; \
+                 scanning would mark every catalogued file missing and start auto-tidy)",
+                root.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Persists the final outcome of a scan into the `scan_runs` row that was

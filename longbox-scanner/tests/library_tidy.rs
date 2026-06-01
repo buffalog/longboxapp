@@ -156,8 +156,13 @@ async fn an_existing_discovered_folder_refreshes_its_file_count_on_rescan() {
 
 #[tokio::test]
 async fn a_never_owned_series_is_a_steady_state_phantom() {
-    // Empty library — the seeded series never has files on disk.
+    // Library on disk has no comics — the seeded series never owns any
+    // file. A non-archive placeholder file (the walker filters by
+    // extension and ignores everything that isn't .cbz/.cbr) keeps the
+    // mount-health preflight from tripping while preserving the
+    // "zero matched files" semantics this test depends on.
     let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(".placeholder"), b"keepalive for preflight").unwrap();
     let pool = fresh_pool().await;
     let wd = seed_walking_dead(&pool).await;
     let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
@@ -214,8 +219,12 @@ async fn a_series_is_marked_for_auto_tidy_after_repeated_empty_scans() {
 
 #[tokio::test]
 async fn a_pull_list_series_is_never_auto_marked() {
-    // Empty library — the seeded series never has files on disk.
+    // Library on disk has no comics — the seeded pull-list series never
+    // owns any file. Placeholder keeps the preflight happy; see
+    // [`a_never_owned_series_is_a_steady_state_phantom`] for the same
+    // pattern.
     let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(".placeholder"), b"keepalive for preflight").unwrap();
     let pool = fresh_pool().await;
     let wd = seed_walking_dead(&pool).await;
     pull_list_repo::add(

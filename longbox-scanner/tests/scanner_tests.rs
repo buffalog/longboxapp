@@ -391,16 +391,14 @@ async fn library_root_not_found_does_not_panic() {
     ));
 }
 
-#[tokio::test]
-async fn empty_library_succeeds_with_zero_counters() {
-    let tmp = TempDir::new().unwrap();
-    let pool = fresh_pool().await;
-    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
-    let report = scanner_for(pool).scan_full(library_root_id).await.unwrap();
-    assert_eq!(report.files_seen, 0);
-    assert_eq!(report.files_added, 0);
-    assert!(report.errors.is_empty());
-}
+// Note: a former `empty_library_succeeds_with_zero_counters` test was
+// removed in the mount-health preflight commit. Its premise (an empty
+// FS library is just "no content yet") is no longer valid: an empty
+// FS is now treated as a mount-health failure and trips
+// `PreflightFailed` BEFORE the scan runs. See
+// `preflight_errors_on_empty_library_root` and
+// `scan_full_skipped_when_library_root_empty_preserves_all_invariants`
+// in the preflight section below for the replacement coverage.
 
 // -------- rescan / rematch --------
 
@@ -501,4 +499,191 @@ async fn ignored_status_preserved_across_scans() {
     .await;
     assert_eq!(row.status, "ignored", "ignored must stick");
     assert!(row.issue_id.is_none());
+}
+
+// -------- mount-health preflight --------
+
+/// Helper: read a series's empty_scan_counter directly via runtime
+/// sqlx (no macro). The column isn't exposed via SeriesRow and we
+/// only need it from tests; not worth a public repo helper just for
+/// this. Runtime query avoids touching the .sqlx offline cache.
+async fn empty_scan_counter(pool: &longbox_db::Pool, series_id: i64) -> i64 {
+    use sqlx::Row;
+    sqlx::query("SELECT consecutive_empty_scans FROM series WHERE id = ?")
+        .bind(series_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get(0)
+}
+
+#[tokio::test]
+async fn preflight_errors_on_nonexistent_library_root_path() {
+    let pool = fresh_pool().await;
+    // library_roots row stored with a path that doesn't exist on disk.
+    let library_root_id = seed_library_root(&pool, "/nonexistent-longbox-preflight-test").await;
+    let err = scanner_for(pool)
+        .scan_full(library_root_id)
+        .await
+        .unwrap_err();
+    match err {
+        ScanError::PreflightFailed { reason } => {
+            assert!(
+                reason.contains("unreadable"),
+                "reason should name the failure mode: {reason}"
+            );
+        }
+        other => panic!("expected PreflightFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn preflight_errors_on_empty_library_root() {
+    let tmp = TempDir::new().unwrap(); // empty dir
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let err = scanner_for(pool)
+        .scan_full(library_root_id)
+        .await
+        .unwrap_err();
+    match err {
+        ScanError::PreflightFailed { reason } => {
+            // The reason string explicitly names auto-tidy as the
+            // consequence being avoided — that's what makes the 3am
+            // log line useful.
+            assert!(
+                reason.contains("empty") && reason.contains("auto-tidy"),
+                "reason should explain the why: {reason}"
+            );
+        }
+        other => panic!("expected PreflightFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn preflight_passes_on_populated_library_root() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path()); // creates real CBZs
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    // A populated dir + empty catalog is a happy case — preflight
+    // passes, scan runs end-to-end (every file lands as unmatched).
+    let report = scanner_for(pool)
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+    assert!(report.files_seen > 0);
+}
+
+/// LOAD-BEARING: when scan_full trips the preflight, the entire
+/// destructive cascade must be short-circuited. Four invariants:
+///   1. Err::PreflightFailed returned.
+///   2. Zero new scan_runs rows recorded.
+///   3. No catalogued file flipped to is_present=false.
+///   4. No series's empty_scan_counter ticked.
+///
+/// If any of these fails, a degraded SMB mount could still poison
+/// the catalog through some other path — the whole point of this
+/// commit was to guarantee it can't.
+#[tokio::test]
+async fn scan_full_skipped_when_library_root_empty_preserves_all_invariants() {
+    use longbox_db::{scan_run_repo, NewFile};
+
+    let empty_root = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    let series = seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, empty_root.path().to_str().unwrap()).await;
+
+    // Seed a file that's currently is_present=true. This stands in
+    // for "the catalog believes this file exists on disk" — exactly
+    // what the bad scan would flip to false.
+    let file_path = "Walking Dead (2003)/Walking Dead 001 (2003).cbz";
+    let inserted = longbox_db::file_repo::insert(
+        &pool,
+        NewFile {
+            library_root_id,
+            path_relative: file_path.into(),
+            issue_id: None,
+            size_bytes: 1024,
+            mtime: time::PrimitiveDateTime::MIN,
+            last_scanned_at: time::PrimitiveDateTime::MIN,
+            match_method: "phase_b".into(),
+            match_confidence: 1.0,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: time::PrimitiveDateTime::MIN,
+            matched_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(inserted.is_present, "seeded row must start present");
+    let counter_before = empty_scan_counter(&pool, series.id).await;
+
+    let err = scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap_err();
+
+    // Invariant 1: typed Err comes back.
+    assert!(
+        matches!(err, ScanError::PreflightFailed { .. }),
+        "expected PreflightFailed, got {err:?}"
+    );
+
+    // Invariant 2: no scan_run row recorded — the scan didn't happen
+    // as far as the catalog is concerned.
+    let runs = scan_run_repo::list_recent(&pool, 10, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        runs.len(),
+        0,
+        "preflight failure must not record a scan_run row; got {} runs",
+        runs.len()
+    );
+
+    // Invariant 3: file's is_present untouched. The whole point.
+    let row = longbox_db::file_repo::find_by_path(&pool, library_root_id, file_path)
+        .await
+        .unwrap()
+        .expect("file row must still exist");
+    assert!(
+        row.is_present,
+        "is_present must not have flipped; row = {row:?}"
+    );
+
+    // Invariant 4: series's empty_scan_counter unchanged. Auto-tidy's
+    // doomsday clock was never even consulted.
+    let counter_after = empty_scan_counter(&pool, series.id).await;
+    assert_eq!(
+        counter_before, counter_after,
+        "empty_scan_counter must not have advanced; before={counter_before} after={counter_after}"
+    );
+}
+
+#[tokio::test]
+async fn rescan_unmatched_skipped_when_library_root_empty() {
+    use longbox_db::scan_run_repo;
+
+    let empty_root = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, empty_root.path().to_str().unwrap()).await;
+
+    let err = scanner_for(pool.clone())
+        .rescan_unmatched(library_root_id)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ScanError::PreflightFailed { .. }),
+        "expected PreflightFailed, got {err:?}"
+    );
+    let runs = scan_run_repo::list_recent(&pool, 10, &[])
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 0, "rescan_unmatched must not record a scan_run");
 }
