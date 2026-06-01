@@ -75,6 +75,16 @@ pub const KEY_METRON_CALENDAR_FORWARD_WEEKS: &str = "metron_calendar_forward_wee
 /// against API calls. Read lazily per-request.
 pub const KEY_METRON_CALENDAR_CACHE_TTL_HOURS: &str = "metron_calendar_cache_ttl_hours";
 
+// -------- Phase B virtiofs polling fallback --------
+
+/// Poll interval for the Phase B watcher (whole seconds). Default 30
+/// (set by the 20260601020000 migration). Inside Docker Desktop's
+/// virtiofs mount inotify is blind to host-written files, so the
+/// watcher uses `notify::PollWatcher` instead of RecommendedWatcher;
+/// this row controls how often the poll runs. Read once at boot —
+/// changing it requires a container restart.
+pub const KEY_PHASE_B_POLL_INTERVAL_SECONDS: &str = "phase_b_poll_interval_seconds";
+
 // -------- GCD placeholders (reserved; not yet functional) --------
 
 /// Reserved settings-row key for a future GCD integration. Default

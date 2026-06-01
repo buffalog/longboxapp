@@ -27,6 +27,7 @@ pub mod skip;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
@@ -110,7 +111,12 @@ pub async fn start(
     //    holds it for the program's lifetime. The cache clone lets
     //    the watcher callback evict entries on Remove / Rename-From
     //    events without going through the bounded channel.
-    spawn_watcher(config.watch_path.clone(), tx, Arc::clone(&cache))?;
+    spawn_watcher(
+        config.watch_path.clone(),
+        config.poll_interval,
+        tx,
+        Arc::clone(&cache),
+    )?;
 
     Ok(())
 }
@@ -247,8 +253,32 @@ fn eviction_paths_from_event(event: &notify::Event) -> Vec<PathBuf> {
 
 /// Stand up the `notify` watcher. The returned `Watcher` is parked
 /// inside a long-lived task because dropping it stops the watch.
+///
+/// **Why `PollWatcher` and not `recommended_watcher`:** LongBox runs
+/// inside a Docker Desktop container on macOS, mounting `/watch` from
+/// the host via virtiofs. inotify is blind to host writes through
+/// virtiofs — a CBZ landing in `/watch` from outside the container
+/// never fires a Create event, so a file downloaded by the host took
+/// 44+ minutes to be noticed before the swap. `PollWatcher` walks the
+/// directory on a fixed interval and diffs mtime+size; works on every
+/// platform LongBox might ever run on, at the cost of up-to-interval
+/// detection latency. `PollWatcher` implements the same `Watcher`
+/// trait and emits the same `EventKind::Create / Modify / Remove`
+/// events, so the closure body below is untouched.
+///
+/// **Revert path:** on a native-Linux deploy where inotify works,
+/// swap `PollWatcher::new(handler, cfg)` back to
+/// `notify::recommended_watcher(handler)` — one line. The poll
+/// interval setting is then dead but harmless.
+///
+/// `PollWatcher`'s first poll silently populates its internal
+/// `PathData` map; pre-existing files do NOT fire as Create events
+/// (the `is_initial` flag only emits to the optional
+/// `ScanEventHandler`). The `initial_sweep` task above remains
+/// responsible for catching files that exist at boot.
 fn spawn_watcher(
     watch_path: PathBuf,
+    poll_interval: Duration,
     tx: mpsc::Sender<PathBuf>,
     cache: Arc<PendingInterventionsCache>,
 ) -> Result<()> {
@@ -258,7 +288,9 @@ fn spawn_watcher(
     let tx = Arc::new(tx);
     let tx_for_cb = Arc::clone(&tx);
 
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let poll_config = notify::Config::default().with_poll_interval(poll_interval);
+    let mut watcher = notify::PollWatcher::new(
+        move |res: notify::Result<notify::Event>| {
         let event = match res {
             Ok(e) => e,
             Err(e) => {
@@ -311,7 +343,9 @@ fn spawn_watcher(
                 }
             }
         }
-    })?;
+        },
+        poll_config,
+    )?;
 
     watcher.watch(&watch_path, RecursiveMode::Recursive)?;
 
@@ -467,6 +501,7 @@ mod tests {
         let config = PostprocessConfig {
             watch_path: PathBuf::from("/nonexistent-longbox-test-path"),
             library_root: PathBuf::from("/tmp/longbox-test-library"),
+            poll_interval: Duration::from_secs(30),
         };
         let err = start(config, pool, Arc::new(PendingInterventionsCache::new()))
             .await
@@ -494,6 +529,7 @@ mod tests {
         let config = PostprocessConfig {
             watch_path: tmp.path().to_path_buf(),
             library_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_secs(30),
         };
         start(config, pool, Arc::new(PendingInterventionsCache::new()))
             .await
@@ -507,6 +543,7 @@ mod tests {
         let config = PostprocessConfig {
             watch_path: tmp.path().to_path_buf(),
             library_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_secs(30),
         };
         let err = start(config, pool, Arc::new(PendingInterventionsCache::new()))
             .await
