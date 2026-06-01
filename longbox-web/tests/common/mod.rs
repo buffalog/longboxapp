@@ -79,6 +79,8 @@ pub async fn build_test_app() -> TestApp {
         match_threshold: 0.85,
         cors_permissive: false,
         download_watch_path: None,
+        metron_api_user: None,
+        metron_api_password: None,
         pull_schedule_time: time::macros::time!(05:00),
         scan_schedule_time: time::macros::time!(03:00),
     };
@@ -98,6 +100,11 @@ pub async fn build_test_app() -> TestApp {
     let state = AppState {
         db: pool,
         cv: cv_arc,
+        // Item A v2: tests don't exercise the Metron path. Disabled is
+        // the default — piece 3 will add tests that explicitly construct
+        // a Some(client) backed by a wiremock server for forward-week
+        // calendar behavior.
+        metron: None,
         scanner: Arc::new(scanner),
         config: Arc::new(config),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),

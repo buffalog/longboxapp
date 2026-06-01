@@ -16,6 +16,15 @@ pub struct AppConfig {
     /// starts the post-process watcher at boot. Unset = Phase B not
     /// enabled; unreadable = warn-and-skip.
     pub download_watch_path: Option<String>,
+    /// Metron API username (Basic Auth). Optional — the
+    /// `metron_enabled` settings row is the actual gate. When
+    /// `metron_enabled = true` AND this is None/empty, bootstrap
+    /// logs warn and degrades to None on the MetronClient handle.
+    /// Source: `METRON_API_USER` env var.
+    pub metron_api_user: Option<String>,
+    /// Metron API password. See [`Self::metron_api_user`]. Source:
+    /// `METRON_API_PASSWORD` env var.
+    pub metron_api_password: Option<String>,
     /// Wall-clock time the daily pull sweep fires, from
     /// `PULL_SCHEDULE_TIME` (`HH:MM`, default 05:00). Interpreted as
     /// UTC by the pull scheduler — see `longbox_pull::PullConfig`.
@@ -75,6 +84,13 @@ impl AppConfig {
 
         let download_watch_path = optional("DOWNLOAD_WATCH_PATH");
 
+        // Metron credentials. Both optional at this layer — the
+        // `metron_enabled` settings row is the actual feature gate;
+        // bootstrap collapses any (enabled, missing-creds) state to
+        // a None MetronClient handle with a warn log, no hard fail.
+        let metron_api_user = optional("METRON_API_USER");
+        let metron_api_password = optional("METRON_API_PASSWORD");
+
         let pull_schedule_time = match optional("PULL_SCHEDULE_TIME") {
             Some(raw) => parse_schedule_time("PULL_SCHEDULE_TIME", &raw)?,
             None => time::macros::time!(05:00),
@@ -94,6 +110,8 @@ impl AppConfig {
             match_threshold,
             cors_permissive,
             download_watch_path,
+            metron_api_user,
+            metron_api_password,
             pull_schedule_time,
             scan_schedule_time,
         })

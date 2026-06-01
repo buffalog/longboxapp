@@ -17,6 +17,7 @@ path = "src/main.rs"
 longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
 longbox-comicvine = { path = "../longbox-comicvine" }
+longbox-metron = { path = "../longbox-metron" }
 longbox-scanner = { path = "../longbox-scanner" }
 longbox-postprocess = { path = "../longbox-postprocess" }
 longbox-newznab = { path = "../longbox-newznab" }

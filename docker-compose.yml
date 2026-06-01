@@ -23,6 +23,13 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.85}
       COMICVINE_API_KEY: ${COMICVINE_API_KEY}
+      # Item A v2 forward-calendar (Metron). Empty defaults boot the
+      # container cleanly even without an account — the metron_enabled
+      # settings row is the actual gate; bad/missing credentials with
+      # the row flipped on degrade to "forward weeks return empty" with
+      # a single warn log at boot.
+      METRON_API_USER: ${METRON_API_USER:-}
+      METRON_API_PASSWORD: ${METRON_API_PASSWORD:-}
       # Phase B: when set, web spawns the post-process watcher at boot.
       # Maps to the /watch bind mount above.
       DOWNLOAD_WATCH_PATH: ${DOWNLOAD_WATCH_PATH:-}

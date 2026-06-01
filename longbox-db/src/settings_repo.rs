@@ -52,6 +52,44 @@ pub const KEY_CV_ENRICHMENT_MAX_RUN: &str = "cv_enrichment_max_run";
 /// restart needed.
 pub const KEY_CV_ENRICHMENT_ENABLED: &str = "cv_enrichment_enabled";
 
+// -------- Item A v2: Metron forward-calendar integration --------
+
+/// Kill switch for the Metron forward-calendar path. Default 'false'
+/// (set by the 20260601 migration) so the feature is inert until the
+/// deploy env carries valid credentials AND the row is flipped to
+/// 'true'. Read once at boot — `bootstrap` skips MetronClient
+/// construction entirely when this is false, so a disabled Metron
+/// incurs no env-var reads, no settings reads, no warn logs.
+pub const KEY_METRON_ENABLED: &str = "metron_enabled";
+
+/// How many forward weeks the calendar handler asks Metron about on
+/// "Next week" navigation. Default 4 (set by migration). Read lazily
+/// per forward-window calendar request — pattern mirrors
+/// `EnrichmentConfig::load`, allows live tuning via sidecar without a
+/// container restart.
+pub const KEY_METRON_CALENDAR_FORWARD_WEEKS: &str = "metron_calendar_forward_weeks";
+
+/// TTL on the `metron_calendar_cache` rows. Default 24 hours (set by
+/// migration). Forward solicitation data shifts (FOC cancellations,
+/// date moves) but not minute-by-minute — 24h balances freshness
+/// against API calls. Read lazily per-request.
+pub const KEY_METRON_CALENDAR_CACHE_TTL_HOURS: &str = "metron_calendar_cache_ttl_hours";
+
+// -------- GCD placeholders (reserved; not yet functional) --------
+
+/// Reserved settings-row key for a future GCD integration. Default
+/// empty string (set by the 20260601 migration). The
+/// `gcd_api_user` / `gcd_api_password` row pair exists so a future
+/// GCD path doesn't need its own migration just to introduce two
+/// settings rows. Currently unused in code.
+#[allow(dead_code)]
+pub const KEY_GCD_API_USER: &str = "gcd_api_user";
+
+/// Reserved settings-row key for a future GCD integration. See
+/// [`KEY_GCD_API_USER`] for rationale.
+#[allow(dead_code)]
+pub const KEY_GCD_API_PASSWORD: &str = "gcd_api_password";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,

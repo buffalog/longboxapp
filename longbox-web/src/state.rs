@@ -9,6 +9,12 @@ use crate::config::AppConfig;
 pub struct AppState {
     pub db: longbox_db::Pool,
     pub cv: Arc<longbox_comicvine::ComicVineClient>,
+    /// Metron forward-calendar client (Item A v2). `None` when the
+    /// `metron_enabled` settings row is `false` OR when credentials are
+    /// missing/invalid (degraded boot path). Forward-week calendar
+    /// requests short-circuit to "no releases" when this is `None`;
+    /// current-week requests are unaffected.
+    pub metron: Option<Arc<longbox_metron::MetronClient>>,
     pub scanner: Arc<longbox_scanner::Scanner>,
     pub config: Arc<AppConfig>,
     pub scan_status: Arc<RwLock<ScanStatus>>,

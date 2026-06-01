@@ -1361,6 +1361,7 @@ dependencies = [
  "longbox-cv-enrichment",
  "longbox-db",
  "longbox-downloader",
+ "longbox-metron",
  "longbox-newznab",
  "longbox-postprocess",
  "longbox-pull",
