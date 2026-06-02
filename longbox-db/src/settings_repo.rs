@@ -22,6 +22,13 @@ pub const KEY_AUTO_TIDY_ENABLED: &str = "auto_tidy_enabled";
 /// recovery cost of a wrong NZB grab.
 pub const KEY_PULL_INDEXER_MATCH_THRESHOLD: &str = "pull_indexer_match_threshold";
 
+/// `settings.key` value: comma-separated list of release-title
+/// substrings the pre-grab filter silently drops. Used to keep
+/// digital-only formats (Marvel "Infinity Comic", DC "Infinite
+/// Comic") out of the library. Pull sweep reads this per-sweep so
+/// editing the row tunes the next sweep without a restart.
+pub const KEY_PULL_EXCLUSION_KEYWORDS: &str = "pull_exclusion_keywords";
+
 /// CV enrichment tunables (Step 6c.1). Worker reads each per-cycle so
 /// flipping a value tunes the next attempt with no restart. Defaults
 /// are the conservative-to-a-fault choices from the kickoff and

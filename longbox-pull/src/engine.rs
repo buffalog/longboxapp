@@ -81,6 +81,12 @@ struct SweepContext {
     indexers: Vec<IndexerConfig>,
     patterns: Vec<ParsingPattern>,
     similarity_threshold: f64,
+    /// Comma-split, trimmed, non-empty entries from the
+    /// `pull_exclusion_keywords` setting. The pre-grab filter drops
+    /// any release whose normalized title contains one of these as
+    /// a substring — used to keep digital-only formats (Marvel
+    /// Infinity Comic, DC Infinite Comic) out of the library.
+    exclusion_keywords: Vec<String>,
 }
 
 /// Reasons a sweep can't run. `NoDownloader` and `DownloaderDisabled`
@@ -119,13 +125,35 @@ async fn load_sweep_context(db: &Pool) -> Result<Result<SweepContext, SweepGate>
         PULL_INDEXER_MATCH_THRESHOLD,
     )
     .await?;
+    let exclusion_keywords = load_exclusion_keywords(db).await?;
 
     Ok(Ok(SweepContext {
         downloader,
         indexers,
         patterns,
         similarity_threshold,
+        exclusion_keywords,
     }))
+}
+
+/// Read `pull_exclusion_keywords` from settings, split on `,`, trim
+/// whitespace, drop empty entries. Stored as a CSV string in one row
+/// so editing via plain SQL stays ergonomic (no JSON array escapes).
+/// On missing-row / read-error, returns the conservative default — no
+/// keywords, no exclusions, the indexer's full result pool passes the
+/// pre-grab filter as before.
+async fn load_exclusion_keywords(db: &Pool) -> Result<Vec<String>, PullError> {
+    let raw: String = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_PULL_EXCLUSION_KEYWORDS,
+        String::new(),
+    )
+    .await?;
+    Ok(raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 /// Run one pull sweep against the catalog and the configured services.
@@ -163,6 +191,7 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
         PULL_INDEXER_MATCH_THRESHOLD,
     )
     .await?;
+    let exclusion_keywords = load_exclusion_keywords(db).await?;
 
     for entry in pull_list_repo::list_active(db).await? {
         sweep_series(
@@ -172,6 +201,7 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
             &downloader,
             &patterns,
             similarity_threshold,
+            &exclusion_keywords,
             &mut summary,
         )
         .await?;
@@ -222,6 +252,7 @@ pub async fn sweep_single_series(
         &ctx.downloader,
         &ctx.patterns,
         ctx.similarity_threshold,
+        &ctx.exclusion_keywords,
         &mut summary,
     )
     .await?;
@@ -304,6 +335,9 @@ async fn poll_in_flight(
 }
 
 /// Phase 2, per series — enumerate candidates and attempt each.
+#[allow(clippy::too_many_arguments)] // sweep-context bag — mirrors
+                                     // attempt_pull_for_candidate's
+                                     // existing too-many-args waiver.
 async fn sweep_series(
     db: &Pool,
     entry: &PullListRow,
@@ -311,6 +345,7 @@ async fn sweep_series(
     downloader: &AnyDownloader,
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
+    exclusion_keywords: &[String],
     summary: &mut SweepSummary,
 ) -> Result<(), PullError> {
     let Some(series) = series_repo::find_by_id(db, entry.series_id).await? else {
@@ -332,6 +367,7 @@ async fn sweep_series(
             downloader,
             patterns,
             similarity_threshold,
+            exclusion_keywords,
             summary,
         )
         .await?
@@ -387,6 +423,7 @@ async fn attempt_pull_for_candidate(
     downloader: &AnyDownloader,
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
+    exclusion_keywords: &[String],
     summary: &mut SweepSummary,
 ) -> Result<AttemptOutcome, PullError> {
     let series_id = series.id;
@@ -427,6 +464,7 @@ async fn attempt_pull_for_candidate(
         &exclude,
         patterns,
         similarity_threshold,
+        exclusion_keywords,
     )
     .await
     {
@@ -609,6 +647,7 @@ pub async fn sweep_single_issue(
         &ctx.downloader,
         &ctx.patterns,
         ctx.similarity_threshold,
+        &ctx.exclusion_keywords,
         &mut summary,
     )
     .await?;
