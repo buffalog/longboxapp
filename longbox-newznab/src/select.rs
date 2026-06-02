@@ -731,6 +731,64 @@ mod tests {
         );
     }
 
+    /// The 20260602010000 migration extends the default keyword set
+    /// with `Trade Paperback`. NZBs for TPB reissues of subscribed
+    /// series must be silently dropped — they're the pull-side
+    /// complement to the cv-enrichment collection penalty (which
+    /// keeps the catalog row pointed at the original series).
+    #[test]
+    fn exclusion_drops_trade_paperback() {
+        let patterns = default_patterns();
+        let pool = vec![release(
+            "Beneath the Trees Where Nobody Sees Trade Paperback (2024).cbz",
+            Some(40),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Beneath the Trees Where Nobody Sees",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &["Trade Paperback".into()],
+        );
+        assert!(outcome.kept.is_empty());
+        assert!(outcome.mismatch.is_none(), "exclusion must be silent");
+    }
+
+    /// `Hardcover` in the release title — same default-keyword set.
+    #[test]
+    fn exclusion_drops_hardcover() {
+        let patterns = default_patterns();
+        let pool = vec![release("Batman Hardcover 001 (2023).cbz", Some(40))];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Batman",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &["Hardcover".into()],
+        );
+        assert!(outcome.kept.is_empty());
+        assert!(outcome.mismatch.is_none());
+    }
+
+    /// `Omnibus` in the release title.
+    #[test]
+    fn exclusion_drops_omnibus() {
+        let patterns = default_patterns();
+        let pool = vec![release("Spider-Man Omnibus 001 (2023).cbz", Some(40))];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Spider-Man",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &["Omnibus".into()],
+        );
+        assert!(outcome.kept.is_empty());
+        assert!(outcome.mismatch.is_none());
+    }
+
     // -------- normalize_scene_title (Bug 3a) --------
     //
     // Baseline: the 11 archaeology cases that parsed cleanly under the
