@@ -18,6 +18,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pull/check", post(check_now))
+        .route("/pull/search/:series_id", post(search_now))
         .route("/pull-list", get(list).post(add))
         .route(
             "/pull-list/:series_id",
@@ -35,6 +36,33 @@ async fn check_now(State(state): State<AppState>) -> Result<StatusCode, ApiError
         Err(ApiError::Conflict {
             code: "conflict.pull_running",
             message: "A pull sweep is already running.".into(),
+        })
+    }
+}
+
+/// Request an on-demand single-series search. `202 Accepted` when the
+/// request is taken; `404 Not Found` when the series isn't on the pull
+/// list; `409 Conflict` when a search for the SAME series is already
+/// in flight. A daily sweep running concurrently does NOT block this —
+/// the per-series guard is independent of the global daily-sweep lock.
+async fn search_now(
+    State(state): State<AppState>,
+    Path(series_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    // 404 preflight first so a typo-ed series id surfaces correctly
+    // even if the per-series guard would have rejected it anyway.
+    if pull_list_repo::get(&state.db, series_id).await?.is_none() {
+        return Err(ApiError::NotFound {
+            resource: "pull_list entry",
+            id: series_id.to_string(),
+        });
+    }
+    if state.pull_search.try_start(series_id).await {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::Conflict {
+            code: "conflict.pull_search_running",
+            message: "A search is already running for this series.".into(),
         })
     }
 }
@@ -90,7 +118,16 @@ async fn add(
     )
     .await
     {
-        Ok(row) => Ok(Json(row)),
+        Ok(row) => {
+            // Auto-fire an on-demand search for the newly-subscribed
+            // series. Fire-and-forget: a duplicate (someone manually
+            // clicked Search now in the same window) is a silent
+            // no-op via the per-series guard. No toast — the user
+            // sees results land on the pull list / needs-attention
+            // page naturally.
+            state.pull_search.try_start(row.series_id).await;
+            Ok(Json(row))
+        }
         Err(longbox_db::DbError::UniqueViolation {
             field: "pull_list_series_id",
         }) => Err(ApiError::Conflict {

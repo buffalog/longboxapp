@@ -20,11 +20,13 @@ mod dispatch;
 mod engine;
 mod error;
 mod schedule;
+mod search;
 
 pub use config::PullConfig;
-pub use engine::{sweep, SweepSummary};
+pub use engine::{sweep, sweep_single_series, SweepSummary};
 pub use error::PullError;
 pub use schedule::PullHandle;
+pub use search::PullSearchHandle;
 
 /// Start the pull engine: spawn the daily scheduler task and return a
 /// handle for manual sweep triggering. Called once at web-layer boot;

@@ -70,12 +70,71 @@ pub struct SweepSummary {
     pub indexer_errors: usize,
 }
 
+/// Per-sweep context: the rebuilt downloader, the enabled indexers,
+/// the parsing patterns, and the pre-grab similarity threshold. Loaded
+/// once per sweep so a settings change tunes the next sweep without
+/// restart, and shared between `sweep` (all series) and
+/// `sweep_single_series` (one series) so the on-demand search path
+/// gets the exact same gating.
+struct SweepContext {
+    downloader: AnyDownloader,
+    indexers: Vec<IndexerConfig>,
+    patterns: Vec<ParsingPattern>,
+    similarity_threshold: f64,
+}
+
+/// Reasons a sweep can't run. `NoDownloader` and `DownloaderDisabled`
+/// short-circuit before Phase 1 (without a downloader the engine can't
+/// even poll in-flight attempts). `NoIndexers` blocks Phase 2 only;
+/// the all-series caller logs it and returns the polling result
+/// anyway, the single-series caller propagates it as a no-op summary.
+enum SweepGate {
+    NoDownloader,
+    DownloaderDisabled,
+    NoIndexers,
+}
+
+/// Load everything Phase 2 needs. `Ok(Ok(ctx))` means full sweep is
+/// possible. `Ok(Err(gate))` means a precondition failed and the
+/// caller should log + bail. `Err(_)` is a real DB failure.
+async fn load_sweep_context(db: &Pool) -> Result<Result<SweepContext, SweepGate>, PullError> {
+    let Some(downloader_row) = downloader_config_repo::get(db).await? else {
+        return Ok(Err(SweepGate::NoDownloader));
+    };
+    if !downloader_row.enabled {
+        return Ok(Err(SweepGate::DownloaderDisabled));
+    }
+    let downloader = build_downloader(downloader_row);
+
+    let indexer_rows = indexer_config_repo::list_enabled(db).await?;
+    if indexer_rows.is_empty() {
+        return Ok(Err(SweepGate::NoIndexers));
+    }
+    let indexers: Vec<IndexerConfig> = indexer_rows.into_iter().map(to_indexer_config).collect();
+
+    let patterns = load_patterns(db).await?;
+    let similarity_threshold = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_PULL_INDEXER_MATCH_THRESHOLD,
+        PULL_INDEXER_MATCH_THRESHOLD,
+    )
+    .await?;
+
+    Ok(Ok(SweepContext {
+        downloader,
+        indexers,
+        patterns,
+        similarity_threshold,
+    }))
+}
+
 /// Run one pull sweep against the catalog and the configured services.
 pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     let mut summary = SweepSummary::default();
 
-    // The downloader is required for both phases — no downloader, no
-    // sweep.
+    // Phase 1 needs only the downloader; load just enough to drive it
+    // without paying the Phase 2 load costs (indexers, patterns,
+    // threshold) up front.
     let Some(downloader_row) = downloader_config_repo::get(db).await? else {
         tracing::info!(target: "longbox_pull", "pull.sweep_skipped (no downloader configured)");
         return Ok(summary);
@@ -97,9 +156,6 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     }
     let indexers: Vec<IndexerConfig> = indexer_rows.into_iter().map(to_indexer_config).collect();
 
-    // Bug 3: load filename-parser patterns + the pre-grab similarity
-    // threshold once per sweep. Re-loading per-sweep (not at startup)
-    // means a settings change tunes the next sweep without restart.
     let patterns = load_patterns(db).await?;
     let similarity_threshold = settings_repo::get_or_default(
         db,
@@ -120,6 +176,55 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
         )
         .await?;
     }
+    Ok(summary)
+}
+
+/// Run Phase 2 (issue enumeration + indexer submission) for exactly
+/// one subscribed series. Skips Phase 1 — in-flight polling belongs
+/// to the daily scheduler. Returns `NotOnPullList` when the series
+/// has no pull-list entry.
+///
+/// Documented race: if the daily scheduler is mid-sweep on the same
+/// series at the moment this fires, both could query indexers for the
+/// same candidates and try to submit duplicate `pull_attempts`. The
+/// unique key on `(series_id, issue_id)` absorbs the collision — the
+/// second INSERT errors out and the per-issue code path logs and moves
+/// on. Window is bounded (each sweep_series call is short); cost on
+/// collision is one wasted indexer query.
+pub async fn sweep_single_series(
+    db: &Pool,
+    series_id: i64,
+) -> Result<SweepSummary, PullError> {
+    let mut summary = SweepSummary::default();
+    let entry =
+        pull_list_repo::get(db, series_id)
+            .await?
+            .ok_or(PullError::NotOnPullList { series_id })?;
+    let ctx = match load_sweep_context(db).await? {
+        Ok(ctx) => ctx,
+        Err(SweepGate::NoDownloader) => {
+            tracing::info!(target: "longbox_pull", series_id, "pull.search_skipped (no downloader configured)");
+            return Ok(summary);
+        }
+        Err(SweepGate::DownloaderDisabled) => {
+            tracing::info!(target: "longbox_pull", series_id, "pull.search_skipped (downloader disabled)");
+            return Ok(summary);
+        }
+        Err(SweepGate::NoIndexers) => {
+            tracing::info!(target: "longbox_pull", series_id, "pull.search_skipped (no enabled indexers)");
+            return Ok(summary);
+        }
+    };
+    sweep_series(
+        db,
+        &entry,
+        &ctx.indexers,
+        &ctx.downloader,
+        &ctx.patterns,
+        ctx.similarity_threshold,
+        &mut summary,
+    )
+    .await?;
     Ok(summary)
 }
 

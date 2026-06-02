@@ -2394,6 +2394,121 @@ async fn pull_check_accepts_a_sweep_request() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 
+// -------- on-demand single-series search (Phase A.9) --------
+
+#[tokio::test]
+async fn pull_search_404_when_series_not_on_pull_list() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("POST", "/api/pull/search/9999"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_found.pull_list entry");
+}
+
+#[tokio::test]
+async fn pull_search_404_when_series_exists_but_unsubscribed() {
+    // Series in catalog but not on pull list — must surface as 404 on
+    // the pull_list entry, not as a stale 200.
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/pull/search/{sid}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pull_search_202_accepts_when_subscribed() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    // Subscribe directly via the repo so the test isolates the search
+    // route from the auto-trigger that the POST /pull-list handler
+    // would otherwise fire.
+    longbox_db::pull_list_repo::add(
+        &app.state.db,
+        longbox_db::NewPullEntry {
+            series_id: sid,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/pull/search/{sid}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn pull_search_auto_triggered_on_subscribe_via_pull_list_add() {
+    // Load-bearing for the auto-trigger arc: subscribing through
+    // POST /api/pull-list must fire a single-series search for the new
+    // series_id. `is_searching` is observable here because tokio's
+    // current-thread runtime doesn't preempt this test's mutex lock
+    // with the spawned-task's cleanup; the entry is still in the set
+    // when we check.
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    assert!(
+        !app.state.pull_search.is_searching(sid).await,
+        "guard must start clean"
+    );
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/pull-list",
+            format!(r#"{{"series_id":{sid}}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        app.state.pull_search.is_searching(sid).await,
+        "subscribe must auto-trigger a search for the new series_id"
+    );
+}
+
+#[tokio::test]
+async fn pull_search_auto_trigger_silently_skips_already_on_list() {
+    // Re-subscribing a series that's already on the list returns 409
+    // from the route, NOT 200. The auto-trigger only fires on the
+    // success path, so a no-op re-subscribe must NOT trigger a
+    // search. Defends against double-firing on bulk-add payloads
+    // that include duplicates.
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    // First subscribe — fires the trigger.
+    app.request(json_request(
+        "POST",
+        "/api/pull-list",
+        format!(r#"{{"series_id":{sid}}}"#),
+    ))
+    .await;
+    // Let the spawned task clear the in-progress entry.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    // Repeat subscribe — 409, no re-trigger.
+    let dup = app
+        .request(json_request(
+            "POST",
+            "/api/pull-list",
+            format!(r#"{{"series_id":{sid}}}"#),
+        ))
+        .await;
+    assert_eq!(dup.status(), StatusCode::CONFLICT);
+    assert!(
+        !app.state.pull_search.is_searching(sid).await,
+        "a 409 re-subscribe must NOT re-trigger a search"
+    );
+}
+
 // -------- pull list (Phase A.8 Step 7) --------
 
 async fn seed_pull_series(app: &common::TestApp, title: &str) -> i64 {
@@ -4514,6 +4629,15 @@ async fn calendar_add_to_pull_list_creates_series_and_subscribes() {
         .await
         .unwrap()
         .is_some());
+    // Auto-trigger: subscribing through the calendar must fire an
+    // on-demand search for the new series_id, just like POST
+    // /api/pull-list does. is_searching is observable here because the
+    // spawned cleanup task hasn't been scheduled yet on the
+    // single-threaded test runtime.
+    assert!(
+        app.state.pull_search.is_searching(series_id).await,
+        "calendar add must auto-trigger a search for the new series_id"
+    );
 }
 
 #[tokio::test]
