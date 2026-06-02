@@ -12,4 +12,11 @@ use thiserror::Error;
 pub enum PullError {
     #[error(transparent)]
     Db(#[from] longbox_db::DbError),
+
+    /// `sweep_single_series` was asked to run for a series that isn't
+    /// on the pull list. Defensive: the route handler does its own 404
+    /// preflight first, but a direct caller (test, future internal
+    /// trigger) needs the typed signal too.
+    #[error("series {series_id} is not on the pull list")]
+    NotOnPullList { series_id: i64 },
 }

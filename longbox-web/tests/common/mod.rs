@@ -113,6 +113,7 @@ pub async fn build_test_app() -> TestApp {
     // pull handle is what the `/pull/check` route exercises; the scan
     // scheduler gets a no-op closure.
     let pull = longbox_pull::start(longbox_pull::PullConfig::default(), pool.clone());
+    let pull_search = longbox_pull::PullSearchHandle::new(pool.clone());
     let scan_scheduler = longbox_scan_scheduler::start(
         longbox_scan_scheduler::ScanSchedulerConfig::default(),
         || async {},
@@ -134,6 +135,7 @@ pub async fn build_test_app() -> TestApp {
         library_root_id,
         pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
         pull,
+        pull_search,
         scan_scheduler,
         enrichment,
     };

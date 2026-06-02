@@ -240,6 +240,13 @@ async fn try_add_one(state: &AppState, cv_volume_id: i64) -> Result<(i64, &'stat
             },
         )
         .await?;
+        // Auto-fire an on-demand search for the freshly-subscribed
+        // series. Bulk-add fires N of these (one per item); duplicate
+        // series_ids in the payload are absorbed by the per-series
+        // guard. No toast — the user sees results land naturally.
+        // Only fires on a real "added" transition; an already-on-list
+        // no-op doesn't re-search.
+        state.pull_search.try_start(series.id).await;
         "added"
     } else {
         "already_on_list"

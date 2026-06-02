@@ -266,6 +266,18 @@ impl From<longbox_comicvine::CvError> for ApiError {
     }
 }
 
+impl From<longbox_pull::PullError> for ApiError {
+    fn from(err: longbox_pull::PullError) -> Self {
+        match err {
+            longbox_pull::PullError::NotOnPullList { series_id } => ApiError::NotFound {
+                resource: "pull_list entry",
+                id: series_id.to_string(),
+            },
+            longbox_pull::PullError::Db(db_err) => ApiError::from(db_err),
+        }
+    }
+}
+
 impl From<longbox_scanner::ScanError> for ApiError {
     fn from(err: longbox_scanner::ScanError) -> Self {
         match err {

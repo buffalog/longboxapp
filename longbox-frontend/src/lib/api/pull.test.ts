@@ -5,6 +5,7 @@ import {
   getPullEntry,
   listPullList,
   removeFromPullList,
+  searchSeriesNow,
   setPullPaused
 } from './pull';
 
@@ -67,6 +68,15 @@ describe('pull api', () => {
     await checkPull();
     const [url, opts] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('/api/pull/check');
+    expect(opts?.method).toBe('POST');
+  });
+
+  it('searchSeriesNow POSTs /api/pull/search/:series_id', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    await searchSeriesNow(42);
+    const [url, opts] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/pull/search/42');
     expect(opts?.method).toBe('POST');
   });
 });

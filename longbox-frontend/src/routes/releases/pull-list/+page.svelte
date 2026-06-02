@@ -5,6 +5,7 @@
   import {
     checkPull,
     removeFromPullList,
+    searchSeriesNow,
     setPullPaused,
     type PullListEntry
   } from '$lib/api/pull';
@@ -18,6 +19,13 @@
   let entries = $state<PullListEntry[]>([...data.entries]);
   let busy = $state(false);
   let error = $state<ApiError | null>(null);
+  // Per-row debounce for the Search-now button. 15 s covers a typical
+  // indexer search wall-time without locking the button indefinitely —
+  // the backend has no live-status feed for the frontend to poll, so
+  // a fixed timer is the pragmatic disabled-state proxy. An impatient
+  // re-click after the timer expires still gets a clear 409 toast.
+  const SEARCH_BUTTON_DISABLED_MS = 15_000;
+  let searchingIds = $state<Set<number>>(new Set());
 
   async function run(fn: () => Promise<void>): Promise<void> {
     busy = true;
@@ -56,6 +64,27 @@
         toast.warning('A pull sweep is already running.');
       } else {
         toast.error(e instanceof ApiError ? e.message : 'Could not start a pull sweep.');
+      }
+    }
+  }
+
+  async function handleSearchNow(entry: PullListEntry): Promise<void> {
+    if (searchingIds.has(entry.series_id)) return;
+    // Reassign for Svelte 5 $state reactivity on Sets.
+    searchingIds = new Set([...searchingIds, entry.series_id]);
+    setTimeout(() => {
+      const next = new Set(searchingIds);
+      next.delete(entry.series_id);
+      searchingIds = next;
+    }, SEARCH_BUTTON_DISABLED_MS);
+    try {
+      await searchSeriesNow(entry.series_id);
+      toast.success(`Search started for ${entry.series_title}.`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        toast.warning(`A search is already running for ${entry.series_title}.`);
+      } else {
+        toast.error(e instanceof ApiError ? e.message : 'Could not start the search.');
       }
     }
   }
@@ -137,6 +166,14 @@
             </td>
             <td class="px-4 py-2">
               <div class="flex justify-end gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => handleSearchNow(entry)}
+                  disabled={busy || searchingIds.has(entry.series_id)}
+                >
+                  Search now
+                </Button>
                 <Button
                   variant="ghost"
                   size="sm"

@@ -126,6 +126,10 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         },
         db.clone(),
     );
+    // On-demand single-series search tracker. Spawns its own short-
+    // lived tokio task per accepted search; the pool clone is what
+    // they run against.
+    let pull_search = longbox_pull::PullSearchHandle::new(db.clone());
 
     // 9. Library Tidy scheduled scan. The scan-with-status logic is a
     //    closure built here — it needs `scan_status`, a web-layer type
@@ -183,6 +187,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         library_root_id,
         pending_cache,
         pull,
+        pull_search,
         scan_scheduler,
         enrichment,
     })

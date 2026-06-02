@@ -31,6 +31,12 @@ pub struct AppState {
     /// scheduler task runs unconditionally; the `/pull/check` route
     /// uses this to trigger an immediate sweep.
     pub pull: longbox_pull::PullHandle,
+    /// On-demand single-series search tracker. Independent of `pull`
+    /// (which guards the daily scheduler); guards `/pull/search/:id`
+    /// and the auto-fire-on-subscribe hook. Per-series concurrency:
+    /// two searches for distinct series run in parallel, two for the
+    /// same series return 409.
+    pub pull_search: longbox_pull::PullSearchHandle,
     /// Handle to the Library Tidy scheduled-scan timer. Always present;
     /// the daily scan runs through the same `scan_status` guard as the
     /// manual scan route.

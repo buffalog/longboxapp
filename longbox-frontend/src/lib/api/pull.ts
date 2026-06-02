@@ -61,3 +61,15 @@ export function removeFromPullList(seriesId: number): Promise<void> {
 export function checkPull(): Promise<void> {
   return apiFetch('/pull/check', { method: 'POST' });
 }
+
+/** Trigger an on-demand search for one series. Fire-and-forget — the
+ *  server responds 202 immediately and runs the search in the
+ *  background; the resulting submissions land on the pull list /
+ *  needs-attention pages naturally. Rejects with `ApiError`:
+ *   - 404 `not_found.pull_list entry` when the series isn't subscribed,
+ *   - 409 `conflict.pull_search_running` when a search for that same
+ *     series is already in flight (a daily sweep running concurrently
+ *     does NOT block this — the per-series guard is independent). */
+export function searchSeriesNow(seriesId: number): Promise<void> {
+  return apiFetch(`/pull/search/${seriesId}`, { method: 'POST' });
+}
