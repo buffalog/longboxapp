@@ -259,38 +259,50 @@ pub async fn find_release_excluding_filtered(
         return Ok(FindOutcome::NoMatch);
     }
 
-    // Defensive: sort by priority so the caller need not pre-order.
+    // Sort by priority — used as tiebreaker when grabs/format are equal.
     let mut ordered: Vec<&IndexerConfig> = indexers.iter().collect();
     ordered.sort_by_key(|i| i.priority);
 
     let client = http_client();
+
+    // Fan out to ALL indexers simultaneously. Every indexer is queried in
+    // parallel and the best release from the combined pool wins — the same
+    // model Prowlarr uses. A single slow or empty indexer no longer blocks
+    // the others.
+    let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
+        futures::future::join_all(
+            ordered
+                .iter()
+                .map(|idx| search_one_indexer(&client, idx, series, issue, year)),
+        )
+        .await;
+
+    let mut all_kept: Vec<Release> = Vec::new();
     let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
     let mut first_mismatch: Option<(IndexerId, MismatchDiagnostic)> = None;
+    // guid → IndexerId so we can attribute the winning release after select_best.
+    let mut guid_to_indexer: std::collections::HashMap<String, IndexerId> =
+        std::collections::HashMap::new();
 
-    for indexer in ordered {
-        match search_one_indexer(&client, indexer, series, issue, year).await {
-            Ok(results) => {
-                let kept_pre_filter: Vec<Release> = results
+    for (indexer, result) in ordered.iter().zip(per_indexer) {
+        match result {
+            Ok(releases) => {
+                let kept_pre_filter: Vec<Release> = releases
                     .into_iter()
                     .filter(|r| !exclude_guids.iter().any(|g| g == &r.guid))
                     .collect();
                 let outcome =
                     filter_by_series_title(kept_pre_filter, patterns, series, year, similarity_threshold);
-                if !outcome.kept.is_empty() {
-                    if let Some(best) = select_best(outcome.kept) {
-                        return Ok(FindOutcome::Match {
-                            indexer: indexer.id,
-                            release: best,
-                        });
-                    }
+                for release in &outcome.kept {
+                    guid_to_indexer.insert(release.guid.clone(), indexer.id);
                 }
+                all_kept.extend(outcome.kept);
                 if let Some(diag) = outcome.mismatch {
                     if first_mismatch.is_none() {
                         first_mismatch = Some((indexer.id, diag));
                     }
                 }
-                // outcome.mismatch.is_none() AND kept.is_empty() = silent
-                // (year-only or no results) — fall through.
+                // Silent fall-through when year-filter drained the pool.
             }
             Err(e) => {
                 tracing::warn!(
@@ -307,6 +319,19 @@ pub async fn find_release_excluding_filtered(
     if failures.len() == indexers.len() {
         return Err(NewznabError::AllIndexersFailed(failures));
     }
+
+    // select_best across the combined pool from all indexers.
+    if let Some(best) = select_best(all_kept) {
+        let indexer_id = guid_to_indexer
+            .get(&best.guid)
+            .copied()
+            .unwrap_or(ordered[0].id);
+        return Ok(FindOutcome::Match {
+            indexer: indexer_id,
+            release: best,
+        });
+    }
+
     if let Some((indexer, diagnostic)) = first_mismatch {
         return Ok(FindOutcome::Mismatch {
             indexer,
