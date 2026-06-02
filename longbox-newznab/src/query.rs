@@ -17,10 +17,19 @@ const RESULT_LIMIT: u32 = 100;
 /// numbers; non-numeric ones (`Annual 1`, `½`) pass through unchanged
 /// in both variations.
 ///
-/// `year`, when `Some`, appends ` (YYYY)` for volume disambiguation.
-/// The caller decides whether to pass it — this crate has no CV
-/// volume knowledge.
-pub fn build_search_term(series: &str, issue: &str, year: Option<i32>, padded: bool) -> String {
+/// **No year in the query.** Newznab's `t=search` does a literal
+/// substring match on `q`. Releases are tagged with their RELEASE
+/// year, not the series's start_year, so a literal `(2024)` from the
+/// catalog never appears in NZBs tagged `(2023)` and the query
+/// returns zero results for any ongoing series whose start_year
+/// differs from the issue's actual release year. Prowlarr — which
+/// returns 85 hits for a query LongBox got 0 for — does not embed a
+/// year in its text query; we follow the same shape.
+///
+/// Year is still load-bearing for ranking via the similarity filter
+/// downstream (`filter_by_series_title`); it just doesn't belong in
+/// the indexer text query.
+pub fn build_search_term(series: &str, issue: &str, padded: bool) -> String {
     let issue_part = if padded {
         match issue.parse::<u32>() {
             Ok(n) => format!("{n:03}"),
@@ -29,11 +38,7 @@ pub fn build_search_term(series: &str, issue: &str, year: Option<i32>, padded: b
     } else {
         issue.to_string()
     };
-    let mut term = format!("{series} {issue_part}");
-    if let Some(y) = year {
-        term.push_str(&format!(" ({y})"));
-    }
-    term
+    format!("{series} {issue_part}")
 }
 
 /// Build the full Newznab search URL for an indexer + search term.
@@ -75,48 +80,47 @@ mod tests {
 
     #[test]
     fn padded_zero_pads_numeric_issues() {
-        assert_eq!(
-            build_search_term("Wolverine", "5", None, true),
-            "Wolverine 005"
-        );
-        assert_eq!(build_search_term("Saga", "12", None, true), "Saga 012");
-        assert_eq!(build_search_term("X", "100", None, true), "X 100");
+        assert_eq!(build_search_term("Wolverine", "5", true), "Wolverine 005");
+        assert_eq!(build_search_term("Saga", "12", true), "Saga 012");
+        assert_eq!(build_search_term("X", "100", true), "X 100");
     }
 
     #[test]
     fn unpadded_leaves_issue_as_is() {
-        assert_eq!(
-            build_search_term("Wolverine", "5", None, false),
-            "Wolverine 5"
-        );
-        assert_eq!(build_search_term("Saga", "12", None, false), "Saga 12");
+        assert_eq!(build_search_term("Wolverine", "5", false), "Wolverine 5");
+        assert_eq!(build_search_term("Saga", "12", false), "Saga 12");
     }
 
     #[test]
     fn non_numeric_issues_pass_through_both_variations() {
         assert_eq!(
-            build_search_term("Bone", "Annual 1", None, true),
+            build_search_term("Bone", "Annual 1", true),
             "Bone Annual 1"
         );
         assert_eq!(
-            build_search_term("Bone", "Annual 1", None, false),
+            build_search_term("Bone", "Annual 1", false),
             "Bone Annual 1"
         );
-        assert_eq!(
-            build_search_term("Promethea", "½", None, true),
-            "Promethea ½"
-        );
+        assert_eq!(build_search_term("Promethea", "½", true), "Promethea ½");
     }
 
     #[test]
-    fn year_appends_when_present() {
+    fn year_is_never_embedded_in_the_query_term() {
+        // Regression: prior shape was `Series 005 (YYYY)`, which made
+        // ongoing series unfindable. Newznab `t=search` does a literal
+        // substring match on `q`, and NZB titles carry the RELEASE
+        // year, not the series start_year — so a series that started
+        // in 2023 with releases tagged "(2024)" never matched
+        // "Series 005 (2023)". The signature no longer carries year;
+        // this test is the load-bearing documentation that both
+        // variations stay year-free.
         assert_eq!(
-            build_search_term("Wolverine", "5", Some(1982), true),
-            "Wolverine 005 (1982)"
+            build_search_term("Beneath the Trees Where Nobody Sees", "5", true),
+            "Beneath the Trees Where Nobody Sees 005"
         );
         assert_eq!(
-            build_search_term("Wolverine", "5", Some(1982), false),
-            "Wolverine 5 (1982)"
+            build_search_term("Beneath the Trees Where Nobody Sees", "5", false),
+            "Beneath the Trees Where Nobody Sees 5"
         );
     }
 
