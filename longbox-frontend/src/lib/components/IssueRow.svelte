@@ -6,8 +6,11 @@
     AlertCircle,
     XCircle,
     ExternalLink,
-    FileImage
+    FileImage,
+    Search
   } from 'lucide-svelte';
+  import { ApiError } from '$lib/api/client';
+  import { searchIssueNow } from '$lib/api/pull';
   import type { IssueWithFile } from '$lib/types';
   import { cvIssueUrl, formatDate } from '$lib/format';
   import { sanitizeCvSynopsis } from '$lib/text';
@@ -16,9 +19,22 @@
 
   interface Props {
     issue: IssueWithFile;
+    /** Parent series id — needed to construct the per-issue search
+     *  endpoint URL. Optional because IssueRow is also rendered in
+     *  contexts that don't have a single parent series (e.g. the
+     *  needs-attention listing); when absent, the Search button is
+     *  hidden. */
+    seriesId?: number;
   }
 
-  let { issue }: Props = $props();
+  let { issue, seriesId }: Props = $props();
+
+  // Per-row Search debounce — 15 s, same trade-off as the per-series
+  // Search-now button on the pull list page. The backend's in-flight
+  // guard catches duplicate fires silently, but a debounce here keeps
+  // rapid clicks from spamming the API with no-op work.
+  const SEARCH_BUTTON_DISABLED_MS = 15_000;
+  let searching = $state(false);
 
   // A file-present row keeps its actionable status. A no-file row
   // splits into 'solicited' (cover_date today-or-future — not shipped
@@ -46,6 +62,32 @@
         return { Icon: Circle, color: 'text-status-missing', label: 'Missing' };
     }
   });
+
+  // Whether to surface the Search button for this row. Only Missing
+  // issues qualify — Owned doesn't need it, Solicited isn't shipped,
+  // Needs-review / Ignored / Unmatched belong to other workflows.
+  // seriesId is required to construct the API URL; without it, hide.
+  const showSearchButton = $derived(seriesId !== undefined && status === 'missing');
+
+  async function handleSearchNow(): Promise<void> {
+    if (searching || seriesId === undefined) return;
+    searching = true;
+    setTimeout(() => {
+      searching = false;
+    }, SEARCH_BUTTON_DISABLED_MS);
+    try {
+      await searchIssueNow(seriesId, issue.id);
+      toast.success(`Search started for #${issue.number}.`);
+    } catch (e) {
+      // The backend's in-flight guard silently no-ops rather than
+      // returning a 409, so the only errors expected here are real
+      // (404 for a deleted issue, network failure). Surface them as
+      // warnings rather than ignoring.
+      const message =
+        e instanceof ApiError ? e.message : 'Could not start the search.';
+      toast.warning(message);
+    }
+  }
 
   // Click-to-copy feedback goes through the shared toast store
   // (Task 5). The button label stays the issue id permanently;
@@ -132,10 +174,24 @@
   </td>
   <td class="px-3 py-2 align-top text-xs text-slate-500">{formatDate(issue.cover_date)}</td>
   <td class="px-3 py-2 align-top">
-    <span class="inline-flex items-center gap-1 {statusMeta.color}" aria-label={statusMeta.label}>
-      <statusMeta.Icon class="size-4" aria-hidden="true" />
-      <span class="text-xs font-medium">{statusMeta.label}</span>
-    </span>
+    <div class="flex items-center gap-2">
+      <span class="inline-flex items-center gap-1 {statusMeta.color}" aria-label={statusMeta.label}>
+        <statusMeta.Icon class="size-4" aria-hidden="true" />
+        <span class="text-xs font-medium">{statusMeta.label}</span>
+      </span>
+      {#if showSearchButton}
+        <button
+          type="button"
+          onclick={handleSearchNow}
+          disabled={searching}
+          aria-label={`Search for issue ${issue.number}`}
+          class="inline-flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Search class="size-3" aria-hidden="true" />
+          Search
+        </button>
+      {/if}
+    </div>
   </td>
 </tr>
 

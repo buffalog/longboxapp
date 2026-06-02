@@ -73,3 +73,16 @@ export function checkPull(): Promise<void> {
 export function searchSeriesNow(seriesId: number): Promise<void> {
   return apiFetch(`/pull/search/${seriesId}`, { method: 'POST' });
 }
+
+/** Trigger an on-demand search for ONE specific issue. The series
+ *  does NOT need to be on the pull list — this is the per-issue
+ *  "Search" button on the series detail page for Missing issues. The
+ *  server always 202s when (series, issue, relation) check passes;
+ *  there is no 409 because the in-flight guard lives inside the
+ *  engine and silently skips. Rejects with `ApiError`:
+ *   - 404 `not_found.series` if the series doesn't exist,
+ *   - 404 `not_found.issue` if the issue doesn't exist OR doesn't
+ *     belong to the named series (URL tampering / stale UI). */
+export function searchIssueNow(seriesId: number, issueId: number): Promise<void> {
+  return apiFetch(`/pull/search/${seriesId}/issue/${issueId}`, { method: 'POST' });
+}

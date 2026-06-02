@@ -5,9 +5,14 @@
 
   interface Props {
     issues: IssueWithFile[];
+    /** Parent series id — passed through to each IssueRow so the
+     *  per-issue "Search" button on Missing rows can construct its
+     *  endpoint URL. Optional; omitted at callers that don't carry a
+     *  single parent series (the button hides when absent). */
+    seriesId?: number;
   }
 
-  let { issues }: Props = $props();
+  let { issues, seriesId }: Props = $props();
 
   let gridRef: HTMLElement | null = $state(null);
 
@@ -72,7 +77,7 @@
     </thead>
     <tbody>
       {#each issues as issue (issue.id)}
-        <IssueRow {issue} />
+        <IssueRow {issue} {seriesId} />
       {/each}
     </tbody>
   </table>

@@ -23,7 +23,7 @@ use longbox_core::{IssueNumber, ParsingPattern, PULL_INDEXER_MATCH_THRESHOLD};
 use longbox_db::{
     downloader_config_repo, indexer_config_repo, issue_repo, parsing_pattern_repo,
     pull_attempt_repo, pull_list_repo, series_repo, settings_repo, webhook_config_repo,
-    DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool, PullListRow,
+    DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool, PullListRow, SeriesRow,
 };
 use longbox_downloader::{
     connect, AnyDownloader, DownloadHandle, DownloadStatus, Downloader, DownloaderAuth,
@@ -319,129 +319,26 @@ async fn sweep_series(
     };
     let candidates = issue_repo::list_pull_candidates(db, entry.series_id).await?;
     let candidates = apply_start_floor(candidates, entry.start_issue.as_deref());
-    // Bug 3: pass series.start_year to the newznab call so the query
-    // narrows server-side AND the per-release year filter has a value
-    // to compare against.
-    let year_hint = series.start_year.map(|y| y as i32);
 
     let mut any_submitted = false;
     let mut any_failed = false;
 
     for issue in candidates {
-        let prior = pull_attempt_repo::list_for_issue(db, entry.series_id, issue.id).await?;
-        // Retry-exclusion: skip releases already tried. Only a
-        // *grab*-failed attempt carries a release_id — a submission
-        // failure records none, so its release is retried as-is (the
-        // downloader, not the NZB, was the suspect).
-        let exclude: Vec<String> = prior.iter().filter_map(|a| a.release_id.clone()).collect();
-        // Bug 3: failure-class for retry-count budget covers both
-        // 'failed' and 'mismatched'; the candidate query parks the
-        // issue once any row reaches retry_count >= 3 regardless of
-        // which kind it is.
-        let failed_count = prior
-            .iter()
-            .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
-            .count() as i64;
-
-        match longbox_newznab::find_release_excluding_filtered(
+        match attempt_pull_for_candidate(
+            db,
+            &series,
+            &issue,
             indexers,
-            &series.title,
-            &issue.number,
-            year_hint,
-            &exclude,
+            downloader,
             patterns,
             similarity_threshold,
+            summary,
         )
-        .await
+        .await?
         {
-            Ok(FindOutcome::Match {
-                indexer: indexer_id,
-                release,
-            }) => {
-                let name = format!("{} {}", series.title, issue.number);
-                match downloader.submit(&release.nzb_url, &name).await {
-                    Ok(handle) => {
-                        pull_attempt_repo::insert(
-                            db,
-                            NewPullAttempt {
-                                series_id: entry.series_id,
-                                issue_id: issue.id,
-                                indexer_id: Some(indexer_id.0),
-                                release_id: Some(release.guid),
-                                status: "submitted".into(),
-                                error_message: None,
-                                retry_count: failed_count,
-                                download_handle: Some(handle.0),
-                            },
-                        )
-                        .await?;
-                        summary.submitted += 1;
-                        any_submitted = true;
-                    }
-                    Err(e) => {
-                        // Submission failure — record a failed attempt
-                        // with no release_id so the same release is
-                        // retried next sweep.
-                        let reason = format!("submit failed: {e}");
-                        pull_attempt_repo::insert(
-                            db,
-                            NewPullAttempt {
-                                series_id: entry.series_id,
-                                issue_id: issue.id,
-                                indexer_id: Some(indexer_id.0),
-                                release_id: None,
-                                status: "failed".into(),
-                                error_message: Some(reason.clone()),
-                                retry_count: failed_count + 1,
-                                download_handle: None,
-                            },
-                        )
-                        .await?;
-                        summary.submission_failed += 1;
-                        any_failed = true;
-                        maybe_fire_pull_failed(db, entry.series_id, issue.id, &reason).await;
-                    }
-                }
-            }
-            Ok(FindOutcome::Mismatch {
-                indexer: indexer_id,
-                diagnostic,
-            }) => {
-                // Bug 3: indexer returned releases but none survived the
-                // series-title filter. Record as 'mismatched' (counts
-                // toward retry_count like a submission failure) and let
-                // the existing cap+webhook path handle the surfacing.
-                let reason = diagnostic.into_error_message(&series.title, similarity_threshold);
-                pull_attempt_repo::record_mismatch(
-                    db,
-                    entry.series_id,
-                    issue.id,
-                    Some(indexer_id.0),
-                    &reason,
-                    failed_count,
-                )
-                .await?;
-                summary.series_mismatched += 1;
-                any_failed = true;
-                maybe_fire_pull_failed(db, entry.series_id, issue.id, &reason).await;
-            }
-            Ok(FindOutcome::NoMatch) => {
-                // No indexer match — no attempt row; retried next sweep.
-                summary.no_match += 1;
-            }
-            Err(NewznabError::AllIndexersFailed(_)) => {
-                // Every indexer errored — an infrastructure problem, not
-                // an issue-specific one. No attempt row: parking the
-                // issue for an indexer outage would be wrong. Retried
-                // next sweep.
-                tracing::warn!(
-                    target: "longbox_pull",
-                    series_id = entry.series_id,
-                    issue_id = issue.id,
-                    "pull.all_indexers_failed"
-                );
-                summary.indexer_errors += 1;
-            }
+            AttemptOutcome::Submitted => any_submitted = true,
+            AttemptOutcome::Failed => any_failed = true,
+            AttemptOutcome::NoMatch | AttemptOutcome::IndexerErrors => {}
         }
     }
 
@@ -455,6 +352,258 @@ async fn sweep_series(
         pull_list_repo::mark_attempt_failed(db, entry.series_id).await?;
     }
     Ok(())
+}
+
+/// What `attempt_pull_for_candidate` did with one issue. Drives
+/// `sweep_series`'s pull-list-bookkeeping branch at the end of a
+/// sweep; `sweep_single_issue` ignores it (the series might not be
+/// subscribed at all, so updating its pull-list timestamps would be
+/// nonsensical).
+enum AttemptOutcome {
+    Submitted,
+    Failed,
+    NoMatch,
+    IndexerErrors,
+}
+
+/// Run the full match-then-submit dance for ONE issue: search the
+/// indexers (excluding prior grab-failed release ids), submit a hit to
+/// the downloader, record the attempt row. The `summary` counters are
+/// updated in place; the return value distinguishes submitted /
+/// failed / no-match / all-indexers-down so callers can decide on
+/// pull-list bookkeeping.
+///
+/// Extracted from `sweep_series`'s loop so the on-demand single-issue
+/// search path can reuse it without duplicating the indexer-and-
+/// downloader-and-attempt flow.
+#[allow(clippy::too_many_arguments)] // sweep-context bag — extracting a struct
+                                     // for two call sites is not worth the
+                                     // indirection.
+async fn attempt_pull_for_candidate(
+    db: &Pool,
+    series: &SeriesRow,
+    issue: &IssueRow,
+    indexers: &[IndexerConfig],
+    downloader: &AnyDownloader,
+    patterns: &[ParsingPattern],
+    similarity_threshold: f64,
+    summary: &mut SweepSummary,
+) -> Result<AttemptOutcome, PullError> {
+    let series_id = series.id;
+    // Bug 3: pass series.start_year to the newznab call so the query
+    // narrows server-side AND the per-release year filter has a value
+    // to compare against.
+    let year_hint = series.start_year.map(|y| y as i32);
+
+    let prior = pull_attempt_repo::list_for_issue(db, series_id, issue.id).await?;
+    // Retry-exclusion: skip releases already tried. Only a
+    // *grab*-failed attempt carries a release_id — a submission
+    // failure records none, so its release is retried as-is (the
+    // downloader, not the NZB, was the suspect).
+    let exclude: Vec<String> = prior.iter().filter_map(|a| a.release_id.clone()).collect();
+    // Bug 3: failure-class for retry-count budget covers both
+    // 'failed' and 'mismatched'; the candidate query parks the
+    // issue once any row reaches retry_count >= 3 regardless of
+    // which kind it is.
+    let failed_count = prior
+        .iter()
+        .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
+        .count() as i64;
+
+    match longbox_newznab::find_release_excluding_filtered(
+        indexers,
+        &series.title,
+        &issue.number,
+        year_hint,
+        &exclude,
+        patterns,
+        similarity_threshold,
+    )
+    .await
+    {
+        Ok(FindOutcome::Match {
+            indexer: indexer_id,
+            release,
+        }) => {
+            let name = format!("{} {}", series.title, issue.number);
+            match downloader.submit(&release.nzb_url, &name).await {
+                Ok(handle) => {
+                    pull_attempt_repo::insert(
+                        db,
+                        NewPullAttempt {
+                            series_id,
+                            issue_id: issue.id,
+                            indexer_id: Some(indexer_id.0),
+                            release_id: Some(release.guid),
+                            status: "submitted".into(),
+                            error_message: None,
+                            retry_count: failed_count,
+                            download_handle: Some(handle.0),
+                        },
+                    )
+                    .await?;
+                    summary.submitted += 1;
+                    Ok(AttemptOutcome::Submitted)
+                }
+                Err(e) => {
+                    // Submission failure — record a failed attempt
+                    // with no release_id so the same release is
+                    // retried next sweep.
+                    let reason = format!("submit failed: {e}");
+                    pull_attempt_repo::insert(
+                        db,
+                        NewPullAttempt {
+                            series_id,
+                            issue_id: issue.id,
+                            indexer_id: Some(indexer_id.0),
+                            release_id: None,
+                            status: "failed".into(),
+                            error_message: Some(reason.clone()),
+                            retry_count: failed_count + 1,
+                            download_handle: None,
+                        },
+                    )
+                    .await?;
+                    summary.submission_failed += 1;
+                    maybe_fire_pull_failed(db, series_id, issue.id, &reason).await;
+                    Ok(AttemptOutcome::Failed)
+                }
+            }
+        }
+        Ok(FindOutcome::Mismatch {
+            indexer: indexer_id,
+            diagnostic,
+        }) => {
+            // Bug 3: indexer returned releases but none survived the
+            // series-title filter. Record as 'mismatched' (counts
+            // toward retry_count like a submission failure) and let
+            // the existing cap+webhook path handle the surfacing.
+            let reason = diagnostic.into_error_message(&series.title, similarity_threshold);
+            pull_attempt_repo::record_mismatch(
+                db,
+                series_id,
+                issue.id,
+                Some(indexer_id.0),
+                &reason,
+                failed_count,
+            )
+            .await?;
+            summary.series_mismatched += 1;
+            maybe_fire_pull_failed(db, series_id, issue.id, &reason).await;
+            Ok(AttemptOutcome::Failed)
+        }
+        Ok(FindOutcome::NoMatch) => {
+            // No indexer match — no attempt row; retried next sweep.
+            summary.no_match += 1;
+            Ok(AttemptOutcome::NoMatch)
+        }
+        Err(NewznabError::AllIndexersFailed(_)) => {
+            // Every indexer errored — an infrastructure problem, not
+            // an issue-specific one. No attempt row: parking the
+            // issue for an indexer outage would be wrong. Retried
+            // next sweep.
+            tracing::warn!(
+                target: "longbox_pull",
+                series_id,
+                issue_id = issue.id,
+                "pull.all_indexers_failed"
+            );
+            summary.indexer_errors += 1;
+            Ok(AttemptOutcome::IndexerErrors)
+        }
+    }
+}
+
+/// On-demand search for ONE specific issue. The series does NOT need
+/// to be on the pull list — this is the "I found a gap in my
+/// collection, fill it now" path off the series detail page.
+///
+/// Bypasses two of the standard sweep gates: the pull-list
+/// `start_issue` floor (the user is targeting a specific issue
+/// explicitly) and the `retry_count >= 3` parking (the user is
+/// overriding a prior give-up). Still respects the in-flight gate
+/// — if a `pending` / `submitted` / `grabbed` attempt already exists
+/// for this issue, skip silently with a log line. Without that guard
+/// a second click on Search would create a duplicate pull_attempt and
+/// hand the SAME NZB to the downloader twice (pull_attempts has no
+/// unique key on `(series_id, issue_id)` — multiple rows are expected
+/// for retry tracking).
+///
+/// Errors map to typed `PullError` variants (`SeriesNotFound`,
+/// `IssueNotFound`, `IssueSeriesMismatch`) so the web route can
+/// surface clean 404s. Downloader / indexer preconditions silently
+/// no-op via `load_sweep_context`'s gates with a log line, same as
+/// `sweep_single_series`.
+pub async fn sweep_single_issue(
+    db: &Pool,
+    series_id: i64,
+    issue_id: i64,
+) -> Result<SweepSummary, PullError> {
+    let mut summary = SweepSummary::default();
+    let series = series_repo::find_by_id(db, series_id)
+        .await?
+        .ok_or(PullError::SeriesNotFound { series_id })?;
+    let issue = issue_repo::find_by_id(db, issue_id)
+        .await?
+        .ok_or(PullError::IssueNotFound { issue_id })?;
+    // Defense against URL tampering: the issue must actually belong to
+    // the series in the path.
+    if issue.series_id != series_id {
+        return Err(PullError::IssueSeriesMismatch {
+            series_id,
+            issue_id,
+            actual_series_id: issue.series_id,
+        });
+    }
+
+    // In-flight guard. Replaces the unique-key absorption I had wrongly
+    // assumed existed at the schema level. `pull_attempts` carries
+    // multiple rows per (series_id, issue_id) by design (retry history),
+    // so a duplicate INSERT here would create a real duplicate submit.
+    let prior = pull_attempt_repo::list_for_issue(db, series_id, issue_id).await?;
+    if prior
+        .iter()
+        .any(|a| matches!(a.status.as_str(), "pending" | "submitted" | "grabbed"))
+    {
+        tracing::info!(
+            target: "longbox_pull",
+            series_id,
+            issue_id,
+            "pull.search_skipped (an in-flight attempt already exists)"
+        );
+        return Ok(summary);
+    }
+
+    let ctx = match load_sweep_context(db).await? {
+        Ok(ctx) => ctx,
+        Err(SweepGate::NoDownloader) => {
+            tracing::info!(target: "longbox_pull", series_id, issue_id, "pull.search_skipped (no downloader configured)");
+            return Ok(summary);
+        }
+        Err(SweepGate::DownloaderDisabled) => {
+            tracing::info!(target: "longbox_pull", series_id, issue_id, "pull.search_skipped (downloader disabled)");
+            return Ok(summary);
+        }
+        Err(SweepGate::NoIndexers) => {
+            tracing::info!(target: "longbox_pull", series_id, issue_id, "pull.search_skipped (no enabled indexers)");
+            return Ok(summary);
+        }
+    };
+
+    // Direct call to the per-candidate function — no list_pull_candidates
+    // gating, no start_floor. The user explicitly asked for this issue.
+    attempt_pull_for_candidate(
+        db,
+        &series,
+        &issue,
+        &ctx.indexers,
+        &ctx.downloader,
+        &ctx.patterns,
+        ctx.similarity_threshold,
+        &mut summary,
+    )
+    .await?;
+    Ok(summary)
 }
 
 /// Fire a `pull_failed` webhook event when this issue's failure-class
