@@ -258,6 +258,11 @@ pub async fn find_release_excluding(
 /// produces a Match but at least one produced a mismatch, the remembered
 /// diagnostic is returned. Pools emptied by the year-filter alone leave
 /// no diagnostic — they're silent fall-through.
+#[allow(clippy::too_many_arguments)] // every arg here is a real per-sweep
+                                     // input loaded by the engine; bundling
+                                     // them into a struct is one layer of
+                                     // indirection without a callsite that
+                                     // benefits.
 pub async fn find_release_excluding_filtered(
     indexers: &[IndexerConfig],
     series: &str,
@@ -266,6 +271,7 @@ pub async fn find_release_excluding_filtered(
     exclude_guids: &[String],
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
+    exclusion_keywords: &[String],
 ) -> Result<FindOutcome, NewznabError> {
     if indexers.is_empty() {
         return Ok(FindOutcome::NoMatch);
@@ -303,8 +309,14 @@ pub async fn find_release_excluding_filtered(
                     .into_iter()
                     .filter(|r| !exclude_guids.iter().any(|g| g == &r.guid))
                     .collect();
-                let outcome =
-                    filter_by_series_title(kept_pre_filter, patterns, series, year, similarity_threshold);
+                let outcome = filter_by_series_title(
+                    kept_pre_filter,
+                    patterns,
+                    series,
+                    year,
+                    similarity_threshold,
+                    exclusion_keywords,
+                );
                 for release in &outcome.kept {
                     guid_to_indexer.insert(release.guid.clone(), indexer.id);
                 }
@@ -499,6 +511,7 @@ mod tests {
             &[],
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         )
         .await
         .unwrap();
@@ -542,6 +555,7 @@ mod tests {
             &[],
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         )
         .await
         .unwrap();

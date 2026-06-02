@@ -194,9 +194,41 @@ pub fn filter_by_series_title(
     requested_series_title: &str,
     requested_year: Option<i32>,
     threshold: f64,
+    exclusion_keywords: &[String],
 ) -> FilterOutcome {
-    let total_results = releases.len();
     let requested_normalized = normalize_title(requested_series_title);
+
+    // Pre-filter excluded releases BEFORE counting total_results. An
+    // excluded release must NOT contribute to total_results,
+    // parseable_count, or best_similarity — those signals drive the
+    // mismatch-vs-silent-fallthrough decision below, and treating an
+    // excluded release as a mismatch input would surface spurious
+    // "0 parseable / wrong series" diagnostics when the indexer
+    // happened to return only digital-only formats.
+    //
+    // Normalization (lowercase + dots → spaces) matches both
+    // `Infinity Comic` (NZBGeek-style space-separated) and
+    // `Infinity.Comic` (Scene-style dotted) with the same single
+    // human-readable keyword in the config.
+    let lowered_keywords: Vec<String> = exclusion_keywords
+        .iter()
+        .map(|k| k.trim().to_lowercase())
+        .filter(|k| !k.is_empty())
+        .collect();
+    let releases: Vec<Release> = if lowered_keywords.is_empty() {
+        releases
+    } else {
+        releases
+            .into_iter()
+            .filter(|r| {
+                let normalized_title = r.title.to_lowercase().replace('.', " ");
+                !lowered_keywords
+                    .iter()
+                    .any(|kw| normalized_title.contains(kw))
+            })
+            .collect()
+    };
+    let total_results = releases.len();
 
     let mut kept: Vec<Release> = Vec::new();
     let mut parseable_count = 0usize;
@@ -387,6 +419,7 @@ mod tests {
             "Odin",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty(), "kept should be empty");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -410,6 +443,7 @@ mod tests {
             "The Darkness",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -430,6 +464,7 @@ mod tests {
             "Wolverine",
             Some(2024),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -448,6 +483,7 @@ mod tests {
             "Wolverine",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD, // 0.75
+            &[],
         );
         assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
         let diag = outcome.mismatch.unwrap();
@@ -471,6 +507,7 @@ mod tests {
             "Wolverine: Origin",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1, "subtitle variant should pass");
     }
@@ -488,6 +525,7 @@ mod tests {
             "Wolverine",
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -512,6 +550,7 @@ mod tests {
             "Wolverine",
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -531,6 +570,7 @@ mod tests {
             "Wolverine",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("all-unparseable → mismatch");
@@ -557,6 +597,7 @@ mod tests {
             "Odin",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         let diag = outcome.mismatch.expect("mismatch expected");
         assert_eq!(diag.total_results, 2);
@@ -591,12 +632,102 @@ mod tests {
             "Wolverine",
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
             outcome.mismatch.is_none(),
             "year-rejected (a) proves indexer has right series — must stay silent. got {:?}",
             outcome.mismatch
+        );
+    }
+
+    // -------- exclusion_keywords (digital-only formats) --------
+
+    /// The user's configured exclusion list keeps Marvel "Infinity
+    /// Comic" releases out of the library. A release whose title
+    /// contains the keyword must be silently dropped — NOT counted
+    /// as a parseable mismatch (which would taint the
+    /// best_similarity signal and surface a spurious mismatch row).
+    #[test]
+    fn exclusion_keyword_drops_infinity_comic_release() {
+        let patterns = default_patterns();
+        let pool = vec![release(
+            "Amazing Spider-Man Infinity Comic 001 (2023) (digital).cbz",
+            Some(40),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Amazing Spider-Man",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &["Infinity Comic".into()],
+        );
+        assert!(outcome.kept.is_empty(), "excluded release must be dropped");
+        assert!(
+            outcome.mismatch.is_none(),
+            "exclusion is silent — not a series-mismatch. got {:?}",
+            outcome.mismatch
+        );
+    }
+
+    /// The match is normalized: lowercase + dots → spaces, so both
+    /// upper-cased and Scene-format dotted spellings are caught with
+    /// the same `Infinity Comic` keyword. This is the contract that
+    /// keeps the user's config simple — one human-readable keyword,
+    /// many on-the-wire shapes covered.
+    #[test]
+    fn exclusion_keyword_case_insensitive_and_dot_form() {
+        let patterns = default_patterns();
+        let pool = vec![
+            release(
+                "Amazing Spider-Man INFINITY COMIC 001 (2023) (digital).cbz",
+                Some(40),
+            ),
+            release(
+                "Amazing.Spider-Man.Infinity.Comic.002.2023.digital.Empire",
+                Some(40),
+            ),
+        ];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Amazing Spider-Man",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &["Infinity Comic".into()],
+        );
+        assert!(
+            outcome.kept.is_empty(),
+            "both case-variant and dot-form must be caught"
+        );
+        assert!(outcome.mismatch.is_none());
+    }
+
+    /// Empty exclusion list is the production default before the
+    /// settings migration runs and a hand-edited DB shape. Must
+    /// behave as if the feature is off — a release that would
+    /// otherwise pass the series + year gates passes through.
+    #[test]
+    fn exclusion_empty_list_passes_everything() {
+        let patterns = default_patterns();
+        let pool = vec![release(
+            "Amazing Spider-Man 001 (2023) (digital).cbz",
+            Some(40),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Amazing Spider-Man",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
+        );
+        assert_eq!(
+            outcome.kept.len(),
+            1,
+            "empty exclusions must not filter anything"
         );
     }
 
@@ -869,6 +1000,7 @@ mod tests {
             "Odin",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -897,6 +1029,7 @@ mod tests {
             "Hello Darkness",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -914,6 +1047,7 @@ mod tests {
             "Wolverine",
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
