@@ -12,6 +12,7 @@
 //! `longbox-cv-enrichment/tests/`.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use longbox_comicvine::{
     enrichment::pick_volume, ComicVineClient, CvIssueDetail, CvVolumeDetail,
     EnrichmentCandidateInput, PickOutcome, SeriesSearchResult,
 };
+use longbox_core::LibraryPath;
 use longbox_db::{
     cv_volume_cache_repo, issue_repo, series_repo, CandidateSelectionMode, CvVolumePending,
     NewIssue, Pool, ShallowEnrichmentCandidate, VolumeRefreshCandidate,
@@ -62,20 +64,25 @@ impl EnrichmentHandle {
 /// assertion (see [`assert_schema`]) before doing any other work;
 /// if assertion fails, the worker refuses to start, logs at ERROR,
 /// and the returned handle's `request_run` will be a no-op.
-pub fn spawn(db: Pool, inner_cv: Arc<ComicVineClient>) -> EnrichmentHandle {
+pub fn spawn(
+    db: Pool,
+    inner_cv: Arc<ComicVineClient>,
+    library_root: PathBuf,
+) -> EnrichmentHandle {
     let running = Arc::new(AtomicBool::new(false));
     let (trigger, rx) = mpsc::channel::<()>(1);
     let handle = EnrichmentHandle {
         trigger,
         running: Arc::clone(&running),
     };
-    tokio::spawn(worker_loop(db, inner_cv, running, rx));
+    tokio::spawn(worker_loop(db, inner_cv, library_root, running, rx));
     handle
 }
 
 async fn worker_loop(
     db: Pool,
     inner_cv: Arc<ComicVineClient>,
+    library_root: PathBuf,
     running: Arc<AtomicBool>,
     mut trigger: mpsc::Receiver<()>,
 ) {
@@ -255,7 +262,8 @@ async fn worker_loop(
             }
 
             running.store(true, Ordering::SeqCst);
-            let attempts_this_cycle = run_refresh_cycle(&db, &bg, &config, refresh).await;
+            let attempts_this_cycle =
+                run_refresh_cycle(&db, &bg, &config, &library_root, refresh).await;
             running.store(false, Ordering::SeqCst);
 
             tracing::info!(
@@ -274,7 +282,8 @@ async fn worker_loop(
         }
 
         running.store(true, Ordering::SeqCst);
-        let attempts_this_cycle = run_cycle(&db, &bg, &config, candidates).await;
+        let attempts_this_cycle =
+            run_cycle(&db, &bg, &config, &library_root, candidates).await;
         running.store(false, Ordering::SeqCst);
 
         tracing::info!(
@@ -317,6 +326,7 @@ async fn run_cycle(
     db: &Pool,
     bg: &BackgroundCvClient,
     config: &EnrichmentConfig,
+    library_root: &Path,
     candidates: Vec<ShallowEnrichmentCandidate>,
 ) -> usize {
     let mut attempts = 0usize;
@@ -324,7 +334,7 @@ async fn run_cycle(
         if config.max_run > 0 && attempts >= config.max_run as usize {
             break;
         }
-        let outcome = attempt_one(db, bg, config, &c).await;
+        let outcome = attempt_one(db, bg, config, library_root, &c).await;
         log_outcome(&c, &outcome);
         attempts += 1;
     }
@@ -342,6 +352,7 @@ async fn run_refresh_cycle(
     db: &Pool,
     bg: &BackgroundCvClient,
     config: &EnrichmentConfig,
+    library_root: &Path,
     candidates: Vec<VolumeRefreshCandidate>,
 ) -> usize {
     let mut attempts = 0usize;
@@ -349,7 +360,7 @@ async fn run_refresh_cycle(
         if config.max_run > 0 && attempts >= config.max_run as usize {
             break;
         }
-        refresh_one(db, bg, &c).await;
+        refresh_one(db, bg, library_root, &c).await;
         attempts += 1;
     }
     attempts
@@ -432,6 +443,7 @@ async fn cache_fill_one(db: &Pool, bg: &BackgroundCvClient, cv_volume_id: i64) {
 async fn refresh_one(
     db: &Pool,
     bg: &BackgroundCvClient,
+    library_root: &Path,
     candidate: &VolumeRefreshCandidate,
 ) {
     let volume = match bg.fetch_volume(candidate.cv_id).await {
@@ -467,6 +479,13 @@ async fn refresh_one(
                 rows_affected = rows,
                 "cv_enrichment.refreshed"
             );
+            // rows_affected == 0 means the series row was deleted out
+            // from under the cycle (rare). Skip the side-effect; the
+            // cover would land in a folder for a series we no longer
+            // track.
+            if rows > 0 {
+                try_write_cover_image(db, library_root, candidate.series_id).await;
+            }
         }
         Err(e) => {
             tracing::warn!(
@@ -506,6 +525,7 @@ async fn attempt_one(
     db: &Pool,
     bg: &BackgroundCvClient,
     config: &EnrichmentConfig,
+    library_root: &Path,
     candidate: &ShallowEnrichmentCandidate,
 ) -> AttemptOutcome {
     let input = EnrichmentCandidateInput {
@@ -632,7 +652,21 @@ async fn attempt_one(
     // errors, the entire transaction rolls back including the
     // outcome write.
     match commit_merge(db, candidate.series_id, cv_id, score, &volume, cv_issues).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // Side-effect AFTER tx.commit() — never inside the
+            // transaction, since a filesystem write can't be rolled
+            // back if a later DB step fails. Only the two outcomes
+            // that actually wrote `cover_url` to the series row are
+            // eligible; `SetCvIdRaceLost` means another worker did
+            // the merge and owns the cover-image side-effect.
+            if matches!(
+                outcome,
+                AttemptOutcome::Matched { .. } | AttemptOutcome::PartialMerge { .. }
+            ) {
+                try_write_cover_image(db, library_root, candidate.series_id).await;
+            }
+            outcome
+        }
         Err(e) => {
             let outcome = AttemptOutcome::Error {
                 detail: format!("commit_merge: {e}"),
@@ -749,6 +783,118 @@ async fn commit_merge(
     Ok(outcome)
 }
 
+/// Download the series's CV cover and write it as `folder.jpg` next
+/// to the series's library files — the file Plex, Komga, and the
+/// macOS Finder pick up for offline cover art. Mirrors what Mylar
+/// has always done for the same folders.
+///
+/// All four refusal cases are intentional and silent at info-level:
+///
+/// - `cover_url IS NULL` — nothing to download.
+/// - The series's library folder doesn't exist on disk yet — no
+///   files imported, so creating the folder just to drop a cover in
+///   would race the Phase B importer (which creates the canonical
+///   folder when the first issue lands).
+/// - `folder.jpg` already exists — don't overwrite. Many folders
+///   carry a pre-existing Mylar-generated cover that the user
+///   considers canonical.
+/// - HTTP / filesystem error — warn and move on. The enrichment row
+///   write already succeeded; the cover is a best-effort side
+///   effect, not a step that can fail the enrichment.
+async fn try_write_cover_image(db: &Pool, library_root: &Path, series_id: i64) {
+    let series = match series_repo::find_by_id(db, series_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                series_id,
+                error = %e,
+                "cover_image.series_lookup_failed"
+            );
+            return;
+        }
+    };
+    let Some(cover_url) = series.cover_url.as_deref() else {
+        return;
+    };
+
+    // The folder()-only consumer ignores the issue number; "0" is a
+    // throwaway placeholder that satisfies LibraryPath::new's signature.
+    let folder_rel = LibraryPath::new(&series.title, series.start_year.map(|y| y as i32), "0")
+        .folder();
+    let folder = library_root.join(&folder_rel);
+    let target = folder.join("folder.jpg");
+
+    if target.exists() {
+        return;
+    }
+    if !folder.is_dir() {
+        // No comics for this series have been imported (or scanned)
+        // into the library yet — Phase B will create the canonical
+        // folder on first import. Skip rather than racing it.
+        return;
+    }
+
+    let bytes = match reqwest::get(cover_url).await {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(r) => match r.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "longbox_cv_enrichment",
+                        series_id,
+                        url = cover_url,
+                        error = %e,
+                        "cover_image.download_body_failed"
+                    );
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_cv_enrichment",
+                    series_id,
+                    url = cover_url,
+                    status = ?e.status(),
+                    error = %e,
+                    "cover_image.download_status_failed"
+                );
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_cv_enrichment",
+                series_id,
+                url = cover_url,
+                error = %e,
+                "cover_image.download_failed"
+            );
+            return;
+        }
+    };
+
+    if let Err(e) = tokio::fs::write(&target, &bytes).await {
+        tracing::warn!(
+            target: "longbox_cv_enrichment",
+            series_id,
+            target = %target.display(),
+            error = %e,
+            "cover_image.write_failed"
+        );
+        return;
+    }
+
+    tracing::info!(
+        target: "longbox_cv_enrichment",
+        series_id,
+        target = %target.display(),
+        bytes = bytes.len(),
+        "cover_image.written"
+    );
+}
+
 /// Record outcome standalone (no merge to roll back). Used for
 /// refusals + errors + race-lost where no write needs to roll back
 /// atomically with the outcome.
@@ -840,3 +986,160 @@ pub async fn assert_schema(db: &Pool) -> Result<(), Vec<String>> {
     }
 }
 
+#[cfg(test)]
+mod cover_image_tests {
+    //! Targeted tests for `try_write_cover_image`. The helper is the
+    //! load-bearing surface between successful CV enrichment and the
+    //! Plex/Komga-compatible `folder.jpg` file on disk — every
+    //! refusal case below is one the helper MUST honor to avoid
+    //! corrupting the library layout that Mylar (and the user) have
+    //! been maintaining for years.
+
+    use super::try_write_cover_image;
+    use longbox_db::{series_repo, NewSeries};
+    use tempfile::TempDir;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn seed_series(
+        pool: &longbox_db::Pool,
+        title: &str,
+        start_year: Option<i32>,
+        cover_url: Option<&str>,
+    ) -> i64 {
+        let row = series_repo::insert(
+            pool,
+            NewSeries {
+                cv_id: Some(42),
+                metron_id: None,
+                sort_title: longbox_core::normalize_title(title),
+                title: title.into(),
+                start_year,
+                publisher: None,
+                description: None,
+                cover_url: cover_url.map(|s| s.into()),
+            },
+        )
+        .await
+        .unwrap();
+        row.id
+    }
+
+    #[tokio::test]
+    async fn writes_folder_jpg_when_dir_exists_and_no_prior_cover() {
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let lib = TempDir::new().unwrap();
+        // Mimic the post-Phase-B state: the series's folder exists
+        // on disk because at least one issue was already imported.
+        std::fs::create_dir(lib.path().join("Saga (2012)")).unwrap();
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(&b"JPEGBYTES"[..]))
+            .mount(&mock)
+            .await;
+        let cover_url = format!("{}/cover.jpg", mock.uri());
+
+        let series_id = seed_series(&pool, "Saga", Some(2012), Some(&cover_url)).await;
+        try_write_cover_image(&pool, lib.path(), series_id).await;
+
+        let target = lib.path().join("Saga (2012)").join("folder.jpg");
+        let written = std::fs::read(&target).expect("folder.jpg must be written");
+        assert_eq!(written, b"JPEGBYTES");
+    }
+
+    #[tokio::test]
+    async fn refuses_to_overwrite_existing_folder_jpg() {
+        // Mylar-generated covers must survive — the existing file
+        // is the user's canonical cover, even if CV's would be a
+        // better render.
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let lib = TempDir::new().unwrap();
+        let folder = lib.path().join("Saga (2012)");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.join("folder.jpg");
+        std::fs::write(&target, b"MYLAR_ORIGINAL").unwrap();
+
+        let mock = MockServer::start().await;
+        // Wiremock with no .expect() raises on unexpected hits at
+        // drop. By NOT mounting any responder, an HTTP attempt
+        // would 404 — but the helper must short-circuit before
+        // ever calling out.
+        let cover_url = format!("{}/cover.jpg", mock.uri());
+        let series_id = seed_series(&pool, "Saga", Some(2012), Some(&cover_url)).await;
+
+        try_write_cover_image(&pool, lib.path(), series_id).await;
+
+        let after = std::fs::read(&target).unwrap();
+        assert_eq!(
+            after, b"MYLAR_ORIGINAL",
+            "existing folder.jpg must not be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_to_create_a_new_series_folder() {
+        // No issues imported for this series → no folder on disk.
+        // The helper must not create one just to drop the image in;
+        // Phase B's importer will create the canonical folder when
+        // the first issue lands, and a pre-existing empty folder
+        // (or worse: with stale `folder.jpg`) would confuse it.
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let lib = TempDir::new().unwrap();
+
+        let mock = MockServer::start().await;
+        let cover_url = format!("{}/cover.jpg", mock.uri());
+        let series_id = seed_series(&pool, "Phantom", Some(2099), Some(&cover_url)).await;
+
+        try_write_cover_image(&pool, lib.path(), series_id).await;
+
+        assert!(
+            !lib.path().join("Phantom (2099)").exists(),
+            "series folder must not be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_cover_url_is_a_silent_noop() {
+        // A series row with NULL `cover_url` reaches this code path
+        // via the refresh-cycle predicate. No URL, no fetch, no
+        // warn log, no filesystem touch.
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let lib = TempDir::new().unwrap();
+        let folder = lib.path().join("Saga (2012)");
+        std::fs::create_dir(&folder).unwrap();
+
+        let series_id = seed_series(&pool, "Saga", Some(2012), None).await;
+        try_write_cover_image(&pool, lib.path(), series_id).await;
+
+        assert!(
+            !folder.join("folder.jpg").exists(),
+            "no fetch should occur for a NULL cover_url"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_error_does_not_create_partial_file() {
+        // A 500 from CV's CDN must NOT leave a partial / zero-byte
+        // folder.jpg behind that Plex would then refuse to refresh.
+        let pool = longbox_db::open(":memory:").await.unwrap();
+        let lib = TempDir::new().unwrap();
+        let folder = lib.path().join("Saga (2012)");
+        std::fs::create_dir(&folder).unwrap();
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+        let cover_url = format!("{}/cover.jpg", mock.uri());
+
+        let series_id = seed_series(&pool, "Saga", Some(2012), Some(&cover_url)).await;
+        try_write_cover_image(&pool, lib.path(), series_id).await;
+
+        assert!(
+            !folder.join("folder.jpg").exists(),
+            "HTTP 5xx must not create a zero-byte file"
+        );
+    }
+}

@@ -119,7 +119,11 @@ pub async fn build_test_app() -> TestApp {
         || async {},
     );
     let cv_arc = Arc::new(cv);
-    let enrichment = longbox_cv_enrichment::spawn(pool.clone(), Arc::clone(&cv_arc));
+    let enrichment = longbox_cv_enrichment::spawn(
+        pool.clone(),
+        Arc::clone(&cv_arc),
+        std::path::PathBuf::from("/tmp/longbox-test-library"),
+    );
 
     let state = AppState {
         db: pool,
