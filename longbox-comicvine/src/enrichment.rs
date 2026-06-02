@@ -111,6 +111,102 @@ pub enum PickOutcome {
     CollisionDisabled,
 }
 
+/// Score multiplier applied to candidates [`is_collection_volume`]
+/// recognizes as TPBs / hardcovers / omnibuses / etc. Half-strength
+/// is deliberately punishing: at the 0.85 year-known threshold a
+/// raw-1.0 collection lands at 0.5 and is rejected outright, so the
+/// original-series candidate (no penalty) always wins. A
+/// collection-only pool (no original at all) lands as LowConfidence
+/// and the user is asked to pick — wrong auto-link to a TPB is
+/// asymmetrically worse than refusal, same logic as the rest of
+/// this module's gates.
+const COLLECTION_PENALTY: f64 = 0.5;
+
+/// Detect whether a CV search result describes a collected edition
+/// (TPB / hardcover / omnibus / collected edition) rather than an
+/// original ongoing or mini-series. Returns the name of the
+/// triggering signal so the log line attributes the penalty to a
+/// specific pattern (debuggable when CV's data drifts).
+///
+/// Three signal classes:
+///
+///  1. **Name** contains a collection-type word as a whole word
+///     (Omnibus, Compendium, Absolute, Deluxe Edition, HC, TPB).
+///     Word-boundary check via [`contains_word`] so "tpbeach"
+///     doesn't false-match and parenthesized forms like
+///     "Saga (TPB)" do.
+///  2. **Description** contains one of the collection terms
+///     ("trade paperback", "hardcover", "omnibus", "collected
+///     edition") — heavy signal regardless of issue count.
+///  3. `issue_count == 1` AND description contains "collecting" —
+///     catches CV's TPB boilerplate ("Trade paperback collecting
+///     issues 1-6 of...") without unconditionally penalizing the
+///     bare word "collecting", which a multi-issue volume
+///     might use in passing.
+fn is_collection_volume(r: &SeriesSearchResult) -> Option<&'static str> {
+    let name_lower = r.name.to_lowercase();
+    const NAME_TERMS: &[&str] = &[
+        "omnibus",
+        "compendium",
+        "absolute",
+        "deluxe edition",
+        "hc",
+        "tpb",
+    ];
+    for term in NAME_TERMS {
+        if contains_word(&name_lower, term) {
+            return Some("name");
+        }
+    }
+
+    let desc_lower = match r.description.as_deref() {
+        Some(d) => d.to_lowercase(),
+        None => return None,
+    };
+
+    const DESC_TERMS: &[&str] = &[
+        "trade paperback",
+        "hardcover",
+        "omnibus",
+        "collected edition",
+    ];
+    for term in DESC_TERMS {
+        if desc_lower.contains(term) {
+            return Some("desc");
+        }
+    }
+
+    if r.issue_count == 1 && desc_lower.contains("collecting") {
+        return Some("single_issue_collecting");
+    }
+
+    None
+}
+
+/// Whole-word substring check. `needle` is considered a "word" hit
+/// when each end is either the string boundary or a non-alphabetic
+/// byte. Pure ASCII boundary logic — sufficient for the collection-
+/// type tokens we check (all ASCII), and avoids pulling regex into
+/// this hot path.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let abs = start + rel;
+        let left_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphabetic();
+        let right = abs + needle.len();
+        let right_ok = right == bytes.len() || !bytes[right].is_ascii_alphabetic();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 /// Run the auto-pick discipline against a CV result pool.
 pub fn pick_volume(
     candidate: &EnrichmentCandidateInput,
@@ -150,7 +246,21 @@ pub fn pick_volume(
     let mut scored: Vec<(f64, &SeriesSearchResult)> = pool
         .iter()
         .map(|r| {
-            let score = similarity(&requested_normalized, &normalize_title(&r.name));
+            let raw_score = similarity(&requested_normalized, &normalize_title(&r.name));
+            let score = if let Some(signal) = is_collection_volume(r) {
+                tracing::debug!(
+                    target: "longbox_cv_enrichment",
+                    cv_id = r.cv_id,
+                    name = %r.name,
+                    raw_score,
+                    penalty = COLLECTION_PENALTY,
+                    signal,
+                    "cv_enrichment.collection_penalty"
+                );
+                raw_score * COLLECTION_PENALTY
+            } else {
+                raw_score
+            };
             (score, r)
         })
         .collect();
@@ -434,7 +544,7 @@ mod tests {
         );
         match r {
             PickOutcome::LowConfidence { best_score } => {
-                assert!(best_score >= 0.85 && best_score < 0.95, "got {best_score}");
+                assert!((0.85..0.95).contains(&best_score), "got {best_score}");
             }
             other => panic!("expected LowConfidence at the year-unknown threshold, got {other:?}"),
         }
@@ -562,5 +672,150 @@ mod tests {
             EnrichmentThresholds::default(),
         );
         assert!(matches!(r, PickOutcome::Matched { cv_id: 5000, .. }));
+    }
+
+    // -------- Collection-type penalty (TPB / HC / Omnibus) --------
+
+    fn result_with_desc(
+        cv_id: i64,
+        name: &str,
+        year: Option<i32>,
+        issue_count: u32,
+        description: &str,
+    ) -> SeriesSearchResult {
+        SeriesSearchResult {
+            cv_id,
+            name: name.into(),
+            start_year: year,
+            publisher: None,
+            issue_count,
+            cover_url: None,
+            description: Some(description.into()),
+        }
+    }
+
+    /// The exact CV-boilerplate signal: a single-issue volume whose
+    /// description starts with "Trade paperback collecting". The
+    /// pre-fix Beneath-the-Trees mis-link rode this exact shape.
+    #[test]
+    fn tpb_description_penalized() {
+        // Only candidate is the TPB; if the penalty is in effect it
+        // drops below the 0.85 threshold and the call falls through
+        // to LowConfidence rather than auto-linking the TPB.
+        let pool = vec![result_with_desc(
+            160379,
+            "Beneath the Trees Where Nobody Sees",
+            Some(2024),
+            1,
+            "Trade paperback collecting issues 1-6 of the smash hit horror series.",
+        )];
+        let r = pick_volume(
+            &input("Beneath the Trees Where Nobody Sees", Some(2024), 6, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        // Raw score is 1.0; penalty halves it to 0.5, below the
+        // 0.85 year-known threshold → LowConfidence.
+        assert!(
+            matches!(r, PickOutcome::LowConfidence { best_score } if (best_score - 0.5).abs() < 1e-9),
+            "expected LowConfidence at 0.5 (1.0 raw * 0.5 penalty), got {r:?}"
+        );
+    }
+
+    /// Name-class signal: "Omnibus" as a whole word in the volume
+    /// name. Triggers regardless of description or issue count.
+    #[test]
+    fn omnibus_name_penalized() {
+        let pool = vec![result(7000, "Saga Omnibus", Some(2020), 3)];
+        let r = pick_volume(
+            &input("Saga", Some(2020), 72, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        // "Saga Omnibus" vs catalog "Saga" already scores below
+        // the year-known threshold on title alone — but the
+        // penalty pushes it further from any future close-call.
+        // The assertion that matters: the omnibus does not get
+        // auto-linked even on a permissive count window.
+        assert!(
+            !matches!(r, PickOutcome::Matched { cv_id: 7000, .. }),
+            "Omnibus must never auto-link, got {r:?}"
+        );
+    }
+
+    /// Negative control: a normal series with a healthy issue count
+    /// and no collection signals in name OR description must NOT be
+    /// penalized.
+    #[test]
+    fn normal_series_unaffected() {
+        // issue_count=6 fails the single-issue gate; description
+        // lacks the boilerplate exact phrase; name has no triggers.
+        let pool = vec![result_with_desc(
+            154239,
+            "Beneath the Trees Where Nobody Sees",
+            Some(2024),
+            6,
+            "An ongoing horror series about a teddy bear.",
+        )];
+        let r = pick_volume(
+            &input("Beneath the Trees Where Nobody Sees", Some(2024), 6, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        assert!(
+            matches!(r, PickOutcome::Matched { cv_id: 154239, .. }),
+            "normal series must auto-link without penalty, got {r:?}"
+        );
+    }
+
+    /// Composed scenario: catalog matches the original 6-issue
+    /// series's title, year, and count exactly. The CV pool returns
+    /// BOTH the original AND the TPB at the same title similarity.
+    /// Without the penalty the dominant-gap guard refuses (both at
+    /// 1.0). With the penalty the original beats the TPB by 0.5,
+    /// well past the dominant gap, and the auto-link picks the
+    /// original — this is the load-bearing fix for the
+    /// Beneath-the-Trees mis-link.
+    #[test]
+    fn original_beats_tpb_same_title() {
+        let pool = vec![
+            result_with_desc(
+                154239,
+                "Beneath the Trees Where Nobody Sees",
+                Some(2024),
+                6,
+                "An ongoing horror series.",
+            ),
+            result_with_desc(
+                160379,
+                "Beneath the Trees Where Nobody Sees",
+                Some(2024),
+                1,
+                "Trade paperback collecting issues 1-6.",
+            ),
+        ];
+        let r = pick_volume(
+            &input("Beneath the Trees Where Nobody Sees", Some(2024), 6, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        assert!(
+            matches!(r, PickOutcome::Matched { cv_id: 154239, .. }),
+            "original must beat TPB, got {r:?}"
+        );
+    }
+
+    /// contains_word: word boundary respected on both ends. Avoids
+    /// false-firing collection name terms on bigger words while
+    /// catching surrounding-punctuation forms.
+    #[test]
+    fn contains_word_respects_boundaries() {
+        assert!(contains_word("saga tpb", "tpb"));
+        assert!(contains_word("saga (tpb)", "tpb"));
+        assert!(contains_word("saga (tpb) volume 1", "tpb"));
+        assert!(contains_word("saga omnibus", "omnibus"));
+        assert!(!contains_word("tpbeach", "tpb")); // substring, not word
+        assert!(!contains_word("absolutely", "absolute")); // suffix, not word
+        assert!(!contains_word("compendiumly", "compendium")); // synthetic but exercises right boundary
     }
 }
