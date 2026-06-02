@@ -395,14 +395,11 @@ async fn attempt_pull_for_candidate(
     // Load-bearing: NZBs are tagged with the publication year of the
     // SPECIFIC issue, not the series start_year. Using start_year
     // here silently rejects every issue published outside the launch
-    // year for any ongoing series. Derive from cover_date (a
-    // YYYY-MM-DD string) and pass None on absent or malformed input
-    // — the year-gate treats None as a pass.
-    let year_hint = issue
-        .cover_date
-        .as_deref()
-        .and_then(|d| d.get(..4))
-        .and_then(|y| y.parse::<i32>().ok());
+    // Don't filter by year: CV cover_date doesn't reliably match
+    // the year Usenet groups embed in NZB titles (scan year vs
+    // cover date, off-by-one solicitation windows). The title
+    // similarity filter already prevents wrong-series grabs.
+    let year_hint: Option<i32> = None;
 
     let prior = pull_attempt_repo::list_for_issue(db, series_id, issue.id).await?;
     // Retry-exclusion: skip releases already tried. Only a
