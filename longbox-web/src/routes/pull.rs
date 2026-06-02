@@ -9,7 +9,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_db::{pull_list_repo, series_repo, NewPullEntry, PullListRow, PullListWithSeries};
+use longbox_db::{
+    issue_repo, pull_list_repo, series_repo, NewPullEntry, PullListRow, PullListWithSeries,
+};
 use serde::Deserialize;
 
 use crate::error::ApiError;
@@ -19,6 +21,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pull/check", post(check_now))
         .route("/pull/search/:series_id", post(search_now))
+        .route(
+            "/pull/search/:series_id/issue/:issue_id",
+            post(search_issue_now),
+        )
         .route("/pull-list", get(list).post(add))
         .route(
             "/pull-list/:series_id",
@@ -65,6 +71,49 @@ async fn search_now(
             message: "A search is already running for this series.".into(),
         })
     }
+}
+
+/// Request an on-demand search for ONE specific issue. The series
+/// does NOT need to be on the pull list — this is the per-issue
+/// "Search" button on the series detail page for Missing/Unowned
+/// issues. `202 Accepted` always when the (series, issue, relation)
+/// preflight passes; `404 Not Found` for an unknown series, unknown
+/// issue, or an issue that doesn't belong to the named series. No
+/// 409 — the in-flight guard lives inside the engine
+/// ([`longbox_pull::sweep_single_issue`]) and silently skips, since
+/// the user-visible contract for the button is "fire and forget."
+async fn search_issue_now(
+    State(state): State<AppState>,
+    Path((series_id, issue_id)): Path<(i64, i64)>,
+) -> Result<StatusCode, ApiError> {
+    // Series preflight — clean 404 here rather than letting the
+    // engine's typed error round-trip.
+    if series_repo::find_by_id(&state.db, series_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: series_id.to_string(),
+        });
+    }
+    // Issue preflight — same shape. Also enforces the relation so a
+    // tampered URL (issue exists, but for a different series) 404s
+    // instead of triggering a search the user didn't intend.
+    let issue = issue_repo::find_by_id(&state.db, issue_id)
+        .await?
+        .ok_or(ApiError::NotFound {
+            resource: "issue",
+            id: issue_id.to_string(),
+        })?;
+    if issue.series_id != series_id {
+        return Err(ApiError::NotFound {
+            resource: "issue",
+            id: issue_id.to_string(),
+        });
+    }
+    longbox_pull::fire_issue_search(state.db.clone(), series_id, issue_id);
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Debug, Deserialize)]

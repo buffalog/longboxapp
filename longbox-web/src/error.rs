@@ -273,6 +273,15 @@ impl From<longbox_pull::PullError> for ApiError {
                 resource: "pull_list entry",
                 id: series_id.to_string(),
             },
+            longbox_pull::PullError::SeriesNotFound { series_id } => ApiError::NotFound {
+                resource: "series",
+                id: series_id.to_string(),
+            },
+            longbox_pull::PullError::IssueNotFound { issue_id }
+            | longbox_pull::PullError::IssueSeriesMismatch { issue_id, .. } => ApiError::NotFound {
+                resource: "issue",
+                id: issue_id.to_string(),
+            },
             longbox_pull::PullError::Db(db_err) => ApiError::from(db_err),
         }
     }

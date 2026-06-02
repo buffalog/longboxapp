@@ -400,3 +400,187 @@ async fn sweep_without_a_downloader_is_a_no_op() {
     let summary = sweep(&db).await.unwrap();
     assert_eq!(summary, longbox_pull::SweepSummary::default());
 }
+
+// -------- on-demand single-issue search --------
+
+#[tokio::test]
+async fn sweep_single_issue_404s_when_series_is_missing() {
+    let (db, _, _) = seed_catalog().await;
+    let err = longbox_pull::sweep_single_issue(&db, 99_999, 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, longbox_pull::PullError::SeriesNotFound { series_id: 99_999 }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn sweep_single_issue_404s_when_issue_belongs_to_different_series() {
+    let (db, series_id, _) = seed_catalog().await;
+    // A second series + an issue that belongs to IT — passing the
+    // wrong series_id with the right issue_id must surface as a
+    // mismatch, not silently search the wrong scope.
+    let other_series = series_repo::insert(
+        &db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Other".into(),
+            sort_title: "other".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let other_issue = issue_repo::insert(
+        &db,
+        NewIssue {
+            series_id: other_series,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: Some("2024-01-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let err = longbox_pull::sweep_single_issue(&db, series_id, other_issue)
+        .await
+        .unwrap_err();
+    match err {
+        longbox_pull::PullError::IssueSeriesMismatch {
+            series_id: req_series,
+            issue_id,
+            actual_series_id,
+        } => {
+            assert_eq!(req_series, series_id);
+            assert_eq!(issue_id, other_issue);
+            assert_eq!(actual_series_id, other_series);
+        }
+        other => panic!("expected IssueSeriesMismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sweep_single_issue_silent_no_op_without_a_downloader() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    // No downloader, no indexers. Same gate as the all-series sweep —
+    // returns a default summary with a log line.
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(summary, longbox_pull::SweepSummary::default());
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert!(attempts.is_empty(), "no attempts recorded");
+}
+
+/// LOAD-BEARING: when the engine sees an in-flight (`pending` /
+/// `submitted` / `grabbed`) attempt for this issue, it must skip
+/// silently and record nothing new. `pull_attempts` has no UNIQUE
+/// constraint on (series_id, issue_id) — multiple rows per pair are
+/// expected for retry tracking — so a duplicate INSERT would NOT be
+/// absorbed by the schema. The guard inside `sweep_single_issue` is
+/// the only thing that prevents a second click on Search from
+/// duplicating an in-flight download.
+#[tokio::test]
+async fn sweep_single_issue_skips_when_an_in_flight_attempt_exists() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    // Pre-seed a submitted attempt — the in-flight state any user
+    // click on Search needs to respect.
+    pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-already-in-flight".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-already-in-flight".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let baseline = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(baseline.len(), 1, "exactly one in-flight attempt to start");
+
+    // Set up a real indexer + downloader so the engine WOULD be able
+    // to submit a duplicate if the guard weren't there. The guard
+    // must fire BEFORE the indexer call.
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-second-search")).await;
+    sab_accepts(&downloader, "nzo-second-search").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    // Engine reported it did nothing. No submit, no failure, no
+    // counter advance.
+    assert_eq!(summary, longbox_pull::SweepSummary::default());
+
+    // The seeded attempt is still the ONLY row. No duplicate insert,
+    // no second download handle handed to SAB.
+    let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "in-flight guard must prevent a second pull_attempt row; got {} rows",
+        after.len()
+    );
+    assert_eq!(after[0].id, baseline[0].id, "the existing row is preserved");
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn sweep_single_issue_works_when_series_is_NOT_on_pull_list() {
+    // The headline requirement: a series can be in the catalog
+    // without being subscribed, and Search-now on one of its issues
+    // still works.
+    let (db, series_id, issue_id) = seed_catalog().await;
+    // Drop the pull-list subscription seeded by seed_catalog so this
+    // mirrors the "found a gap in my collection" path off the series
+    // detail page for an unsubscribed series.
+    pull_list_repo::remove(&db, series_id).await.unwrap();
+    assert!(
+        pull_list_repo::get(&db, series_id).await.unwrap().is_none(),
+        "series must not be on the pull list for this test"
+    );
+
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-unsubscribed")).await;
+    sab_accepts(&downloader, "nzo-unsubscribed").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(summary.submitted, 1, "unsubscribed series can still submit");
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, "submitted");
+    assert_eq!(attempts[0].release_id.as_deref(), Some("guid-unsubscribed"));
+}

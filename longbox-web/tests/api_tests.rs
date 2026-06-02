@@ -2475,6 +2475,131 @@ async fn pull_search_auto_triggered_on_subscribe_via_pull_list_add() {
     );
 }
 
+// -------- per-issue search (series detail page) --------
+
+#[tokio::test]
+async fn pull_search_issue_202_accepts_for_an_issue_belonging_to_the_series() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    let iid = longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: Some("2024-01-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/pull/search/{sid}/issue/{iid}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn pull_search_issue_404_when_series_unknown() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("POST", "/api/pull/search/99999/issue/1"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_found.series");
+}
+
+#[tokio::test]
+async fn pull_search_issue_404_when_issue_belongs_to_different_series() {
+    // URL tampering / stale UI defense: passing series_id of A with
+    // issue_id from series B must surface as 404, not silently search
+    // the wrong scope.
+    let app = build_test_app().await;
+    let saga = seed_pull_series(&app, "Saga").await;
+    let chew = seed_pull_series(&app, "Chew").await;
+    let chew_issue = longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: chew,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: Some("2024-01-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let resp = app
+        .request(empty_request(
+            "POST",
+            // Wrong series_id deliberately.
+            &format!("/api/pull/search/{saga}/issue/{chew_issue}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_found.issue");
+}
+
+/// Headline requirement from the spec: the series does NOT need to be
+/// on the pull list. A series in the catalog without a pull_list row
+/// must still accept a per-issue Search. The route handler doesn't
+/// consult pull_list at all; only series + issue + relation.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn pull_search_issue_works_when_series_is_NOT_on_pull_list() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Unsubscribed Series").await;
+    // Deliberately NOT calling pull_list_repo::add — the series is
+    // catalog-only.
+    assert!(
+        longbox_db::pull_list_repo::get(&app.state.db, sid)
+            .await
+            .unwrap()
+            .is_none(),
+        "series must not be on the pull list for this test"
+    );
+    let iid = longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: Some("2024-01-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/pull/search/{sid}/issue/{iid}"),
+        ))
+        .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "unsubscribed series must still accept a per-issue search"
+    );
+}
+
 #[tokio::test]
 async fn pull_search_auto_trigger_silently_skips_already_on_list() {
     // Re-subscribing a series that's already on the list returns 409

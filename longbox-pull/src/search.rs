@@ -87,6 +87,42 @@ impl PullSearchHandle {
     }
 }
 
+/// Fire-and-forget a per-issue search. No handle, no guard tracking —
+/// the engine's in-flight check inside [`engine::sweep_single_issue`]
+/// is the only safety net needed: a duplicate fire while an attempt is
+/// pending/submitted/grabbed silently skips. The frontend has its own
+/// 15s per-row debounce to prevent rapid-click pileup at the UI layer.
+///
+/// Returns immediately; the engine call runs on a detached tokio task.
+/// Outcome is logged at INFO (success) or WARN (failure) and is not
+/// otherwise observable from the caller — by design, since this is
+/// the "I clicked Search on issue 4 of Saga, go fill it" path.
+pub fn fire_issue_search(db: Pool, series_id: i64, issue_id: i64) {
+    tokio::spawn(async move {
+        let outcome = engine::sweep_single_issue(&db, series_id, issue_id).await;
+        match &outcome {
+            Ok(summary) => tracing::info!(
+                target: "longbox_pull",
+                series_id,
+                issue_id,
+                submitted = summary.submitted,
+                no_match = summary.no_match,
+                submission_failed = summary.submission_failed,
+                series_mismatched = summary.series_mismatched,
+                indexer_errors = summary.indexer_errors,
+                "pull.issue_search_complete"
+            ),
+            Err(e) => tracing::warn!(
+                target: "longbox_pull",
+                series_id,
+                issue_id,
+                err = %e,
+                "pull.issue_search_failed"
+            ),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
