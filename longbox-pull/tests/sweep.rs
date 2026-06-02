@@ -50,7 +50,12 @@ async fn seed_catalog() -> (Pool, i64, i64) {
             metron_issue_id: None,
             number: "1".into(),
             title: None,
-            cover_date: Some("2024-01-01".into()),
+            // Aligned with start_year=2012 so the year-gate sees the
+            // same year as the `(2012)`-tagged mock NZBs the
+            // retry-fresh-pick test uses. cover_date is now the
+            // year_hint source per engine.rs, so this is the input
+            // that drives the year-gate, not start_year.
+            cover_date: Some("2012-07-01".into()),
             summary: None,
             cover_url: None,
         },

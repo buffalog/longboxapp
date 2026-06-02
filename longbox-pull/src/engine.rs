@@ -390,10 +390,19 @@ async fn attempt_pull_for_candidate(
     summary: &mut SweepSummary,
 ) -> Result<AttemptOutcome, PullError> {
     let series_id = series.id;
-    // Bug 3: pass series.start_year to the newznab call so the query
-    // narrows server-side AND the per-release year filter has a value
-    // to compare against.
-    let year_hint = series.start_year.map(|y| y as i32);
+    // Year is no longer in the `q`-term (commit 585e10b); it's still
+    // used by `filter_by_series_title` as the per-release year-gate.
+    // Load-bearing: NZBs are tagged with the publication year of the
+    // SPECIFIC issue, not the series start_year. Using start_year
+    // here silently rejects every issue published outside the launch
+    // year for any ongoing series. Derive from cover_date (a
+    // YYYY-MM-DD string) and pass None on absent or malformed input
+    // — the year-gate treats None as a pass.
+    let year_hint = issue
+        .cover_date
+        .as_deref()
+        .and_then(|d| d.get(..4))
+        .and_then(|y| y.parse::<i32>().ok());
 
     let prior = pull_attempt_repo::list_for_issue(db, series_id, issue.id).await?;
     // Retry-exclusion: skip releases already tried. Only a
