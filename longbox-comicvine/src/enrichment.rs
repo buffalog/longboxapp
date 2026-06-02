@@ -281,9 +281,11 @@ pub fn pick_volume(
             }
             break;
         }
-        // Year gate.
+        // Year gate — allow ±1 year to absorb CV solicitation-date vs
+        // actual-release-date skew (e.g. folder says 2024 but CV records
+        // start_year 2023 because the first issue shipped in late 2023).
         if let (Some(req_year), Some(cand_year)) = (candidate.catalog_start_year, r.start_year) {
-            if req_year != cand_year {
+            if (req_year - cand_year).abs() > 1 {
                 if survivors.is_empty() && best_failed_gate.is_none() {
                     best_failed_gate = Some(FailedGate::Year);
                 }
@@ -475,6 +477,31 @@ mod tests {
         let pool = vec![result(700, "Wolverine", Some(2024), 4)];
         let r = pick_volume(
             &input("Wolverine", Some(1982), 4, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        assert_eq!(r, PickOutcome::YearMismatch);
+    }
+
+    #[test]
+    fn year_within_one_passes_gate() {
+        // Folder says 2024 but CV has start_year 2023 — off-by-one
+        // due to solicitation vs actual release date. Should match.
+        let pool = vec![result(700, "Beneath the Trees Where Nobody Sees", Some(2023), 6)];
+        let r = pick_volume(
+            &input("Beneath the Trees Where Nobody Sees", Some(2024), 6, false),
+            &pool,
+            EnrichmentThresholds::default(),
+        );
+        assert!(matches!(r, PickOutcome::Matched { .. }), "expected Matched, got {r:?}");
+    }
+
+    #[test]
+    fn year_two_apart_still_mismatch() {
+        // ±2 should still fail — gate is ±1 only.
+        let pool = vec![result(700, "Wolverine", Some(2020), 4)];
+        let r = pick_volume(
+            &input("Wolverine", Some(2022), 4, false),
             &pool,
             EnrichmentThresholds::default(),
         );
