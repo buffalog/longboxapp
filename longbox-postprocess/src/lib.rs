@@ -95,6 +95,7 @@ pub async fn start(
             db,
             config.library_root.clone(),
             library_root_id,
+            config.watch_path.clone(),
             Arc::clone(&cache),
         ),
     );
@@ -379,8 +380,16 @@ async fn consumer_task(
     db: longbox_db::Pool,
     library_root: PathBuf,
     library_root_id: i64,
+    watch_root: PathBuf,
     cache: Arc<PendingInterventionsCache>,
 ) {
+    // SABnzbd deposits downloads as `{watch_root}/{job_name}/{file.cbr}`.
+    // After processing moves the file out, the now-empty `{job_name}/`
+    // is left dangling. Canonicalize the watch root once here so the
+    // per-file equality check that protects the root itself is stable
+    // against symlinks / trailing-slash drift in the configured path.
+    let canonical_watch_root = std::fs::canonicalize(&watch_root).unwrap_or(watch_root);
+
     while let Some(path) = rx.recv().await {
         // Skip-filter is run at the producer side (sweep + watcher),
         // but a path that's been removed between detection and now
@@ -396,6 +405,12 @@ async fn consumer_task(
         }
         match processor::process_one(&path, &library_root, library_root_id, &db).await {
             Ok(outcome) => {
+                if matches!(
+                    &outcome,
+                    processor::Outcome::Imported { .. } | processor::Outcome::Unsorted { .. }
+                ) {
+                    cleanup_empty_parent(&path, &canonical_watch_root);
+                }
                 apply_outcome_to_cache(&cache, &path, outcome);
             }
             Err(e) => {
@@ -412,6 +427,57 @@ async fn consumer_task(
         target: "longbox_postprocess",
         "phase_b.consumer_exited (channel closed)"
     );
+}
+
+/// If a processed file lived in a subdirectory of the watch root
+/// (the SABnzbd `{watch_root}/{job_name}/` shape), remove the parent
+/// when it's now empty. Best-effort: filesystem races (a sibling file
+/// reappearing, permission denied, parent already gone) log at debug
+/// and skip rather than failing the import that already succeeded.
+///
+/// The canonicalized-equality guard against `watch_root` itself is
+/// load-bearing: deleting the watch folder would silently break the
+/// pipeline. Files dropped directly into the watch root therefore
+/// short-circuit before any `read_dir` work.
+fn cleanup_empty_parent(source: &Path, canonical_watch_root: &Path) {
+    let Some(parent) = source.parent() else {
+        return;
+    };
+
+    let canonical_parent = match std::fs::canonicalize(parent) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    if canonical_parent == canonical_watch_root {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(&canonical_parent) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    if entries.count() > 0 {
+        return;
+    }
+
+    match std::fs::remove_dir(&canonical_parent) {
+        Ok(()) => {
+            tracing::info!(
+                target: "longbox_postprocess",
+                dir = %canonical_parent.display(),
+                "phase_b.watch_dir_cleaned"
+            );
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "longbox_postprocess",
+                dir = %canonical_parent.display(),
+                err = %e,
+                "phase_b.watch_dir_cleanup_failed"
+            );
+        }
+    }
 }
 
 /// Translate an `Outcome` into the right cache mutation. Pulled out
@@ -689,6 +755,70 @@ mod tests {
             vec![PathBuf::from("/x.cbz")],
         ))
         .is_empty());
+    }
+
+    #[test]
+    fn cleanup_empty_parent_removes_empty_job_subdir() {
+        // SAB shape: {watch}/{job}/{file}. After the file is moved out
+        // by the processor, the source path's parent is the empty job
+        // dir — that is exactly what we want to clean up.
+        let watch = TempDir::new().unwrap();
+        let watch_root = std::fs::canonicalize(watch.path()).unwrap();
+        let job_dir = watch.path().join("saga-job-42");
+        std::fs::create_dir(&job_dir).unwrap();
+        // No file created — simulates the post-move state.
+        let phantom_source = job_dir.join("saga 001.cbz");
+
+        cleanup_empty_parent(&phantom_source, &watch_root);
+
+        assert!(!job_dir.exists(), "empty job dir should be deleted");
+    }
+
+    #[test]
+    fn cleanup_empty_parent_refuses_to_delete_the_watch_root() {
+        // A file dropped directly into the watch root has the watch
+        // root itself as its parent. Deleting it would break Phase B
+        // until the user recreated the folder — the load-bearing
+        // guard at the top of `cleanup_empty_parent`.
+        let watch = TempDir::new().unwrap();
+        let watch_root = std::fs::canonicalize(watch.path()).unwrap();
+        let phantom_source = watch.path().join("loose-file.cbz");
+
+        cleanup_empty_parent(&phantom_source, &watch_root);
+
+        assert!(watch.path().exists(), "watch root must not be deleted");
+    }
+
+    #[test]
+    fn cleanup_empty_parent_skips_nonempty_dirs() {
+        // If a sibling file is still in the job dir (multi-file job
+        // where one was unmatched and stuck for intervention), the
+        // cleanup must NOT touch the dir.
+        let watch = TempDir::new().unwrap();
+        let watch_root = std::fs::canonicalize(watch.path()).unwrap();
+        let job_dir = watch.path().join("two-file-job");
+        std::fs::create_dir(&job_dir).unwrap();
+        let sibling = job_dir.join("still-here.cbz");
+        std::fs::write(&sibling, b"stub").unwrap();
+        let phantom_source = job_dir.join("moved.cbz");
+
+        cleanup_empty_parent(&phantom_source, &watch_root);
+
+        assert!(job_dir.exists(), "non-empty job dir must survive");
+        assert!(sibling.exists(), "sibling file must survive");
+    }
+
+    #[test]
+    fn cleanup_empty_parent_tolerates_missing_parent() {
+        // If the parent vanished between the move and the cleanup
+        // (another process, user intervention), the function must
+        // silently no-op rather than panic.
+        let watch = TempDir::new().unwrap();
+        let watch_root = std::fs::canonicalize(watch.path()).unwrap();
+        let phantom_source = watch.path().join("gone-job/gone.cbz");
+
+        cleanup_empty_parent(&phantom_source, &watch_root);
+        // Reaching this line without panic is the assertion.
     }
 
     #[test]
