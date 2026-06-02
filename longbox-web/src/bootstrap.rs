@@ -160,7 +160,11 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //     request_run() is a no-op — the rest of the web layer
     //     continues running.
     let cv_arc = Arc::new(cv);
-    let enrichment = longbox_cv_enrichment::spawn(db.clone(), Arc::clone(&cv_arc));
+    let enrichment = longbox_cv_enrichment::spawn(
+        db.clone(),
+        Arc::clone(&cv_arc),
+        std::path::PathBuf::from(&configured),
+    );
 
     // 11. Metron client (Item A v2). Kill switch is the construction
     //     gate: `metron_enabled = false` (the migration default) skips

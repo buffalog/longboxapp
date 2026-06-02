@@ -14,13 +14,15 @@ longbox-comicvine = { path = "../longbox-comicvine" }
 longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
 governor = "0.6"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
 thiserror = "1"
-tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
 tracing = "0.1"
 
 [dev-dependencies]
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"
 pretty_assertions = "1"
