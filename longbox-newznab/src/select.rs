@@ -84,12 +84,36 @@ pub fn normalize_scene_title(input: &str) -> String {
     format!("{wrapped}.cbz")
 }
 
-/// Run the parser on the raw title; fall back to the Scene normalizer
-/// if the raw parse fails. The canonical case (raw title parses) never
-/// reaches the normalizer, so already-parenthesized years can't get
-/// double-wrapped.
+/// Run the parser on the raw title; fall back through two repair
+/// passes when the raw parse fails. Cascade order is correctness-
+/// critical:
+///
+/// 1. **Raw** — canonical filename input (`Wolverine 005 (2024).cbz`)
+///    short-circuits everything below.
+///
+/// 2. **`{title}.cbz`** — NZBGeek (and any indexer with space-
+///    separated, already-parenthesized titles) ships releases as
+///    `Beneath the Trees Where Nobody Sees 001 (2023) (digital) (Son
+///    of Ultron-Empire)` — no extension, year already wrapped. The
+///    only thing keeping parse_filename from accepting these is the
+///    trailing `\.(?i:cbz|cbr|cb7)$` anchor; appending `.cbz`
+///    satisfies the anchor without touching the year token. Trying
+///    this step BEFORE [`normalize_scene_title`] is load-bearing:
+///    the normalizer's `\b(YYYY)\b` regex matches inside an existing
+///    `(2023)` (word boundary fires at the paren↔digit edge), and
+///    re-wraps it as `((2023))` which the year-capture group rejects.
+///
+/// 3. **`normalize_scene_title`** — dotted Scene format
+///    (`Hello.Darkness.001.2024.digital.Son.of.Ultron-Empire`) still
+///    needs the dots→spaces + bare-year-wrap + `.cbz` transform.
+///    Reached only when the title has no extension AND no
+///    parenthesized year — the conditions the normalizer was
+///    actually designed for.
 fn parse_release_title(title: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilename> {
     if let Some(parsed) = parse_filename(title, patterns) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_filename(&format!("{title}.cbz"), patterns) {
         return Some(parsed);
     }
     parse_filename(&normalize_scene_title(title), patterns)
@@ -779,6 +803,51 @@ mod tests {
             "005",
             Some(2024),
         );
+    }
+
+    /// **NZBGeek shape** — the format the indexer actually returns:
+    /// space-separated, year already parenthesized, ANNOTATIONS in
+    /// trailing parens, no extension. Pre-fix this fell through to
+    /// `normalize_scene_title` and double-wrapped the year (the
+    /// rightmost-year regex matches inside an existing `(2023)`
+    /// because `\b` fires at the paren↔digit edge), producing
+    /// `((2023))` and an unparseable input. Post-fix the
+    /// `{title}.cbz` middle pass satisfies the extension anchor
+    /// without touching the year token.
+    #[test]
+    fn parse_nzbgeek_space_separated_with_annotations() {
+        check_normalized_parses_to(
+            "Beneath the Trees Where Nobody Sees 001 (2023) (digital) (Son of Ultron-Empire)",
+            "Beneath the Trees Where Nobody Sees",
+            "001",
+            Some(2023),
+        );
+    }
+
+    /// **Regression** — any title that already has a parenthesized
+    /// year segment must NOT have it double-wrapped on the way
+    /// through `parse_release_title`. The contract: an
+    /// already-(YYYY)-bearing input either parses raw (canonical
+    /// `.cbz` shape) or via the `.cbz`-append middle pass — never
+    /// via `normalize_scene_title`, whose year-wrap step is unsafe
+    /// for already-wrapped years.
+    ///
+    /// Two minimal shapes cover the surface:
+    ///   - extension-less, single annotation block
+    ///   - extension-less, no trailing annotations at all
+    #[test]
+    fn double_wrap_does_not_occur_on_already_parenthesized_year() {
+        // With trailing annotation.
+        check_normalized_parses_to(
+            "Saga 062 (2024) (digital)",
+            "Saga",
+            "062",
+            Some(2024),
+        );
+        // Bare — year is the only parenthesized segment, no
+        // annotation block at all. Pre-fix this was the cleanest
+        // double-wrap reproducer.
+        check_normalized_parses_to("Saga 062 (2024)", "Saga", "062", Some(2024));
     }
 
     // -------- End-to-end filter (Scene-format) --------
