@@ -111,15 +111,18 @@ async fn search_one_indexer(
     indexer: &IndexerConfig,
     series: &str,
     issue: &str,
-    year: Option<i32>,
 ) -> Result<Vec<Release>, IndexerError> {
-    let padded = build_search_term(series, issue, year, true);
+    // No `year` parameter: it does not belong in the q-term (see
+    // `build_search_term` for the full rationale). It is still used
+    // downstream for similarity-filter ranking — that lives in the
+    // callers, which keep year in their own scope.
+    let padded = build_search_term(series, issue, true);
     let first = search_with(client, indexer, &padded).await?;
     if !first.is_empty() {
         return Ok(first);
     }
 
-    let unpadded = build_search_term(series, issue, year, false);
+    let unpadded = build_search_term(series, issue, false);
     if unpadded == padded {
         // Non-numeric issue — both variations identical, no retry.
         return Ok(first);
@@ -182,6 +185,15 @@ pub async fn find_release_excluding(
         return Ok(None);
     }
 
+    // `year` is preserved on this bare variant's signature for API
+    // stability (it's exposed to tests + lower-level callers via
+    // `find_release`); since year is no longer embedded in the q-term
+    // and the bare variant skips the similarity filter, year has
+    // nowhere to influence the result here. Production code goes
+    // through `find_release_excluding_filtered`, which DOES use year
+    // for similarity ranking.
+    let _ = year;
+
     // Defensive: sort by priority so the caller need not pre-order.
     let mut ordered: Vec<&IndexerConfig> = indexers.iter().collect();
     ordered.sort_by_key(|i| i.priority);
@@ -190,7 +202,7 @@ pub async fn find_release_excluding(
     let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
 
     for indexer in ordered {
-        match search_one_indexer(&client, indexer, series, issue, year).await {
+        match search_one_indexer(&client, indexer, series, issue).await {
             Ok(results) => {
                 let kept: Vec<Release> = results
                     .into_iter()
@@ -273,7 +285,7 @@ pub async fn find_release_excluding_filtered(
         futures::future::join_all(
             ordered
                 .iter()
-                .map(|idx| search_one_indexer(&client, idx, series, issue, year)),
+                .map(|idx| search_one_indexer(&client, idx, series, issue)),
         )
         .await;
 
