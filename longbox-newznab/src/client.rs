@@ -44,6 +44,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        // Pose as Mylar3, the most widely-allowlisted comic-pulling
+        // client. Several Newznab indexers gate on User-Agent (a
+        // generic reqwest UA gets 403s or empty results); the Mylar3
+        // string is the one comic-tagger fleets coalesce around.
+        .user_agent("Mylar3/3.0.0")
         .build()
         // Only fails on TLS-backend init — a process-level invariant,
         // not a recoverable runtime condition.
