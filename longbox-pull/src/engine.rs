@@ -390,15 +390,18 @@ async fn attempt_pull_for_candidate(
     summary: &mut SweepSummary,
 ) -> Result<AttemptOutcome, PullError> {
     let series_id = series.id;
-    // Year is no longer in the `q`-term (commit 585e10b); it's still
-    // used by `filter_by_series_title` as the per-release year-gate.
-    // Load-bearing: NZBs are tagged with the publication year of the
-    // SPECIFIC issue, not the series start_year. Using start_year
-    // here silently rejects every issue published outside the launch
-    // Don't filter by year: CV cover_date doesn't reliably match
-    // the year Usenet groups embed in NZB titles (scan year vs
-    // cover date, off-by-one solicitation windows). The title
-    // similarity filter already prevents wrong-series grabs.
+    // No year-hint for pull searches. The previous attempts at this
+    // (start_year, then cover_date) both silently dropped valid
+    // hits: CV's recorded cover_date is the cover-month of the
+    // physical issue, but NZB titles carry the SCAN year — and
+    // those routinely differ (off-by-one solicitation windows,
+    // late physical scans of older digital releases, scanner-group
+    // re-rips of back issues). The year-gate's strict equality
+    // turns each disagreement into a silent rejection. Since the
+    // pull engine already knows which series + issue it's pulling
+    // for, the series-title similarity filter is doing all the
+    // wrong-volume disambiguation work; year here is at best
+    // redundant and at worst correctness-destroying.
     let year_hint: Option<i32> = None;
 
     let prior = pull_attempt_repo::list_for_issue(db, series_id, issue.id).await?;
