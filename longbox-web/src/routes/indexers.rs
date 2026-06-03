@@ -258,6 +258,7 @@ fn map_indexer_db_err(e: longbox_db::DbError, name: &str) -> ApiError {
         } => ApiError::Conflict {
             code: "conflict.indexer_exists",
             message: format!("An indexer named {name:?} already exists."),
+            details: serde_json::Value::Null,
         },
         other => ApiError::from(other),
     }

@@ -68,6 +68,7 @@ async fn create(
         }) => Err(ApiError::Conflict {
             code: "conflict.publisher_filter_exists",
             message: format!("A filter for {name:?} already exists (case-insensitive)."),
+            details: serde_json::Value::Null,
         }),
         Err(e) => Err(ApiError::from(e)),
     }

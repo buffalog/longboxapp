@@ -23,6 +23,7 @@
     type DiscoveredFolder,
     type PhantomSeries
   } from '$lib/api/reconcile';
+  import { deleteSeries } from '$lib/api/series';
   import { createSelection } from '$lib/createSelection.svelte';
   import { formatDateTime } from '$lib/format';
   import { searchHintFromPath } from '$lib/match_hint';
@@ -50,6 +51,19 @@
   // (and the row's UI shows progress) without locking out the whole
   // queue while one PATCH is in flight. Keyed by series id.
   let enrichmentPickInFlight = $state<Set<number>>(new Set());
+
+  /** Per-row cv_id_in_use collision state. The PATCH fails with this
+   *  code when the user-picked CV id is already claimed by ANOTHER
+   *  series row — the common cause is a duplicate created by the
+   *  untracked-folder import for a series that was already in the
+   *  catalog under a slightly different folder name. The fix is to
+   *  delete THIS (duplicate) queue row, not the existing one. */
+  interface CollisionState {
+    existingSeriesId: number;
+    existingSeriesTitle: string;
+  }
+  let enrichmentCollisions = $state<Map<number, CollisionState>>(new Map());
+  let enrichmentDeleteInFlight = $state<Set<number>>(new Set());
 
   let error = $state<ApiError | null>(null);
   let busy = $state(false);
@@ -263,10 +277,16 @@
     seriesTitle: string
   ): Promise<void> {
     if (enrichmentPickInFlight.has(seriesId)) return;
-    // Set-replacement on every mutation so Svelte's $state tracks the
-    // change — in-place .add()/.delete() on the Set instance wouldn't
+    // Set/Map-replacement on every mutation so Svelte's $state tracks
+    // the change — in-place .add()/.delete() on the instance wouldn't
     // trigger reactivity.
     enrichmentPickInFlight = new Set([...enrichmentPickInFlight, seriesId]);
+    // Clear any prior collision warning on a fresh attempt.
+    if (enrichmentCollisions.has(seriesId)) {
+      const next = new Map(enrichmentCollisions);
+      next.delete(seriesId);
+      enrichmentCollisions = next;
+    }
     try {
       await setSeriesCvId(seriesId, cvId);
       // Optimistic local removal — the row is gone from the catalog's
@@ -275,12 +295,47 @@
       enrichmentQueue = enrichmentQueue.filter((r) => r.id !== seriesId);
       toast.success(`Linked ${seriesTitle} to ComicVine.`);
     } catch (e) {
-      const message =
-        e instanceof ApiError ? e.message : 'Could not set the CV link.';
-      toast.warning(message);
+      if (e instanceof ApiError && e.code === 'conflict.cv_id_in_use') {
+        // Stash the collision details on the row instead of toasting —
+        // the inline warning gives the user a one-click path to delete
+        // the duplicate.
+        const d = e.details as
+          | { existing_series_id?: number; existing_series_title?: string }
+          | null;
+        const existingSeriesId = d?.existing_series_id ?? 0;
+        const existingSeriesTitle = d?.existing_series_title ?? 'another series';
+        enrichmentCollisions = new Map([
+          ...enrichmentCollisions,
+          [seriesId, { existingSeriesId, existingSeriesTitle }]
+        ]);
+      } else {
+        const message =
+          e instanceof ApiError ? e.message : 'Could not set the CV link.';
+        toast.warning(message);
+      }
     } finally {
       enrichmentPickInFlight = new Set(
         [...enrichmentPickInFlight].filter((id) => id !== seriesId)
+      );
+    }
+  }
+
+  async function handleDeleteDuplicate(seriesId: number, title: string): Promise<void> {
+    if (enrichmentDeleteInFlight.has(seriesId)) return;
+    enrichmentDeleteInFlight = new Set([...enrichmentDeleteInFlight, seriesId]);
+    try {
+      await deleteSeries(seriesId);
+      enrichmentQueue = enrichmentQueue.filter((r) => r.id !== seriesId);
+      const next = new Map(enrichmentCollisions);
+      next.delete(seriesId);
+      enrichmentCollisions = next;
+      toast.success(`Removed duplicate ${title}.`);
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : 'Could not delete the duplicate.';
+      toast.warning(message);
+    } finally {
+      enrichmentDeleteInFlight = new Set(
+        [...enrichmentDeleteInFlight].filter((id) => id !== seriesId)
       );
     }
   }
@@ -652,6 +707,39 @@
                 disabled={enrichmentPickInFlight.has(row.id)}
               />
             </div>
+            {#if enrichmentCollisions.has(row.id)}
+              {@const collision = enrichmentCollisions.get(row.id)!}
+              <div
+                class="mt-3 flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3"
+              >
+                <div class="min-w-0 flex-1 text-sm">
+                  <div class="font-medium text-amber-900">
+                    Already linked to "{collision.existingSeriesTitle}"
+                  </div>
+                  {#if row.owned_count === 0}
+                    <div class="text-xs text-amber-800">
+                      This looks like a duplicate of an existing series. Delete it?
+                    </div>
+                  {:else}
+                    <div class="text-xs text-amber-800">
+                      This series has {row.owned_count} owned file{row.owned_count === 1
+                        ? ''
+                        : 's'} — open the series page to move or remove them before deleting.
+                    </div>
+                  {/if}
+                </div>
+                {#if row.owned_count === 0}
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onclick={() => handleDeleteDuplicate(row.id, row.title)}
+                    disabled={enrichmentDeleteInFlight.has(row.id)}
+                  >
+                    Delete duplicate
+                  </Button>
+                {/if}
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>

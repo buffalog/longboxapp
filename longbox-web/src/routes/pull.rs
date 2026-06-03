@@ -43,6 +43,7 @@ async fn check_now(State(state): State<AppState>) -> Result<StatusCode, ApiError
         Err(ApiError::Conflict {
             code: "conflict.pull_running",
             message: "A pull sweep is already running.".into(),
+            details: serde_json::Value::Null,
         })
     }
 }
@@ -217,6 +218,7 @@ async fn add(
         }) => Err(ApiError::Conflict {
             code: "conflict.already_on_pull_list",
             message: "That series is already on the pull list.".into(),
+            details: serde_json::Value::Null,
         }),
         Err(e) => Err(ApiError::from(e)),
     }

@@ -70,6 +70,7 @@ async fn add(
                 "Series with cv_id {} already in watchlist (id={})",
                 body.cv_id, existing.id
             ),
+            details: serde_json::Value::Null,
         });
     }
 
@@ -260,9 +261,13 @@ async fn set_cv_id(
             return Err(ApiError::Conflict {
                 code: "conflict.cv_id_in_use",
                 message: format!(
-                    "cv_id {} is already linked to series {} ({:?})",
-                    body.cv_id, other.id, other.title
+                    "This ComicVine volume is already linked to \"{}\" (series #{}).",
+                    other.title, other.id
                 ),
+                details: serde_json::json!({
+                    "existing_series_id": other.id,
+                    "existing_series_title": other.title,
+                }),
             });
         }
     }
@@ -430,6 +435,7 @@ pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), 
                 "{} owned file(s) match issues in this series. Remove or ignore them before deleting.",
                 owned.n
             ),
+            details: serde_json::Value::Null,
         });
     }
     sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)

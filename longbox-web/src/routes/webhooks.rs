@@ -181,6 +181,7 @@ fn map_webhook_db_err(e: longbox_db::DbError, name: &str) -> ApiError {
         } => ApiError::Conflict {
             code: "conflict.webhook_exists",
             message: format!("A webhook named {name:?} already exists."),
+            details: serde_json::Value::Null,
         },
         other => ApiError::from(other),
     }
