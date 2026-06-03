@@ -186,6 +186,24 @@ where
     Ok(row)
 }
 
+/// Delete every issue belonging to `series_id`. Cascades to
+/// `files` via the FK definition. Used by the Library Tidy
+/// disambiguation PATCH when the user picks a new CV volume for a
+/// shallow series — the old issues belonged to the wrong volume
+/// and would collide with the upcoming bulk_insert from the new
+/// volume's CV fetch.
+///
+/// Returns the number of rows deleted.
+pub async fn delete_by_series<'e, E>(executor: E, series_id: i64) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(r#"DELETE FROM issues WHERE series_id = ?"#, series_id)
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Single-statement multi-row insert. Up to ~4000 issues at once before
 /// hitting SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (default 32766 in modern
 /// builds; 8 bind params per row). Returns inserted rows in the input order.

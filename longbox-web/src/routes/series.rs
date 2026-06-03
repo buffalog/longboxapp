@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
         .route("/series", post(add).get(list))
         .route("/series/:id", get(detail).delete(remove))
         .route("/series/:id/refresh", post(refresh))
+        .route("/series/:id/cv-id", patch(set_cv_id))
 }
 
 // -------- shapes --------
@@ -210,6 +211,116 @@ async fn detail(
         series,
         issues: with_files,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetCvIdBody {
+    cv_id: i64,
+}
+
+/// `PATCH /api/series/:id/cv-id` — Library Tidy disambiguation
+/// surface. Sets the series's cv_id to the body-supplied value
+/// (typically picked by the user from the CV search input on the
+/// review-queue row), then re-fetches the volume + issues from CV
+/// and overwrites the descriptive fields. Old issues are deleted
+/// before the fresh insert: they belonged to the wrong volume and
+/// would collide with the new issues' cv_issue_ids — and from the
+/// catalog's perspective the series IS the new volume now, the
+/// old issue numbers are meaningless.
+///
+/// Unlike `refresh`, this handler does NOT require an existing
+/// cv_id on the series — that's the whole point of the
+/// disambiguation flow (the queue is filtered to `cv_id IS NULL`
+/// in the first place). It uses [`series_repo::force_set_cv_id`]
+/// rather than `set_cv_id` so the call works whether or not the
+/// row already has one.
+async fn set_cv_id(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetCvIdBody>,
+) -> Result<Json<SeriesRow>, ApiError> {
+    if body.cv_id <= 0 {
+        return Err(ApiError::BadRequest {
+            message: "cv_id must be > 0".into(),
+        });
+    }
+    let _existing = series_repo::find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        })?;
+    // Pre-check the UNIQUE(cv_id) collision so we can return a
+    // structured 409 instead of letting the DB constraint surface
+    // as a generic Internal. Race-window between this and the
+    // UPDATE is closed by the DB-level UNIQUE backstop — that path
+    // surfaces as Internal but the common-case error is clean.
+    if let Some(other) = series_repo::find_by_cv_id(&state.db, body.cv_id).await? {
+        if other.id != id {
+            return Err(ApiError::Conflict {
+                code: "conflict.cv_id_in_use",
+                message: format!(
+                    "cv_id {} is already linked to series {} ({:?})",
+                    body.cv_id, other.id, other.title
+                ),
+            });
+        }
+    }
+
+    // Fetch BEFORE any DB write. If CV is down or rate-limited the
+    // user can retry without the catalog landing in a half-wiped
+    // state.
+    let volume = state.cv.fetch_volume(body.cv_id).await?;
+    let cv_issues = state.cv.fetch_issues(body.cv_id).await?;
+
+    let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
+
+    let rows_updated = series_repo::force_set_cv_id(&mut *tx, id, body.cv_id).await?;
+    if rows_updated == 0 {
+        // The series row was deleted between the existence check
+        // and the UPDATE — rare, but possible if a tidy action
+        // ran concurrently. Surface as 404 (the disambiguation
+        // target is gone).
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        });
+    }
+
+    let update_input = SeriesUpdate {
+        title: volume.name.clone(),
+        sort_title: normalize_title(&volume.name),
+        start_year: volume.start_year,
+        publisher: volume.publisher,
+        description: volume.description,
+        cover_url: volume.cover_url,
+    };
+    let updated = series_repo::update(&mut *tx, id, update_input).await?;
+
+    issue_repo::delete_by_series(&mut *tx, id).await?;
+    let new_issues: Vec<NewIssue> = cv_issues
+        .into_iter()
+        .map(|i| NewIssue {
+            series_id: id,
+            cv_issue_id: Some(i.cv_issue_id),
+            metron_issue_id: None,
+            number: i.issue_number,
+            title: i.name,
+            cover_date: i.cover_date,
+            summary: i.description,
+            cover_url: i.cover_url,
+        })
+        .collect();
+    if !new_issues.is_empty() {
+        issue_repo::bulk_insert(&mut *tx, new_issues).await?;
+    }
+
+    tx.commit().await.map_err(longbox_db::DbError::from)?;
+
+    // The new issues need rematching against the catalog files
+    // that were owned-but-pointing-at-the-now-deleted issues.
+    spawn_auto_rematch(&state, id, "set-cv-id");
+    Ok(Json(updated))
 }
 
 async fn refresh(

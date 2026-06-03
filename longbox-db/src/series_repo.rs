@@ -709,6 +709,107 @@ where
     Ok(result.rows_affected())
 }
 
+/// One row in the Library Tidy enrichment-review queue: a shallow
+/// series the enrichment worker refused to auto-link (outcome ∈
+/// `multi_match` / `low_confidence` / `year_mismatch` /
+/// `collision_disabled` / `error`). Carries everything the UI
+/// needs to render the row + drive the disambiguation picker:
+/// title + start_year for display, the outcome + error text for
+/// the badge and tooltip, and the owned-file count so the queue
+/// can sort by priority (biggest libraries surface first).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrichmentQueueRow {
+    pub id: i64,
+    pub title: String,
+    pub start_year: Option<i64>,
+    pub last_enrichment_outcome: String,
+    pub last_enrichment_error: Option<String>,
+    pub owned_count: i64,
+}
+
+/// List the shallow series that the enrichment worker landed on a
+/// review-required outcome — the disambiguation surface the
+/// Library Tidy "Enrichment needs review" section renders. Same
+/// definition as the `enrichment-summary` endpoint's
+/// review-eligible filter (`cv_id IS NULL` + outcome in the named
+/// set), with the owned-file aggregate joined in so the UI can
+/// sort by impact.
+///
+/// Ordering: `owned_count DESC` (most files at stake first) then
+/// `title ASC` (deterministic tiebreaker for the rendered list).
+pub async fn list_enrichment_queue<'e, E>(executor: E) -> Result<Vec<EnrichmentQueueRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT
+             s.id AS "id!: i64",
+             s.title,
+             s.start_year,
+             s.last_enrichment_outcome AS "last_enrichment_outcome!: String",
+             s.last_enrichment_error,
+             COALESCE(oc.owned_count, 0) AS "owned_count!: i64"
+           FROM series s
+           LEFT JOIN (
+             SELECT i.series_id,
+                    COUNT(DISTINCT i.id) AS owned_count
+               FROM issues i
+               JOIN files f ON f.issue_id = i.id
+              WHERE f.status = 'owned' AND f.is_present = 1
+              GROUP BY i.series_id
+           ) oc ON oc.series_id = s.id
+           WHERE s.cv_id IS NULL
+             AND s.last_enrichment_outcome IN (
+                'multi_match', 'low_confidence', 'year_mismatch',
+                'collision_disabled', 'error'
+             )
+           ORDER BY owned_count DESC, s.title ASC"#,
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| EnrichmentQueueRow {
+            id: r.id,
+            title: r.title,
+            start_year: r.start_year,
+            last_enrichment_outcome: r.last_enrichment_outcome,
+            last_enrichment_error: r.last_enrichment_error,
+            owned_count: r.owned_count,
+        })
+        .collect())
+}
+
+/// Unconditional cv_id write. Unlike [`set_cv_id`]'s
+/// `WHERE cv_id IS NULL` race-guard, this overwrites whatever's
+/// there. Used by the Library Tidy disambiguation PATCH: the user
+/// has explicitly picked a CV volume for this series, so the
+/// race-guard's "refuse if someone else got there first" is the
+/// wrong semantics — the user's choice wins. The DB-level
+/// `UNIQUE(cv_id)` constraint is still the backstop against two
+/// series pointing at the same cv_id (the handler does a
+/// pre-check + maps the constraint violation to a 409 anyway).
+///
+/// Returns rows-affected. 0 means the series_id no longer exists
+/// (deleted between the queue load and the PATCH); caller should
+/// surface that as a 404.
+pub async fn force_set_cv_id<'e, E>(executor: E, series_id: i64, cv_id: i64) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET cv_id = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        cv_id,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Hard-delete every series whose auto-tidy recovery window has elapsed
 /// (`auto_tidy_due_at <= now`). Dependent `issues`/`files` rows cascade.
 /// Safe to run unguarded: [`tick_empty_scan_counters`] runs first in the
