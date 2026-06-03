@@ -127,12 +127,14 @@ async fn enrich_now(State(state): State<AppState>) -> Result<StatusCode, ApiErro
         return Err(ApiError::Conflict {
             code: "conflict.enrichment_running",
             message: "An enrichment cycle is already running.".into(),
+            details: serde_json::Value::Null,
         });
     }
     if !state.enrichment.request_run() {
         return Err(ApiError::Conflict {
             code: "conflict.enrichment_unavailable",
             message: "Enrichment worker is unavailable (refused to start, see logs).".into(),
+            details: serde_json::Value::Null,
         });
     }
     Ok(StatusCode::ACCEPTED)

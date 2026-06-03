@@ -22,6 +22,7 @@ import {
   type EnrichmentQueueRow,
   type EnrichmentSummary
 } from '$lib/api/enrichment';
+import { deleteSeries } from '$lib/api/series';
 import { toast } from '$lib/stores/toast.svelte';
 import TidyPage from './+page.svelte';
 
@@ -43,6 +44,10 @@ vi.mock('$lib/api/enrichment', () => ({
   setSeriesCvId: vi.fn(),
   getEnrichmentSummary: vi.fn(),
   getEnrichmentQueue: vi.fn()
+}));
+
+vi.mock('$lib/api/series', () => ({
+  deleteSeries: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -507,12 +512,13 @@ describe('library tidy page', () => {
     expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Ambiguous'));
   });
 
-  it('warns and keeps the row when setSeriesCvId fails (409 cv_id_in_use)', async () => {
+  it('renders an inline collision warning when setSeriesCvId fails (409 cv_id_in_use)', async () => {
     vi.mocked(setSeriesCvId).mockRejectedValue(
       new ApiError(
         409,
         'conflict.cv_id_in_use',
-        'cv_id 12345 is already linked to series 7 ("Other Series")'
+        'This ComicVine volume is already linked to "Other Series" (series #7).',
+        { existing_series_id: 7, existing_series_title: 'Other Series' }
       )
     );
     vi.mocked(searchVolumes).mockResolvedValue({
@@ -529,6 +535,9 @@ describe('library tidy page', () => {
       ],
       filtered_count: 0
     });
+    // owned_count: 6 (the default) — the row has owned files, so the
+    // inline warning tells the user to handle on the series page and
+    // does NOT show a Delete button.
     render(
       TidyPage,
       pageData({ enrichmentQueue: [enrichmentRow({ id: 42, title: 'Ambiguous' })] })
@@ -542,10 +551,68 @@ describe('library tidy page', () => {
     await fireEvent.click(pickButton);
 
     await waitFor(() =>
-      expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('already linked'))
+      expect(screen.getByText(/Already linked to "Other Series"/)).toBeInTheDocument()
     );
-    // Row stays put — the user can try a different CV pick.
+    expect(screen.getByText(/open the series page to move or remove them/)).toBeInTheDocument();
+    // No Delete button — owned files block the affordance.
+    expect(screen.queryByRole('button', { name: /Delete duplicate/ })).not.toBeInTheDocument();
+    // Row stays put and the toast was NOT used for cv_id_in_use — the
+    // inline warning is the affordance now.
     expect(screen.getByText('Ambiguous')).toBeInTheDocument();
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it('shows a Delete duplicate button when the colliding row has zero owned files', async () => {
+    vi.mocked(setSeriesCvId).mockRejectedValue(
+      new ApiError(
+        409,
+        'conflict.cv_id_in_use',
+        'This ComicVine volume is already linked to "Real Series" (series #7).',
+        { existing_series_id: 7, existing_series_title: 'Real Series' }
+      )
+    );
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 42 });
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [
+        {
+          cv_id: 12345,
+          name: 'Real Volume',
+          start_year: 2024,
+          publisher: 'Marvel',
+          issue_count: 6,
+          cover_url: null,
+          description: null
+        }
+      ],
+      filtered_count: 0
+    });
+    render(
+      TidyPage,
+      pageData({
+        enrichmentQueue: [enrichmentRow({ id: 42, title: 'Duplicate Title', owned_count: 0 })]
+      })
+    );
+
+    const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Real' } });
+    const pickButton = await waitFor(() =>
+      screen.getByRole('button', { name: /Real Volume/ })
+    );
+    await fireEvent.click(pickButton);
+
+    // Collision warning + Delete button appear.
+    const deleteBtn = await waitFor(() =>
+      screen.getByRole('button', { name: /Delete duplicate/ })
+    );
+    expect(screen.getByText(/Already linked to "Real Series"/)).toBeInTheDocument();
+    await fireEvent.click(deleteBtn);
+
+    await waitFor(() => expect(deleteSeries).toHaveBeenCalledWith(42));
+    // Row removed from the queue — the whole section hides because it's now empty.
+    await waitFor(() =>
+      expect(screen.queryByText('Enrichment needs review')).not.toBeInTheDocument()
+    );
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Duplicate Title'));
   });
 
   it('keeps skipped rows and warns after a partial bulk delete', async () => {

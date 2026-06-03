@@ -66,6 +66,7 @@ async fn start_scan(
             return Err(ApiError::Conflict {
                 code: "conflict.scan_running",
                 message: "Scan already in progress".into(),
+                details: serde_json::Value::Null,
             });
         }
         status.current = Some(CurrentScan {

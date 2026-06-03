@@ -15,7 +15,16 @@ pub enum ApiError {
     NotFound { resource: &'static str, id: String },
 
     #[error("conflict ({code}): {message}")]
-    Conflict { code: &'static str, message: String },
+    Conflict {
+        code: &'static str,
+        message: String,
+        // Structured payload the frontend can read instead of parsing
+        // the message text. Most callers pass `serde_json::Value::Null`;
+        // the cv_id_in_use case carries the existing series's id + title
+        // so Library Tidy can render an inline "delete this duplicate?"
+        // affordance rather than a generic toast.
+        details: serde_json::Value,
+    },
 
     #[error("validation failed: {} errors", errors.len())]
     Validation { errors: Vec<FieldError> },
@@ -101,6 +110,7 @@ impl ApiError {
     fn details(&self) -> serde_json::Value {
         match self {
             Self::NotFound { resource, id } => json!({ "resource": resource, "id": id }),
+            Self::Conflict { details, .. } => details.clone(),
             Self::Validation { errors } => json!({ "errors": errors }),
             Self::Upstream {
                 service,
@@ -169,6 +179,7 @@ impl From<longbox_db::DbError> for ApiError {
             longbox_db::DbError::UniqueViolation { field } => ApiError::Conflict {
                 code: "conflict.unique_violation",
                 message: format!("Unique constraint violated on field: {field}"),
+                details: serde_json::Value::Null,
             },
             longbox_db::DbError::MigrationFailed(m) => ApiError::Internal {
                 message: format!("migration failed: {m}"),
@@ -293,6 +304,7 @@ impl From<longbox_scanner::ScanError> for ApiError {
             longbox_scanner::ScanError::AlreadyRunning => ApiError::Conflict {
                 code: "conflict.scan_running",
                 message: "Scan already in progress".into(),
+                details: serde_json::Value::Null,
             },
             longbox_scanner::ScanError::LibraryRootNotFound { id } => ApiError::NotFound {
                 resource: "library_root",
