@@ -1,8 +1,11 @@
 <script lang="ts">
   import { goto, invalidateAll } from '$app/navigation';
-  import { RefreshCw, Trash2 } from 'lucide-svelte';
+  import { RefreshCw, Search, Trash2 } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
+  import { searchSeriesNow } from '$lib/api/pull';
   import { deleteSeries, refreshSeries } from '$lib/api/series';
+  import { isSolicited } from '$lib/solicitation';
+  import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import IssueGrid from '$lib/components/IssueGrid.svelte';
@@ -17,10 +20,26 @@
   let confirmOpen = $state(false);
   let error = $state<ApiError | null>(null);
 
+  // Per-series Search debounce. Same 15 s as IssueRow's per-issue
+  // button — the backend's per-series in-flight guard catches
+  // duplicate fires silently (returns 409 conflict.pull_search_running
+  // for the same series mid-search), but a local debounce keeps
+  // rapid double-clicks from generating noise.
+  const SEARCH_BUTTON_DISABLED_MS = 15_000;
+  let searching = $state(false);
+
   const ownedCount = $derived(
     data.series.issues.filter((i) => i.file?.status === 'owned').length
   );
   const totalCount = $derived(data.series.issues.length);
+
+  // "Missing" mirrors IssueRow's derivation exactly: no file, and
+  // not in the solicited window. Surface the search affordance only
+  // when there's at least one such issue — otherwise the button
+  // would no-match every call and clutter the header.
+  const hasMissingIssues = $derived(
+    data.series.issues.some((i) => !i.file && !isSolicited(i.cover_date))
+  );
 
   async function handleRefresh(): Promise<void> {
     refreshing = true;
@@ -32,6 +51,27 @@
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
       refreshing = false;
+    }
+  }
+
+  async function handleSearchMissing(): Promise<void> {
+    if (searching) return;
+    searching = true;
+    setTimeout(() => {
+      searching = false;
+    }, SEARCH_BUTTON_DISABLED_MS);
+    try {
+      await searchSeriesNow(data.series.id);
+      toast.success('Search started.');
+    } catch (e) {
+      // Real-error surface (not the silent in-flight guard): 404
+      // when the series isn't on the pull list, 409 if a search
+      // is already running for it, network failures. The endpoint's
+      // own error envelope carries the human message — pass it
+      // through verbatim rather than rewording.
+      const message =
+        e instanceof ApiError ? e.message : 'Could not start the search.';
+      toast.warning(message);
     }
   }
 
@@ -68,6 +108,17 @@
         onclick={handleRefresh}
       >
         <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
+      </Button>
+    {/if}
+    {#if hasMissingIssues}
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={searching}
+        disabled={searching}
+        onclick={handleSearchMissing}
+      >
+        <Search class="size-3.5" aria-hidden="true" /> Search missing
       </Button>
     {/if}
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
