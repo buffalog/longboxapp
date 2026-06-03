@@ -119,6 +119,15 @@ pub async fn build_test_app() -> TestApp {
         || async {},
     );
     let cv_arc = Arc::new(cv);
+    // Tests use the same wiremock server for cv_direct — rate limit is moot in tests.
+    let cv_direct = ComicVineClient::new(ComicVineClientConfig {
+        api_key: "test-key".to_string(),
+        base_url: format!("{}/", cv_server.uri()),
+        max_wait_for_slot: Duration::from_secs(3),
+        ..Default::default()
+    })
+    .unwrap();
+    let cv_direct_arc = Arc::new(cv_direct);
     let enrichment = longbox_cv_enrichment::spawn(
         pool.clone(),
         Arc::clone(&cv_arc),
@@ -128,6 +137,7 @@ pub async fn build_test_app() -> TestApp {
     let state = AppState {
         db: pool,
         cv: cv_arc,
+        cv_direct: cv_direct_arc,
         // Item A v2: tests don't exercise the Metron path. Disabled is
         // the default — piece 3 will add tests that explicitly construct
         // a Some(client) backed by a wiremock server for forward-week

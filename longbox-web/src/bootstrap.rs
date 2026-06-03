@@ -160,6 +160,19 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //     request_run() is a no-op — the rest of the web layer
     //     continues running.
     let cv_arc = Arc::new(cv);
+
+    // Direct/interactive CV client — higher rate limit, short wait-for-slot.
+    // Used by user-initiated routes (Library Tidy cv-id picks) so they never
+    // queue behind the enrichment worker's 30-60s token wait.
+    let cv_direct = ComicVineClient::new(ComicVineClientConfig {
+        api_key: config.comicvine_api_key.clone(),
+        timeout: Duration::from_secs(30),
+        rate_limit_per_hour: 3_600,
+        max_wait_for_slot: Duration::from_secs(3),
+        ..Default::default()
+    })
+    .map_err(BootstrapError::Cv)?;
+    let cv_direct_arc = Arc::new(cv_direct);
     let enrichment = longbox_cv_enrichment::spawn(
         db.clone(),
         Arc::clone(&cv_arc),
@@ -184,6 +197,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     Ok(AppState {
         db,
         cv: cv_arc,
+        cv_direct: cv_direct_arc,
         metron,
         scanner,
         config: Arc::new(config),
