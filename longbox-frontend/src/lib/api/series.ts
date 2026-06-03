@@ -16,8 +16,18 @@ export function addSeries(cvId: number): Promise<Series> {
   });
 }
 
-export function deleteSeries(id: number): Promise<{ deleted: number }> {
-  return apiFetch(`/series/${id}`, { method: 'DELETE' });
+/** Delete a series. When `force` is true, the server unlinks every
+ *  file from this series's issues — `issue_id` to NULL and `status` to
+ *  `needs_review` — and bypasses the owned-files guard. The unlinked
+ *  files are kicked back into the unmatched pool so they re-match to
+ *  their real series (used by the Library Tidy duplicate-cleanup
+ *  flow). */
+export function deleteSeries(
+  id: number,
+  opts: { force?: boolean } = {}
+): Promise<{ deleted: number }> {
+  const qs = opts.force ? '?force=true' : '';
+  return apiFetch(`/series/${id}${qs}`, { method: 'DELETE' });
 }
 
 export function refreshSeries(id: number): Promise<Series> {

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files\n             SET issue_id = NULL,\n                 status = 'needs_review'\n           WHERE issue_id IN (SELECT id FROM issues WHERE series_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dda4fe2f586941fa4d78324a58c68202315f944e6cbcaea874fdfbc327b309d8"
+}

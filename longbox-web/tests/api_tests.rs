@@ -563,6 +563,110 @@ async fn delete_series_with_no_owned_files_succeeds() {
         .is_none());
 }
 
+#[tokio::test]
+async fn force_delete_series_unlinks_owned_files_and_succeeds() {
+    // The Library Tidy "Delete duplicate anyway" path: a series with
+    // misassigned owned files gets dropped, its files revert to
+    // needs_review with issue_id NULL, and the standard owned-files
+    // guard does NOT fire.
+    let app = build_test_app().await;
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "The Walking Dead".into(),
+            sort_title: "walking dead".into(),
+            start_year: Some(2003),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: Some(101),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    write_cbz(
+        &app.library_path()
+            .join("The Walking Dead (2003)/The Walking Dead 001 (2003).cbz"),
+        None,
+    );
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let files_before = longbox_db::file_repo::list_by_library_root(
+        &app.state.db,
+        app.library_root_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files_before.len(), 1);
+    assert_eq!(files_before[0].status, "owned");
+    assert!(files_before[0].issue_id.is_some());
+    let file_id = files_before[0].id;
+
+    // Standard delete refuses while the file is owned + present.
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{}", series.id),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Force-delete succeeds.
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{}?force=true", series.id),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Series is gone.
+    assert!(series_repo::find_by_id(&app.state.db, series.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // File is preserved, but unlinked and flagged needs_review.
+    let files_after = longbox_db::file_repo::list_by_library_root(
+        &app.state.db,
+        app.library_root_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files_after.len(), 1);
+    assert_eq!(files_after[0].id, file_id);
+    assert_eq!(files_after[0].status, "needs_review");
+    assert!(files_after[0].issue_id.is_none());
+}
+
+#[tokio::test]
+async fn force_delete_series_404_for_unknown_id() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("DELETE", "/api/series/9999?force=true"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // -------- files --------
 
 #[tokio::test]

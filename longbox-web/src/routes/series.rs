@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
@@ -159,6 +159,42 @@ pub(crate) fn spawn_auto_rematch(state: &AppState, series_id: i64, caller: &'sta
                 caller,
                 error = %e,
                 "auto-rematch failed"
+            ),
+        }
+    });
+}
+
+/// Fire-and-forget `rescan_unmatched` for the configured library root.
+/// Used by `DELETE /api/series/:id?force=true` after unlinking the
+/// duplicate's files — the freshly `needs_review`-flagged files need
+/// to be matched against the rest of the catalog, NOT against a
+/// specific series (we don't know which real series they belong to;
+/// the catalog cascade will figure it out).
+pub(crate) fn spawn_rescan_unmatched(state: &AppState, caller: &'static str) {
+    let scanner = state.scanner.clone();
+    let library_root_id = state.library_root_id;
+    tokio::spawn(async move {
+        match scanner.rescan_unmatched(library_root_id).await {
+            Ok(report) => tracing::info!(
+                target: "longbox_web",
+                library_root_id,
+                matched_owned = report.matched_owned,
+                matched_needs_review = report.matched_needs_review,
+                caller,
+                "rescan-unmatched completed"
+            ),
+            Err(longbox_scanner::ScanError::AlreadyRunning) => tracing::warn!(
+                target: "longbox_web",
+                library_root_id,
+                caller,
+                "rescan-unmatched deferred: another scan is in progress"
+            ),
+            Err(e) => tracing::warn!(
+                target: "longbox_web",
+                library_root_id,
+                caller,
+                error = %e,
+                "rescan-unmatched failed"
             ),
         }
     });
@@ -448,10 +484,68 @@ pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), 
     Ok(())
 }
 
+/// Force-delete variant used by the Library Tidy "Delete duplicate
+/// anyway" affordance. The caller has accepted that the owned files
+/// presently linked to this series are misassigned (the real series is
+/// elsewhere in the catalog) and wants them returned to the unmatched
+/// pool. Unlinks every file from the series's issues — `issue_id` to
+/// NULL and `status` to `needs_review` — then deletes the series; the
+/// `issues` cascade does the rest. The owned-files guard is
+/// deliberately bypassed.
+///
+/// The caller is responsible for kicking off a rescan after this
+/// returns so the now-`needs_review` files find their real home.
+pub(crate) async fn force_delete_series(
+    db: &longbox_db::Pool,
+    id: i64,
+) -> Result<(), ApiError> {
+    if series_repo::find_by_id(db, id).await?.is_none() {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        });
+    }
+    let mut tx = db.begin().await.map_err(longbox_db::DbError::from)?;
+    sqlx::query!(
+        r#"UPDATE files
+             SET issue_id = NULL,
+                 status = 'needs_review'
+           WHERE issue_id IN (SELECT id FROM issues WHERE series_id = ?)"#,
+        id
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("file-unlink failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("delete failed: {e}"),
+            source: anyhow::anyhow!(e),
+        })?;
+    tx.commit().await.map_err(longbox_db::DbError::from)?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveQuery {
+    #[serde(default)]
+    force: bool,
+}
+
 async fn remove(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(q): Query<RemoveQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    delete_series(&state.db, id).await?;
+    if q.force {
+        force_delete_series(&state.db, id).await?;
+        spawn_rescan_unmatched(&state, "force-delete-series");
+    } else {
+        delete_series(&state.db, id).await?;
+    }
     Ok(Json(serde_json::json!({ "deleted": id })))
 }

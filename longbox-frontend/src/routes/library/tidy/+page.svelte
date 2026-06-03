@@ -320,16 +320,26 @@
     }
   }
 
-  async function handleDeleteDuplicate(seriesId: number, title: string): Promise<void> {
+  async function handleDeleteDuplicate(
+    seriesId: number,
+    title: string,
+    force: boolean
+  ): Promise<void> {
     if (enrichmentDeleteInFlight.has(seriesId)) return;
     enrichmentDeleteInFlight = new Set([...enrichmentDeleteInFlight, seriesId]);
     try {
-      await deleteSeries(seriesId);
+      await deleteSeries(seriesId, { force });
       enrichmentQueue = enrichmentQueue.filter((r) => r.id !== seriesId);
       const next = new Map(enrichmentCollisions);
       next.delete(seriesId);
       enrichmentCollisions = next;
-      toast.success(`Removed duplicate ${title}.`);
+      // Force-delete unlinks files and kicks off a server-side rescan;
+      // the user should know to wait for the rematch to land.
+      toast.success(
+        force
+          ? `Removed duplicate ${title}. Files queued for re-match.`
+          : `Removed duplicate ${title}.`
+      );
     } catch (e) {
       const message = e instanceof ApiError ? e.message : 'Could not delete the duplicate.';
       toast.warning(message);
@@ -724,7 +734,9 @@
                     <div class="text-xs text-amber-800">
                       This series has {row.owned_count} owned file{row.owned_count === 1
                         ? ''
-                        : 's'} — open the series page to move or remove them before deleting.
+                        : 's'}. They're almost certainly misassigned — physically
+                      they live under "{collision.existingSeriesTitle}" and will
+                      re-match automatically after the duplicate is removed.
                     </div>
                   {/if}
                 </div>
@@ -732,10 +744,19 @@
                   <Button
                     variant="danger"
                     size="sm"
-                    onclick={() => handleDeleteDuplicate(row.id, row.title)}
+                    onclick={() => handleDeleteDuplicate(row.id, row.title, false)}
                     disabled={enrichmentDeleteInFlight.has(row.id)}
                   >
                     Delete duplicate
+                  </Button>
+                {:else}
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onclick={() => handleDeleteDuplicate(row.id, row.title, true)}
+                    disabled={enrichmentDeleteInFlight.has(row.id)}
+                  >
+                    Delete duplicate anyway
                   </Button>
                 {/if}
               </div>
