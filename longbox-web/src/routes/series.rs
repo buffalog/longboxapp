@@ -270,8 +270,11 @@ async fn set_cv_id(
     // Fetch BEFORE any DB write. If CV is down or rate-limited the
     // user can retry without the catalog landing in a half-wiped
     // state.
-    let volume = state.cv.fetch_volume(body.cv_id).await?;
-    let cv_issues = state.cv.fetch_issues(body.cv_id).await?;
+    // Use the unthrottled cv_direct client — this is a user-initiated
+    // interactive request; it must not queue behind the enrichment worker's
+    // 30-60s rate-limiter slot wait.
+    let volume = state.cv_direct.fetch_volume(body.cv_id).await?;
+    let cv_issues = state.cv_direct.fetch_issues(body.cv_id).await?;
 
     let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
 

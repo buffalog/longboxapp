@@ -9,6 +9,11 @@ use crate::config::AppConfig;
 pub struct AppState {
     pub db: longbox_db::Pool,
     pub cv: Arc<longbox_comicvine::ComicVineClient>,
+    /// Unthrottled CV client for interactive/user-initiated requests (e.g.,
+    /// Library Tidy manual cv-id picks). Rate-limited to 3600/hr (practically
+    /// unlimited for one-at-a-time user actions) with a short 3s wait-for-slot
+    /// so the handler fails fast rather than blocking for 30-60s.
+    pub cv_direct: Arc<longbox_comicvine::ComicVineClient>,
     /// Metron forward-calendar client (Item A v2). `None` when the
     /// `metron_enabled` settings row is `false` OR when credentials are
     /// missing/invalid (degraded boot path). Forward-week calendar
