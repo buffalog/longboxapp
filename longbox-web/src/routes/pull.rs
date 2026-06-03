@@ -7,12 +7,13 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use longbox_db::{
     issue_repo, pull_list_repo, series_repo, NewPullEntry, PullListRow, PullListWithSeries,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -46,31 +47,65 @@ async fn check_now(State(state): State<AppState>) -> Result<StatusCode, ApiError
     }
 }
 
-/// Request an on-demand single-series search. `202 Accepted` when the
-/// request is taken; `404 Not Found` when the series isn't on the pull
-/// list; `409 Conflict` when a search for the SAME series is already
-/// in flight. A daily sweep running concurrently does NOT block this —
-/// the per-series guard is independent of the global daily-sweep lock.
+#[derive(Debug, Serialize)]
+struct SearchNowResponse {
+    queued: usize,
+    note: Option<String>,
+}
+
+/// Request an on-demand "search every missing issue" for a series.
+/// `202 Accepted` when at least one issue was queued, with
+/// `{queued: N}` carrying the count. `200 OK` with `{queued: 0,
+/// note: ...}` when the series has no missing issues — there's
+/// nothing to fail, but the caller deserves to know the dispatch
+/// was a no-op. `404 Not Found` when the series id doesn't exist.
+///
+/// The series does NOT need to be on the pull list — this is the
+/// header "Search missing" affordance on series detail, mirroring
+/// the per-issue Search button on each missing row. The
+/// pull-list-based per-series guard
+/// (`state.pull_search.try_start`) is bypassed too: it feeds the
+/// daily sweep's all-series cycle, which is the wrong semantics
+/// for a manual user override on a possibly-unsubscribed series.
+/// Per-issue in-flight dedup is the engine's job — `sweep_single_issue`
+/// silently no-ops on already-in-flight issues, so this loop is
+/// safe to call repeatedly.
 async fn search_now(
     State(state): State<AppState>,
     Path(series_id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    // 404 preflight first so a typo-ed series id surfaces correctly
-    // even if the per-series guard would have rejected it anyway.
-    if pull_list_repo::get(&state.db, series_id).await?.is_none() {
+) -> Result<Response, ApiError> {
+    // 404 preflight — clean structured error rather than a
+    // misleading empty-results path. Same shape as
+    // `search_issue_now`.
+    if series_repo::find_by_id(&state.db, series_id)
+        .await?
+        .is_none()
+    {
         return Err(ApiError::NotFound {
-            resource: "pull_list entry",
+            resource: "series",
             id: series_id.to_string(),
         });
     }
-    if state.pull_search.try_start(series_id).await {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ApiError::Conflict {
-            code: "conflict.pull_search_running",
-            message: "A search is already running for this series.".into(),
-        })
+    let missing = issue_repo::list_missing_for_series(&state.db, series_id).await?;
+    if missing.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(SearchNowResponse {
+                queued: 0,
+                note: Some("No missing issues for this series.".into()),
+            }),
+        )
+            .into_response());
     }
+    let queued = missing.len();
+    for issue in missing {
+        longbox_pull::fire_issue_search(state.db.clone(), series_id, issue.id);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SearchNowResponse { queued, note: None }),
+    )
+        .into_response())
 }
 
 /// Request an on-demand search for ONE specific issue. The series
