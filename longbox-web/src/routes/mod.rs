@@ -8,6 +8,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
+pub mod admin;
 pub mod calendar;
 pub mod cv_search;
 pub mod dashboard;
@@ -59,7 +60,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(reconcile::router())
         .merge(calendar::router())
         .merge(needs_attention::router())
-        .merge(enrichment::router());
+        .merge(enrichment::router())
+        .merge(admin::router());
 
     Router::new()
         .nest("/api", api)
