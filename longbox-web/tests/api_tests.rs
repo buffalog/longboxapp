@@ -2397,20 +2397,22 @@ async fn pull_check_accepts_a_sweep_request() {
 // -------- on-demand single-series search (Phase A.9) --------
 
 #[tokio::test]
-async fn pull_search_404_when_series_not_on_pull_list() {
+async fn pull_search_404_when_series_does_not_exist() {
     let app = build_test_app().await;
     let resp = app
         .request(empty_request("POST", "/api/pull/search/9999"))
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = response_json(resp).await;
-    assert_eq!(body["error"]["code"], "not_found.pull_list entry");
+    assert_eq!(body["error"]["code"], "not_found.series");
 }
 
 #[tokio::test]
-async fn pull_search_404_when_series_exists_but_unsubscribed() {
-    // Series in catalog but not on pull list — must surface as 404 on
-    // the pull_list entry, not as a stale 200.
+async fn pull_search_200_when_series_has_no_missing_issues() {
+    // Series exists, no issues whose cover date has shipped + no file —
+    // the bulk button has nothing to dispatch. Returns a 200 with an
+    // informational `note` so the caller can tell "we tried, found
+    // nothing to do" from "search queued, await results".
     let app = build_test_app().await;
     let sid = seed_pull_series(&app, "Saga").await;
     let resp = app
@@ -2419,21 +2421,85 @@ async fn pull_search_404_when_series_exists_but_unsubscribed() {
             &format!("/api/pull/search/{sid}"),
         ))
         .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["queued"], 0);
+    assert!(body["note"].is_string(), "note must be populated: {body:?}");
 }
 
 #[tokio::test]
-async fn pull_search_202_accepts_when_subscribed() {
+async fn pull_search_202_dispatches_per_missing_issue_for_unsubscribed_series() {
+    // Load-bearing: the series is NOT on the pull list, but the button
+    // still fires a search for every shipped + unowned issue. The
+    // previous shape 404'd here because of the pull-list gate; this
+    // confirms the gate is gone.
     let app = build_test_app().await;
     let sid = seed_pull_series(&app, "Saga").await;
-    // Subscribe directly via the repo so the test isolates the search
-    // route from the auto-trigger that the POST /pull-list handler
-    // would otherwise fire.
-    longbox_db::pull_list_repo::add(
+    for n in &["1", "2"] {
+        longbox_db::issue_repo::insert(
+            &app.state.db,
+            longbox_db::NewIssue {
+                series_id: sid,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: (*n).into(),
+                title: None,
+                cover_date: Some("2020-01-01".into()),
+                summary: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let resp = app
+        .request(empty_request(
+            "POST",
+            &format!("/api/pull/search/{sid}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = response_json(resp).await;
+    assert_eq!(body["queued"], 2);
+    assert!(body["note"].is_null(), "note must be absent on 202: {body:?}");
+}
+
+#[tokio::test]
+async fn pull_search_skips_solicited_and_owned_issues() {
+    // The "missing" filter excludes: (a) issues with a future cover
+    // date (solicited — not shipped yet) and (b) issues that already
+    // have an owned+present file. Only the shipped+no-owned-file
+    // intersection counts as missing.
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    // 1) Genuinely missing — counts.
+    longbox_db::issue_repo::insert(
         &app.state.db,
-        longbox_db::NewPullEntry {
+        longbox_db::NewIssue {
             series_id: sid,
-            start_issue: None,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: Some("2020-01-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // 2) Solicited (cover_date in the future) — does not count.
+    longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "99".into(),
+            title: None,
+            cover_date: Some("2099-12-31".into()),
+            summary: None,
+            cover_url: None,
         },
     )
     .await
@@ -2445,6 +2511,8 @@ async fn pull_search_202_accepts_when_subscribed() {
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = response_json(resp).await;
+    assert_eq!(body["queued"], 1, "only the shipped issue counts: {body:?}");
 }
 
 #[tokio::test]

@@ -114,6 +114,53 @@ where
     Ok(rows)
 }
 
+/// Every "missing" issue for one series — mirrors the frontend
+/// IssueRow's status derivation exactly: a row has status `missing`
+/// when there's no owned-and-present file row AND the cover date is
+/// today or earlier (i.e. the issue has shipped — not solicited).
+///
+/// Distinct from [`list_pull_candidates`] in two ways: this does
+/// NOT exclude issues with in-flight attempts (the per-issue
+/// engine guard handles dedup silently for fire-and-forget callers)
+/// and does NOT exclude parked (`retry_count >= 3`) attempts —
+/// the user's "Search missing" intent on the series page is a
+/// manual override, same shape as the per-issue Search button
+/// which also bypasses parking. The engine path (`fire_issue_search`
+/// → `sweep_single_issue`) has its own load-bearing in-flight
+/// guard, so handing it an already-in-flight issue is a no-op
+/// rather than a duplicate submit.
+pub async fn list_missing_for_series<'e, E>(
+    executor: E,
+    series_id: i64,
+) -> Result<Vec<IssueRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        IssueRow,
+        r#"SELECT i.id AS "id!: i64", i.series_id AS "series_id!: i64",
+                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,
+                  i.summary, i.cover_url,
+                  i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
+           FROM issues i
+           WHERE i.series_id = ?
+             AND i.cover_date IS NOT NULL
+             AND length(i.cover_date) = 10
+             AND i.cover_date <= date('now')
+             AND NOT EXISTS (
+               SELECT 1 FROM files f
+               WHERE f.issue_id = i.id
+                 AND f.status = 'owned'
+                 AND f.is_present = 1
+             )
+           ORDER BY i.cover_date ASC, i.id ASC"#,
+        series_id
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
 /// Issues eligible for an auto-pull attempt for one series: shipped
 /// (`cover_date` a full `YYYY-MM-DD`, today or earlier), not already
 /// owned, and not already settled or parked in `pull_attempts`.
