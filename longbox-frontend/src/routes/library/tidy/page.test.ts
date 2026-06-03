@@ -17,6 +17,11 @@ import {
 } from '$lib/api/reconcile';
 import { searchVolumes } from '$lib/api/cv';
 import { ApiError } from '$lib/api/client';
+import {
+  setSeriesCvId,
+  type EnrichmentQueueRow,
+  type EnrichmentSummary
+} from '$lib/api/enrichment';
 import { toast } from '$lib/stores/toast.svelte';
 import TidyPage from './+page.svelte';
 
@@ -32,6 +37,12 @@ vi.mock('$lib/api/reconcile', async (importOriginal) => ({
 
 vi.mock('$lib/api/cv', () => ({
   searchVolumes: vi.fn()
+}));
+
+vi.mock('$lib/api/enrichment', () => ({
+  setSeriesCvId: vi.fn(),
+  getEnrichmentSummary: vi.fn(),
+  getEnrichmentQueue: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -66,7 +77,36 @@ function folder(over: Partial<DiscoveredFolder> = {}): DiscoveredFolder {
   };
 }
 
-function pageData(over: { phantoms?: PhantomSeries[]; untracked?: DiscoveredFolder[] } = {}) {
+function emptyEnrichmentSummary(): EnrichmentSummary {
+  return {
+    shallow_total: 0,
+    awaiting_attempt: 0,
+    cooldown_waiting: 0,
+    is_running: false,
+    recent_outcomes: {
+      matched: 0,
+      partial_merge: 0,
+      no_results: 0,
+      low_confidence: 0,
+      multi_match: 0,
+      year_mismatch: 0,
+      count_mismatch: 0,
+      collision_disabled: 0,
+      cv_id_collision: 0,
+      set_cv_id_race_lost: 0,
+      error: 0
+    }
+  };
+}
+
+function pageData(
+  over: {
+    phantoms?: PhantomSeries[];
+    untracked?: DiscoveredFolder[];
+    enrichmentSummary?: EnrichmentSummary;
+    enrichmentQueue?: EnrichmentQueueRow[];
+  } = {}
+) {
   const phantoms = over.phantoms ?? [];
   return {
     props: {
@@ -78,7 +118,9 @@ function pageData(over: { phantoms?: PhantomSeries[]; untracked?: DiscoveredFold
           all_zero_owned: phantoms,
           with_transition: phantoms.filter((p) => p.last_matched_count > 0)
         },
-        untracked: over.untracked ?? []
+        untracked: over.untracked ?? [],
+        enrichmentSummary: over.enrichmentSummary ?? emptyEnrichmentSummary(),
+        enrichmentQueue: over.enrichmentQueue ?? []
       }
     }
   };
@@ -368,6 +410,142 @@ describe('library tidy page', () => {
     );
     // The delete failed — the row is still present.
     expect(screen.getByText('Stubborn')).toBeInTheDocument();
+  });
+
+  // -------- enrichment review queue ----------------------------------
+
+  function enrichmentRow(over: Partial<EnrichmentQueueRow> = {}): EnrichmentQueueRow {
+    return {
+      id: 42,
+      title: 'Ambiguous Title',
+      start_year: 2024,
+      last_enrichment_outcome: 'multi_match',
+      last_enrichment_error: null,
+      owned_count: 6,
+      ...over
+    };
+  }
+
+  it('hides the enrichment-review section when the queue is empty', () => {
+    render(TidyPage, pageData({ phantoms: [phantom()] }));
+    expect(screen.queryByText('Enrichment needs review')).not.toBeInTheDocument();
+  });
+
+  it('renders the enrichment-review section with a per-row badge + owned count', () => {
+    render(
+      TidyPage,
+      pageData({
+        enrichmentQueue: [
+          enrichmentRow({ id: 42, title: 'Ambiguous', last_enrichment_outcome: 'multi_match' }),
+          enrichmentRow({ id: 99, title: 'Year Off', last_enrichment_outcome: 'year_mismatch' })
+        ]
+      })
+    );
+    expect(screen.getByText('Enrichment needs review')).toBeInTheDocument();
+    expect(screen.getByText(/2\s+series need.*ComicVine pick/)).toBeInTheDocument();
+    expect(screen.getByText('Ambiguous')).toBeInTheDocument();
+    expect(screen.getByText('Year Off')).toBeInTheDocument();
+    expect(screen.getByText('Multiple matches')).toBeInTheDocument();
+    expect(screen.getByText('Year mismatch')).toBeInTheDocument();
+  });
+
+  it('PATCHes cv-id and optimistically removes a row when CvSearchInput onSelect fires', async () => {
+    vi.mocked(setSeriesCvId).mockResolvedValue({
+      id: 42,
+      cv_id: 12345,
+      metron_id: null,
+      title: 'Resolved',
+      sort_title: 'resolved',
+      start_year: 2024,
+      publisher: 'Marvel',
+      description: null,
+      cover_url: null,
+      created_at: '2026-01-01T00:00:00',
+      updated_at: '2026-06-02T00:00:00'
+    });
+    vi.mocked(searchVolumes).mockResolvedValue({ results: [], filtered_count: 0 });
+    render(
+      TidyPage,
+      pageData({ enrichmentQueue: [enrichmentRow({ id: 42, title: 'Ambiguous' })] })
+    );
+
+    // Type into the CvSearchInput, then directly trigger the search +
+    // simulate the onSelect call by mounting the CV search response.
+    // Easier: bypass the input entirely and call the handler via the
+    // page's exposed surface. CvSearchInput's onSelect is the only
+    // path to the handler, so simulate it by mocking searchVolumes to
+    // return a single result, then click it.
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [
+        {
+          cv_id: 12345,
+          name: 'Real Volume',
+          start_year: 2024,
+          publisher: 'Marvel',
+          issue_count: 6,
+          cover_url: null,
+          description: null
+        }
+      ],
+      filtered_count: 0
+    });
+    // Find the CvSearchInput's input field (search role) and type.
+    const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Real Volume' } });
+    // The debounce is 300ms — wait for the result button to appear.
+    const pickButton = await waitFor(() =>
+      screen.getByRole('button', { name: /Real Volume/ })
+    );
+    await fireEvent.click(pickButton);
+
+    await waitFor(() => expect(setSeriesCvId).toHaveBeenCalledWith(42, 12345));
+    // Optimistic removal — the row is gone, the section hides because
+    // the queue is now empty.
+    await waitFor(() =>
+      expect(screen.queryByText('Enrichment needs review')).not.toBeInTheDocument()
+    );
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Ambiguous'));
+  });
+
+  it('warns and keeps the row when setSeriesCvId fails (409 cv_id_in_use)', async () => {
+    vi.mocked(setSeriesCvId).mockRejectedValue(
+      new ApiError(
+        409,
+        'conflict.cv_id_in_use',
+        'cv_id 12345 is already linked to series 7 ("Other Series")'
+      )
+    );
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [
+        {
+          cv_id: 12345,
+          name: 'Real Volume',
+          start_year: 2024,
+          publisher: 'Marvel',
+          issue_count: 6,
+          cover_url: null,
+          description: null
+        }
+      ],
+      filtered_count: 0
+    });
+    render(
+      TidyPage,
+      pageData({ enrichmentQueue: [enrichmentRow({ id: 42, title: 'Ambiguous' })] })
+    );
+
+    const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Real' } });
+    const pickButton = await waitFor(() =>
+      screen.getByRole('button', { name: /Real Volume/ })
+    );
+    await fireEvent.click(pickButton);
+
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('already linked'))
+    );
+    // Row stays put — the user can try a different CV pick.
+    expect(screen.getByText('Ambiguous')).toBeInTheDocument();
   });
 
   it('keeps skipped rows and warns after a partial bulk delete', async () => {

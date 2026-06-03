@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             s.id AS \"id!: i64\",\n             s.title,\n             s.start_year,\n             s.last_enrichment_outcome AS \"last_enrichment_outcome!: String\",\n             s.last_enrichment_error,\n             COALESCE(oc.owned_count, 0) AS \"owned_count!: i64\"\n           FROM series s\n           LEFT JOIN (\n             SELECT i.series_id,\n                    COUNT(DISTINCT i.id) AS owned_count\n               FROM issues i\n               JOIN files f ON f.issue_id = i.id\n              WHERE f.status = 'owned' AND f.is_present = 1\n              GROUP BY i.series_id\n           ) oc ON oc.series_id = s.id\n           WHERE s.cv_id IS NULL\n             AND s.last_enrichment_outcome IN (\n                'multi_match', 'low_confidence', 'year_mismatch',\n                'collision_disabled', 'error'\n             )\n           ORDER BY owned_count DESC, s.title ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "last_enrichment_outcome!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_enrichment_error",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "owned_count!: i64",
+        "ordinal": 5,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "0da5720fbdaff2f9a76d88230f4f7d08eaa5418fe4e5fcc5797e4ec36f2285b6"
+}

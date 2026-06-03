@@ -1,14 +1,19 @@
-//! `/api/library/tidy/enrichment-summary` (GET) and
+//! `/api/library/tidy/enrichment-summary` (GET),
+//! `/api/library/tidy/enrichment-queue` (GET),
 //! `/api/library/tidy/enrich-now` (POST).
 //!
-//! Aggregate-only surface for Step 6c.2 — per-series detail and
-//! filtered list views are deferred to 6c.3 polish if the bounded-
-//! sample observation shows they're needed.
+//! Aggregate + per-series surface for the Library Tidy enrichment
+//! tab. `enrichment-summary` returns the counts the dashboard chip
+//! reads. `enrichment-queue` is the disambiguation list — every
+//! shallow series the worker landed on a review-required outcome,
+//! ordered by impact so the user resolves the biggest libraries
+//! first.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use longbox_db::{series_repo, EnrichmentQueueRow};
 use serde::Serialize;
 
 use crate::error::ApiError;
@@ -17,7 +22,14 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/library/tidy/enrichment-summary", get(summary))
+        .route("/library/tidy/enrichment-queue", get(queue))
         .route("/library/tidy/enrich-now", post(enrich_now))
+}
+
+async fn queue(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<EnrichmentQueueRow>>, ApiError> {
+    Ok(Json(series_repo::list_enrichment_queue(&state.db).await?))
 }
 
 #[derive(Debug, Serialize)]

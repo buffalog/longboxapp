@@ -9,6 +9,11 @@
   import { Folder, Sparkles } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
+    setSeriesCvId,
+    type EnrichmentQueueRow,
+    type EnrichmentReviewOutcome
+  } from '$lib/api/enrichment';
+  import {
     addFolders,
     bulkDeletePhantoms,
     convertFolders,
@@ -37,6 +42,14 @@
   // separately tracked list — see the $derived block below.
   let phantoms = $state<PhantomSeries[]>([...data.phantoms.all_zero_owned]);
   let untracked = $state<DiscoveredFolder[]>([...data.untracked]);
+  // Mutable copy of the enrichment review queue so a successful pick
+  // can be removed locally without a refetch — same pattern as
+  // phantoms / untracked above.
+  let enrichmentQueue = $state<EnrichmentQueueRow[]>([...data.enrichmentQueue]);
+  // Per-row in-flight tracking so the row's CvSearchInput disables
+  // (and the row's UI shows progress) without locking out the whole
+  // queue while one PATCH is in flight. Keyed by series id.
+  let enrichmentPickInFlight = $state<Set<number>>(new Set());
 
   let error = $state<ApiError | null>(null);
   let busy = $state(false);
@@ -210,6 +223,68 @@
     addError = null;
   }
 
+  // --- enrichment queue ----------------------------------------------
+  /** Per-outcome chip styling. The five outcomes map to four colors:
+   *  `collision_disabled` and `error` both indicate something the
+   *  worker won't retry without user intervention, so they share the
+   *  red tint. */
+  function outcomeBadgeClasses(outcome: EnrichmentReviewOutcome): string {
+    switch (outcome) {
+      case 'multi_match':
+        return 'border-amber-200 bg-amber-100 text-amber-900';
+      case 'low_confidence':
+        return 'border-slate-200 bg-slate-100 text-slate-700';
+      case 'year_mismatch':
+        return 'border-blue-200 bg-blue-100 text-blue-900';
+      case 'collision_disabled':
+      case 'error':
+        return 'border-red-200 bg-red-100 text-red-900';
+    }
+  }
+
+  function outcomeLabel(outcome: EnrichmentReviewOutcome): string {
+    switch (outcome) {
+      case 'multi_match':
+        return 'Multiple matches';
+      case 'low_confidence':
+        return 'Low confidence';
+      case 'year_mismatch':
+        return 'Year mismatch';
+      case 'collision_disabled':
+        return 'Title collision';
+      case 'error':
+        return 'Worker error';
+    }
+  }
+
+  async function handleEnrichmentPick(
+    seriesId: number,
+    cvId: number,
+    seriesTitle: string
+  ): Promise<void> {
+    if (enrichmentPickInFlight.has(seriesId)) return;
+    // Set-replacement on every mutation so Svelte's $state tracks the
+    // change — in-place .add()/.delete() on the Set instance wouldn't
+    // trigger reactivity.
+    enrichmentPickInFlight = new Set([...enrichmentPickInFlight, seriesId]);
+    try {
+      await setSeriesCvId(seriesId, cvId);
+      // Optimistic local removal — the row is gone from the catalog's
+      // shallow set the moment PATCH returns 200, so re-fetching the
+      // queue would just confirm what we already know.
+      enrichmentQueue = enrichmentQueue.filter((r) => r.id !== seriesId);
+      toast.success(`Linked ${seriesTitle} to ComicVine.`);
+    } catch (e) {
+      const message =
+        e instanceof ApiError ? e.message : 'Could not set the CV link.';
+      toast.warning(message);
+    } finally {
+      enrichmentPickInFlight = new Set(
+        [...enrichmentPickInFlight].filter((id) => id !== seriesId)
+      );
+    }
+  }
+
   async function submitAdd(): Promise<void> {
     if (!addModalFolder || !addCvSelected) return;
     const folderName = addModalFolder.folder_name;
@@ -260,11 +335,11 @@
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}
 
-{#if phantoms.length === 0 && untracked.length === 0}
+{#if phantoms.length === 0 && untracked.length === 0 && enrichmentQueue.length === 0}
   <EmptyState
     icon={Sparkles}
     title="Your library is tidy"
-    message="Every tracked series has files on disk, and no untracked folders were found."
+    message="Every tracked series has files on disk, no untracked folders were found, and every shallow series is either CV-linked or still inside its enrichment cooldown."
   />
 {:else}
   <!-- ===================== Phantom series ===================== -->
@@ -536,6 +611,52 @@
       </ul>
     {/if}
   </section>
+
+  <!-- ================= Enrichment needs review ================= -->
+  {#if enrichmentQueue.length > 0}
+    <section class="mt-8">
+      <h2 class="mb-1 text-lg font-semibold">Enrichment needs review</h2>
+      <p class="mb-3 text-xs text-slate-500">
+        {enrichmentQueue.length}
+        series need{enrichmentQueue.length === 1 ? 's' : ''} a ComicVine pick — the auto-link
+        worker found a match it couldn't accept on its own. Search ComicVine for each row and
+        choose the right volume.
+      </p>
+      <ul class="space-y-2">
+        {#each enrichmentQueue as row (row.id)}
+          <li class="rounded-md border border-slate-200 bg-white p-3">
+            <div class="flex items-start gap-3">
+              <div class="min-w-0 flex-1">
+                <div class="truncate font-medium" title={row.title}>
+                  {row.title}{#if row.start_year}
+                    <span class="text-slate-500">({row.start_year})</span>{/if}
+                </div>
+                <div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                  <span
+                    class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium {outcomeBadgeClasses(
+                      row.last_enrichment_outcome
+                    )}"
+                    title={row.last_enrichment_error ?? undefined}
+                  >
+                    {outcomeLabel(row.last_enrichment_outcome)}
+                  </span>
+                  <span class="text-slate-500">
+                    {row.owned_count} owned file{row.owned_count === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div class="mt-3">
+              <CvSearchInput
+                onSelect={(r) => handleEnrichmentPick(row.id, r.cv_id, row.title)}
+                disabled={enrichmentPickInFlight.has(row.id)}
+              />
+            </div>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 {/if}
 
 <Modal open={addModalFolder !== null} title="Add to LongBox" onClose={closeAddModal}>

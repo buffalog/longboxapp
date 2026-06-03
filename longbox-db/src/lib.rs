@@ -54,7 +54,7 @@ pub use scan_run_repo::{
     NewScanRun, ScanCompletion, ScanProgress, ScanRunKind, ScanRunRow, ScanRunStatus,
 };
 pub use series_repo::{
-    CandidateSelectionMode, NewSeries, PhantomSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
-    ShallowEnrichmentCandidate, VolumeRefreshCandidate,
+    CandidateSelectionMode, EnrichmentQueueRow, NewSeries, PhantomSeries, SeriesRow, SeriesUpdate,
+    SeriesWithCounts, ShallowEnrichmentCandidate, VolumeRefreshCandidate,
 };
 pub use settings_repo::{KEY_LIBRARY_ROOT_PATH, KEY_MATCH_CONFIDENCE_THRESHOLD};
