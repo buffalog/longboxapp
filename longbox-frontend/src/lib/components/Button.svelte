@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
   import type { HTMLButtonAttributes } from 'svelte/elements';
 
-  type Variant = 'primary' | 'secondary' | 'danger' | 'ghost';
+  type Variant = 'primary' | 'secondary' | 'danger' | 'warning' | 'ghost';
   type Size = 'sm' | 'md' | 'lg';
 
   interface Props extends HTMLButtonAttributes {
@@ -36,6 +36,8 @@
       'bg-white text-slate-900 border border-slate-300 hover:bg-slate-50 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed',
     danger:
       'bg-red-600 text-white hover:bg-red-500 disabled:bg-red-300 disabled:cursor-not-allowed',
+    warning:
+      'bg-amber-500 text-white hover:bg-amber-400 disabled:bg-amber-300 disabled:cursor-not-allowed',
     ghost:
       'bg-transparent text-slate-700 hover:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed'
   };

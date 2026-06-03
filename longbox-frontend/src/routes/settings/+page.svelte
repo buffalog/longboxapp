@@ -3,9 +3,11 @@
   // restarting the backend binary; values shown here are reflected from
   // /api/settings. Publisher filters are the one editable surface.
   import { invalidateAll } from '$app/navigation';
-  import { Trash2, RotateCcw } from 'lucide-svelte';
+  import { Trash2, RotateCcw, Power } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
+  import { restartServer } from '$lib/api/admin';
   import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
+  import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
   import DownloaderSettings from '$lib/components/DownloaderSettings.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
@@ -85,6 +87,28 @@
 
   function handleReset(): Promise<void> {
     return withBusy(() => resetFiltersToDefaults());
+  }
+
+  let restarting = $state(false);
+
+  // The server responds 202 and exits ~500ms later; Docker's
+  // `restart: unless-stopped` brings it back up. Wait 4s before
+  // reloading — enough cushion for the container to recreate and the
+  // healthcheck to pass on most hardware.
+  async function handleRestart(): Promise<void> {
+    if (restarting) return;
+    restarting = true;
+    try {
+      await restartServer();
+      toast.success('Restarting… page will reload automatically.');
+      setTimeout(() => window.location.reload(), 4000);
+    } catch (e) {
+      restarting = false;
+      const message = e instanceof ApiError ? e.message : 'Could not restart LongBox.';
+      toast.warning(message);
+    }
+    // Deliberately leave `restarting = true` on success — the page is
+    // about to reload, no point flickering the spinner off.
   }
 </script>
 
@@ -208,5 +232,18 @@
       series, matches files on disk against issues, surfaces what's owned and what's missing. No
       downloading or file mutation.
     </p>
+  </section>
+
+  <section class="rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="mb-2 text-base font-semibold">System</h2>
+    <p class="mb-3 text-sm text-slate-600">
+      Restart LongBox to pick up new environment variables or recover from a stuck worker. The
+      container exits and Docker brings it back up — in-flight requests will fail and any
+      running scans or sweeps will be cut short.
+    </p>
+    <Button variant="warning" onclick={handleRestart} loading={restarting} disabled={restarting}>
+      <Power class="size-4" aria-hidden="true" />
+      {restarting ? 'Restarting…' : 'Restart LongBox'}
+    </Button>
   </section>
 </div>
