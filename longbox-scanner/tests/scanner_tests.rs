@@ -664,6 +664,101 @@ async fn scan_full_skipped_when_library_root_empty_preserves_all_invariants() {
     );
 }
 
+// -------- live match_confidence_threshold (no restart needed) --------
+
+/// A boot-time threshold (the scanner's ScannerConfig fallback) of 0.5
+/// stays in `Default::default()`; the bug under test is the scanner
+/// reading the live `match_confidence_threshold` row from `settings`
+/// instead of the cached config value. We toggle the DB row between
+/// scans and observe `files.status` flip without recreating the
+/// scanner.
+#[tokio::test]
+async fn match_threshold_change_in_db_takes_effect_on_next_scan() {
+    use longbox_db::{settings_repo, KEY_MATCH_CONFIDENCE_THRESHOLD};
+
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    // Reuse the same Scanner instance across both scans so the bug —
+    // cached threshold on the long-lived AppState — would manifest if
+    // present.
+    let scanner = scanner_for(pool.clone());
+
+    // Bounce-threshold pass: set the live row to 1.01, an impossible
+    // ceiling. Every match (including Tier 1 at confidence 1.0) must
+    // fall short and downgrade to needs_review.
+    settings_repo::set(&pool, KEY_MATCH_CONFIDENCE_THRESHOLD, "1.01")
+        .await
+        .unwrap();
+    scanner.scan_full(library_root_id).await.unwrap();
+    let f1 = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 001 (2003).cbz",
+    )
+    .await;
+    assert_eq!(
+        f1.status, "needs_review",
+        "threshold=1.01 must downgrade a confidence=1.0 match to needs_review"
+    );
+
+    // Live-edit the row to 0.50 — no scanner re-construction. The next
+    // scan must re-read the row and treat the same match as owned.
+    settings_repo::set(&pool, KEY_MATCH_CONFIDENCE_THRESHOLD, "0.50")
+        .await
+        .unwrap();
+    scanner.scan_full(library_root_id).await.unwrap();
+    let f1 = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 001 (2003).cbz",
+    )
+    .await;
+    assert_eq!(
+        f1.status, "owned",
+        "threshold=0.50 must promote the previously-blocked match to owned without a restart"
+    );
+}
+
+/// rescan_unmatched also reads the live threshold — the rescan path is
+/// what runs after a Settings-page threshold change in practice, so it
+/// has to honor the new value just like a full scan.
+#[tokio::test]
+async fn rescan_unmatched_reads_live_match_threshold() {
+    use longbox_db::{settings_repo, KEY_MATCH_CONFIDENCE_THRESHOLD};
+
+    let tmp = TempDir::new().unwrap();
+    build_fixture_library(tmp.path());
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let scanner = scanner_for(pool.clone());
+
+    // First scan at the impossible threshold parks the matches in
+    // needs_review.
+    settings_repo::set(&pool, KEY_MATCH_CONFIDENCE_THRESHOLD, "1.01")
+        .await
+        .unwrap();
+    scanner.scan_full(library_root_id).await.unwrap();
+    let path = "Walking Dead (2003)/Walking Dead 001 (2003).cbz";
+    assert_eq!(find_file(&pool, library_root_id, path).await.status, "needs_review");
+
+    // The user drops the threshold, runs a rescan-unmatched (NOT a full
+    // scan). The rescan must consult the live row and promote.
+    settings_repo::set(&pool, KEY_MATCH_CONFIDENCE_THRESHOLD, "0.50")
+        .await
+        .unwrap();
+    scanner.rescan_unmatched(library_root_id).await.unwrap();
+    assert_eq!(
+        find_file(&pool, library_root_id, path).await.status,
+        "owned",
+        "rescan_unmatched must use the live threshold, not the cached config"
+    );
+}
+
 #[tokio::test]
 async fn rescan_unmatched_skipped_when_library_root_empty() {
     use longbox_db::scan_run_repo;

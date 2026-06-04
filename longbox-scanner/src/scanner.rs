@@ -11,6 +11,7 @@ use longbox_db::{
     discovered_folders_repo, file_repo, find_candidates, issue_repo, library_root_repo,
     parsing_pattern_repo, row_to_issue, row_to_series, scan_run_repo, series_repo, settings_repo,
     DiscoveredFolder, FileUpdate, NewFile, NewScanRun, Pool, ScanCompletion, ScanRunKind,
+    KEY_MATCH_CONFIDENCE_THRESHOLD,
 };
 use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::Mutex;
@@ -22,6 +23,11 @@ use crate::walker::{walk_library, DiscoveredFile};
 
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
+    /// Fallback match-confidence threshold used only when the
+    /// `match_confidence_threshold` settings row is missing or
+    /// unparseable. Each scan re-reads the live value via
+    /// [`Scanner::load_match_threshold`] so an in-DB change takes effect
+    /// on the very next scan without a restart.
     pub match_threshold: f64,
 }
 
@@ -56,6 +62,23 @@ impl Scanner {
             config,
             scan_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Live match-confidence threshold. Read once at the start of each
+    /// scan run so a change to the `match_confidence_threshold` row
+    /// (Settings UI, direct SQL) takes effect on the very next scan
+    /// without a container restart — the previous implementation cached
+    /// the boot-time env value on `ScannerConfig` and silently ignored
+    /// the row. Falls back to the boot config's threshold when the row
+    /// is absent or unparseable.
+    async fn load_match_threshold(&self) -> Result<f64, ScanError> {
+        let value = settings_repo::get_or_default(
+            &self.db,
+            KEY_MATCH_CONFIDENCE_THRESHOLD,
+            self.config.match_threshold,
+        )
+        .await?;
+        Ok(value)
     }
 
     /// Full disk walk + full match cascade for every file + mark-missing pass.
@@ -108,6 +131,7 @@ impl Scanner {
     ) -> Result<ScanReport, ScanError> {
         let mut report = ScanReport::new(library_root_id, started_at);
         let patterns = load_patterns(&self.db).await?;
+        let match_threshold = self.load_match_threshold().await?;
 
         let root_path = PathBuf::from(&library_root.path);
         for entry in walk_library(&root_path) {
@@ -124,7 +148,13 @@ impl Scanner {
             report.files_seen += 1;
 
             if let Err(e) = self
-                .process_file(&discovered, library_root_id, &patterns, &mut report)
+                .process_file(
+                    &discovered,
+                    library_root_id,
+                    &patterns,
+                    match_threshold,
+                    &mut report,
+                )
                 .await
             {
                 report.errors.push(ScanFileError {
@@ -229,6 +259,7 @@ impl Scanner {
     ) -> Result<ScanReport, ScanError> {
         let mut report = ScanReport::new(library_root_id, started_at);
         let patterns = load_patterns(&self.db).await?;
+        let match_threshold = self.load_match_threshold().await?;
 
         let files = file_repo::list_by_status(
             &self.db,
@@ -252,7 +283,13 @@ impl Scanner {
                 }
             };
             if let Err(e) = self
-                .process_file(&discovered, library_root_id, &patterns, &mut report)
+                .process_file(
+                    &discovered,
+                    library_root_id,
+                    &patterns,
+                    match_threshold,
+                    &mut report,
+                )
                 .await
             {
                 report.errors.push(ScanFileError {
@@ -299,6 +336,7 @@ impl Scanner {
 
         let mut report = ScanReport::new(0, started_at);
         let patterns = load_patterns(&self.db).await?;
+        let match_threshold = self.load_match_threshold().await?;
 
         for library_root in library_root_repo::list_all(&self.db).await? {
             report.library_root_id = library_root.id;
@@ -318,7 +356,14 @@ impl Scanner {
                     None => continue,
                 };
                 if let Err(e) = self
-                    .rematch_one(&discovered, &existing, &candidates, &patterns, &mut report)
+                    .rematch_one(
+                        &discovered,
+                        &existing,
+                        &candidates,
+                        &patterns,
+                        match_threshold,
+                        &mut report,
+                    )
                     .await
                 {
                     report.errors.push(ScanFileError {
@@ -340,6 +385,7 @@ impl Scanner {
         discovered: &DiscoveredFile,
         library_root_id: i64,
         patterns: &[ParsingPattern],
+        match_threshold: f64,
         report: &mut ScanReport,
     ) -> Result<(), ScanError> {
         let existing =
@@ -352,11 +398,7 @@ impl Scanner {
             .run_match_cascade(&comic_info, filename_parse.as_ref())
             .await?;
 
-        let new_status = compute_status(
-            existing.as_ref(),
-            &match_result,
-            self.config.match_threshold,
-        );
+        let new_status = compute_status(existing.as_ref(), &match_result, match_threshold);
 
         self.persist(
             discovered,
@@ -383,6 +425,7 @@ impl Scanner {
         existing: &longbox_db::FileRow,
         candidates: &[Candidate],
         patterns: &[ParsingPattern],
+        match_threshold: f64,
         report: &mut ScanReport,
     ) -> Result<(), ScanError> {
         let (comic_info, _comic_info_xml) = read_comic_info(discovered, report);
@@ -392,7 +435,7 @@ impl Scanner {
         // elsewhere). Run only Tier 2/3 against the single-candidate pool.
         let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), candidates);
 
-        let new_status = compute_status(Some(existing), &match_result, self.config.match_threshold);
+        let new_status = compute_status(Some(existing), &match_result, match_threshold);
 
         // Only update if the status actually changed.
         if existing.status != new_status.as_db_str() {
