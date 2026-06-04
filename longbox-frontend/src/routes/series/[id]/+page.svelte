@@ -33,6 +33,26 @@
   );
   const totalCount = $derived(data.series.issues.length);
 
+  // Folder name the backend will compute and delete. We mirror the
+  // backend convention exactly: `{title} ({start_year})` when the
+  // year is set, bare `{title}` otherwise. Used purely for the
+  // confirmation modal's display — the backend recomputes from the
+  // SeriesRow and is the source of truth for the actual rm.
+  const seriesFolderName = $derived(
+    data.series.start_year
+      ? `${data.series.title} (${data.series.start_year})`
+      : data.series.title
+  );
+
+  // Count of files currently linked to this series (any status) — the
+  // honest catalog answer for "how many files am I about to wipe."
+  // Files that *live in this folder but aren't linked to this series*
+  // (a misassignment we haven't caught yet) would also get nuked by
+  // `remove_dir_all`, but we can't show what we don't know.
+  const linkedFileCount = $derived(
+    data.series.issues.filter((i) => i.file !== null).length
+  );
+
   // "Missing" mirrors IssueRow's derivation exactly: no file, and
   // not in the solicited window. Surface the search affordance only
   // when there's at least one such issue — otherwise the button
@@ -79,7 +99,7 @@
     deleting = true;
     error = null;
     try {
-      await deleteSeries(data.series.id);
+      await deleteSeries(data.series.id, { deleteFiles: true });
       await goto('/series');
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
@@ -147,14 +167,26 @@
   </Button>
 </section>
 
-<Modal open={confirmOpen} title="Delete series?" onClose={() => (confirmOpen = false)}>
+<Modal open={confirmOpen} title="Delete series and files?" onClose={() => (confirmOpen = false)}>
   <p class="text-sm">
-    This removes <strong>{data.series.title}</strong> and all its issues from the catalog. Files on
-    disk are not touched. Files that were matched to issues in this series will become unmatched on
-    the next scan.
+    This will permanently delete the series folder and all
+    {linkedFileCount} file{linkedFileCount === 1 ? '' : 's'} from disk.
+    <strong>This cannot be undone.</strong>
+  </p>
+  <p class="mt-2 text-sm">
+    Folder to be removed:
+    <code class="ml-1 break-all rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">
+      {seriesFolderName}/
+    </code>
+  </p>
+  <p class="mt-2 text-xs text-slate-500">
+    If the folder doesn't exist on disk (e.g. it was renamed), the catalog entry is still removed
+    and a warning is logged server-side.
   </p>
   <div class="mt-4 flex justify-end gap-2">
     <Button variant="ghost" onclick={() => (confirmOpen = false)} disabled={deleting}>Cancel</Button>
-    <Button variant="danger" onclick={handleDelete} loading={deleting}>Delete</Button>
+    <Button variant="danger" onclick={handleDelete} loading={deleting}>
+      Delete series and files
+    </Button>
   </div>
 </Modal>
