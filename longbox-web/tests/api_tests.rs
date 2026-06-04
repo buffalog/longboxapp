@@ -2999,6 +2999,123 @@ async fn pull_search_issue_works_when_series_is_NOT_on_pull_list() {
     );
 }
 
+// -------- /pull/search-all-missing --------
+
+fn ts_2020() -> time::PrimitiveDateTime {
+    time::macros::datetime!(2020-01-01 00:00:00)
+}
+
+async fn insert_issue(
+    app: &common::TestApp,
+    series_id: i64,
+    number: &str,
+    cover_date: Option<&str>,
+) -> i64 {
+    longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: number.into(),
+            title: None,
+            cover_date: cover_date.map(str::to_owned),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// Partition a mixed set of issues by the same predicate the frontend
+/// uses (`isSolicited`): a fully-specified `YYYY-MM-DD` cover_date that
+/// is today-or-later is solicited and skipped; everything else
+/// (already-shipped, null cover_date, partial date) is searched.
+#[tokio::test]
+async fn search_all_missing_searches_shipped_and_skips_solicited() {
+    let app = build_test_app().await;
+    let sid_a = seed_pull_series(&app, "Saga").await;
+    let sid_b = seed_pull_series(&app, "Chew").await;
+
+    // A long-past issue — definitely shipped.
+    insert_issue(&app, sid_a, "1", Some("2012-01-01")).await;
+    // A future-dated issue — solicited, must be skipped.
+    insert_issue(&app, sid_a, "999", Some("2999-01-01")).await;
+    // A null cover_date — falls through to NOT solicited (same lenient
+    // classification the frontend uses for unknown dates).
+    insert_issue(&app, sid_b, "1", None).await;
+    // A partial date `YYYY-MM` — also NOT solicited (it isn't a clean
+    // 10-char `YYYY-MM-DD` so the predicate rejects it).
+    insert_issue(&app, sid_b, "2", Some("2010-05")).await;
+
+    let resp = app
+        .request(empty_request("POST", "/api/pull/search-all-missing"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = response_json(resp).await;
+    assert_eq!(body["searched"], 3);
+    assert_eq!(body["skipped_solicited"], 1);
+}
+
+#[tokio::test]
+async fn search_all_missing_excludes_owned_present_issues() {
+    // An issue with an owned, present file is not missing. The endpoint
+    // must skip it entirely — it shouldn't count as searched OR
+    // skipped_solicited.
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Owned Already").await;
+    let iid_owned = insert_issue(&app, sid, "1", Some("2020-01-01")).await;
+    let iid_missing = insert_issue(&app, sid, "2", Some("2020-02-01")).await;
+
+    // Attach an owned, present file to issue 1.
+    let library_root_id = app.library_root_id;
+    longbox_db::file_repo::insert(
+        &app.state.db,
+        longbox_db::NewFile {
+            issue_id: Some(iid_owned),
+            library_root_id,
+            path_relative: "Owned Already (2020)/001.cbz".into(),
+            size_bytes: 1,
+            mtime: ts_2020(),
+            last_scanned_at: ts_2020(),
+            match_method: "filename".into(),
+            match_confidence: 0.99,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: ts_2020(),
+            matched_at: Some(ts_2020()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("POST", "/api/pull/search-all-missing"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["searched"], 1, "only the missing issue should be searched");
+    assert_eq!(body["skipped_solicited"], 0);
+    // Sanity: the owned issue's id wasn't in the missing pool.
+    let _ = iid_missing;
+}
+
+#[tokio::test]
+async fn search_all_missing_is_a_clean_zero_when_catalog_is_empty() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("POST", "/api/pull/search-all-missing"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = response_json(resp).await;
+    assert_eq!(body["searched"], 0);
+    assert_eq!(body["skipped_solicited"], 0);
+}
+
 #[tokio::test]
 async fn pull_search_auto_trigger_silently_skips_already_on_list() {
     // Re-subscribing a series that's already on the list returns 409
