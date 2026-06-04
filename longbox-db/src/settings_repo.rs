@@ -10,10 +10,28 @@ pub const KEY_MATCH_CONFIDENCE_THRESHOLD: &str = "match_confidence_threshold";
 /// `settings.key` value: filesystem path of the library root.
 pub const KEY_LIBRARY_ROOT_PATH: &str = "library_root_path";
 
+/// `settings.key` value: optional host-side library path used by the
+/// "Show in Finder" affordance. The container only sees its
+/// `library_root_path` (e.g. `/library`); to render a `file://` URL
+/// that opens on the user's host OS, we substitute that prefix with
+/// this value. Empty/unset → frontend renders the container path
+/// (informational but not openable from a browser). Stored as-is;
+/// the validator is a no-op because the container can't introspect
+/// the host filesystem.
+pub const KEY_HOST_LIBRARY_PATH: &str = "host_library_path";
+
 /// `settings.key` value: auto-tidy master switch (`'true'` / `'false'`).
 /// When off, the scanner still ticks `series.consecutive_empty_scans`
 /// but never marks a series for automatic removal.
 pub const KEY_AUTO_TIDY_ENABLED: &str = "auto_tidy_enabled";
+
+/// `settings.key` value: directory all backups land in (pre-delete
+/// snapshots today; future internalized periodic snapshots if/when
+/// they ship). Empty/unset → same directory as the DB file
+/// (historical behavior). Validated at write time as an existing
+/// writable directory — the backup writer assumes it stays valid
+/// until the next write.
+pub const KEY_BACKUP_PATH: &str = "backup_path";
 
 /// `settings.key` value: pull-engine pre-grab series-title similarity
 /// threshold (Bug 3). Pull sweep reads this per-sweep, so tuning needs

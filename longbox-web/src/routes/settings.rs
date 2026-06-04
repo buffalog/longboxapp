@@ -54,6 +54,11 @@ struct SettingsResponse {
     /// substrings the pull pre-grab filter drops. Empty string when
     /// the row is absent.
     pull_exclusion_keywords: String,
+    /// Runtime-tunable: host-side library path prefix used to render
+    /// `file://` URLs for the "Show in Finder" affordance. Empty
+    /// when unset; consumers fall back to the container path
+    /// (informational but not openable from a browser).
+    host_library_path: String,
 }
 
 async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>, ApiError> {
@@ -81,6 +86,12 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         String::new(),
     )
     .await?;
+    let host_library_path: String = settings_repo::get_or_default(
+        &state.db,
+        settings_repo::KEY_HOST_LIBRARY_PATH,
+        String::new(),
+    )
+    .await?;
 
     Ok(Json(SettingsResponse {
         library_root_path: state.config.library_root_path.clone(),
@@ -95,6 +106,7 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         cv_enrichment_title_threshold_year_known,
         cv_enrichment_title_threshold_year_unknown,
         pull_exclusion_keywords,
+        host_library_path,
     }))
 }
 
@@ -131,6 +143,14 @@ async fn update(
             parse_threshold(&key, &body.value)?
         }
         settings_repo::KEY_PULL_EXCLUSION_KEYWORDS => body.value.clone(),
+        // host_library_path: stored as-is. The validator is
+        // deliberately a no-op — the container can't introspect the
+        // host filesystem, so we can't check "does this directory
+        // exist" or "is it writable" the way we do for in-container
+        // paths. Trim leading/trailing whitespace because a stray
+        // newline at copy-paste time would silently break the prefix
+        // substitution.
+        settings_repo::KEY_HOST_LIBRARY_PATH => body.value.trim().to_string(),
         _ => {
             return Err(ApiError::BadRequest {
                 message: format!(
@@ -138,7 +158,8 @@ async fn update(
                      match_confidence_threshold, \
                      cv_enrichment_title_threshold_year_known, \
                      cv_enrichment_title_threshold_year_unknown, \
-                     pull_exclusion_keywords."
+                     pull_exclusion_keywords, \
+                     host_library_path."
                 ),
             });
         }

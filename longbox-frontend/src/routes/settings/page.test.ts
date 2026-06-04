@@ -47,6 +47,7 @@ function settings(over: Partial<Settings> = {}): Settings {
     cv_enrichment_title_threshold_year_known: 0.85,
     cv_enrichment_title_threshold_year_unknown: 0.95,
     pull_exclusion_keywords: '',
+    host_library_path: '',
     ...over
   };
 }
@@ -128,6 +129,27 @@ describe('Settings page — Tunable settings', () => {
     expect(updateSetting).not.toHaveBeenCalled();
     const { toast } = await import('$lib/stores/toast.svelte');
     expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('0.0 and 1.0'));
+  });
+
+  it('host library path saves verbatim without client-side validation', async () => {
+    // The container can't introspect the host filesystem, so there's
+    // no client-side check beyond "what the user typed lands at the
+    // server." The backend trims whitespace and stores as-is.
+    vi.mocked(updateSetting).mockResolvedValue({
+      key: 'host_library_path',
+      value: '/Volumes/Comics'
+    });
+    render(Page, pageData());
+
+    const input = screen.getByLabelText('Host library path value');
+    await fireEvent.input(input, { target: { value: '/Volumes/Comics' } });
+    // 5th tunable → last Save button.
+    const saveButtons = screen.getAllByRole('button', { name: 'Save' });
+    await fireEvent.click(saveButtons[4]!);
+
+    await waitFor(() =>
+      expect(updateSetting).toHaveBeenCalledWith('host_library_path', '/Volumes/Comics')
+    );
   });
 
   it('keywords field saves the raw CSV without client-side validation', async () => {

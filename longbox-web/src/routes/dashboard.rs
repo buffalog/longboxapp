@@ -81,6 +81,14 @@ async fn activity(
     let recent_series = series_repo::list_recent_with_counts(&state.db, limit).await?;
 
     let limit_i64 = i64::from(limit);
+    // `_unsorted/` is the junk drawer the post-processor parks
+    // pending-intervention files in until the user resolves them.
+    // Surfacing those raw paths on the dashboard's "Recently
+    // completed issues" feed reads as catalog noise — they're
+    // matched issues but the path is provisional. Filter with
+    // byte-exact substr equality (10 chars including the trailing
+    // slash) rather than LIKE — LIKE's `_` wildcard would treat the
+    // leading underscore as "any one char" without an ESCAPE clause.
     let match_rows = sqlx::query_as!(
         RecentMatchRow,
         r#"SELECT
@@ -98,6 +106,7 @@ async fn activity(
            JOIN issues i ON f.issue_id = i.id
            JOIN series s ON i.series_id = s.id
            WHERE f.matched_at IS NOT NULL
+             AND substr(f.path_relative, 1, 10) != '_unsorted/'
            ORDER BY f.matched_at DESC, f.id DESC
            LIMIT ?"#,
         limit_i64

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { goto, invalidateAll } from '$app/navigation';
-  import { Edit3, RefreshCw, Search, Trash2 } from 'lucide-svelte';
+  import { Edit3, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { setSeriesCvId } from '$lib/api/enrichment';
   import { searchSeriesNow } from '$lib/api/pull';
-  import { deleteSeries, refreshSeries } from '$lib/api/series';
+  import { deleteSeries, getSeriesFolderPath, refreshSeries } from '$lib/api/series';
   import { isSolicited } from '$lib/solicitation';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -107,6 +107,44 @@
   /// nothing on disk to remove — and the backend's path safety guards
   /// still cleanly handle a stray folder if one happens to exist
   /// (folder absent → warn + 200; we don't surface that here).
+  /// Open the series folder in the host OS's file browser (Finder on
+  /// macOS, Explorer on Windows). The backend computes the host path
+  /// via the `host_library_path` setting prefix substitution; the
+  /// `file://` URL is whatever the host OS will resolve.
+  ///
+  /// Two real constraints on this affordance:
+  ///   1) Without `host_library_path` configured the backend returns
+  ///      the container path, which `file://` can't open from the
+  ///      host (it points inside Docker). We surface that as a toast
+  ///      with a copyable path rather than a broken link.
+  ///   2) Even with the host path configured, some browsers (Chrome
+  ///      notably) block `file://` from an `http://` origin entirely.
+  ///      Safari prompts the user once; Firefox warns. The toast
+  ///      fallback keeps the path one Cmd+V away from being useful.
+  async function handleShowInFinder(): Promise<void> {
+    try {
+      const { host_path, host_path_configured } = await getSeriesFolderPath(
+        data.series.id
+      );
+      if (!host_path_configured) {
+        await navigator.clipboard.writeText(host_path).catch(() => {});
+        toast.warning(
+          `host_library_path is not set. Copied container path to clipboard: ${host_path}`
+        );
+        return;
+      }
+      // `file://` URLs require absolute paths with proper encoding —
+      // spaces and parens in series titles need escaping or the OS
+      // either errors or opens the wrong directory.
+      const url = `file://${encodeURI(host_path)}`;
+      window.open(url, '_blank');
+    } catch (e) {
+      const message =
+        e instanceof ApiError ? e.message : 'Could not look up the folder path.';
+      toast.warning(message);
+    }
+  }
+
   async function handleDeleteClick(): Promise<void> {
     if (linkedFileCount === 0) {
       await runDelete(false);
@@ -211,6 +249,9 @@
     >
       <Edit3 class="size-3.5" aria-hidden="true" />
       {data.series.cv_id ? 'Change match' : 'Fix match'}
+    </Button>
+    <Button variant="secondary" size="sm" onclick={handleShowInFinder}>
+      <FolderOpen class="size-3.5" aria-hidden="true" /> Show in Finder
     </Button>
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
