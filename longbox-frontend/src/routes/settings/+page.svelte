@@ -40,6 +40,8 @@
   let enrichUnknownSaving = $state(false);
   let pullKeywordsDraft = $state(data.settings.pull_exclusion_keywords);
   let pullKeywordsSaving = $state(false);
+  let hostLibraryPathDraft = $state(data.settings.host_library_path);
+  let hostLibraryPathSaving = $state(false);
 
   /// Client-side threshold validation. Mirrors the backend's
   /// `parse_threshold`: must be a finite number in [0.0, 1.0].
@@ -179,8 +181,8 @@
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">Configuration</h2>
     <p class="mb-3 text-sm text-slate-600">
-      LongBox reads its settings from environment variables at startup. The values are not
-      editable from the UI in Phase A — restart the binary with different env vars to change them.
+      LongBox reads these settings from environment variables at startup. They're not editable
+      from the UI — restart the container with different env vars to change them.
     </p>
     <dl class="grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
       {#each rows as r (r.envVar)}
@@ -207,9 +209,9 @@
       <dd>
         {#if s.download_watch_path}
           <span class="font-mono text-slate-900">{s.download_watch_path}</span>
-          <span class="ml-2 text-xs text-emerald-700">(Phase B enabled)</span>
+          <span class="ml-2 text-xs text-emerald-700">(watching)</span>
         {:else}
-          <span class="text-slate-500">— (Phase B disabled)</span>
+          <span class="text-slate-500">— (not configured)</span>
         {/if}
         <span class="ml-2 text-xs text-slate-500">set via <code>DOWNLOAD_WATCH_PATH</code></span>
       </dd>
@@ -375,6 +377,47 @@
           </Button>
         </form>
       </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">Host library path</h3>
+        <p class="mb-2 text-xs text-slate-500">
+          Host-side path your library mounts to. Used by "Show in Finder" on series pages — the
+          container only sees <code class="font-mono">{s.library_root_path}</code>, so we
+          substitute that prefix with this value to build a <code class="font-mono">file://</code>
+          URL the host OS can open. Leave empty to disable Show-in-Finder (the button falls back
+          to a clipboard copy). Currently saved:
+          {#if s.host_library_path}
+            <code class="font-mono">{s.host_library_path}</code>
+          {:else}
+            <span class="text-slate-400">(empty — Show in Finder will copy the container path)</span>
+          {/if}.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'host_library_path',
+              hostLibraryPathDraft,
+              (b) => (hostLibraryPathSaving = b),
+              null,
+              'Host library path saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            bind:value={hostLibraryPathDraft}
+            disabled={hostLibraryPathSaving}
+            placeholder="e.g. /Volumes/Comics or /Users/you/Library/Comics"
+            class="flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Host library path value"
+          />
+          <Button type="submit" loading={hostLibraryPathSaving} disabled={hostLibraryPathSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
     </div>
   </section>
 
@@ -446,9 +489,9 @@
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">About</h2>
     <p class="text-sm text-slate-600">
-      LongBox is a self-hosted comic library catalog. Phase A is the foundation: tracks watched
-      series, matches files on disk against issues, surfaces what's owned and what's missing. No
-      downloading or file mutation.
+      LongBox is a self-hosted comic library catalog. It tracks watched series, matches files on
+      disk against issues, surfaces what's owned and what's missing, and integrates with newznab
+      indexers to fill the gaps.
     </p>
   </section>
 

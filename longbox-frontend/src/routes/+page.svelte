@@ -165,7 +165,7 @@
     <a
       href="/needs-attention"
       class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
-      title="Failed pulls and files Phase B couldn't process automatically"
+      title="Failed pulls and files the post-processor couldn't place automatically"
     >
       <div class="text-xs uppercase text-status-needs_review">Needs attention</div>
       <div class="text-2xl font-semibold">{pendingCount + pullFailureCount}</div>

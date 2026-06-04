@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n             f.id AS \"file_id!: i64\",\n             f.path_relative,\n             f.matched_at AS \"matched_at!: time::PrimitiveDateTime\",\n             i.id AS \"issue_id!: i64\",\n             i.number AS \"issue_number!\",\n             i.title AS \"issue_title?\",\n             i.cover_url AS \"issue_cover_url?\",\n             s.id AS \"series_id!: i64\",\n             s.title AS \"series_title!\",\n             s.start_year AS \"series_start_year?: i64\"\n           FROM files f\n           JOIN issues i ON f.issue_id = i.id\n           JOIN series s ON i.series_id = s.id\n           WHERE f.matched_at IS NOT NULL\n           ORDER BY f.matched_at DESC, f.id DESC\n           LIMIT ?",
+  "query": "SELECT\n             f.id AS \"file_id!: i64\",\n             f.path_relative,\n             f.matched_at AS \"matched_at!: time::PrimitiveDateTime\",\n             i.id AS \"issue_id!: i64\",\n             i.number AS \"issue_number!\",\n             i.title AS \"issue_title?\",\n             i.cover_url AS \"issue_cover_url?\",\n             s.id AS \"series_id!: i64\",\n             s.title AS \"series_title!\",\n             s.start_year AS \"series_start_year?: i64\"\n           FROM files f\n           JOIN issues i ON f.issue_id = i.id\n           JOIN series s ON i.series_id = s.id\n           WHERE f.matched_at IS NOT NULL\n             AND substr(f.path_relative, 1, 10) != '_unsorted/'\n           ORDER BY f.matched_at DESC, f.id DESC\n           LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "a15da9439a821b4c2be33064a914bc955a8963ab14341d821fa67904aa2e8b3f"
+  "hash": "7c328cf4f027d675e20d687523068d220e783bd5e732eee4061988988760ac80"
 }

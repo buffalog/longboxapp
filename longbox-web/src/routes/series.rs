@@ -5,8 +5,8 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
-    issue_repo, library_root_repo, series_repo, IssueRow, NewIssue, NewSeries, SeriesRow,
-    SeriesUpdate, SeriesWithCounts,
+    issue_repo, library_root_repo, series_repo, settings_repo, IssueRow, NewIssue, NewSeries,
+    SeriesRow, SeriesUpdate, SeriesWithCounts,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/series/:id", get(detail).delete(remove))
         .route("/series/:id/refresh", post(refresh))
         .route("/series/:id/cv-id", patch(set_cv_id))
+        .route("/series/:id/folder-path", get(folder_path))
 }
 
 // -------- shapes --------
@@ -430,6 +431,89 @@ async fn set_cv_id(
     // so `rematch_for_series` actually sees them.
     spawn_auto_rematch(&state, id, "set-cv-id");
     Ok(Json(updated))
+}
+
+#[derive(Debug, Serialize)]
+struct FolderPathResponse {
+    /// Path as the container sees it (e.g. `/library/Saga (2012)`).
+    /// Always present — derived from `series.title` + `start_year`
+    /// joined under the library root, same convention every other
+    /// folder-aware code path uses (`series_folder_path`,
+    /// delete_files, snapshot helpers).
+    container_path: String,
+    /// Host-side path with the `host_library_path` setting
+    /// substituted for the container's library_root prefix. Equal to
+    /// `container_path` when the setting is unset. The frontend uses
+    /// this to render a `file://` URL the host OS can resolve to a
+    /// Finder/Explorer window.
+    host_path: String,
+    /// Convenience flag for the frontend: true iff `host_library_path`
+    /// is configured, so the UI can render an active "Show in Finder"
+    /// link vs a copy-only display.
+    host_path_configured: bool,
+}
+
+/// `GET /api/series/:id/folder-path` — compute the disk location of
+/// the series folder, returning both the container path and the
+/// host-OS path (when a `host_library_path` setting is configured).
+/// The frontend's "Show in Finder" affordance uses `host_path` to
+/// open a `file://` URL; the container path is along for the ride so
+/// users without a configured host path still get something
+/// copy-pastable into Cmd+Shift+G.
+async fn folder_path(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<FolderPathResponse>, ApiError> {
+    let series = series_repo::find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        })?;
+    let root_row = library_root_repo::find_by_id(&state.db, state.library_root_id)
+        .await?
+        .ok_or_else(|| ApiError::Internal {
+            message: format!(
+                "library_root_id {} on AppState resolves to no row",
+                state.library_root_id
+            ),
+            source: anyhow::anyhow!("library root row missing"),
+        })?;
+
+    // Container-side path: the same `{title} ({year})/` (or bare
+    // `{title}/`) convention `series_folder_path` uses for delete +
+    // backup. Strip any trailing slash off the library root so the
+    // join doesn't double-slash.
+    let library_root_trimmed = root_row.path.trim_end_matches('/');
+    let folder_name = match series.start_year {
+        Some(year) => format!("{} ({})", series.title, year),
+        None => series.title.clone(),
+    };
+    let container_path = format!("{library_root_trimmed}/{folder_name}");
+
+    // Host-side path: substitute the container's library root prefix
+    // with the configured host path. Both sides get trimmed of
+    // trailing slashes so the substitution doesn't produce
+    // `/host//Saga (2012)`.
+    let host_library_path: String = settings_repo::get_or_default(
+        &state.db,
+        settings_repo::KEY_HOST_LIBRARY_PATH,
+        String::new(),
+    )
+    .await?;
+    let host_library_path_trimmed = host_library_path.trim().trim_end_matches('/');
+    let host_path_configured = !host_library_path_trimmed.is_empty();
+    let host_path = if host_path_configured {
+        format!("{host_library_path_trimmed}/{folder_name}")
+    } else {
+        container_path.clone()
+    };
+
+    Ok(Json(FolderPathResponse {
+        container_path,
+        host_path,
+        host_path_configured,
+    }))
 }
 
 async fn refresh(

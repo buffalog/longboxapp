@@ -31,6 +31,10 @@ export interface Settings {
   /** Runtime-tunable: comma-separated release-title substrings the
    *  pull pre-grab filter drops. Empty string when unset. */
   pull_exclusion_keywords: string;
+  /** Runtime-tunable: host-side library path prefix used to render
+   *  `file://` URLs for the Show-in-Finder affordance. Empty when
+   *  unset (the frontend then shows the container path copy-only). */
+  host_library_path: string;
 }
 
 /** A whitelisted runtime-tunable setting. The backend rejects any
@@ -40,7 +44,8 @@ export type EditableSettingKey =
   | 'match_confidence_threshold'
   | 'cv_enrichment_title_threshold_year_known'
   | 'cv_enrichment_title_threshold_year_unknown'
-  | 'pull_exclusion_keywords';
+  | 'pull_exclusion_keywords'
+  | 'host_library_path';
 
 export function getSettings(): Promise<Settings> {
   return apiFetch('/settings');

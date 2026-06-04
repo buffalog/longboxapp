@@ -104,7 +104,7 @@
 <header class="mb-4">
   <h1 class="text-2xl font-bold">Needs attention</h1>
   <p class="mt-1 text-sm text-slate-600">
-    Pulls the engine couldn't complete, and files Phase B couldn't process automatically.
+    Pulls the engine couldn't complete, and files the post-processor couldn't place automatically.
   </p>
 </header>
 
@@ -204,12 +204,12 @@
     {/if}
   </section>
 
-  <!-- ================= Manual intervention (Phase B) ================= -->
+  <!-- ================= Manual intervention ================= -->
   <section>
     <h2 class="mb-1 text-lg font-semibold">Manual intervention</h2>
     <p class="mb-2 text-xs text-slate-500">
-      Files Phase B couldn't process. Resolve each on disk (move, rename, delete the conflicting
-      target); processing re-triggers on the next filesystem event for that file.
+      Files the post-processor couldn't place. Resolve each on disk (move, rename, delete the
+      conflicting target); processing re-triggers on the next filesystem event for that file.
     </p>
     {#if pending.count === 0}
       <p class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">

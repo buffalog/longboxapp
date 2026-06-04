@@ -45,3 +45,18 @@ export function deleteSeries(
 export function refreshSeries(id: number): Promise<Series> {
   return apiFetch(`/series/${id}/refresh`, { method: 'POST' });
 }
+
+/** The container-side and host-side disk locations of a series'
+ *  folder. `host_path_configured` is true iff the `host_library_path`
+ *  setting is set — when false the UI surfaces the container path
+ *  copy-only (a `file://` URL pointing inside the container is
+ *  useless to the host OS). */
+export interface SeriesFolderPath {
+  container_path: string;
+  host_path: string;
+  host_path_configured: boolean;
+}
+
+export function getSeriesFolderPath(id: number): Promise<SeriesFolderPath> {
+  return apiFetch(`/series/${id}/folder-path`);
+}
