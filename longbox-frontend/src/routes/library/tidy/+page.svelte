@@ -15,9 +15,7 @@
   } from '$lib/api/enrichment';
   import {
     addFolders,
-    bulkDeletePhantoms,
     convertFolders,
-    deletePhantom,
     dismissFolders,
     keepPhantom,
     type DiscoveredFolder,
@@ -47,6 +45,17 @@
   // can be removed locally without a refetch — same pattern as
   // phantoms / untracked above.
   let enrichmentQueue = $state<EnrichmentQueueRow[]>([...data.enrichmentQueue]);
+
+  // Destructive-confirmation state. Every "Remove now" click sets a
+  // target (or opens the bulk modal); the modal is the only path to
+  // actually firing the delete. Per the spec, the confirm button
+  // routes through DELETE /api/series/:id?delete_files=true — the
+  // backend's per-call safety net handles a missing folder gracefully,
+  // so phantom rows that never had a folder on disk are fine.
+  let phantomDeleteTarget = $state<PhantomSeries | null>(null);
+  let phantomDeleting = $state(false);
+  let bulkPhantomDeleteOpen = $state(false);
+  let bulkPhantomDeleting = $state(false);
   // Per-row in-flight tracking so the row's CvSearchInput disables
   // (and the row's UI shows progress) without locking out the whole
   // queue while one PATCH is in flight. Keyed by series id.
@@ -141,31 +150,83 @@
     });
   }
 
-  function handleRemovePhantom(seriesId: number): Promise<void> {
-    return run(async () => {
-      await deletePhantom(seriesId);
-      phantoms = phantoms.filter((p) => p.id !== seriesId);
-      phantomSel.discard(seriesId);
-      toast.success('Series removed from the catalog.');
-    });
+  /// Open the per-row confirmation modal. The actual delete happens
+  /// only after the user confirms (see `confirmRemovePhantom`).
+  function requestRemovePhantom(p: PhantomSeries): void {
+    phantomDeleteTarget = p;
   }
 
-  function handleBulkRemovePhantoms(): Promise<void> {
+  /// Folder name the backend will compute and try to remove.
+  /// Mirrors `series_folder_path` in routes/series.rs exactly.
+  function folderNameFor(p: { title: string; start_year: number | null }): string {
+    return p.start_year ? `${p.title} (${p.start_year})` : p.title;
+  }
+
+  async function confirmRemovePhantom(): Promise<void> {
+    if (!phantomDeleteTarget) return;
+    const target = phantomDeleteTarget;
+    phantomDeleting = true;
+    error = null;
+    try {
+      // delete_files=true so an orphan folder (a phantom's bytes-on-
+      // disk are by definition not catalog-linked, but the folder may
+      // still exist) is cleaned up in the same call. Backend's
+      // folder-absent branch makes this safe when no folder exists.
+      await deleteSeries(target.id, { deleteFiles: true });
+      phantoms = phantoms.filter((p) => p.id !== target.id);
+      phantomSel.discard(target.id);
+      toast.success('Series removed from the catalog.');
+      phantomDeleteTarget = null;
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      phantomDeleting = false;
+    }
+  }
+
+  /// Open the bulk-confirmation modal. The shared `phantomSel`
+  /// selection is the source of truth; the modal renders count +
+  /// list-preview from it.
+  function requestBulkRemovePhantoms(): void {
+    if (phantomSel.selected.size === 0) return;
+    bulkPhantomDeleteOpen = true;
+  }
+
+  /// Each selected phantom is deleted via the per-series endpoint with
+  /// `delete_files=true` — the spec's single canonical delete path —
+  /// rather than the historical `/reconcile/phantoms/bulk` endpoint
+  /// (DB-only, doesn't touch disk). Fanning out via Promise.all keeps
+  /// the wall-clock close to one round-trip; the backend's per-call
+  /// owned-files guard still 409s if files reappear between list and
+  /// delete.
+  async function confirmBulkRemovePhantoms(): Promise<void> {
     const ids = [...phantomSel.selected];
-    if (ids.length === 0) return Promise.resolve();
-    return run(async () => {
-      const result = await bulkDeletePhantoms(ids);
-      const deleted = new Set(result.deleted);
-      phantoms = phantoms.filter((p) => !deleted.has(p.id));
-      phantomSel.clear();
-      if (result.skipped.length > 0) {
-        toast.warning(
-          `Removed ${result.deleted.length}; skipped ${result.skipped.length} (files reappeared).`
-        );
-      } else {
-        toast.success(`Removed ${result.deleted.length} series from the catalog.`);
-      }
-    });
+    if (ids.length === 0) {
+      bulkPhantomDeleteOpen = false;
+      return;
+    }
+    bulkPhantomDeleting = true;
+    error = null;
+    const results = await Promise.allSettled(
+      ids.map((id) => deleteSeries(id, { deleteFiles: true }).then(() => id))
+    );
+    const succeeded = new Set<number>();
+    let failed = 0;
+    for (const r of results) {
+      if (r.status === 'fulfilled') succeeded.add(r.value);
+      else failed += 1;
+    }
+    phantoms = phantoms.filter((p) => !succeeded.has(p.id));
+    phantomSel.clear();
+    if (failed > 0) {
+      toast.warning(
+        `Removed ${succeeded.size}; ${failed} failed (files reappeared or path guard tripped).`
+      );
+    } else {
+      toast.success(`Removed ${succeeded.size} series from the catalog.`);
+    }
+    bulkPhantomDeleting = false;
+    bulkPhantomDeleteOpen = false;
   }
 
   // --- folder mutations ----------------------------------------------
@@ -448,7 +509,7 @@
                 <Button
                   variant="danger"
                   size="sm"
-                  onclick={() => handleRemovePhantom(p.id)}
+                  onclick={() => requestRemovePhantom(p)}
                   disabled={busy}
                 >
                   Remove now
@@ -496,7 +557,7 @@
                 <Button
                   variant="danger"
                   size="sm"
-                  onclick={() => handleRemovePhantom(p.id)}
+                  onclick={() => requestRemovePhantom(p)}
                   disabled={busy}
                 >
                   Remove from catalog
@@ -522,7 +583,7 @@
               <Button
                 variant="danger"
                 size="sm"
-                onclick={handleBulkRemovePhantoms}
+                onclick={requestBulkRemovePhantoms}
                 disabled={busy || phantomSel.size === 0}
               >
                 Remove selected
@@ -554,7 +615,7 @@
                 <Button
                   variant="ghost"
                   size="sm"
-                  onclick={() => handleRemovePhantom(p.id)}
+                  onclick={() => requestRemovePhantom(p)}
                   disabled={busy}
                 >
                   Remove
@@ -591,7 +652,7 @@
                 <Button
                   variant="ghost"
                   size="sm"
-                  onclick={() => handleRemovePhantom(p.id)}
+                  onclick={() => requestRemovePhantom(p)}
                   disabled={busy}
                 >
                   Remove
@@ -819,3 +880,98 @@
     {/if}
   {/if}
 </Modal>
+
+<!-- Per-row phantom delete confirmation. Open only when a target is
+     set; never auto-opens. Adapts copy based on last_matched_count so
+     a transition phantom (recently lost files) reads differently from
+     a never-had-files steady-state row. -->
+{#if phantomDeleteTarget}
+  {@const target = phantomDeleteTarget}
+  {@const folder = folderNameFor(target)}
+  <Modal open={true} title="Delete series?" onClose={() => (phantomDeleteTarget = null)}>
+    <p class="text-sm">
+      Remove
+      <strong>{target.title}{target.start_year ? ` (${target.start_year})` : ''}</strong>
+      from the catalog.
+      {#if target.last_matched_count > 0}
+        It had <strong>{target.last_matched_count} file{target.last_matched_count === 1 ? '' : 's'}</strong>
+        linked at the last scan — those files are no longer on disk.
+      {:else}
+        It currently has no files linked.
+      {/if}
+    </p>
+    <p class="mt-2 text-sm">
+      Folder to be removed (if it still exists):
+      <code class="ml-1 break-all rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">
+        {folder}/
+      </code>
+    </p>
+    <p class="mt-2 text-xs text-slate-500">
+      If the folder is absent (already cleaned up, never existed), the catalog entry is removed
+      and a warning is logged server-side. <strong>This cannot be undone.</strong>
+    </p>
+    <div class="mt-4 flex justify-end gap-2">
+      <Button
+        variant="ghost"
+        onclick={() => (phantomDeleteTarget = null)}
+        disabled={phantomDeleting}
+      >
+        Cancel
+      </Button>
+      <Button variant="danger" onclick={confirmRemovePhantom} loading={phantomDeleting}>
+        Delete series
+      </Button>
+    </div>
+  </Modal>
+{/if}
+
+<!-- Bulk phantom delete confirmation. Renders the count + a short
+     preview list so the user can sanity-check before firing N
+     destructive calls. The preview caps at 8 to keep the modal small;
+     the count is the load-bearing detail anyway. -->
+{#if bulkPhantomDeleteOpen}
+  {@const ids = [...phantomSel.selected]}
+  {@const selectedPhantoms = phantoms.filter((p) => phantomSel.selected.has(p.id))}
+  {@const previewCount = 8}
+  <Modal
+    open={true}
+    title={`Delete ${ids.length} series?`}
+    onClose={() => (bulkPhantomDeleteOpen = false)}
+  >
+    <p class="text-sm">
+      Remove <strong>{ids.length}</strong> series from the catalog. For each one, the on-disk
+      folder will also be removed if it still exists.
+      <strong>This cannot be undone.</strong>
+    </p>
+    {#if selectedPhantoms.length > 0}
+      <ul class="mt-3 max-h-48 overflow-y-auto rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+        {#each selectedPhantoms.slice(0, previewCount) as p (p.id)}
+          <li class="py-0.5 font-mono">
+            {folderNameFor(p)}/
+          </li>
+        {/each}
+        {#if selectedPhantoms.length > previewCount}
+          <li class="py-0.5 text-slate-500">
+            … and {selectedPhantoms.length - previewCount} more
+          </li>
+        {/if}
+      </ul>
+    {/if}
+    <div class="mt-4 flex justify-end gap-2">
+      <Button
+        variant="ghost"
+        onclick={() => (bulkPhantomDeleteOpen = false)}
+        disabled={bulkPhantomDeleting}
+      >
+        Cancel
+      </Button>
+      <Button
+        variant="danger"
+        onclick={confirmBulkRemovePhantoms}
+        loading={bulkPhantomDeleting}
+      >
+        Delete {ids.length} series
+      </Button>
+    </div>
+  </Modal>
+{/if}

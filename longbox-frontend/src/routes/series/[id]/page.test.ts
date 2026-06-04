@@ -127,12 +127,56 @@ describe('series detail page', () => {
 
   it('renders the bare title (no parentheses) when start_year is null', async () => {
     vi.mocked(deleteSeries).mockResolvedValue({ deleted: 1 });
-    render(Page, pageData(seriesDetail({ title: 'Yearless', start_year: null })));
+    // The skip-modal-when-zero-files rule means the modal only opens
+    // when there's at least one linked file — give the series one
+    // owned file so the modal renders and we can assert its copy.
+    render(
+      Page,
+      pageData(
+        seriesDetail({
+          title: 'Yearless',
+          start_year: null,
+          issues: [
+            {
+              id: 1,
+              number: '1',
+              title: null,
+              cover_date: null,
+              cover_url: null,
+              cv_issue_id: null,
+              metron_issue_id: null,
+              created_at: '2026-05-20 00:00:00',
+              updated_at: '2026-05-20 00:00:00',
+              file: {
+                id: 1,
+                path_relative: 'Yearless/1.cbz',
+                status: 'owned',
+                is_present: true
+              }
+            }
+          ]
+        })
+      )
+    );
 
     await fireEvent.click(screen.getByRole('button', { name: /Delete series/ }));
     // Bare title, no `(YYYY)` suffix.
     expect(screen.getByText('Yearless/')).toBeInTheDocument();
     expect(screen.queryByText(/\(\d{4}\)\//)).not.toBeInTheDocument();
+  });
+
+  it('skips the modal and calls deleteSeries without deleteFiles when no linked files', async () => {
+    // Per the spec's "default behavior should only apply if zero files
+    // on disk" rule: the click is a straight DB-only delete.
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 1 });
+    render(Page, pageData(seriesDetail({ title: 'Empty', start_year: 2020, issues: [] })));
+
+    await fireEvent.click(screen.getByRole('button', { name: /Delete series/ }));
+
+    await waitFor(() => expect(deleteSeries).toHaveBeenCalledWith(1, {}));
+    // No modal copy.
+    expect(screen.queryByText(/Folder to be removed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/permanently delete the series folder/)).not.toBeInTheDocument();
   });
 
   it('hides Refresh and shows the shallow empty-issues hint for a cv_id-NULL series', () => {

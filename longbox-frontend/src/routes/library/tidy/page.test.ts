@@ -160,18 +160,40 @@ describe('library tidy page', () => {
     expect(screen.getByText('Your library is tidy')).toBeInTheDocument();
   });
 
-  it('removes a phantom when Remove is clicked', async () => {
-    vi.mocked(deletePhantom).mockResolvedValue({ deleted: 2 });
+  it('removes a phantom via the modal, calling deleteSeries with deleteFiles=true', async () => {
+    // Remove now opens a confirmation modal first. Clicking "Delete
+    // series" inside the modal is what fires the network call, and
+    // every phantom delete now routes through /api/series/:id with
+    // delete_files=true so the disk-side folder is also cleaned up
+    // (backend safely no-ops when the folder is absent).
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 2 });
     render(TidyPage, pageData({ phantoms: [phantom({ id: 2, title: 'Steady Series' })] }));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    // Modal copy: shows the folder, warns about disk removal.
+    expect(screen.getByText(/Folder to be removed/)).toBeInTheDocument();
+    // The Delete confirm button is the one inside the modal.
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete series' }));
 
-    await waitFor(() => expect(deletePhantom).toHaveBeenCalledWith(2));
+    await waitFor(() => expect(deleteSeries).toHaveBeenCalledWith(2, { deleteFiles: true }));
     await waitFor(() => expect(screen.queryByText('Steady Series')).not.toBeInTheDocument());
   });
 
-  it('bulk-removes selected phantoms', async () => {
-    vi.mocked(bulkDeletePhantoms).mockResolvedValue({ deleted: [2, 3], skipped: [] });
+  it('Cancel on the phantom modal aborts without a network call', async () => {
+    render(TidyPage, pageData({ phantoms: [phantom({ id: 2, title: 'Steady Series' })] }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(deleteSeries).not.toHaveBeenCalled();
+    expect(screen.getByText('Steady Series')).toBeInTheDocument();
+  });
+
+  it('bulk-removes selected phantoms via per-series delete with deleteFiles=true', async () => {
+    // Bulk now confirms via modal, then loops on the per-series
+    // endpoint (Promise.allSettled). bulkDeletePhantoms is no longer
+    // called.
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 0 });
     render(
       TidyPage,
       pageData({
@@ -184,12 +206,18 @@ describe('library tidy page', () => {
 
     await fireEvent.click(screen.getByLabelText('Select all empty series'));
     await fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }));
+    // Bulk modal: confirm.
+    await fireEvent.click(screen.getByRole('button', { name: /Delete 2 series/ }));
 
-    await waitFor(() => expect(bulkDeletePhantoms).toHaveBeenCalledWith([2, 3]));
+    await waitFor(() => {
+      expect(deleteSeries).toHaveBeenCalledWith(2, { deleteFiles: true });
+      expect(deleteSeries).toHaveBeenCalledWith(3, { deleteFiles: true });
+    });
     await waitFor(() => {
       expect(screen.queryByText('Steady Two')).not.toBeInTheDocument();
       expect(screen.queryByText('Steady Three')).not.toBeInTheDocument();
     });
+    expect(bulkDeletePhantoms).not.toHaveBeenCalled();
   });
 
   it('keeps a transition phantom, moving it to Empty series', async () => {
@@ -403,18 +431,25 @@ describe('library tidy page', () => {
   });
 
   it('surfaces a delete failure in the page error banner', async () => {
-    vi.mocked(deletePhantom).mockRejectedValue(
+    // The same 409 the backend's owned-files guard returns when files
+    // reappeared between the phantom list and the delete call. The
+    // modal stays around (with the cancel still available) so the
+    // user can dismiss it after reading the banner.
+    vi.mocked(deleteSeries).mockRejectedValue(
       new ApiError(409, 'conflict.series_has_owned_files', 'Files reappeared on disk')
     );
     render(TidyPage, pageData({ phantoms: [phantom({ id: 2, title: 'Stubborn' })] }));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete series' }));
 
     await waitFor(() =>
       expect(screen.getByText(/Files reappeared on disk/)).toBeInTheDocument()
     );
-    // The delete failed — the row is still present.
-    expect(screen.getByText('Stubborn')).toBeInTheDocument();
+    // The delete failed — the row is still present (along with the
+    // modal still showing the same title, so getAllByText is what
+    // captures the "row is still rendered" intent).
+    expect(screen.getAllByText('Stubborn').length).toBeGreaterThanOrEqual(1);
   });
 
   // -------- enrichment review queue ----------------------------------
@@ -674,11 +709,16 @@ describe('library tidy page', () => {
     expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Duplicate Title'));
   });
 
-  it('keeps skipped rows and warns after a partial bulk delete', async () => {
-    vi.mocked(bulkDeletePhantoms).mockResolvedValue({
-      deleted: [2],
-      skipped: [{ series_id: 3, reason: 'owned files reappeared' }]
-    });
+  it('keeps failed rows and warns after a partial bulk delete', async () => {
+    // The per-series fanout: id=2 succeeds, id=3 rejects (owned files
+    // came back between phantom-list and the delete call). The
+    // succeeded row falls out of the list and the warning toast names
+    // the failure count. The bulk endpoint is no longer called.
+    vi.mocked(deleteSeries).mockImplementation((id: number) =>
+      id === 3
+        ? Promise.reject(new ApiError(409, 'conflict.series_has_owned_files', 'files came back'))
+        : Promise.resolve({ deleted: id })
+    );
     render(
       TidyPage,
       pageData({
@@ -688,10 +728,12 @@ describe('library tidy page', () => {
 
     await fireEvent.click(screen.getByLabelText('Select all empty series'));
     await fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }));
+    await fireEvent.click(screen.getByRole('button', { name: /Delete 2 series/ }));
 
     await waitFor(() => expect(screen.queryByText('Gone Two')).not.toBeInTheDocument());
-    // The skipped row stays; the warning toast names the skipped count.
+    // The failed row stays; the warning toast names the failure count.
     expect(screen.getByText('Kept Three')).toBeInTheDocument();
-    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('skipped 1'));
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('1 failed'));
+    expect(bulkDeletePhantoms).not.toHaveBeenCalled();
   });
 });

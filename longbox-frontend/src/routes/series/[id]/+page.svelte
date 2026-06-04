@@ -95,17 +95,36 @@
     }
   }
 
-  async function handleDelete(): Promise<void> {
+  /// Open the destructive-confirm modal when the series has at least
+  /// one linked file; otherwise the click goes straight to a DB-only
+  /// delete (the "default behavior when zero files on disk" rule from
+  /// the spec). We never call `deleteFiles=true` here because there's
+  /// nothing on disk to remove — and the backend's path safety guards
+  /// still cleanly handle a stray folder if one happens to exist
+  /// (folder absent → warn + 200; we don't surface that here).
+  async function handleDeleteClick(): Promise<void> {
+    if (linkedFileCount === 0) {
+      await runDelete(false);
+    } else {
+      confirmOpen = true;
+    }
+  }
+
+  async function runDelete(withFiles: boolean): Promise<void> {
     deleting = true;
     error = null;
     try {
-      await deleteSeries(data.series.id, { deleteFiles: true });
+      await deleteSeries(data.series.id, withFiles ? { deleteFiles: true } : {});
       await goto('/series');
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
       deleting = false;
       confirmOpen = false;
     }
+  }
+
+  async function handleConfirmDelete(): Promise<void> {
+    await runDelete(true);
   }
 </script>
 
@@ -162,7 +181,13 @@
 </section>
 
 <section class="mt-8 flex justify-end">
-  <Button variant="danger" size="sm" onclick={() => (confirmOpen = true)}>
+  <Button
+    variant="danger"
+    size="sm"
+    loading={deleting && !confirmOpen}
+    disabled={deleting}
+    onclick={handleDeleteClick}
+  >
     <Trash2 class="size-3.5" aria-hidden="true" /> Delete series
   </Button>
 </section>
@@ -185,7 +210,7 @@
   </p>
   <div class="mt-4 flex justify-end gap-2">
     <Button variant="ghost" onclick={() => (confirmOpen = false)} disabled={deleting}>Cancel</Button>
-    <Button variant="danger" onclick={handleDelete} loading={deleting}>
+    <Button variant="danger" onclick={handleConfirmDelete} loading={deleting}>
       Delete series and files
     </Button>
   </div>
