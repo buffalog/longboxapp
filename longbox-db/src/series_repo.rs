@@ -553,9 +553,13 @@ pub struct PhantomSeries {
     pub auto_tidy_due_at: Option<PrimitiveDateTime>,
 }
 
-/// Every series with no owned, present file — the phantom set. The
-/// reconciliation route partitions the result on `last_matched_count`
-/// for its transition vs steady-state surfaces.
+/// Every series with no present file in any catalog-linked status — the
+/// phantom set. The predicate is "no files on disk associated with this
+/// series", not "no owned files": a series with only `needs_review` or
+/// `unmatched` files still has bytes on disk and is not phantom. Ignored
+/// files don't count (user-suppressed; treated as absent for tidy
+/// purposes). The reconciliation route partitions the result on
+/// `last_matched_count` for its transition vs steady-state surfaces.
 pub async fn list_phantoms<'e, E>(executor: E) -> Result<Vec<PhantomSeries>>
 where
     E: SqliteExecutor<'e>,
@@ -574,7 +578,7 @@ where
                SELECT 1 FROM files f
                JOIN issues i ON f.issue_id = i.id
                WHERE i.series_id = s.id
-                 AND f.status = 'owned'
+                 AND f.status IN ('owned', 'needs_review', 'unmatched')
                  AND f.is_present = 1
            )
            ORDER BY s.sort_title COLLATE NOCASE"#
@@ -611,15 +615,19 @@ where
 ///
 /// Series whose current count is zero are deliberately **skipped** (the
 /// `WHERE` clause): leaving `last_matched_count` at its last non-zero
-/// value is exactly what marks a series that just lost all its files as
-/// a *transition* phantom rather than steady-state. A series that has
-/// been zero-owned all along stays at 0.
+/// value is exactly what marks a series that just lost all its
+/// previously-owned files as a *transition* phantom rather than
+/// steady-state. A series that has been zero-owned all along stays at 0.
 ///
-/// The owned-AND-present predicate is identical to the one
-/// [`list_phantoms`] uses for an "owned file", so `last_matched_count`
-/// and the phantom check measure the same thing — the route's
-/// transition partition (zero owned now AND `last_matched_count > 0`)
-/// is a coherent comparison.
+/// This counts owned-AND-present specifically — narrower than the
+/// phantom-set predicate in [`list_phantoms`], which considers any
+/// present file (owned/needs_review/unmatched) as keeping a series
+/// alive. The transition signal is "did this series ever *match* and
+/// then lose its files", not "are there any bytes on disk" — so owned
+/// is the right reference here. A series that is `list_phantoms`-phantom
+/// (no files on disk) with `last_matched_count > 0` is the transition
+/// phantom the route surfaces; a `list_phantoms`-phantom with
+/// `last_matched_count = 0` is steady-state.
 pub async fn refresh_last_matched_counts<'e, E>(executor: E) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
@@ -644,11 +652,14 @@ where
 }
 
 /// Scan-end tick of every series' `consecutive_empty_scans` (A.9 Step
-/// 6b). A series with no owned, present file has its counter
-/// incremented; a series that owns at least one such file is reset to 0
-/// **and** has any `auto_tidy_due_at` mark cleared — the auto-recovery
-/// path for a folder that came back on disk. Run once per full scan,
-/// after the mark-missing pass and `refresh_last_matched_counts`.
+/// 6b). A series with no present file (in any catalog-linked status) has
+/// its counter incremented; a series with at least one present file
+/// — owned, needs_review, or unmatched — is reset to 0 **and** has any
+/// `auto_tidy_due_at` mark cleared. The auto-recovery path includes
+/// needs_review/unmatched so a series sitting at sub-threshold
+/// confidence (real files on disk, just not promoted) is never tidied
+/// away. Run once per full scan, after the mark-missing pass and
+/// `refresh_last_matched_counts`.
 pub async fn tick_empty_scan_counters<'e, E>(executor: E) -> Result<()>
 where
     E: SqliteExecutor<'e>,
@@ -658,12 +669,14 @@ where
                consecutive_empty_scans = CASE WHEN EXISTS (
                    SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
                    WHERE i.series_id = series.id
-                     AND f.status = 'owned' AND f.is_present = 1
+                     AND f.status IN ('owned', 'needs_review', 'unmatched')
+                     AND f.is_present = 1
                ) THEN 0 ELSE consecutive_empty_scans + 1 END,
                auto_tidy_due_at = CASE WHEN EXISTS (
                    SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
                    WHERE i.series_id = series.id
-                     AND f.status = 'owned' AND f.is_present = 1
+                     AND f.status IN ('owned', 'needs_review', 'unmatched')
+                     AND f.is_present = 1
                ) THEN NULL ELSE auto_tidy_due_at END"#
     )
     .execute(executor)
@@ -675,7 +688,10 @@ where
 /// `threshold` consecutive scans, not already marked, and not awaiting a
 /// first download (no `pull_list` entry, no `pull_attempts` row — the
 /// pull list is an explicit "I want this" signal auto-tidy must never
-/// override). `due_at` is the recovery deadline written to the
+/// override). The emptiness check is "no present file in owned /
+/// needs_review / unmatched" — a series with files on disk in any
+/// catalog-linked status is never tidied, even if none are matched
+/// above threshold. `due_at` is the recovery deadline written to the
 /// newly-marked rows. Returns the count of series newly marked. The
 /// caller gates this call on the `auto_tidy_enabled` setting.
 pub async fn mark_for_auto_tidy<'e, E>(
@@ -693,7 +709,8 @@ where
              AND NOT EXISTS (
                  SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
                  WHERE i.series_id = series.id
-                   AND f.status = 'owned' AND f.is_present = 1
+                   AND f.status IN ('owned', 'needs_review', 'unmatched')
+                   AND f.is_present = 1
              )
              AND NOT EXISTS (
                  SELECT 1 FROM pull_list pl WHERE pl.series_id = series.id

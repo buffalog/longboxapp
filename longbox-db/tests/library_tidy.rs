@@ -209,6 +209,48 @@ async fn list_phantoms_excludes_series_with_an_owned_file() {
     );
 }
 
+#[tokio::test]
+async fn list_phantoms_excludes_a_series_with_only_needs_review_files() {
+    // Bug fix: auto-tidy was scheduling series for removal when every
+    // file sat at sub-threshold confidence. needs_review files are
+    // on-disk bytes — the series is not phantom.
+    let pool = fresh_pool().await;
+    let with_review = insert_series(&pool, "Below Threshold").await;
+    give_file_with_status(&pool, with_review, "needs_review", 0.83).await;
+
+    let ids: Vec<i64> = series_repo::list_phantoms(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    assert!(
+        !ids.contains(&with_review),
+        "a series whose only files are needs_review is not a phantom"
+    );
+}
+
+#[tokio::test]
+async fn list_phantoms_includes_a_series_whose_only_file_is_missing() {
+    // A `needs_review` file that has gone missing from disk
+    // (`is_present = 0`) does NOT keep its series alive — the new
+    // predicate is about bytes on disk, not catalog state.
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Gone").await;
+    give_file_with_status_and_presence(&pool, sid, "needs_review", 0.83, false).await;
+
+    let ids: Vec<i64> = series_repo::list_phantoms(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    assert!(
+        ids.contains(&sid),
+        "a series whose only file is marked missing is still a phantom"
+    );
+}
+
 // -------- series_repo auto-tidy (A.9 Step 6b) --------
 
 /// Attach one owned, present file to `series_id` (via a fresh library
@@ -262,6 +304,68 @@ async fn give_owned_file(pool: &SqlitePool, series_id: i64) {
     .unwrap();
 }
 
+/// Attach one file with the given status + confidence + presence to
+/// `series_id`. Powers the needs_review / unmatched / missing variants
+/// of the "is this series a phantom" tests.
+async fn give_file_with_status_and_presence(
+    pool: &SqlitePool,
+    series_id: i64,
+    status: &str,
+    confidence: f64,
+    is_present: bool,
+) {
+    let library_root_id = library_root_repo::insert(
+        pool,
+        NewLibraryRoot {
+            path: format!("/comics/{series_id}-{status}"),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let issue_id = issue_repo::insert(
+        pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    file_repo::insert(
+        pool,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id,
+            path_relative: format!("s{series_id}/1.cbz"),
+            size_bytes: 1,
+            mtime: fixed_ts(),
+            last_scanned_at: fixed_ts(),
+            match_method: "filename".into(),
+            match_confidence: confidence,
+            status: status.into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present,
+            last_seen_at: fixed_ts(),
+            matched_at: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+async fn give_file_with_status(pool: &SqlitePool, series_id: i64, status: &str, confidence: f64) {
+    give_file_with_status_and_presence(pool, series_id, status, confidence, true).await;
+}
+
 async fn empty_scan_counter(pool: &SqlitePool, series_id: i64) -> i64 {
     sqlx::query_scalar("SELECT consecutive_empty_scans FROM series WHERE id = ?")
         .bind(series_id)
@@ -308,6 +412,60 @@ async fn auto_tidy_marks_a_series_empty_past_the_threshold() {
         0,
         "an already-marked series is not re-marked"
     );
+}
+
+#[tokio::test]
+async fn auto_tidy_never_marks_a_series_with_only_needs_review_files() {
+    // Bug fix: the sweep was scheduling series for removal because
+    // every file sat below the match-confidence threshold. The new
+    // emptiness predicate counts needs_review / unmatched as keeping
+    // the series alive — tick must not fire, mark must not fire.
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Sub-threshold").await;
+    give_file_with_status(&pool, sid, "needs_review", 0.83).await;
+    let due = fixed_ts();
+
+    // Tick five times — well past the threshold of 3. The counter must
+    // stay at 0 because a present file in any catalog-linked status
+    // keeps the series alive.
+    for _ in 0..5 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    assert_eq!(
+        empty_scan_counter(&pool, sid).await,
+        0,
+        "a series with needs_review files must not tick its empty counter"
+    );
+
+    // And the sweep must not mark it even if the counter were somehow
+    // elevated — the EXISTS guard in mark_for_auto_tidy catches it too.
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        0
+    );
+    assert_eq!(due_at(&pool, sid).await, None);
+}
+
+#[tokio::test]
+async fn auto_tidy_tick_clears_the_mark_when_needs_review_files_appear() {
+    // A series marked for tidy regains a needs_review file (e.g. user
+    // dropped CBZs back into the folder but they haven't matched
+    // anything yet). The next tick must clear the mark — the
+    // auto-recovery path includes any present file, not just owned.
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Came Back Sub-threshold").await;
+    let due = fixed_ts();
+
+    for _ in 0..3 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    assert_eq!(due_at(&pool, sid).await, Some(due));
+
+    give_file_with_status(&pool, sid, "needs_review", 0.50).await;
+    series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    assert_eq!(empty_scan_counter(&pool, sid).await, 0);
+    assert_eq!(due_at(&pool, sid).await, None);
 }
 
 #[tokio::test]
