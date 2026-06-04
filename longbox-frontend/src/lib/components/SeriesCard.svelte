@@ -20,7 +20,7 @@
   href="/series/{series.id}"
   class="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm transition hover:shadow"
 >
-  <div class="relative aspect-[2/3] bg-slate-100">
+  <div class="aspect-[2/3] bg-slate-100">
     {#if series.cover_url}
       <img
         src={series.cover_url}
@@ -33,16 +33,16 @@
         <BookOpen class="size-12" aria-hidden="true" />
       </div>
     {/if}
-    <span
-      class="absolute right-2 top-2 rounded-full px-2 py-0.5 text-xs font-medium {badgeClass}"
-    >
-      {series.owned_count}/{series.total_count}
-    </span>
   </div>
   <div class="flex flex-col gap-1 p-3">
     <h3 class="line-clamp-2 text-sm font-semibold leading-snug">{series.title}</h3>
-    <div class="text-xs text-slate-500">
-      {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
+    <div class="flex items-center justify-between gap-2 text-xs text-slate-500">
+      <span class="truncate">
+        {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
+      </span>
+      <span class="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium {badgeClass}">
+        {series.owned_count}/{series.total_count}
+      </span>
     </div>
   </div>
 </a>
