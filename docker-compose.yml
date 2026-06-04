@@ -9,7 +9,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - longbox-data:/data
+      - ${DB_PATH}:/data
       - ${LIBRARY_PATH}:/library
       # Phase B watch folder. Bind-mounted as writable (Step 6 will
       # move files out of it). Optional — when DOWNLOAD_WATCH_HOST is
@@ -40,5 +40,3 @@ services:
       retries: 3
       start_period: 10s
 
-volumes:
-  longbox-data:
