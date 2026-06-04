@@ -5506,3 +5506,120 @@ async fn needs_attention_retry_clears_an_issues_failed_attempts() {
     .await;
     assert_eq!(body.as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn needs_attention_dismiss_deletes_one_attempt_by_id() {
+    let app = build_test_app().await;
+    let (series, issue_a) = seed_series_and_issue(&app, "Saga", "1").await;
+    let (_, issue_b) = seed_series_and_issue(&app, "Chew", "1").await;
+    let a_id = pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_a, None))
+        .await
+        .unwrap()
+        .id;
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_b, Some("rel-x")))
+        .await
+        .unwrap();
+
+    // Surface row carries pa.id — the dismiss endpoint targets that.
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let surfaced_a_id = rows
+        .iter()
+        .find(|r| r["issue_id"].as_i64() == Some(issue_a))
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(surfaced_a_id, a_id);
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/needs-attention/pull-failures/{a_id}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Only the dismissed row is gone; the other failure remains.
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["issue_id"].as_i64(), Some(issue_b));
+}
+
+#[tokio::test]
+async fn needs_attention_dismiss_unknown_id_is_a_no_op() {
+    // A stale UI dismissing a row that was already cleared (retry,
+    // bulk-clear, a race with another tab) gets a clean 204 — the
+    // dismiss action is idempotent from the caller's perspective.
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            "/api/needs-attention/pull-failures/99999",
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn needs_attention_clear_all_deletes_every_failure_class_attempt() {
+    let app = build_test_app().await;
+    let (series, issue_a) = seed_series_and_issue(&app, "Saga", "1").await;
+    let (_, issue_b) = seed_series_and_issue(&app, "Chew", "1").await;
+    let (series_c, issue_c) = seed_series_and_issue(&app, "Bone", "1").await;
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_a, None))
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_b, Some("rel-x")))
+        .await
+        .unwrap();
+    // A non-failure attempt — preserves history of an in-flight pull
+    // that the bulk-clear must NOT touch.
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: series_c,
+            issue_id: issue_c,
+            indexer_id: None,
+            release_id: Some("rel-live".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("handle".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            "/api/needs-attention/pull-failures",
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Failures cleared.
+    let body = response_json(
+        app.request(empty_request("GET", "/api/needs-attention/pull-failures"))
+            .await,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+    // The live `submitted` attempt is still on file — bulk-clear is
+    // surgical to failure-class statuses.
+    let remaining = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pull_attempts")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1);
+}

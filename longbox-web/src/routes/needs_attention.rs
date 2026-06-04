@@ -7,8 +7,9 @@
 //! (`/api/postprocess/pending`) — the `/needs-attention` page reads
 //! both and renders them as two sections.
 
-use axum::extract::State;
-use axum::routing::{get, post};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use longbox_db::{pull_attempt_repo, FailedPull};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,14 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/needs-attention/pull-failures", get(pull_failures))
+        .route(
+            "/needs-attention/pull-failures",
+            delete(dismiss_all_pull_failures),
+        )
+        .route(
+            "/needs-attention/pull-failures/:attempt_id",
+            delete(dismiss_pull_failure),
+        )
         .route("/needs-attention/retry", post(retry))
 }
 
@@ -72,4 +81,27 @@ async fn retry(
     // is picked up by the next one.
     state.pull.request_sweep();
     Ok(Json(serde_json::json!({ "cleared": cleared })))
+}
+
+/// Dismiss a single pull-failure surface row by `pull_attempts.id`.
+/// Surgical — does not touch any other attempt for the same issue, so
+/// an older failure-class attempt may resurface on the next list. 204
+/// on both delete and no-op (stale UI dismissing an already-gone row).
+async fn dismiss_pull_failure(
+    State(state): State<AppState>,
+    Path(attempt_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    pull_attempt_repo::delete_by_id(&state.db, attempt_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Bulk-dismiss every failure-class `pull_attempts` row — the "Clear
+/// all" action. Mirrors `list_failed`'s status filter
+/// (`'failed'`, `'mismatched'`), so a `pending` / `submitted` / `grabbed`
+/// attempt history is preserved. 204 even if zero rows matched.
+async fn dismiss_all_pull_failures(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    pull_attempt_repo::delete_all_failed(&state.db).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
