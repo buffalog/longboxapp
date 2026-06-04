@@ -51,24 +51,30 @@
     rows: typeof data.missing.missing;
   }
 
+  // Map-based grouper keyed by series.id — robust to any sort order in
+  // the API response. The previous consecutive-merge loop produced
+  // duplicate series_id groups when the API interleaved rows from two
+  // distinct series that shared a title (e.g. multiple "The Department
+  // of Truth" volumes), which crashed `{#each ... (g.series_id)}` with
+  // a Svelte each_key_duplicate error.
   const groups = $derived.by<MissingGroup[]>(() => {
     if (data.sort !== 'series') return [];
-    const out: MissingGroup[] = [];
+    const map = new Map<number, MissingGroup>();
     for (const m of data.missing.missing) {
-      const last = out[out.length - 1];
-      if (last && last.series_id === m.series.id) {
-        last.rows.push(m);
-      } else {
-        out.push({
+      let g = map.get(m.series.id);
+      if (!g) {
+        g = {
           series_id: m.series.id,
           series_title: m.series.title,
           series_sort_title: m.series.sort_title,
           start_year: m.series.start_year,
-          rows: [m]
-        });
+          rows: []
+        };
+        map.set(m.series.id, g);
       }
+      g.rows.push(m);
     }
-    return out;
+    return Array.from(map.values());
   });
 </script>
 
