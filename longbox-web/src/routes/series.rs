@@ -274,6 +274,27 @@ struct SetCvIdBody {
 /// in the first place). It uses [`series_repo::force_set_cv_id`]
 /// rather than `set_cv_id` so the call works whether or not the
 /// row already has one.
+///
+/// # Transactional contract
+///
+/// 1. ComicVine fetches (`fetch_volume`, `fetch_issues`) happen
+///    BEFORE `tx.begin()`. If CV is down, rate-limited, or returns
+///    an error mid-pagination, `?` short-circuits and no DB row has
+///    been touched. The user retries.
+/// 2. Every catalog mutation (cv_id update, series row update, old
+///    issue delete, new issue bulk insert, file unlink-for-rematch)
+///    runs inside ONE `tx`. Any `await?` inside the body drops the
+///    tx without commit → automatic rollback. The series never lands
+///    in a half-wiped state.
+/// 3. `spawn_auto_rematch` runs POST-commit (fire-and-forget). It
+///    only sees the committed catalog state. The file-unlink step
+///    inside the tx is load-bearing — without it, the cascade
+///    `ON DELETE SET NULL` on `files.issue_id` would leave every
+///    formerly-linked file as `issue_id = NULL, status = 'owned'`,
+///    a stuck-orphan state that `rematch_for_series` would skip
+///    because it only scans `needs_review`. Flipping files to
+///    `needs_review` atomically with the issue wipe is what lets
+///    the post-commit rematch actually link them.
 async fn set_cv_id(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -284,7 +305,7 @@ async fn set_cv_id(
             message: "cv_id must be > 0".into(),
         });
     }
-    let _existing = series_repo::find_by_id(&state.db, id)
+    let existing = series_repo::find_by_id(&state.db, id)
         .await?
         .ok_or_else(|| ApiError::NotFound {
             resource: "series",
@@ -362,10 +383,51 @@ async fn set_cv_id(
         issue_repo::bulk_insert(&mut *tx, new_issues).await?;
     }
 
+    // Reset every file under the pre-PATCH series folder so the
+    // rematch step (below) actually finds them. Without this step
+    // the rematch is a no-op for this surface: `issues` was deleted,
+    // and the `files.issue_id ON DELETE SET NULL` cascade left every
+    // formerly-linked file at `issue_id = NULL, status = 'owned'` —
+    // an orphan state where `rematch_for_series` skips them because
+    // it only scans `needs_review`. Path-based filter using the PRE-
+    // PATCH title + start_year because the folder on disk is named
+    // whatever the catalog had when the files were attached; the
+    // PATCH just updated the catalog title to the new CV volume's
+    // name, but the on-disk folder is unchanged.
+    //
+    // `substr(path_relative, 1, N) = prefix` is byte-exact prefix
+    // matching (no LIKE wildcards, no escape gymnastics). Length is
+    // SQLite's `length(prefix)` — which counts characters for TEXT,
+    // matching `prefix.chars().count()` in Rust.
+    let folder_prefix = match existing.start_year {
+        Some(year) => format!("{} ({})/", existing.title, year),
+        None => format!("{}/", existing.title),
+    };
+    let prefix_chars = i64::try_from(folder_prefix.chars().count()).unwrap_or(i64::MAX);
+    let library_root_id = state.library_root_id;
+    sqlx::query!(
+        r#"UPDATE files
+             SET issue_id = NULL,
+                 status = 'needs_review'
+           WHERE library_root_id = ?
+             AND substr(path_relative, 1, ?) = ?"#,
+        library_root_id,
+        prefix_chars,
+        folder_prefix
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("file rematch reset failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
     // The new issues need rematching against the catalog files
-    // that were owned-but-pointing-at-the-now-deleted issues.
+    // that were owned-but-pointing-at-the-now-deleted issues. The
+    // pre-commit UPDATE above flipped those files to `needs_review`
+    // so `rematch_for_series` actually sees them.
     spawn_auto_rematch(&state, id, "set-cv-id");
     Ok(Json(updated))
 }
@@ -651,6 +713,89 @@ fn canonicalize_within_root(
     Ok(Some(canonical_target))
 }
 
+/// Derive a pre-delete backup target from `DATABASE_URL`. Supports the
+/// three sqlx URL shapes we use:
+///   `sqlite::memory:`    → `None` (nothing to back up)
+///   `sqlite:foo.db`      → `foo.db.pre-delete-backup`
+///   `sqlite:/data/db`    → `/data/db.pre-delete-backup`
+///   `sqlite:./db?mode=…` → `./db.pre-delete-backup`
+/// Query-string suffix (`?mode=rwc`) is stripped before computing the
+/// filesystem path. Returns `None` for any URL we can't confidently
+/// resolve to a single on-disk file — the caller skips the backup
+/// rather than guessing.
+fn derive_db_backup_path(database_url: &str) -> Option<PathBuf> {
+    let no_scheme = database_url.strip_prefix("sqlite:")?;
+    let path_part = no_scheme.split('?').next()?;
+    // Tolerate `sqlite://path` (URL-style) in addition to the bare
+    // `sqlite:path` we usually use.
+    let path_part = path_part.trim_start_matches("//");
+    if path_part.is_empty() || path_part == ":memory:" {
+        return None;
+    }
+    let mut backup = PathBuf::from(path_part);
+    let name = backup.file_name()?.to_owned();
+    let mut backup_name = name.into_string().ok()?;
+    backup_name.push_str(".pre-delete-backup");
+    backup.set_file_name(backup_name);
+    Some(backup)
+}
+
+/// Capture an atomic, snapshot-consistent copy of the SQLite DB to the
+/// derived backup path. Uses `VACUUM INTO` rather than `std::fs::copy`
+/// because the latter can pick up mid-write state when writers are
+/// active — VACUUM INTO produces a clean file even under concurrent
+/// load. The target file is removed first if it exists (VACUUM INTO
+/// refuses to overwrite). Spec says one backup file, overwrite each
+/// destructive op.
+///
+/// Backup failure is fatal for the destructive op: if we can't write
+/// the safety net, we don't take the destructive action. The user
+/// gets a clear error and can re-try after fixing disk/permissions.
+///
+/// Returns the path written to so the caller can log it; `Ok(None)`
+/// when the DB URL has no on-disk path (in-memory tests, mostly).
+async fn snapshot_db_for_destructive_op(
+    state: &AppState,
+) -> Result<Option<PathBuf>, ApiError> {
+    let Some(backup_path) = derive_db_backup_path(&state.config.database_url) else {
+        return Ok(None);
+    };
+    // VACUUM INTO will not overwrite an existing target; remove it first
+    // so the spec's "one backup file, overwrite each delete" holds.
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path).map_err(|e| ApiError::Internal {
+            message: format!(
+                "could not remove stale DB backup at {}: {e}",
+                backup_path.display()
+            ),
+            source: anyhow::anyhow!(e),
+        })?;
+    }
+    // VACUUM INTO's target path is a SQL string literal — no bind
+    // parameter support — so escape any single quotes by doubling per
+    // SQLite rules. Without this a path containing `'` would break the
+    // statement.
+    let path_str = backup_path
+        .to_str()
+        .ok_or_else(|| ApiError::Internal {
+            message: format!(
+                "backup path is not valid UTF-8: {}",
+                backup_path.display()
+            ),
+            source: anyhow::anyhow!("non-UTF-8 backup path"),
+        })?
+        .replace('\'', "''");
+    let stmt = format!("VACUUM INTO '{}'", path_str);
+    sqlx::query(&stmt)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("VACUUM INTO {} failed: {e}", backup_path.display()),
+            source: anyhow::anyhow!(e),
+        })?;
+    Ok(Some(backup_path))
+}
+
 async fn remove(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -677,6 +822,26 @@ async fn remove(
     } else {
         None
     };
+
+    // Pre-delete safety net: when we're about to wipe bytes from disk
+    // (delete_files=true), capture an atomic snapshot of the catalog
+    // first. The user can recover from `{DATABASE_URL}.pre-delete-backup`
+    // if they discover they deleted the wrong series. Backup failure is
+    // fatal — without a safety net we don't take the destructive
+    // action. Plain delete (no files touched) doesn't need this; the
+    // catalog mutation is recoverable from the normal scan/rematch
+    // pipeline if the user re-creates the series.
+    if let Some(ref series) = to_remove {
+        if let Some(path) = snapshot_db_for_destructive_op(&state).await? {
+            warn!(
+                target: "longbox_web",
+                series_id = id,
+                series_title = %series.title,
+                backup = %path.display(),
+                "pre-delete DB snapshot written"
+            );
+        }
+    }
 
     if q.force {
         force_delete_series(&state.db, id).await?;
@@ -741,4 +906,86 @@ async fn remove(
         body["folder_deleted"] = serde_json::Value::String(path);
     }
     Ok(Json(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_path_skipped_for_memory_db() {
+        assert_eq!(derive_db_backup_path("sqlite::memory:"), None);
+    }
+
+    #[test]
+    fn backup_path_skipped_for_unknown_scheme() {
+        assert_eq!(derive_db_backup_path("postgres://foo"), None);
+        assert_eq!(derive_db_backup_path(""), None);
+    }
+
+    #[test]
+    fn backup_path_for_bare_filename() {
+        assert_eq!(
+            derive_db_backup_path("sqlite:longbox.db"),
+            Some(PathBuf::from("longbox.db.pre-delete-backup"))
+        );
+    }
+
+    #[test]
+    fn backup_path_for_absolute_path() {
+        assert_eq!(
+            derive_db_backup_path("sqlite:/data/longbox.db"),
+            Some(PathBuf::from("/data/longbox.db.pre-delete-backup"))
+        );
+    }
+
+    #[test]
+    fn backup_path_strips_query_string() {
+        // The mode=rwc suffix is sqlx connection config — must not end
+        // up in the backup filename.
+        assert_eq!(
+            derive_db_backup_path("sqlite:./longbox.db?mode=rwc"),
+            Some(PathBuf::from("./longbox.db.pre-delete-backup"))
+        );
+    }
+
+    #[test]
+    fn backup_path_accepts_url_style_double_slash() {
+        // `sqlite://path` is the URL-style variant some sqlx versions
+        // accept; treat it the same as the bare `sqlite:path` form.
+        assert_eq!(
+            derive_db_backup_path("sqlite:///abs/path.db"),
+            Some(PathBuf::from("/abs/path.db.pre-delete-backup"))
+        );
+    }
+
+    /// End-to-end check on a real file-backed SQLite DB: VACUUM INTO
+    /// writes a usable snapshot, and a second call cleanly overwrites
+    /// the previous backup (the spec's "one backup file" requirement).
+    /// Doesn't go through `snapshot_db_for_destructive_op` because that
+    /// takes an `AppState`; we exercise the load-bearing SQL+filesystem
+    /// dance directly via the same query the helper runs.
+    #[tokio::test]
+    async fn vacuum_into_writes_snapshot_and_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let url = format!("sqlite:{}", db_path.display());
+        let pool = longbox_db::open(&url).await.unwrap();
+        let backup_path = derive_db_backup_path(&url).expect("file URL → backup path");
+        assert_eq!(backup_path, tmp.path().join("test.db.pre-delete-backup"));
+
+        // Run the same query the helper runs.
+        let stmt = format!("VACUUM INTO '{}'", backup_path.display());
+        sqlx::query(&stmt).execute(&pool).await.unwrap();
+        assert!(
+            backup_path.is_file(),
+            "VACUUM INTO must create the backup file"
+        );
+
+        // Second run: emulate the "overwrite each delete" guarantee by
+        // removing first (as the helper does), then VACUUM INTO again.
+        std::fs::remove_file(&backup_path).unwrap();
+        sqlx::query(&stmt).execute(&pool).await.unwrap();
+        assert!(backup_path.is_file());
+    }
 }
