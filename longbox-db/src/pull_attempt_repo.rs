@@ -107,6 +107,12 @@ where
 /// issue.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
 pub struct FailedPull {
+    /// `pull_attempts.id` — the surface-row key the dismiss endpoint
+    /// uses to delete this specific attempt. Distinct from
+    /// `(series_id, issue_id)` because a single issue can have several
+    /// failure-class attempts on file; `list_failed` only surfaces the
+    /// latest one but each row carries its own attempts-table id.
+    pub id: i64,
     pub series_id: i64,
     pub issue_id: i64,
     pub series_title: String,
@@ -136,7 +142,8 @@ where
 {
     let rows = sqlx::query_as!(
         FailedPull,
-        r#"SELECT pa.series_id AS "series_id!: i64", pa.issue_id AS "issue_id!: i64",
+        r#"SELECT pa.id AS "id!: i64",
+                  pa.series_id AS "series_id!: i64", pa.issue_id AS "issue_id!: i64",
                   s.title AS "series_title!: String", i.number AS "issue_number!: String",
                   pa.release_id,
                   pa.status AS "status!: String",
@@ -156,6 +163,38 @@ where
     .fetch_all(executor)
     .await?;
     Ok(rows)
+}
+
+/// Delete a single `pull_attempts` row by id. Powers the per-row
+/// "Dismiss" action on the needs-attention surface. Returns `true` if a
+/// row was deleted, `false` if no row matched (stale UI / double-click).
+/// Surgical by design — if older failure-class attempts exist for the
+/// same issue, the next list_failed pulls the previous one as the new
+/// surface row, and the user can dismiss again or use bulk-clear.
+pub async fn delete_by_id<'e, E>(executor: E, id: i64) -> Result<bool>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(r#"DELETE FROM pull_attempts WHERE id = ?"#, id)
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Delete every failure-class `pull_attempts` row — the "Clear all"
+/// action on the needs-attention surface. Status filter mirrors
+/// [`list_failed`] so we only remove what was visible. Returns the
+/// number of rows deleted.
+pub async fn delete_all_failed<'e, E>(executor: E) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM pull_attempts WHERE status IN ('failed', 'mismatched')"#
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Delete an issue's failure-class pull attempts (`'failed'` and

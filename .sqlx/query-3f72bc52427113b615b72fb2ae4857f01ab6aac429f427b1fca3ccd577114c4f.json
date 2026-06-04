@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pull_attempts WHERE status IN ('failed', 'mismatched')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3f72bc52427113b615b72fb2ae4857f01ab6aac429f427b1fca3ccd577114c4f"
+}

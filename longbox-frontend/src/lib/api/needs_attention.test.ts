@@ -1,16 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getPullFailures, retryPull } from './needs_attention';
+import {
+  clearAllPullFailures,
+  dismissPullFailure,
+  getPullFailures,
+  retryPull
+} from './needs_attention';
 
 describe('needs-attention api', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   function mockJson(body: unknown, status = 200) {
-    const fn = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(body), {
-        status,
-        headers: { 'content-type': 'application/json' }
-      })
-    );
+    // A 204 response cannot carry a body (Response constructor rejects
+    // it). Build an empty-body Response for those, JSON otherwise.
+    const init: ResponseInit = {
+      status,
+      headers: { 'content-type': 'application/json' }
+    };
+    const r =
+      status === 204 || body === null
+        ? new Response(null, init)
+        : new Response(JSON.stringify(body), init);
+    const fn = vi.fn().mockResolvedValue(r);
     vi.stubGlobal('fetch', fn);
     return fn;
   }
@@ -28,5 +38,21 @@ describe('needs-attention api', () => {
     expect(url).toBe('/api/needs-attention/retry');
     expect(opts?.method).toBe('POST');
     expect(JSON.parse(opts?.body as string)).toEqual({ series_id: 3, issue_id: 7 });
+  });
+
+  it('dismissPullFailure DELETEs the by-id endpoint', async () => {
+    const fetchSpy = mockJson(null, 204);
+    await dismissPullFailure(42);
+    const [url, opts] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/needs-attention/pull-failures/42');
+    expect(opts?.method).toBe('DELETE');
+  });
+
+  it('clearAllPullFailures DELETEs the collection endpoint', async () => {
+    const fetchSpy = mockJson(null, 204);
+    await clearAllPullFailures();
+    const [url, opts] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/needs-attention/pull-failures');
+    expect(opts?.method).toBe('DELETE');
   });
 });

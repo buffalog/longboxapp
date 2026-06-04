@@ -3,6 +3,8 @@ import { apiFetch } from './client';
 /** One failed pull surfaced on `/needs-attention` — the latest attempt
  *  for an issue, when that attempt failed. One per issue. */
 export interface PullFailure {
+  /** `pull_attempts.id` — the dismiss endpoint's key. */
+  id: number;
   series_id: number;
   issue_id: number;
   series_title: string;
@@ -28,4 +30,15 @@ export function retryPull(seriesId: number, issueId: number): Promise<{ cleared:
     method: 'POST',
     body: JSON.stringify({ series_id: seriesId, issue_id: issueId })
   });
+}
+
+/** Dismiss a single pull-failure surface row by `pull_attempts.id`.
+ *  Surgical — does not touch other attempts for the same issue. */
+export function dismissPullFailure(attemptId: number): Promise<void> {
+  return apiFetch(`/needs-attention/pull-failures/${attemptId}`, { method: 'DELETE' });
+}
+
+/** Bulk-dismiss every failure-class pull attempt. */
+export function clearAllPullFailures(): Promise<void> {
+  return apiFetch('/needs-attention/pull-failures', { method: 'DELETE' });
 }

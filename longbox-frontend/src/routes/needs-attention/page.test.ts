@@ -2,13 +2,20 @@
 // taking a `data` prop, rendered in isolation with @testing-library.
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { retryPull, type PullFailure } from '$lib/api/needs_attention';
+import {
+  clearAllPullFailures,
+  dismissPullFailure,
+  retryPull,
+  type PullFailure
+} from '$lib/api/needs_attention';
 import type { PendingIntervention } from '$lib/types';
 import NeedsAttentionPage from './+page.svelte';
 
 vi.mock('$lib/api/needs_attention', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/needs_attention')>()),
-  retryPull: vi.fn()
+  retryPull: vi.fn(),
+  dismissPullFailure: vi.fn(),
+  clearAllPullFailures: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -17,6 +24,7 @@ vi.mock('$lib/stores/toast.svelte', () => ({
 
 function pullFailure(over: Partial<PullFailure> = {}): PullFailure {
   return {
+    id: 100,
     series_id: 1,
     issue_id: 10,
     series_title: 'Saga',
@@ -74,5 +82,51 @@ describe('needs-attention page', () => {
 
     await waitFor(() => expect(retryPull).toHaveBeenCalledWith(1, 10));
     await waitFor(() => expect(screen.queryByText('Saga')).not.toBeInTheDocument());
+  });
+
+  it('dismisses a pull failure by attempt id and drops the row', async () => {
+    vi.mocked(dismissPullFailure).mockResolvedValue(undefined);
+    render(
+      NeedsAttentionPage,
+      pageData([pullFailure({ id: 42, series_title: 'Saga' })])
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+
+    await waitFor(() => expect(dismissPullFailure).toHaveBeenCalledWith(42));
+    expect(retryPull).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('Saga')).not.toBeInTheDocument());
+  });
+
+  it('clears every pull failure when Clear all is clicked', async () => {
+    vi.mocked(clearAllPullFailures).mockResolvedValue(undefined);
+    render(
+      NeedsAttentionPage,
+      pageData(
+        [
+          pullFailure({ id: 1, issue_id: 10, series_title: 'Saga' }),
+          pullFailure({ id: 2, issue_id: 11, series_title: 'Chew' })
+        ],
+        // A pending intervention keeps the page out of its global empty
+        // state — we want to assert the per-section "No failed pulls."
+        // copy, not the global "Nothing needs attention" panel.
+        [conflictItem()]
+      )
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+
+    await waitFor(() => expect(clearAllPullFailures).toHaveBeenCalledOnce());
+    await waitFor(() => {
+      expect(screen.queryByText('Saga')).not.toBeInTheDocument();
+      expect(screen.queryByText('Chew')).not.toBeInTheDocument();
+    });
+    // The section now shows the empty-state subnote.
+    expect(screen.getByText('No failed pulls.')).toBeInTheDocument();
+  });
+
+  it('hides Clear all when the pull-failure list is empty', () => {
+    render(NeedsAttentionPage, pageData([], [conflictItem()]));
+    expect(screen.queryByRole('button', { name: 'Clear all' })).not.toBeInTheDocument();
   });
 });

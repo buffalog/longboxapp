@@ -4,7 +4,12 @@
   // on disk; the fs watcher re-triggers processing).
   import { CircleSlash } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
-  import { retryPull, type PullFailure } from '$lib/api/needs_attention';
+  import {
+    clearAllPullFailures,
+    dismissPullFailure,
+    retryPull,
+    type PullFailure
+  } from '$lib/api/needs_attention';
   import { toast } from '$lib/stores/toast.svelte';
   import { formatBytes, formatRelative } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
@@ -14,11 +19,14 @@
 
   let { data } = $props();
 
-  // Pull failures are self-owned — a retry drops the row. Phase B's
-  // pending list is read-only here (resolved on disk, not in the UI).
+  // Pull failures are self-owned — retry / dismiss / clear-all all drop
+  // rows from local state optimistically. Phase B's pending list is
+  // read-only here (resolved on disk, not in the UI).
   let pullFailures = $state<PullFailure[]>([...data.pullFailures]);
   let error = $state<ApiError | null>(null);
   let retryingIssue = $state<number | null>(null);
+  let dismissingAttempt = $state<number | null>(null);
+  let clearingAll = $state(false);
 
   const pending = $derived(data.pending);
 
@@ -61,6 +69,36 @@
       retryingIssue = null;
     }
   }
+
+  async function handleDismiss(failure: PullFailure): Promise<void> {
+    dismissingAttempt = failure.id;
+    error = null;
+    try {
+      await dismissPullFailure(failure.id);
+      pullFailures = pullFailures.filter((p) => p.id !== failure.id);
+      toast.success(`Dismissed ${failure.series_title} #${failure.issue_number}.`);
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      dismissingAttempt = null;
+    }
+  }
+
+  async function handleClearAll(): Promise<void> {
+    if (clearingAll) return;
+    clearingAll = true;
+    error = null;
+    const count = pullFailures.length;
+    try {
+      await clearAllPullFailures();
+      pullFailures = [];
+      toast.success(`Cleared ${count} pull failure${count === 1 ? '' : 's'}.`);
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      clearingAll = false;
+    }
+  }
 </script>
 
 <header class="mb-4">
@@ -83,7 +121,20 @@
 {:else}
   <!-- ===================== Pull failures ===================== -->
   <section class="mb-8">
-    <h2 class="mb-2 text-lg font-semibold">Pull failures</h2>
+    <header class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="text-lg font-semibold">Pull failures</h2>
+      {#if pullFailures.length > 0}
+        <Button
+          variant="ghost"
+          size="sm"
+          onclick={handleClearAll}
+          loading={clearingAll}
+          disabled={clearingAll}
+        >
+          Clear all
+        </Button>
+      {/if}
+    </header>
     {#if pullFailures.length === 0}
       <p class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
         No failed pulls.
@@ -125,14 +176,25 @@
                   {formatRelative(f.attempted_at)}
                 </td>
                 <td class="px-3 py-2 text-right">
-                  <Button
-                    size="sm"
-                    onclick={() => handleRetry(f)}
-                    loading={retryingIssue === f.issue_id}
-                    disabled={retryingIssue !== null}
-                  >
-                    Retry
-                  </Button>
+                  <div class="inline-flex gap-2">
+                    <Button
+                      size="sm"
+                      onclick={() => handleRetry(f)}
+                      loading={retryingIssue === f.issue_id}
+                      disabled={retryingIssue !== null || dismissingAttempt !== null || clearingAll}
+                    >
+                      Retry
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => handleDismiss(f)}
+                      loading={dismissingAttempt === f.id}
+                      disabled={retryingIssue !== null || dismissingAttempt !== null || clearingAll}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
                 </td>
               </tr>
             {/each}
