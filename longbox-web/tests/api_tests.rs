@@ -667,6 +667,233 @@ async fn force_delete_series_404_for_unknown_id() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// -------- delete_files (disk-side series-folder removal) --------
+
+/// Seed a barebones series row with the given title + year and return
+/// its id. No issues, no files — the tests below set those up on a
+/// case-by-case basis.
+async fn insert_barebones_series(
+    app: &common::TestApp,
+    title: &str,
+    start_year: Option<i32>,
+) -> i64 {
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn delete_files_removes_the_series_folder_from_disk() {
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Saga", Some(2012)).await;
+    let folder = app.library_path().join("Saga (2012)");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("Saga 001 (2012).cbz"), b"contents").unwrap();
+    assert!(folder.is_dir());
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["deleted"], id);
+    // The handler echoes the canonicalized path back so the frontend
+    // can confirm exactly what was removed.
+    assert!(body["folder_deleted"]
+        .as_str()
+        .unwrap()
+        .ends_with("Saga (2012)"));
+
+    assert!(!folder.exists(), "series folder must be gone from disk");
+    assert!(series_repo::find_by_id(&app.state.db, id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_files_uses_title_only_when_start_year_is_null() {
+    // Confirm the `{title}` (no parentheses) variant. A series with no
+    // start_year carries a bare-title folder on disk.
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Untitled Yearless Volume", None).await;
+    let folder = app.library_path().join("Untitled Yearless Volume");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("001.cbz"), b"contents").unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!folder.exists());
+}
+
+#[tokio::test]
+async fn delete_files_succeeds_when_folder_already_absent() {
+    // The folder convention may not match (manual rename, never on
+    // disk to begin with). The DB delete still happens; the handler
+    // logs a warning and returns 200 without a folder_deleted field.
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Phantom No Folder", Some(2020)).await;
+    let folder = app.library_path().join("Phantom No Folder (2020)");
+    assert!(!folder.exists());
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["deleted"], id);
+    assert!(
+        body.get("folder_deleted").is_none(),
+        "no folder removed → field should be absent"
+    );
+    assert!(series_repo::find_by_id(&app.state.db, id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_files_refuses_when_series_folder_is_a_symlink() {
+    // A symlink could point anywhere — outside the library root, in
+    // /etc, in the user's home. Following it for remove_dir_all is
+    // a footgun; refuse and tell the user to clean it up manually.
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Symlinked Series", Some(2024)).await;
+
+    // Build a real directory outside the series folder, then symlink
+    // the series-named path to it.
+    let real_dir = app.library_path().join("real-target");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let symlink = app.library_path().join("Symlinked Series (2024)");
+    std::os::unix::fs::symlink(&real_dir, &symlink).unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "conflict.series_folder_is_symlink");
+
+    // The series row was deleted BEFORE the symlink check (acceptable —
+    // DB and disk are now both consistent: no row, no real folder
+    // gone, the symlink still dangles and the user gets a 409 telling
+    // them why). Assert the row is in fact gone so this is not silently
+    // inconsistent.
+    assert!(series_repo::find_by_id(&app.state.db, id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // The symlink target itself is untouched.
+    assert!(real_dir.exists());
+}
+
+#[tokio::test]
+async fn delete_files_refuses_path_traversal_via_series_title() {
+    // A title like "../etc" would join to a path that lexically
+    // escapes the library root. canonicalize_within_root must reject
+    // it after resolving the actual filesystem path. We forge a
+    // sibling directory of the library root to make the traversal
+    // resolvable and prove the canonical check fires.
+    let app = build_test_app().await;
+    let escape_dir = app.library_path().parent().unwrap().join("escape-target");
+    std::fs::create_dir_all(&escape_dir).unwrap();
+    let id = insert_barebones_series(&app, "../escape-target", None).await;
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["error"]["code"],
+        "conflict.series_folder_outside_library_root"
+    );
+    // Escape target stays put.
+    assert!(escape_dir.exists());
+
+    // Cleanup so we don't leak the sibling dir into the test process's
+    // tempdir parent.
+    let _ = std::fs::remove_dir_all(&escape_dir);
+}
+
+#[tokio::test]
+async fn delete_files_400s_when_combined_with_force() {
+    // The force path exists for misassigned files whose real series
+    // lives elsewhere; deleting the title-based folder would destroy
+    // bytes belonging to ANOTHER series. The two are incoherent in
+    // combination → 400.
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Saga", Some(2012)).await;
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{id}?force=true&delete_files=true"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Series row still in place — the rejection happens before any
+    // mutation.
+    assert!(series_repo::find_by_id(&app.state.db, id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn delete_without_delete_files_leaves_folder_untouched() {
+    // Backwards-compat: the default `DELETE /api/series/:id` (no
+    // query params) keeps its old DB-only semantics. A pre-existing
+    // folder must survive the call.
+    let app = build_test_app().await;
+    let id = insert_barebones_series(&app, "Catalog Only", Some(2019)).await;
+    let folder = app.library_path().join("Catalog Only (2019)");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("001.cbz"), b"contents").unwrap();
+
+    let resp = app
+        .request(empty_request("DELETE", &format!("/api/series/{id}")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert!(body.get("folder_deleted").is_none());
+    assert!(
+        folder.exists(),
+        "default delete must not touch the on-disk folder"
+    );
+}
+
 // -------- files --------
 
 #[tokio::test]

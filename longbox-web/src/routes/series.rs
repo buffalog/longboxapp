@@ -1,12 +1,15 @@
+use std::path::{Path as StdPath, PathBuf};
+
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
-    issue_repo, series_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate,
-    SeriesWithCounts,
+    issue_repo, library_root_repo, series_repo, IssueRow, NewIssue, NewSeries, SeriesRow,
+    SeriesUpdate, SeriesWithCounts,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -534,6 +537,118 @@ pub(crate) async fn force_delete_series(
 struct RemoveQuery {
     #[serde(default)]
     force: bool,
+    /// When `true`, after the DB delete succeeds the handler also
+    /// removes the series's on-disk folder via `std::fs::remove_dir_all`.
+    /// Off by default: the prior delete contract was DB-only, and an
+    /// API consumer or script must opt in to destructive disk behavior.
+    /// Incompatible with `force`: the force path exists for misassigned
+    /// files (the real series lives elsewhere), so wiping the
+    /// title-based folder would destroy bytes that belong to ANOTHER
+    /// series. The handler rejects the combination with 400.
+    #[serde(default)]
+    delete_files: bool,
+}
+
+/// Compute the on-disk series folder under a library root from
+/// `series.title` and `series.start_year`:
+///   `{library_root}/{title} ({year})/`  when year is present
+///   `{library_root}/{title}/`            when year is null
+/// Matches the convention used by every other code path that names
+/// series folders (e.g. Mylar imports, manual organization).
+///
+/// Returned path is the JOIN result; safety verification — that it
+/// actually resolves under `library_root` after canonicalization, isn't
+/// a symlink, etc. — is the caller's job via
+/// [`canonicalize_within_root`].
+fn series_folder_path(library_root: &StdPath, series: &SeriesRow) -> PathBuf {
+    let name = match series.start_year {
+        Some(year) => format!("{} ({})", series.title, year),
+        None => series.title.clone(),
+    };
+    library_root.join(name)
+}
+
+/// Resolve `candidate` and verify it is a real, non-symlink directory
+/// strictly under `library_root` (also resolved). The canonicalization
+/// step is what defeats path traversal — a series title like `../etc`
+/// builds a `candidate` that lexically escapes the root, but
+/// `canonicalize` returns the actual filesystem path and we reject any
+/// result that doesn't sit under the canonicalized root.
+///
+/// Returns:
+///   `Ok(Some(path))` — verified, safe to `remove_dir_all`.
+///   `Ok(None)`       — folder doesn't exist on disk (best-effort: log
+///                      and skip; the DB delete already succeeded).
+///   `Err(...)`       — path is a symlink, a non-directory, or escapes
+///                      the library root after canonicalization.
+fn canonicalize_within_root(
+    library_root: &StdPath,
+    candidate: &StdPath,
+) -> Result<Option<PathBuf>, ApiError> {
+    // The DB delete has already happened by the time this runs, so a
+    // missing folder is a soft outcome (best-effort): warn-and-skip.
+    let metadata = match std::fs::symlink_metadata(candidate) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ApiError::Internal {
+                message: format!("stat series folder failed: {e}"),
+                source: anyhow::anyhow!(e),
+            });
+        }
+    };
+    // Symlink → refuse. Following it could land anywhere on disk —
+    // outside the library root, in /etc, in the user's home. Better to
+    // fail loudly and let the user remove the symlink manually.
+    if metadata.file_type().is_symlink() {
+        return Err(ApiError::Conflict {
+            code: "conflict.series_folder_is_symlink",
+            message: format!(
+                "Refusing to delete {} — the folder is a symlink. Remove it manually.",
+                candidate.display()
+            ),
+            details: serde_json::Value::Null,
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(ApiError::Conflict {
+            code: "conflict.series_folder_not_a_directory",
+            message: format!(
+                "Refusing to delete {} — the path is not a directory.",
+                candidate.display()
+            ),
+            details: serde_json::Value::Null,
+        });
+    }
+    let canonical_root = std::fs::canonicalize(library_root).map_err(|e| ApiError::Internal {
+        message: format!("canonicalize library_root failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    let canonical_target = std::fs::canonicalize(candidate).map_err(|e| ApiError::Internal {
+        message: format!("canonicalize series folder failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(ApiError::Conflict {
+            code: "conflict.series_folder_outside_library_root",
+            message: format!(
+                "Refusing to delete {} — it resolves outside the library root after canonicalization.",
+                candidate.display()
+            ),
+            details: serde_json::Value::Null,
+        });
+    }
+    // Belt-and-braces: do not let the canonical target *be* the library
+    // root itself. A pathological series with empty title joined with
+    // `library_root` would otherwise nuke the entire library.
+    if canonical_target == canonical_root {
+        return Err(ApiError::Conflict {
+            code: "conflict.series_folder_is_library_root",
+            message: "Refusing to delete the library root itself.".into(),
+            details: serde_json::Value::Null,
+        });
+    }
+    Ok(Some(canonical_target))
 }
 
 async fn remove(
@@ -541,11 +656,89 @@ async fn remove(
     Path(id): Path<i64>,
     Query(q): Query<RemoveQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if q.force && q.delete_files {
+        return Err(ApiError::BadRequest {
+            message: "force=true and delete_files=true are mutually exclusive: the force path \
+                      exists for misassigned files whose real series lives elsewhere, so deleting \
+                      the title-based folder would destroy bytes belonging to another series."
+                .into(),
+        });
+    }
+
+    // For delete_files we need to read the series row (for title +
+    // start_year) BEFORE the DB delete cascades it away.
+    let to_remove = if q.delete_files {
+        Some(series_repo::find_by_id(&state.db, id).await?.ok_or(
+            ApiError::NotFound {
+                resource: "series",
+                id: id.to_string(),
+            },
+        )?)
+    } else {
+        None
+    };
+
     if q.force {
         force_delete_series(&state.db, id).await?;
         spawn_rescan_unmatched(&state, "force-delete-series");
     } else {
         delete_series(&state.db, id).await?;
     }
-    Ok(Json(serde_json::json!({ "deleted": id })))
+
+    let mut folder_deleted: Option<String> = None;
+    if let Some(series) = to_remove {
+        let root_row = library_root_repo::find_by_id(&state.db, state.library_root_id)
+            .await?
+            .ok_or(ApiError::Internal {
+                message: format!(
+                    "library_root_id {} on AppState resolves to no row",
+                    state.library_root_id
+                ),
+                source: anyhow::anyhow!("library root row missing"),
+            })?;
+        let library_root_path = PathBuf::from(&root_row.path);
+        let candidate = series_folder_path(&library_root_path, &series);
+        match canonicalize_within_root(&library_root_path, &candidate)? {
+            Some(safe_path) => {
+                // Logged at WARN so it shows up in default-verbosity
+                // container logs alongside other destructive actions
+                // (admin restart, force-delete) — operators see
+                // disk-touching ops without scraping debug logs.
+                warn!(
+                    target: "longbox_web",
+                    series_id = id,
+                    series_title = %series.title,
+                    folder = %safe_path.display(),
+                    "removing series folder from disk"
+                );
+                std::fs::remove_dir_all(&safe_path).map_err(|e| ApiError::Internal {
+                    message: format!(
+                        "remove_dir_all({}) failed: {e}",
+                        safe_path.display()
+                    ),
+                    source: anyhow::anyhow!(e),
+                })?;
+                folder_deleted = Some(safe_path.display().to_string());
+            }
+            None => {
+                // Folder absent: the convention didn't match (manual
+                // rename, CV-canonical name, never on disk to begin
+                // with). Warn so the operator can investigate; the
+                // delete still counts as successful — DB is consistent.
+                warn!(
+                    target: "longbox_web",
+                    series_id = id,
+                    series_title = %series.title,
+                    folder = %candidate.display(),
+                    "series folder not found on disk; DB delete succeeded but no bytes were removed"
+                );
+            }
+        }
+    }
+
+    let mut body = serde_json::json!({ "deleted": id });
+    if let Some(path) = folder_deleted {
+        body["folder_deleted"] = serde_json::Value::String(path);
+    }
+    Ok(Json(body))
 }
