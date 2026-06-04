@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files\n             SET issue_id = NULL,\n                 status = 'needs_review'\n           WHERE library_root_id = ?\n             AND substr(path_relative, 1, ?) = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0f67fb9684ecf6b26c8a4c9e5e3a068167c93ae71d23dc6e2e93fb10d2e27f04"
+}
