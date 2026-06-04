@@ -1,23 +1,28 @@
 <script lang="ts">
   import { goto, invalidateAll } from '$app/navigation';
-  import { RefreshCw, Search, Trash2 } from 'lucide-svelte';
+  import { Edit3, RefreshCw, Search, Trash2 } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
+  import { setSeriesCvId } from '$lib/api/enrichment';
   import { searchSeriesNow } from '$lib/api/pull';
   import { deleteSeries, refreshSeries } from '$lib/api/series';
   import { isSolicited } from '$lib/solicitation';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
+  import CvSearchInput from '$lib/components/CvSearchInput.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import IssueGrid from '$lib/components/IssueGrid.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import PullListToggle from '$lib/components/PullListToggle.svelte';
   import SeriesHeader from '$lib/components/SeriesHeader.svelte';
+  import type { SeriesSearchResult } from '$lib/types';
 
   let { data } = $props();
 
   let refreshing = $state(false);
   let deleting = $state(false);
   let confirmOpen = $state(false);
+  let matchFixerOpen = $state(false);
+  let fixingMatch = $state(false);
   let error = $state<ApiError | null>(null);
 
   // Per-series Search debounce. Same 15 s as IssueRow's per-issue
@@ -126,6 +131,44 @@
   async function handleConfirmDelete(): Promise<void> {
     await runDelete(true);
   }
+
+  /// PATCH /api/series/:id/cv-id with the picked CV volume. Backend
+  /// wipes the old issues, fetches the new CV volume's issues +
+  /// metadata, and spawns an auto-rematch. We invalidate the page
+  /// load on success so the rebuilt issue list / covers / titles
+  /// render with no manual refresh.
+  ///
+  /// cv_id_in_use is the load-bearing error path: a CV id can only
+  /// link to ONE series row, so picking a volume that's already
+  /// claimed by another row in the catalog 409s. We surface the
+  /// existing series's title in the toast so the user knows where
+  /// the duplicate lives — same recovery as Library Tidy's queue
+  /// case, just less inline-prescriptive (this surface isn't a
+  /// review queue, so we don't render a "delete duplicate" affordance
+  /// here).
+  async function handlePickCv(result: SeriesSearchResult): Promise<void> {
+    if (fixingMatch) return;
+    fixingMatch = true;
+    error = null;
+    try {
+      await setSeriesCvId(data.series.id, result.cv_id);
+      toast.success(`Linked to ${result.name}.`);
+      matchFixerOpen = false;
+      await invalidateAll();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'conflict.cv_id_in_use') {
+        const d = e.details as { existing_series_title?: string } | null;
+        const existing = d?.existing_series_title ?? 'another series';
+        toast.warning(`That ComicVine volume is already linked to ${existing}.`);
+      } else {
+        const message =
+          e instanceof ApiError ? e.message : 'Could not link the ComicVine volume.';
+        toast.warning(message);
+      }
+    } finally {
+      fixingMatch = false;
+    }
+  }
 </script>
 
 {#if error}
@@ -160,9 +203,52 @@
         <Search class="size-3.5" aria-hidden="true" /> Search missing
       </Button>
     {/if}
+    <Button
+      variant="secondary"
+      size="sm"
+      onclick={() => (matchFixerOpen = !matchFixerOpen)}
+      disabled={fixingMatch}
+    >
+      <Edit3 class="size-3.5" aria-hidden="true" />
+      {data.series.cv_id ? 'Change match' : 'Fix match'}
+    </Button>
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
 </SeriesHeader>
+
+{#if matchFixerOpen}
+  <!-- Inline CV picker. Pre-populated with the series title so the
+       first results land without typing. Picking a volume kicks the
+       PATCH /api/series/:id/cv-id flow; on success we invalidate the
+       page load so the rebuilt issues + covers + titles render. -->
+  <section
+    class="mt-4 rounded-lg border border-slate-200 bg-white p-4"
+    aria-label="ComicVine match picker"
+  >
+    <header class="mb-2 flex items-baseline justify-between gap-2">
+      <h2 class="text-sm font-semibold">
+        {data.series.cv_id ? 'Change ComicVine match' : 'Find ComicVine match'}
+      </h2>
+      <button
+        type="button"
+        class="text-xs text-slate-500 hover:text-slate-700"
+        onclick={() => (matchFixerOpen = false)}
+        disabled={fixingMatch}
+      >
+        Cancel
+      </button>
+    </header>
+    <p class="mb-3 text-xs text-slate-500">
+      Pick a volume to replace this series' identity. The catalog wipes the existing issues, fetches
+      the picked volume's issues and metadata from ComicVine, and queues a rematch of files on disk.
+    </p>
+    <CvSearchInput
+      initialQuery={data.series.title}
+      onSelect={handlePickCv}
+      disabled={fixingMatch}
+    />
+  </section>
+{/if}
 
 <section class="mt-6">
   <h2 class="mb-2 text-lg font-semibold">Issues ({totalCount})</h2>

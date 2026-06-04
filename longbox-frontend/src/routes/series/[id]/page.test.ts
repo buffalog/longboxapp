@@ -6,10 +6,14 @@
 // the hot-fix kickoff (the page had no tests, so the conditional
 // branch was never exercised either way).
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { describe, expect, it, vi } from 'vitest';
-import type { SeriesDetail } from '$lib/types';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SeriesDetail, SeriesSearchResult } from '$lib/types';
 import type { PullEntry } from '$lib/api/pull';
 import { deleteSeries } from '$lib/api/series';
+import { setSeriesCvId } from '$lib/api/enrichment';
+import { searchVolumes } from '$lib/api/cv';
+import { invalidateAll } from '$app/navigation';
+import { ApiError } from '$lib/api/client';
 import Page from './+page.svelte';
 
 vi.mock('$lib/api/series', () => ({
@@ -17,10 +21,42 @@ vi.mock('$lib/api/series', () => ({
   deleteSeries: vi.fn()
 }));
 
+vi.mock('$lib/api/enrichment', () => ({
+  setSeriesCvId: vi.fn()
+}));
+
+vi.mock('$lib/api/cv', () => ({
+  searchVolumes: vi.fn()
+}));
+
+vi.mock('$lib/stores/toast.svelte', () => ({
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() }
+}));
+
 vi.mock('$app/navigation', () => ({
   goto: vi.fn(),
   invalidateAll: vi.fn()
 }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Default CV search resolves to an empty result. Tests that drive
+  // the picker override this with concrete results.
+  vi.mocked(searchVolumes).mockResolvedValue({ results: [], filtered_count: 0 });
+});
+
+function cvResult(over: Partial<SeriesSearchResult> = {}): SeriesSearchResult {
+  return {
+    cv_id: 9999,
+    name: 'Picked Volume',
+    start_year: 2024,
+    publisher: 'Image',
+    issue_count: 5,
+    cover_url: null,
+    description: null,
+    ...over
+  };
+}
 
 function seriesDetail(over: Partial<SeriesDetail> = {}): SeriesDetail {
   return {
@@ -193,5 +229,95 @@ describe('series detail page', () => {
     expect(
       screen.getByText(/will appear here as the next scan parses and attaches them/)
     ).toBeInTheDocument();
+  });
+
+  // -------- Fix / Change match picker ---------------------------------
+
+  it('shows "Fix match" on a shallow series (cv_id null)', () => {
+    render(Page, pageData(seriesDetail({ cv_id: null })));
+    expect(screen.getByRole('button', { name: /Fix match/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Change match/ })).not.toBeInTheDocument();
+  });
+
+  it('shows "Change match" on a CV-linked series', () => {
+    render(Page, pageData(seriesDetail({ cv_id: 12345 })));
+    expect(screen.getByRole('button', { name: /Change match/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Fix match/ })).not.toBeInTheDocument();
+  });
+
+  it('opens the CV picker and pre-populates with the series title', async () => {
+    render(
+      Page,
+      pageData(seriesDetail({ cv_id: null, title: 'Wolverine', start_year: 2024 }))
+    );
+    await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
+
+    // Picker section is now visible.
+    expect(screen.getByLabelText('ComicVine match picker')).toBeInTheDocument();
+    expect(screen.getByText('Find ComicVine match')).toBeInTheDocument();
+    // CvSearchInput auto-runs its initialQuery — the title — through
+    // searchVolumes(). Use waitFor since the search is debounced.
+    await waitFor(() =>
+      expect(searchVolumes).toHaveBeenCalledWith('Wolverine', expect.any(Object))
+    );
+  });
+
+  it('picking a CV result fires setSeriesCvId and invalidates the page', async () => {
+    const picked = cvResult({ cv_id: 4242, name: 'Wolverine (2024)' });
+    vi.mocked(searchVolumes).mockResolvedValue({ results: [picked], filtered_count: 0 });
+    vi.mocked(setSeriesCvId).mockResolvedValue({
+      ...seriesDetail({ cv_id: picked.cv_id, title: picked.name }),
+      issues: undefined as never
+    });
+
+    render(
+      Page,
+      pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' }))
+    );
+    await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
+
+    // Wait for the first result to render, then click it. CvSearchInput
+    // renders result rows as buttons titled with the volume name.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Wolverine \(2024\)/ })).toBeInTheDocument()
+    );
+    await fireEvent.click(screen.getByRole('button', { name: /Wolverine \(2024\)/ }));
+
+    await waitFor(() => expect(setSeriesCvId).toHaveBeenCalledWith(7, 4242));
+    // Page invalidation happens on success — the rebuilt issue list /
+    // covers / titles come back through `data`.
+    await waitFor(() => expect(invalidateAll).toHaveBeenCalled());
+    // Picker closes once the PATCH resolves.
+    expect(screen.queryByLabelText('ComicVine match picker')).not.toBeInTheDocument();
+  });
+
+  it('keeps the picker open and warns on cv_id_in_use without invalidating', async () => {
+    const picked = cvResult({ cv_id: 4242, name: 'Already Linked' });
+    vi.mocked(searchVolumes).mockResolvedValue({ results: [picked], filtered_count: 0 });
+    vi.mocked(setSeriesCvId).mockRejectedValue(
+      new ApiError(409, 'conflict.cv_id_in_use', 'taken', {
+        existing_series_id: 99,
+        existing_series_title: 'The Other Wolverine'
+      })
+    );
+
+    render(
+      Page,
+      pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' }))
+    );
+    await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Already Linked/ })).toBeInTheDocument()
+    );
+    await fireEvent.click(screen.getByRole('button', { name: /Already Linked/ }));
+
+    await waitFor(() => expect(setSeriesCvId).toHaveBeenCalled());
+    expect(invalidateAll).not.toHaveBeenCalled();
+    const { toast } = await import('$lib/stores/toast.svelte');
+    expect(toast.warning).toHaveBeenCalledWith(
+      'That ComicVine volume is already linked to The Other Wolverine.'
+    );
+    // Picker stays open so the user can pick a different volume.
+    expect(screen.getByLabelText('ComicVine match picker')).toBeInTheDocument();
   });
 });
