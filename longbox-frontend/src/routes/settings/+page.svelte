@@ -7,6 +7,7 @@
   import { ApiError } from '$lib/api/client';
   import { restartServer } from '$lib/api/admin';
   import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
+  import { updateSetting, type EditableSettingKey } from '$lib/api/settings';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
   import DownloaderSettings from '$lib/components/DownloaderSettings.svelte';
@@ -20,6 +21,66 @@
   let newPublisher = $state('');
   let busy = $state(false);
   let error = $state<ApiError | null>(null);
+
+  // Editable settings — one draft + saving flag per tunable. Drafts
+  // are seeded from the server's canonical value on mount; we don't
+  // auto-resync them after server changes (would clobber an in-flight
+  // edit). After a successful save we update both the local "saved"
+  // mirror and re-invalidate so other surfaces of `data.settings`
+  // reflect the new value.
+  let matchThresholdDraft = $state(String(data.settings.match_confidence_threshold));
+  let matchThresholdSaving = $state(false);
+  let enrichKnownDraft = $state(
+    String(data.settings.cv_enrichment_title_threshold_year_known)
+  );
+  let enrichKnownSaving = $state(false);
+  let enrichUnknownDraft = $state(
+    String(data.settings.cv_enrichment_title_threshold_year_unknown)
+  );
+  let enrichUnknownSaving = $state(false);
+  let pullKeywordsDraft = $state(data.settings.pull_exclusion_keywords);
+  let pullKeywordsSaving = $state(false);
+
+  /// Client-side threshold validation. Mirrors the backend's
+  /// `parse_threshold`: must be a finite number in [0.0, 1.0].
+  /// Returns a user-friendly error message on failure, or null on
+  /// success. We pre-check before hitting the wire so a malformed
+  /// value gets caught instantly without a round-trip.
+  function validateThreshold(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (trimmed === '') return 'Enter a number between 0.0 and 1.0.';
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return `'${raw}' is not a valid number.`;
+    if (n < 0 || n > 1) return `Must be between 0.0 and 1.0 (got ${n}).`;
+    return null;
+  }
+
+  async function saveTunable(
+    key: EditableSettingKey,
+    draft: string,
+    setSaving: (b: boolean) => void,
+    validator: ((raw: string) => string | null) | null,
+    successMessage: string
+  ): Promise<void> {
+    if (validator) {
+      const errMsg = validator(draft);
+      if (errMsg) {
+        toast.warning(errMsg);
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      await updateSetting(key, draft);
+      toast.success(successMessage);
+      await invalidateAll();
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : 'Could not save the setting.';
+      toast.warning(message);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   interface Row {
     label: string;
@@ -158,6 +219,163 @@
         <span class="font-mono text-slate-900">{s.version}</span>
       </dd>
     </dl>
+  </section>
+
+  <section class="rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="mb-2 text-base font-semibold">Tunable settings</h2>
+    <p class="mb-4 text-sm text-slate-600">
+      These settings are read live from the database by their consumers — the scanner per scan,
+      the enrichment worker per cycle, and the pull engine per sweep. Changes take effect on the
+      next run without a container restart. Initial defaults come from environment variables at
+      first boot; subsequent edits override them.
+    </p>
+
+    <div class="space-y-5">
+      <div class="border-t border-slate-100 pt-4 first:border-t-0 first:pt-0">
+        <h3 class="text-sm font-semibold text-slate-800">Match confidence threshold</h3>
+        <p class="mb-2 text-xs text-slate-500">
+          Scanner cutoff between <code>owned</code> and <code>needs_review</code>. A file's match
+          score must clear this to count as owned. Range 0.0–1.0. Currently saved:
+          <code class="font-mono">{s.match_confidence_threshold}</code>.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'match_confidence_threshold',
+              matchThresholdDraft,
+              (b) => (matchThresholdSaving = b),
+              validateThreshold,
+              'Match threshold saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            inputmode="decimal"
+            bind:value={matchThresholdDraft}
+            disabled={matchThresholdSaving}
+            class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Match confidence threshold value"
+          />
+          <Button type="submit" loading={matchThresholdSaving} disabled={matchThresholdSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">
+          Enrichment title threshold (year known)
+        </h3>
+        <p class="mb-2 text-xs text-slate-500">
+          CV-enrichment title-similarity gate for candidates whose start year matches the
+          catalog's. Range 0.0–1.0. Currently saved:
+          <code class="font-mono">{s.cv_enrichment_title_threshold_year_known}</code>.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'cv_enrichment_title_threshold_year_known',
+              enrichKnownDraft,
+              (b) => (enrichKnownSaving = b),
+              validateThreshold,
+              'Enrichment year-known threshold saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            inputmode="decimal"
+            bind:value={enrichKnownDraft}
+            disabled={enrichKnownSaving}
+            class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Enrichment title threshold (year known) value"
+          />
+          <Button type="submit" loading={enrichKnownSaving} disabled={enrichKnownSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">
+          Enrichment title threshold (year unknown)
+        </h3>
+        <p class="mb-2 text-xs text-slate-500">
+          Stricter title-similarity gate for candidates with no start year — the conservative
+          default catches more false matches when one anchor is missing. Range 0.0–1.0. Currently
+          saved: <code class="font-mono">{s.cv_enrichment_title_threshold_year_unknown}</code>.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'cv_enrichment_title_threshold_year_unknown',
+              enrichUnknownDraft,
+              (b) => (enrichUnknownSaving = b),
+              validateThreshold,
+              'Enrichment year-unknown threshold saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            inputmode="decimal"
+            bind:value={enrichUnknownDraft}
+            disabled={enrichUnknownSaving}
+            class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Enrichment title threshold (year unknown) value"
+          />
+          <Button type="submit" loading={enrichUnknownSaving} disabled={enrichUnknownSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">Pull exclusion keywords</h3>
+        <p class="mb-2 text-xs text-slate-500">
+          Comma-separated list of release-title substrings the pull pre-grab filter drops —
+          typically digital-only formats like "infinity comic". Case-insensitive substring match
+          at the pull engine. Currently saved:
+          {#if s.pull_exclusion_keywords}
+            <code class="font-mono">{s.pull_exclusion_keywords}</code>
+          {:else}
+            <span class="text-slate-400">(empty — no exclusions)</span>
+          {/if}.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'pull_exclusion_keywords',
+              pullKeywordsDraft,
+              (b) => (pullKeywordsSaving = b),
+              null,
+              'Pull exclusion keywords saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            bind:value={pullKeywordsDraft}
+            disabled={pullKeywordsSaving}
+            placeholder="e.g. infinity comic, infinite comic, digital"
+            class="flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Pull exclusion keywords value"
+          />
+          <Button type="submit" loading={pullKeywordsSaving} disabled={pullKeywordsSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+    </div>
   </section>
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">
