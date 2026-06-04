@@ -34,3 +34,18 @@ export function getMissing(query: MissingQuery = {}): Promise<MissingResponse> {
   const qs = params.toString();
   return apiFetch(`/missing${qs ? '?' + qs : ''}`);
 }
+
+export interface SearchAllMissingSummary {
+  /** Issues for which an indexer search was dispatched. */
+  searched: number;
+  /** Solicited issues skipped because they haven't shipped yet
+   *  (cover_date is today or later). */
+  skipped_solicited: number;
+}
+
+/** Fire-and-forget: dispatch a per-issue indexer search for every
+ *  missing, already-shipped issue in the catalog. 202 with the summary
+ *  counts on success. */
+export function searchAllMissing(): Promise<SearchAllMissingSummary> {
+  return apiFetch('/pull/search-all-missing', { method: 'POST' });
+}

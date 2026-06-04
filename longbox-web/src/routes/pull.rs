@@ -14,6 +14,7 @@ use longbox_db::{
     issue_repo, pull_list_repo, series_repo, NewPullEntry, PullListRow, PullListWithSeries,
 };
 use serde::{Deserialize, Serialize};
+use time::macros::format_description;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -26,11 +27,31 @@ pub fn router() -> Router<AppState> {
             "/pull/search/:series_id/issue/:issue_id",
             post(search_issue_now),
         )
+        .route("/pull/search-all-missing", post(search_all_missing))
         .route("/pull-list", get(list).post(add))
         .route(
             "/pull-list/:series_id",
             get(get_one).patch(set_paused).delete(remove),
         )
+}
+
+/// Rust port of the frontend `isSolicited` predicate. A "solicited"
+/// issue is one with a fully-specified `YYYY-MM-DD` cover_date on or
+/// after `today` — it hasn't shipped yet, so the pull engine has nothing
+/// to find. Anything that isn't a clean `YYYY-MM-DD` (null, partial,
+/// garbage) is treated as NOT solicited — same lenient classification
+/// as the frontend, so a back-end skip on Search-all and a front-end
+/// "this looks searchable" badge can't diverge.
+fn is_solicited(cover_date: Option<&str>, today: time::Date) -> bool {
+    let Some(raw) = cover_date else { return false };
+    if raw.len() != 10 {
+        return false;
+    }
+    let fmt = format_description!("[year]-[month]-[day]");
+    match time::Date::parse(raw, fmt) {
+        Ok(d) => d >= today,
+        Err(_) => false,
+    }
 }
 
 /// Request an immediate pull sweep. `202 Accepted` when the request is
@@ -150,6 +171,76 @@ async fn search_issue_now(
     }
     longbox_pull::fire_issue_search(state.db.clone(), series_id, issue_id);
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Serialize)]
+struct SearchAllMissingResponse {
+    /// Issues for which a per-issue search was dispatched.
+    searched: usize,
+    /// Issues whose cover_date is today or later — skipped because the
+    /// release hasn't happened yet, so the indexer call would be pure
+    /// noise. Matches the frontend's `isSolicited` predicate exactly.
+    skipped_solicited: usize,
+}
+
+/// Dispatch a per-issue search for every "missing" issue in the
+/// catalog (no owned, present file) that has already shipped. Mirrors
+/// the per-series Search-now's fire-and-forget contract — each issue
+/// spawns its own `sweep_single_issue` task and reports its outcome to
+/// the log. The engine's per-issue in-flight dedup keeps a re-click
+/// from doubling the indexer load on already-running searches.
+///
+/// Watch out: this fans out to ALL non-solicited missing issues at
+/// once. Per-indexer rate limits in the newznab clients absorb some of
+/// the bombardment but a library with thousands of missing issues
+/// will produce a sustained burst of indexer hits. Same fanout pattern
+/// the per-series endpoint has had since A.8 — this just scales it to
+/// the whole catalog.
+async fn search_all_missing(
+    State(state): State<AppState>,
+) -> Result<Response, ApiError> {
+    // Same "missing" predicate as routes/missing.rs and stats.rs — no
+    // owned, present file matches this issue. We only need
+    // (series_id, issue_id, cover_date); skip the join with the
+    // series table because the per-issue search call doesn't use it.
+    let rows = sqlx::query!(
+        r#"SELECT i.id AS "issue_id!: i64",
+                  i.series_id AS "series_id!: i64",
+                  i.cover_date
+           FROM issues i
+           WHERE NOT EXISTS (
+               SELECT 1 FROM files f
+               WHERE f.issue_id = i.id
+                 AND f.status = 'owned'
+                 AND f.is_present = 1
+           )"#
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("missing query failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+
+    let today = time::OffsetDateTime::now_utc().date();
+    let mut searched = 0usize;
+    let mut skipped_solicited = 0usize;
+    for row in rows {
+        if is_solicited(row.cover_date.as_deref(), today) {
+            skipped_solicited += 1;
+            continue;
+        }
+        longbox_pull::fire_issue_search(state.db.clone(), row.series_id, row.issue_id);
+        searched += 1;
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SearchAllMissingResponse {
+            searched,
+            skipped_solicited,
+        }),
+    )
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]

@@ -4,14 +4,34 @@
 // two distinct series ids that shared a title (e.g. multiple "The
 // Department of Truth" volumes). The Map-based grouper handles any
 // sort order.
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MissingIssue, MissingResponse } from '$lib/api/missing';
+import { searchAllMissing } from '$lib/api/missing';
+import { searchSeriesNow } from '$lib/api/pull';
 import MissingPage from './+page.svelte';
 
 // goto is called only when a sort/filter control changes; not exercised
 // here but the import is reachable, so stub it for safety.
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+
+vi.mock('$lib/api/missing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api/missing')>()),
+  searchAllMissing: vi.fn()
+}));
+
+vi.mock('$lib/api/pull', () => ({
+  searchSeriesNow: vi.fn()
+}));
+
+vi.mock('$lib/stores/toast.svelte', () => ({
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() }
+}));
+
+// Helper: build a far-future date string so `isSolicited` matches today
+// or later regardless of when the test runs.
+const FUTURE = '2999-01-01';
+const PAST = '2010-05-01';
 
 function missingIssue(over: Partial<MissingIssue> & {
   series_id: number;
@@ -97,6 +117,106 @@ describe('missing page series grouping', () => {
     // regex rather than the bare phrase.
     expect(screen.getByText(/2 missing/)).toBeInTheDocument();
     expect(screen.getByText(/1 missing/)).toBeInTheDocument();
+  });
+
+  it('partitions solicited rows into a separate section and labels the global Search by actionable count', () => {
+    render(
+      MissingPage,
+      pageData([
+        // 2 actionable (past or null cover_date)
+        missingIssue({
+          issue_id: 1,
+          number: '1',
+          cover_date: PAST,
+          series_id: 100,
+          series_title: 'Saga'
+        }),
+        missingIssue({ issue_id: 2, number: '2', series_id: 100, series_title: 'Saga' }),
+        // 1 solicited
+        missingIssue({
+          issue_id: 999,
+          number: '99',
+          cover_date: FUTURE,
+          series_id: 100,
+          series_title: 'Saga'
+        })
+      ])
+    );
+
+    // Global search button label uses the actionable count, NOT the total.
+    expect(
+      screen.getByRole('button', { name: /Search 2 missing/ })
+    ).toBeInTheDocument();
+    // Header carries both the gross total and the solicited subnote.
+    expect(screen.getByText(/3 missing issues/)).toBeInTheDocument();
+    expect(screen.getByText(/\(1 solicited\)/)).toBeInTheDocument();
+
+    // The actionable section's per-series count is 2 (solicited issue
+    // is filtered out before grouping). The "Search 2 missing" button
+    // also contains "2 missing", so disambiguate by leading bullet.
+    expect(screen.getByText(/· 2 missing/)).toBeInTheDocument();
+    // The solicited section heading exists and has its own per-series
+    // count.
+    expect(screen.getByRole('heading', { name: /Solicited$/ })).toBeInTheDocument();
+    expect(screen.getByText(/· 1 solicited/)).toBeInTheDocument();
+  });
+
+  it('hides the global Search button when there are no actionable issues', () => {
+    render(
+      MissingPage,
+      pageData([
+        missingIssue({
+          issue_id: 1,
+          number: '1',
+          cover_date: FUTURE,
+          series_id: 100,
+          series_title: 'Pre-Order Only'
+        })
+      ])
+    );
+    expect(
+      screen.queryByRole('button', { name: /Search \d+ missing/ })
+    ).not.toBeInTheDocument();
+    // The solicited section is the only group on the page.
+    expect(screen.getByRole('heading', { name: /Solicited$/ })).toBeInTheDocument();
+  });
+
+  it('dispatches the global Search-all and reports the summary in a toast', async () => {
+    vi.mocked(searchAllMissing).mockResolvedValue({ searched: 5, skipped_solicited: 2 });
+    render(
+      MissingPage,
+      pageData([
+        missingIssue({ issue_id: 1, number: '1', cover_date: PAST, series_id: 100, series_title: 'Saga' })
+      ])
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: /Search 1 missing/ }));
+    await waitFor(() => expect(searchAllMissing).toHaveBeenCalledOnce());
+
+    const { toast } = await import('$lib/stores/toast.svelte');
+    expect(toast.success).toHaveBeenCalledWith(
+      'Search dispatched for 5 missing issues (2 solicited skipped).'
+    );
+  });
+
+  it('per-series Search button fires searchSeriesNow for that series only', async () => {
+    vi.mocked(searchSeriesNow).mockResolvedValue();
+    render(
+      MissingPage,
+      pageData([
+        missingIssue({ issue_id: 1, number: '1', cover_date: PAST, series_id: 100, series_title: 'Saga' }),
+        missingIssue({ issue_id: 2, number: '5', cover_date: PAST, series_id: 200, series_title: 'Chew' })
+      ])
+    );
+
+    const buttons = screen.getAllByRole('button', { name: 'Search' });
+    expect(buttons).toHaveLength(2);
+    await fireEvent.click(buttons[0]!);
+
+    await waitFor(() => expect(searchSeriesNow).toHaveBeenCalledOnce());
+    // The first group is Saga (series 100) — that's the id the click
+    // routed.
+    expect(searchSeriesNow).toHaveBeenCalledWith(100);
   });
 
   it('bucket-merges all rows for a series even when they are non-contiguous', () => {
