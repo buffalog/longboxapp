@@ -1869,6 +1869,143 @@ async fn settings_never_exposes_the_cv_api_key() {
     );
 }
 
+// -------- PUT /api/settings/:key (Tier 2 ITEM 4) --------
+
+/// Each editable threshold round-trips: a successful PUT writes the
+/// canonical f64 form into the `settings` row, and the next GET
+/// reflects that exact value. The consumers (scanner per scan,
+/// enrichment per cycle) read the same row via `settings_repo`, so
+/// what GET shows here is what the next scan/cycle actually uses.
+#[tokio::test]
+async fn settings_put_match_confidence_threshold_persists_and_round_trips() {
+    let app = build_test_app().await;
+    // Default-seeded row is 0.85 (from the 20260516040415 initial
+    // migration), so a write to 0.5 is observably different.
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/match_confidence_threshold",
+            r#"{"value":"0.5"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["key"], "match_confidence_threshold");
+    assert_eq!(body["value"], "0.5");
+
+    // GET reflects the new value (DB-sourced, not env-sourced).
+    let resp = app.request(empty_request("GET", "/api/settings")).await;
+    let body = response_json(resp).await;
+    assert_eq!(body["match_confidence_threshold"], 0.5);
+    // The historical env-display field is unchanged — it's the boot
+    // env value, not the live tunable.
+    assert_eq!(body["match_threshold"], 0.85);
+}
+
+#[tokio::test]
+async fn settings_put_enrichment_thresholds_persist() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/cv_enrichment_title_threshold_year_known",
+            r#"{"value":"0.7"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/cv_enrichment_title_threshold_year_unknown",
+            r#"{"value":"0.99"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(body["cv_enrichment_title_threshold_year_known"], 0.7);
+    assert_eq!(body["cv_enrichment_title_threshold_year_unknown"], 0.99);
+}
+
+#[tokio::test]
+async fn settings_put_pull_exclusion_keywords_persists_verbatim() {
+    let app = build_test_app().await;
+    // CSV stored verbatim — the pull engine handles split/trim at
+    // consumption time so the wire round-trips exactly what the user
+    // typed (including spaces, which the engine will trim).
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/pull_exclusion_keywords",
+            r#"{"value":"infinity comic, infinite comic, digital"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(
+        body["pull_exclusion_keywords"],
+        "infinity comic, infinite comic, digital"
+    );
+}
+
+#[tokio::test]
+async fn settings_put_rejects_threshold_out_of_range() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/match_confidence_threshold",
+            r#"{"value":"1.5"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("between 0.0 and 1.0"));
+
+    // The stored value must be unchanged — the rejection happens
+    // before the upsert.
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(body["match_confidence_threshold"], 0.85);
+}
+
+#[tokio::test]
+async fn settings_put_rejects_non_numeric_threshold() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/cv_enrichment_title_threshold_year_known",
+            r#"{"value":"banana"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn settings_put_rejects_unknown_key() {
+    // Boot-time env vars (library_root_path, etc.) are deliberately
+    // NOT exposed to runtime mutation. Tweaking them requires a
+    // container restart by design — silently writing the row would
+    // create a confusing drift between the env-sourced display and
+    // the never-consulted DB row.
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/library_root_path",
+            r#"{"value":"/somewhere/else"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not editable"));
+}
+
 // -------- POST /api/files/match-folder-from-cv --------
 
 /// Mounts wiremock for a single CV volume with the given issues, then

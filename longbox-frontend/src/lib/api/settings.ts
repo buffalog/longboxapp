@@ -5,6 +5,10 @@ export interface Settings {
   database_url: string;
   bind_address: string;
   log_level: string;
+  /** Historical env-display field. Reflects the boot-time
+   *  `MATCH_THRESHOLD` env var, not the live tunable. The actually
+   *  load-bearing value the scanner reads per-scan is
+   *  `match_confidence_threshold` below. */
   match_threshold: number;
   /** Always `true` in Phase A — server boot requires a non-empty key.
    *  Boolean shape preserved for forward-compat if an in-app key flow
@@ -14,8 +18,43 @@ export interface Settings {
    *  on this deployment. */
   download_watch_path: string | null;
   version: string;
+
+  /** Runtime-tunable: scanner owned-vs-needs_review threshold.
+   *  Falls back to the boot env value when no DB row exists. */
+  match_confidence_threshold: number;
+  /** Runtime-tunable: CV enrichment title-similarity gate when the
+   *  candidate volume has a known start year. Default 0.85. */
+  cv_enrichment_title_threshold_year_known: number;
+  /** Runtime-tunable: stricter title-similarity gate when the
+   *  candidate has no start year. Default 0.95. */
+  cv_enrichment_title_threshold_year_unknown: number;
+  /** Runtime-tunable: comma-separated release-title substrings the
+   *  pull pre-grab filter drops. Empty string when unset. */
+  pull_exclusion_keywords: string;
 }
+
+/** A whitelisted runtime-tunable setting. The backend rejects any
+ *  other key with 400 — the env-baked rows (library_root_path, etc.)
+ *  are intentionally not exposed to live mutation. */
+export type EditableSettingKey =
+  | 'match_confidence_threshold'
+  | 'cv_enrichment_title_threshold_year_known'
+  | 'cv_enrichment_title_threshold_year_unknown'
+  | 'pull_exclusion_keywords';
 
 export function getSettings(): Promise<Settings> {
   return apiFetch('/settings');
+}
+
+/** PUT /api/settings/:key. Body shape is `{value: string}` — thresholds
+ *  send the stringified number; keywords send the raw CSV. Returns the
+ *  canonical (server-normalized) stored value. */
+export function updateSetting(
+  key: EditableSettingKey,
+  value: string
+): Promise<{ key: string; value: string }> {
+  return apiFetch(`/settings/${key}`, {
+    method: 'PUT',
+    body: JSON.stringify({ value })
+  });
 }
