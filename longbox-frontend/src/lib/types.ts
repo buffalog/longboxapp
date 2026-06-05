@@ -67,6 +67,12 @@ export interface IssueWithFile extends Issue {
 
 export interface SeriesDetail extends Series {
   issues: IssueWithFile[];
+  /** Owned-and-present file count sourced from the same SQL the
+   *  backend's delete-series guard uses. Authoritative; do NOT
+   *  derive from `issues[].file` for delete-confirmation gating —
+   *  that surface underreports for shallow / unenriched series and
+   *  was the cause of the modal-skip 409 bug. */
+  owned_file_count: number;
 }
 
 export interface FileRow {

@@ -624,6 +624,57 @@ async fn series_detail_404_for_missing() {
 }
 
 #[tokio::test]
+async fn series_detail_includes_authoritative_owned_file_count() {
+    // The detail response's `owned_file_count` is computed via the
+    // join-based query the delete-series guard uses — NOT derived
+    // from the per-issue file lookup that powers `issues[].file`.
+    // Seed a series with one issue and an owned+present file; assert
+    // the count comes back as 1.
+    let app = build_test_app().await;
+    let (sid, iid) = seed_series_and_issue(&app, "Adventureman", "1").await;
+    longbox_db::file_repo::insert(
+        &app.state.db,
+        longbox_db::NewFile {
+            issue_id: Some(iid),
+            library_root_id: app.library_root_id,
+            path_relative: "Adventureman (2020)/Adventureman 001.cbz".into(),
+            size_bytes: 1,
+            mtime: time::macros::datetime!(2024-01-01 0:00),
+            last_scanned_at: time::macros::datetime!(2024-01-01 0:00),
+            match_method: "filename".into(),
+            match_confidence: 0.99,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: time::macros::datetime!(2024-01-01 0:00),
+            matched_at: Some(time::macros::datetime!(2024-01-01 0:00)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", &format!("/api/series/{sid}")))
+            .await,
+    )
+    .await;
+    assert_eq!(body["owned_file_count"], 1);
+}
+
+#[tokio::test]
+async fn series_detail_owned_file_count_zero_when_no_files() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Empty", "1").await;
+    let body = response_json(
+        app.request(empty_request("GET", &format!("/api/series/{sid}")))
+            .await,
+    )
+    .await;
+    assert_eq!(body["owned_file_count"], 0);
+}
+
+#[tokio::test]
 async fn delete_series_with_no_owned_files_succeeds() {
     let app = build_test_app().await;
     let series = series_repo::insert(

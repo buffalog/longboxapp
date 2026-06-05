@@ -60,6 +60,15 @@ function cvResult(over: Partial<SeriesSearchResult> = {}): SeriesSearchResult {
 }
 
 function seriesDetail(over: Partial<SeriesDetail> = {}): SeriesDetail {
+  // `owned_file_count` is sourced from the server's authoritative
+  // count (matches the delete-guard SQL). For test fixtures we
+  // derive it from the issues list as a default — overrides take
+  // precedence so tests can exercise the "server-says-N-but-issues-
+  // show-zero" mismatch directly.
+  const issues = over.issues ?? [];
+  const derivedOwnedCount = issues.filter(
+    (i) => i.file?.status === 'owned'
+  ).length;
   return {
     id: 1,
     cv_id: 12345,
@@ -72,7 +81,8 @@ function seriesDetail(over: Partial<SeriesDetail> = {}): SeriesDetail {
     cover_url: null,
     created_at: '2026-05-20 00:00:00',
     updated_at: '2026-05-20 00:00:00',
-    issues: [],
+    issues,
+    owned_file_count: derivedOwnedCount,
     ...over
   };
 }
@@ -214,6 +224,58 @@ describe('series detail page', () => {
     // No modal copy.
     expect(screen.queryByText(/Folder to be removed/)).not.toBeInTheDocument();
     expect(screen.queryByText(/permanently delete the series folder/)).not.toBeInTheDocument();
+  });
+
+  it('opens the modal on owned_file_count > 0 even when issues[].file is empty', async () => {
+    // Bug regression: shallow / unenriched series surface owned files
+    // through the join-based server count, but `issues[].file` can
+    // come back null on every issue row. The pre-fix guard derived
+    // the count from `issues[].file`, read 0, skipped the modal,
+    // and ran a delete that 409'd because the backend's join-based
+    // owned-files guard saw real files. With the authoritative
+    // `owned_file_count` field driving the guard, the modal opens
+    // and the user gets a chance to confirm `delete_files=true`.
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 1 });
+    render(
+      Page,
+      pageData(
+        seriesDetail({
+          title: 'Unenriched',
+          start_year: 2021,
+          cv_id: null,
+          issues: [
+            {
+              id: 1,
+              series_id: 1,
+              cv_issue_id: null,
+              metron_issue_id: null,
+              number: '1',
+              title: null,
+              cover_date: null,
+              cover_url: null,
+              summary: null,
+              created_at: '2026-05-20 00:00:00',
+              updated_at: '2026-05-20 00:00:00',
+              // The bug shape: a real owned file on disk that the
+              // per-issue lookup didn't surface back on this response.
+              file: null
+            }
+          ],
+          owned_file_count: 3
+        })
+      )
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: /Delete series/ }));
+
+    // The destructive-confirm modal renders with the server count.
+    expect(screen.getByText(/Folder to be removed/)).toBeInTheDocument();
+    expect(screen.getByText(/3 files from disk/)).toBeInTheDocument();
+    // Critically: deleteSeries has NOT been called yet — the user
+    // still needs to click "Delete series and files" inside the
+    // modal. Without the fix this test fails because the click
+    // would have already triggered runDelete(false) and 409'd.
+    expect(deleteSeries).not.toHaveBeenCalled();
   });
 
   it('hides Refresh and shows the shallow empty-issues hint for a cv_id-NULL series', () => {
