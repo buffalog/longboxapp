@@ -2172,6 +2172,30 @@ async fn settings_put_match_confidence_threshold_persists_and_round_trips() {
 }
 
 #[tokio::test]
+async fn settings_put_pull_indexer_match_threshold_persists_and_round_trips() {
+    // Finding 3 regression: the pull engine's NZB-to-series similarity
+    // gate must be tunable via the Settings API now that it's exposed.
+    // Default-seeded value is 0.75 (PULL_INDEXER_MATCH_THRESHOLD); a
+    // write to 0.70 is observably different.
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/pull_indexer_match_threshold",
+            r#"{"value":"0.70"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["key"], "pull_indexer_match_threshold");
+    assert_eq!(body["value"], "0.7");
+
+    // GET reflects the new value — single source of truth (Finding 4).
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(body["pull_indexer_match_threshold"], 0.7);
+}
+
+#[tokio::test]
 async fn settings_put_enrichment_thresholds_persist() {
     let app = build_test_app().await;
     let resp = app

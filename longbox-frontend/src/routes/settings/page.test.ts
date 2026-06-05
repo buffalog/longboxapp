@@ -44,6 +44,7 @@ function settings(over: Partial<Settings> = {}): Settings {
     download_watch_path: null,
     version: '0.0.1',
     match_confidence_threshold: 0.85,
+    pull_indexer_match_threshold: 0.75,
     cv_enrichment_title_threshold_year_known: 0.85,
     cv_enrichment_title_threshold_year_unknown: 0.95,
     pull_exclusion_keywords: '',
@@ -71,11 +72,12 @@ beforeEach(() => {
 });
 
 describe('Settings page — Tunable settings', () => {
-  it('renders the four tunables seeded from server values', () => {
+  it('renders the five tunables seeded from server values', () => {
     render(
       Page,
       pageData({
         match_confidence_threshold: 0.8,
+        pull_indexer_match_threshold: 0.72,
         cv_enrichment_title_threshold_year_known: 0.7,
         cv_enrichment_title_threshold_year_unknown: 0.99,
         pull_exclusion_keywords: 'infinity comic'
@@ -88,6 +90,9 @@ describe('Settings page — Tunable settings', () => {
     expect(
       screen.getByLabelText('Match confidence threshold value')
     ).toHaveValue('0.8');
+    expect(
+      screen.getByLabelText('Pull indexer match threshold value')
+    ).toHaveValue('0.72');
     expect(
       screen.getByLabelText('Enrichment title threshold (year known) value')
     ).toHaveValue('0.7');
@@ -143,9 +148,10 @@ describe('Settings page — Tunable settings', () => {
 
     const input = screen.getByLabelText('Host library path value');
     await fireEvent.input(input, { target: { value: '/Volumes/Comics' } });
-    // 5th tunable → last Save button.
+    // 6th (last) tunable → last Save button. Order: match, pull
+    // indexer, enrich-known, enrich-unknown, pull keywords, host path.
     const saveButtons = screen.getAllByRole('button', { name: 'Save' });
-    await fireEvent.click(saveButtons[4]!);
+    await fireEvent.click(saveButtons[5]!);
 
     await waitFor(() =>
       expect(updateSetting).toHaveBeenCalledWith('host_library_path', '/Volumes/Comics')
@@ -161,9 +167,9 @@ describe('Settings page — Tunable settings', () => {
 
     const input = screen.getByLabelText('Pull exclusion keywords value');
     await fireEvent.input(input, { target: { value: 'a, b, c' } });
-    // The keywords row is the 4th tunable → 4th Save button.
+    // The keywords row is the 5th tunable → 5th Save button.
     const saveButtons = screen.getAllByRole('button', { name: 'Save' });
-    await fireEvent.click(saveButtons[3]!);
+    await fireEvent.click(saveButtons[4]!);
 
     await waitFor(() =>
       expect(updateSetting).toHaveBeenCalledWith('pull_exclusion_keywords', 'a, b, c')

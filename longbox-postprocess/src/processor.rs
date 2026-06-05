@@ -37,21 +37,23 @@ use crate::Result;
 /// edge (Phase B+ if it surfaces in practice).
 const STABILITY_WINDOW: Duration = Duration::from_secs(2);
 
-/// Phase B match-threshold floor for owned classification. Below this,
-/// Phase B leaves the file in the watch folder rather than silently
-/// auto-importing a needs-review-tier match as owned. Same value as
-/// Phase A's `DEFAULT_MATCH_THRESHOLD` so the two phases agree on what
-/// "confident enough to claim" means.
-const PHASE_B_OWNED_THRESHOLD: f64 = longbox_core::DEFAULT_MATCH_THRESHOLD;
-
 /// Process exactly one file. Errors are returned to the caller (the
 /// consumer task) which logs and continues — a per-file failure does
 /// not crash the pipeline.
+///
+/// `owned_threshold` is the live `match_confidence_threshold` value
+/// the caller read from `settings` (see [`load_owned_threshold`]).
+/// Passing it as a parameter — rather than reading it inside each
+/// process_one call — lets `sweep_now` amortize the SELECT across the
+/// whole batch and keeps `process_one` pure-ish (one less DB roundtrip
+/// per file). The scanner uses the identical pattern via
+/// `Scanner::load_match_threshold`.
 pub async fn process_one(
     source: &Path,
     library_root: &Path,
     library_root_id: i64,
     db: &Pool,
+    owned_threshold: f64,
 ) -> Result<Outcome> {
     let started_at = std::time::Instant::now();
     wait_for_stability(source).await;
@@ -108,14 +110,15 @@ pub async fn process_one(
     let candidates = find_candidates(db, &hint, year_hint).await?;
     let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), &candidates);
 
-    // Phase B owned-classification uses the same threshold as Phase A's
-    // post-hoc classify_status; needs-review-tier matches stay in the
-    // watch folder rather than silently claiming status='owned'.
+    // Phase B owned-classification uses the live
+    // `match_confidence_threshold` from settings (the same row the
+    // scanner reads per scan run). Needs-review-tier matches stay in
+    // the watch folder rather than silently claiming status='owned'.
     let status = classify_status(
         match_result.issue_id,
         match_result.confidence,
         match_result.method,
-        PHASE_B_OWNED_THRESHOLD,
+        owned_threshold,
     );
 
     let outcome = match (match_result.issue_id, status) {
@@ -135,7 +138,7 @@ pub async fn process_one(
             reason: format!(
                 "needs-review-tier match for series hint {hint:?} \
                  (confidence={:.2}, method={:?}); below owned threshold {:.2}",
-                match_result.confidence, match_result.method, PHASE_B_OWNED_THRESHOLD
+                match_result.confidence, match_result.method, owned_threshold
             ),
         },
         (None, _) => Outcome::Skipped {

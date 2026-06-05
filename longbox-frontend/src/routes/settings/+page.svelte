@@ -31,6 +31,8 @@
   // reflect the new value.
   let matchThresholdDraft = $state(String(data.settings.match_confidence_threshold));
   let matchThresholdSaving = $state(false);
+  let pullThresholdDraft = $state(String(data.settings.pull_indexer_match_threshold));
+  let pullThresholdSaving = $state(false);
   let enrichKnownDraft = $state(
     String(data.settings.cv_enrichment_title_threshold_year_known)
   );
@@ -267,9 +269,10 @@
       <div class="border-t border-slate-100 pt-4 first:border-t-0 first:pt-0">
         <h3 class="text-sm font-semibold text-slate-800">Match confidence threshold</h3>
         <p class="mb-2 text-xs text-slate-500">
-          Scanner cutoff between <code>owned</code> and <code>needs_review</code>. A file's match
-          score must clear this to count as owned. Range 0.0–1.0. Currently saved:
-          <code class="font-mono">{s.match_confidence_threshold}</code>.
+          Catalog match cutoff between <code>owned</code> and <code>needs_review</code>. Read live
+          by BOTH the scanner (per scan) and Phase B (per watch-folder sweep) — both agree on
+          what "confident enough to claim" means by reading this one row. Range 0.0–1.0. Currently
+          saved: <code class="font-mono">{s.match_confidence_threshold}</code>.
         </p>
         <form
           class="flex gap-2"
@@ -293,6 +296,42 @@
             aria-label="Match confidence threshold value"
           />
           <Button type="submit" loading={matchThresholdSaving} disabled={matchThresholdSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">Pull indexer match threshold</h3>
+        <p class="mb-2 text-xs text-slate-500">
+          NZB-to-series similarity gate the pull engine applies BEFORE handing a release to
+          SABnzbd. Pre-grab errors are asymmetrically costly (wasted bandwidth, churned SAB,
+          catalog poison), so the default sits stricter than the catalog cutoff above. Read
+          per-sweep. Range 0.0–1.0. Currently saved:
+          <code class="font-mono">{s.pull_indexer_match_threshold}</code>.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'pull_indexer_match_threshold',
+              pullThresholdDraft,
+              (b) => (pullThresholdSaving = b),
+              validateThreshold,
+              'Pull indexer threshold saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            inputmode="decimal"
+            bind:value={pullThresholdDraft}
+            disabled={pullThresholdSaving}
+            class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Pull indexer match threshold value"
+          />
+          <Button type="submit" loading={pullThresholdSaving} disabled={pullThresholdSaving}>
             Save
           </Button>
         </form>

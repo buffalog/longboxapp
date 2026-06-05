@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use longbox_db::settings_repo;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
@@ -211,6 +212,23 @@ async fn initial_sweep(root: PathBuf, tx: mpsc::Sender<PathBuf>) {
     );
 }
 
+/// Read the live `match_confidence_threshold` setting that Phase B's
+/// owned-classification consults. Same key, same fallback contract as
+/// the scanner's `Scanner::load_match_threshold` — these two phases
+/// agree on what "confident enough to claim" means by reading the
+/// same row. Falls back to the compiled `DEFAULT_MATCH_THRESHOLD` when
+/// the row is absent or unparseable, but never silently uses a stale
+/// boot-time value.
+async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
+    let value = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_MATCH_CONFIDENCE_THRESHOLD,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+    )
+    .await?;
+    Ok(value)
+}
+
 /// Outcome tally for [`sweep_now`]. Mirrors the [`processor::Outcome`]
 /// enum collapsed to per-bucket counts. Serialized as the response body
 /// of `POST /api/postprocess/trigger` so the frontend can render a
@@ -260,6 +278,13 @@ pub async fn sweep_now(
         source,
     })?;
 
+    // Read the live owned threshold once per sweep — same cadence as
+    // the scanner's `Scanner::load_match_threshold` (per scan run).
+    // The DB settings row is the single source of truth; the constant
+    // fallback only applies when the row is absent/unparseable
+    // (initial-boot state, never after the first save).
+    let owned_threshold = load_owned_threshold(&db).await?;
+
     let watch_path_buf = watch_path.to_path_buf();
     let walk_root = watch_path_buf.clone();
     let candidates = tokio::task::spawn_blocking(move || {
@@ -292,7 +317,15 @@ pub async fn sweep_now(
 
     let mut summary = SweepSummary::default();
     for path in candidates {
-        match processor::process_one(&path, library_root, library_root_id, &db).await {
+        match processor::process_one(
+            &path,
+            library_root,
+            library_root_id,
+            &db,
+            owned_threshold,
+        )
+        .await
+        {
             Ok(outcome) => {
                 use processor::Outcome;
                 match &outcome {
@@ -518,7 +551,23 @@ async fn consumer_task(
             );
             continue;
         }
-        match processor::process_one(&path, &library_root, library_root_id, &db).await {
+        // Per-message threshold read so a Settings UI change takes
+        // effect from the very next watched file — same "live tunable"
+        // promise the scanner makes. SQLite-local read, microseconds.
+        let owned_threshold = match load_owned_threshold(&db).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_postprocess",
+                    err = %e,
+                    "phase_b.threshold_load_failed (falling back to compiled default)"
+                );
+                longbox_core::DEFAULT_MATCH_THRESHOLD
+            }
+        };
+        match processor::process_one(&path, &library_root, library_root_id, &db, owned_threshold)
+            .await
+        {
             Ok(outcome) => {
                 // Imported is the only outcome that removes the source
                 // from /watch/. Skipped intentionally leaves the file

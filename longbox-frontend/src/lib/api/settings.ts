@@ -19,9 +19,18 @@ export interface Settings {
   download_watch_path: string | null;
   version: string;
 
-  /** Runtime-tunable: scanner owned-vs-needs_review threshold.
-   *  Falls back to the boot env value when no DB row exists. */
+  /** Runtime-tunable: catalog match threshold. Used by BOTH the
+   *  scanner (per scan run) and Phase B (per sweep) — the two
+   *  consumers agree on what "confident enough to claim" means by
+   *  reading this single row. Falls back to the boot env value when
+   *  no DB row exists. */
   match_confidence_threshold: number;
+  /** Runtime-tunable: pull engine's NZB-to-series similarity gate.
+   *  Separate from `match_confidence_threshold` because pre-grab
+   *  errors are asymmetrically costly (wasted SAB cycles + catalog
+   *  poison), so the default sits stricter. Read per-sweep by the
+   *  pull engine. Default 0.75. */
+  pull_indexer_match_threshold: number;
   /** Runtime-tunable: CV enrichment title-similarity gate when the
    *  candidate volume has a known start year. Default 0.85. */
   cv_enrichment_title_threshold_year_known: number;
@@ -42,6 +51,7 @@ export interface Settings {
  *  are intentionally not exposed to live mutation. */
 export type EditableSettingKey =
   | 'match_confidence_threshold'
+  | 'pull_indexer_match_threshold'
   | 'cv_enrichment_title_threshold_year_known'
   | 'cv_enrichment_title_threshold_year_unknown'
   | 'pull_exclusion_keywords'
