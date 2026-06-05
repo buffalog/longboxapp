@@ -83,7 +83,7 @@ async fn trigger(State(state): State<AppState>) -> Result<Json<SweepSummary>, Ap
     tracing::info!(
         target: "longbox_web",
         processed = summary.processed,
-        unsorted = summary.unsorted,
+        skipped = summary.skipped,
         conflicts = summary.conflicts,
         failed = summary.failed,
         "postprocess.trigger_completed"

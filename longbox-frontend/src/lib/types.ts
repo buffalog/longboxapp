@@ -215,10 +215,13 @@ export interface PendingResponse {
 
 /** Return body of POST /api/postprocess/trigger. Mirrors
  *  `longbox_postprocess::SweepSummary`. Counters are cumulative for
- *  the sweep — sum is the total number of watch-folder files visited. */
+ *  the sweep — sum is the total number of watch-folder files visited.
+ *  `skipped` counts files left in /watch/ because they had no match
+ *  or only a sub-threshold match — the watch folder is the holding
+ *  pen for unplaceable files (no `_unsorted/` parking lot). */
 export interface SweepSummary {
   processed: number;
-  unsorted: number;
+  skipped: number;
   conflicts: number;
   failed: number;
 }
