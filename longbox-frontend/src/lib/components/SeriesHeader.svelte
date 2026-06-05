@@ -47,7 +47,12 @@
           {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
         </div>
       </div>
-      <div class="flex items-center gap-2">
+      <!-- Actions cluster: outer flex-wrap with gap-4 separates logical
+           groups (primary / metadata / pull-list). The `actions` snippet
+           is responsible for emitting each group as its own
+           gap-2 flex container so spacing stays consistent regardless
+           of which buttons render conditionally. -->
+      <div class="flex flex-wrap items-center gap-4">
         {#if cvUrl}
           <a
             href={cvUrl}

@@ -51,17 +51,22 @@
 
 <div class="flex flex-col items-end gap-1">
   {#if current}
-    <div class="flex items-center gap-1.5">
-      <span
-        class="inline-flex items-center rounded px-2 py-1 text-xs font-medium {current.paused
-          ? 'bg-amber-50 text-amber-700'
-          : 'bg-emerald-50 text-emerald-700'}"
-      >
-        {current.paused ? 'Pulls paused' : 'On pull list'}
-      </span>
-      <Button variant="ghost" size="sm" onclick={handleTogglePause} disabled={busy}>
-        {current.paused ? 'Resume' : 'Pause'}
-      </Button>
+    <!-- Inner cluster: chip+Pause are the status group (gap-2); Remove
+         is the destructive action and sits at gap-4 from the pair so
+         users don't trigger it while reaching for Pause. -->
+    <div class="flex flex-wrap items-center gap-4">
+      <div class="flex items-center gap-2">
+        <span
+          class="inline-flex items-center rounded px-2 py-1 text-xs font-medium {current.paused
+            ? 'bg-amber-50 text-amber-700'
+            : 'bg-emerald-50 text-emerald-700'}"
+        >
+          {current.paused ? 'Pulls paused' : 'On pull list'}
+        </span>
+        <Button variant="ghost" size="sm" onclick={handleTogglePause} disabled={busy}>
+          {current.paused ? 'Resume' : 'Pause'}
+        </Button>
+      </div>
       <Button variant="ghost" size="sm" onclick={handleRemove} disabled={busy}>Remove</Button>
     </div>
   {:else}
