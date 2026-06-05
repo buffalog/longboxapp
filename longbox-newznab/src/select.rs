@@ -63,6 +63,66 @@ fn scene_year_re() -> &'static Regex {
 /// `parse_filename` returns `None` on the raw title — canonical inputs
 /// short-circuit before reaching here, avoiding any double-wrap of
 /// already-parenthesized years.
+/// Bracketed-tag NZB title → canonical-filename shape adapter.
+/// NZBGeek and Prowlarr-via-newznab ship titles like:
+///
+/// ```text
+/// Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]
+/// Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]
+/// ```
+///
+/// Square brackets for year + tags + group, dots-as-spaces in the
+/// series prefix (sometimes), no extension. Neither the raw cascade
+/// nor [`normalize_scene_title`] handles these — the scene
+/// normalizer's rightmost-year-wrap would land the year token INSIDE
+/// the brackets, producing `[(2025)]` which the filename parser
+/// still rejects.
+///
+/// Approach (matches the user-stated spec from the Tier 4 bug):
+///
+/// 1. **Capture year** from the first `[YYYY]` bracket. Regex
+///    requires the whole bracket to be exactly four digits — a
+///    `[2025-Backup]` tag won't poison the year, only a bare
+///    `[YYYY]` is recognized.
+/// 2. **Strip all bracketed segments** wholesale.
+/// 3. **Dots → spaces** so `Absolute.Green.Lantern.008` becomes the
+///    space-separated form the filename parser expects.
+/// 4. **Collapse whitespace** — bracket-stripping leaves runs of
+///    spaces where the brackets used to sit; squash them.
+/// 5. **Re-emit canonical** — `{cleaned} ({year}).cbz` when year was
+///    captured, year-less `{cleaned}.cbz` otherwise. The yearless
+///    form falls through to the file parser's catch-all / `(of N)
+///    yearless` patterns; `(YYYY)` keeps the strict-year patterns
+///    in play.
+///
+/// Called from [`parse_release_title`] between the `{title}.cbz`
+/// pass and [`normalize_scene_title`] so bracketed titles get
+/// claimed BEFORE the scene normalizer mangles them.
+pub fn normalize_nzb_title(input: &str) -> String {
+    let year_re = nzb_year_re();
+    let year = year_re
+        .captures(input)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()));
+    let bracket_re = nzb_bracket_re();
+    let without_brackets = bracket_re.replace_all(input, " ");
+    let dotted = without_brackets.replace('.', " ");
+    let cleaned: String = dotted.split_whitespace().collect::<Vec<_>>().join(" ");
+    match year {
+        Some(y) => format!("{cleaned} ({y}).cbz"),
+        None => format!("{cleaned}.cbz"),
+    }
+}
+
+static NZB_YEAR_RE: OnceLock<Regex> = OnceLock::new();
+fn nzb_year_re() -> &'static Regex {
+    NZB_YEAR_RE.get_or_init(|| Regex::new(r"\[(\d{4})\]").unwrap())
+}
+
+static NZB_BRACKET_RE: OnceLock<Regex> = OnceLock::new();
+fn nzb_bracket_re() -> &'static Regex {
+    NZB_BRACKET_RE.get_or_init(|| Regex::new(r"\[[^\]]*\]").unwrap())
+}
+
 pub fn normalize_scene_title(input: &str) -> String {
     // 1. dots → spaces
     let with_spaces = input.replace('.', " ");
@@ -114,6 +174,15 @@ fn parse_release_title(title: &str, patterns: &[ParsingPattern]) -> Option<Parse
         return Some(parsed);
     }
     if let Some(parsed) = parse_filename(&format!("{title}.cbz"), patterns) {
+        return Some(parsed);
+    }
+    // Bracketed-tag titles (NZBGeek, Prowlarr) — try BEFORE the
+    // scene normalizer because the scene step's rightmost-year-wrap
+    // would land the year inside the brackets and produce `[(YYYY)]`
+    // which still doesn't parse. The NZB normalizer strips the
+    // brackets, capturing the year first, before re-emitting the
+    // canonical shape.
+    if let Some(parsed) = parse_filename(&normalize_nzb_title(title), patterns) {
         return Some(parsed);
     }
     parse_filename(&normalize_scene_title(title), patterns)
@@ -991,6 +1060,129 @@ mod tests {
             "Wolverine",
             "005",
             Some(2024),
+        );
+    }
+
+    // -------- NZB bracketed-tag normalizer (Tier 4 critical) --------
+
+    /// The user-surfaced bug: NZBGeek-style bracketed titles never
+    /// parsed and the indexer pool came back "none parseable" even
+    /// when real releases existed. Both example titles from the
+    /// kickoff brief must now claim through the new normalizer.
+    #[test]
+    fn nzb_bracketed_year_and_tags_space_separated_series() {
+        check_normalized_parses_to(
+            "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
+            "Absolute Green Lantern",
+            "007",
+            Some(2025),
+        );
+    }
+
+    #[test]
+    fn nzb_bracketed_year_and_tags_dot_separated_series() {
+        check_normalized_parses_to(
+            "Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]",
+            "Absolute Green Lantern",
+            "008",
+            Some(2026),
+        );
+    }
+
+    /// `[YYYY]` capture must be the *first* 4-digit bracket, ignoring
+    /// non-year brackets that happen to precede it. A `[Digital]`
+    /// tag in front of the `[2025]` year shouldn't poison the
+    /// capture.
+    #[test]
+    fn nzb_year_capture_skips_non_numeric_brackets_in_front() {
+        check_normalized_parses_to(
+            "Some Mini 003 [Digital] [2025] [Group]",
+            "Some Mini",
+            "003",
+            Some(2025),
+        );
+    }
+
+    /// `[2025-Backup]` looks like it carries a year but the regex
+    /// requires the whole bracket to be exactly four digits — so this
+    /// is NOT a year capture, and the title falls through year-less.
+    /// The `(of N) yearless` / catch-all patterns then pick it up,
+    /// or it stays unparseable. Either way the year token is `None`.
+    #[test]
+    fn nzb_non_pure_year_bracket_does_not_capture_year() {
+        let patterns = default_patterns();
+        let parsed = parse_release_title(
+            "Saga 042 [2025-Backup] [Digital] [Group]",
+            &patterns,
+        );
+        // Year-less with the (of-N-style) catch-all may or may not
+        // claim depending on shape; what's load-bearing is that we
+        // don't accidentally capture `2025` from a non-pure bracket.
+        if let Some(p) = parsed {
+            assert_eq!(p.year, None, "year must NOT capture from non-pure bracket");
+        }
+    }
+
+    /// Bracketed title without ANY [YYYY] bracket still strips the
+    /// other brackets and tries to parse year-less. Whether it parses
+    /// depends on whether the cleaned form matches a yearless pattern;
+    /// the load-bearing assertion is the normalizer doesn't crash and
+    /// doesn't fabricate a year.
+    #[test]
+    fn nzb_no_year_bracket_strips_other_tags_and_yields_yearless() {
+        let normalized = normalize_nzb_title("Some Mini 003 [Digital] [Group-Name]");
+        assert_eq!(normalized, "Some Mini 003.cbz");
+    }
+
+    /// Direct normalizer round-trip — the canonical-shape output the
+    /// filename parser expects to receive.
+    #[test]
+    fn nzb_normalizer_emits_canonical_shape() {
+        assert_eq!(
+            normalize_nzb_title(
+                "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]"
+            ),
+            "Absolute Green Lantern 007 (2025).cbz",
+        );
+        assert_eq!(
+            normalize_nzb_title(
+                "Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]"
+            ),
+            "Absolute Green Lantern 008 (2026).cbz",
+        );
+    }
+
+    /// The full select-stage path: a pool of bracketed-tag releases
+    /// for a subscribed series must SURVIVE the filter (parseable,
+    /// title-matched, year-matched). Pre-fix this returned an
+    /// "all unparseable" mismatch; post-fix the pool is non-empty.
+    #[test]
+    fn filter_keeps_bracketed_releases_for_matching_series() {
+        let patterns = default_patterns();
+        let pool = vec![
+            release(
+                "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
+                Some(20),
+            ),
+            release(
+                "Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]",
+                Some(15),
+            ),
+        ];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Absolute Green Lantern",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
+        );
+        assert_eq!(
+            outcome.kept.len(),
+            2,
+            "both bracketed releases must survive the filter; got {} (mismatch={:?})",
+            outcome.kept.len(),
+            outcome.mismatch
         );
     }
 
