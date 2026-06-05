@@ -6,11 +6,15 @@ use longbox_db::{parsing_pattern_repo, DbError, NewParsingPattern};
 #[tokio::test]
 async fn list_enabled_returns_seeds_in_priority_order() {
     // The initial four (5/10/20/30), the A.9 parser hot-fix three
-    // (11/12/15), and the Bug 1b three (6/7/25).
+    // (11/12/15), the Bug 1b three (6/7/25), and the Tier 4 `(of N)`
+    // three (13/14/28).
     let pool = fresh_pool().await;
     let rows = parsing_pattern_repo::list_enabled(&pool).await.unwrap();
     let priorities: Vec<i64> = rows.iter().map(|r| r.priority).collect();
-    assert_eq!(priorities, vec![5, 6, 7, 10, 11, 12, 15, 20, 25, 30]);
+    assert_eq!(
+        priorities,
+        vec![5, 6, 7, 10, 11, 12, 13, 14, 15, 20, 25, 28, 30]
+    );
     assert!(rows.iter().all(|r| r.enabled));
 }
 
@@ -23,7 +27,10 @@ async fn set_enabled_false_removes_from_enabled_list() {
         .unwrap();
     let rows = parsing_pattern_repo::list_enabled(&pool).await.unwrap();
     let priorities: Vec<i64> = rows.iter().map(|r| r.priority).collect();
-    assert_eq!(priorities, vec![6, 7, 10, 11, 12, 15, 20, 25, 30]);
+    assert_eq!(
+        priorities,
+        vec![6, 7, 10, 11, 12, 13, 14, 15, 20, 25, 28, 30]
+    );
 }
 
 #[tokio::test]
@@ -101,5 +108,5 @@ async fn list_all_includes_disabled() {
         .await
         .unwrap();
     let all = parsing_pattern_repo::list_all(&pool).await.unwrap();
-    assert_eq!(all.len(), 10);
+    assert_eq!(all.len(), 13);
 }
