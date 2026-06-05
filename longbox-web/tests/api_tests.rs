@@ -2006,6 +2006,144 @@ async fn settings_put_rejects_unknown_key() {
         .contains("not editable"));
 }
 
+// -------- GET /api/stats (dashboard tile aggregates) --------
+
+/// New fields the dashboard consolidates into one HTTP round-trip:
+/// `pull_list_count`, `pull_failures_count`, `pending_interventions_count`.
+/// Seed each surface independently and assert the response numbers
+/// match. Existing aggregate fields (total_series, owned_files, etc.)
+/// are spot-checked too so a future refactor of the giant correlated
+/// SELECT can't silently zero them out.
+#[tokio::test]
+async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
+    let app = build_test_app().await;
+
+    // Baseline: empty catalog → every count is 0.
+    let body =
+        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(body["pull_list_count"], 0);
+    assert_eq!(body["pull_failures_count"], 0);
+    assert_eq!(body["pending_interventions_count"], 0);
+    assert_eq!(body["total_series"], 0);
+
+    // Seed two pull-list rows.
+    let s1 = seed_pull_series(&app, "Subscribed One").await;
+    let s2 = seed_pull_series(&app, "Subscribed Two").await;
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: s1,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: s2,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Two issues with failure-class latest attempts (one failed, one
+    // mismatched), one issue with an old failure but a more recent
+    // submitted attempt (should NOT count — latest-attempt semantics).
+    let (sid, ia) = seed_series_and_issue(&app, "Three Issues", "1").await;
+    let ib = longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "2".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let ic = longbox_db::issue_repo::insert(
+        &app.state.db,
+        longbox_db::NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "3".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(sid, ia, None))
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: sid,
+            issue_id: ib,
+            indexer_id: None,
+            release_id: Some("rel-x".into()),
+            status: "mismatched".into(),
+            error_message: Some("title mismatch".into()),
+            retry_count: 1,
+            download_handle: None,
+        },
+    )
+    .await
+    .unwrap();
+    pull_attempt_repo::insert(&app.state.db, failed_attempt(sid, ic, None))
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: sid,
+            issue_id: ic,
+            indexer_id: None,
+            release_id: Some("rel-y".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 1,
+            download_handle: Some("h".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Pending intervention — push two onto the in-memory cache.
+    for source in ["/watch/a.cbz", "/watch/b.cbz"] {
+        app.state
+            .pending_cache
+            .push(longbox_postprocess::PendingIntervention {
+                source_path: std::path::PathBuf::from(source),
+                target_path: std::path::PathBuf::from("/library/x.cbz"),
+                reason: longbox_postprocess::InterventionReason::Conflict,
+                size: 1,
+                last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+            });
+    }
+
+    let body =
+        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(body["pull_list_count"], 2);
+    assert_eq!(
+        body["pull_failures_count"], 2,
+        "ia + ib are failure-class; ic's failed got superseded by submitted"
+    );
+    assert_eq!(body["pending_interventions_count"], 2);
+}
+
 // -------- POST /api/files/match-folder-from-cv --------
 
 /// Mounts wiremock for a single CV volume with the given issues, then
