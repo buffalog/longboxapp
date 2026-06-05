@@ -654,6 +654,21 @@ pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), 
             details: serde_json::Value::Null,
         });
     }
+    delete_series_row(db, id).await
+}
+
+/// Bare `DELETE FROM series` with no owned-files guard and no existence
+/// check. The handler's `delete_files=true` path uses this directly — the
+/// guard exists to stop the user from accidentally orphaning bytes on
+/// disk, but `delete_files=true` is the explicit "yes, delete the bytes
+/// too" opt-in, so applying the guard there is the order-of-operations
+/// bug that surfaced as a 409 when the frontend's modal sent the flag
+/// after confirmation. Callers MUST verify existence first when 404 is
+/// the desired outcome for a missing id.
+pub(crate) async fn delete_series_row(
+    db: &longbox_db::Pool,
+    id: i64,
+) -> Result<(), ApiError> {
     sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)
         .execute(db)
         .await
@@ -961,6 +976,14 @@ async fn remove(
     if q.force {
         force_delete_series(&state.db, id).await?;
         spawn_rescan_unmatched(&state, "force-delete-series");
+    } else if q.delete_files {
+        // delete_files=true is the explicit user opt-in to disk-side
+        // cleanup; the owned-files guard exists to stop accidental
+        // bytes-orphaning, which doesn't apply here — we're about to
+        // remove those bytes ourselves. Existence is already verified
+        // upstream via the find_by_id that populated `to_remove`, so
+        // 404-mapping isn't needed here either.
+        delete_series_row(&state.db, id).await?;
     } else {
         delete_series(&state.db, id).await?;
     }
