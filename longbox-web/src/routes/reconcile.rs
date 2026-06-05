@@ -19,7 +19,8 @@ use axum::{Json, Router};
 use longbox_core::{normalize_title, parse_filename, FileStatus, MatchMethod, ParsingPattern};
 use longbox_db::{
     discovered_folders_repo, file_repo, issue_repo, library_root_repo, parsing_pattern_repo,
-    series_repo, DiscoveredFolderRow, FileRow, FileUpdate, NewSeries, PhantomSeries,
+    series_repo, DbError, DiscoveredFolderRow, DuplicatePair, FileRow, FileUpdate, NewSeries,
+    PhantomSeries,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, PrimitiveDateTime};
@@ -39,6 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/reconcile/phantom/:series_id/keep", post(keep_phantom))
         .route("/reconcile/phantoms/bulk", post(bulk_delete_phantoms))
         .route("/reconcile/convert", post(convert))
+        .route("/library/tidy/duplicates", get(duplicates))
+        .route("/library/tidy/duplicates/merge", post(merge_duplicates))
 }
 
 // -------- shapes --------
@@ -532,4 +535,88 @@ async fn load_patterns(state: &AppState) -> Result<Vec<ParsingPattern>, ApiError
 fn utc_now() -> PrimitiveDateTime {
     let n = OffsetDateTime::now_utc();
     PrimitiveDateTime::new(n.date(), n.time())
+}
+
+// -------- Library Tidy: duplicates --------
+
+#[derive(Debug, Serialize)]
+struct DuplicatesResponse {
+    pairs: Vec<DuplicatePair>,
+}
+
+/// `GET /api/library/tidy/duplicates` — list every pair of series the
+/// detection criteria flag as potential duplicates (same cv_id, OR
+/// same normalized title with start_year within 2 years). Owned-and-
+/// present file counts ride along so the UI can render "merge smaller
+/// into larger" without a follow-up roundtrip.
+async fn duplicates(
+    State(state): State<AppState>,
+) -> Result<Json<DuplicatesResponse>, ApiError> {
+    let pairs = series_repo::find_duplicate_pairs(&state.db).await?;
+    Ok(Json(DuplicatesResponse { pairs }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeDuplicatesBody {
+    target_series_id: i64,
+    source_series_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct MergeDuplicatesResponse {
+    target_series_id: i64,
+    source_series_id: i64,
+}
+
+/// `POST /api/library/tidy/duplicates/merge` — move every issue (and,
+/// transitively, every file linked through those issues) from
+/// `source_series_id` to `target_series_id`, then hard-delete the
+/// emptied source row. Caller decides which series is the "larger"
+/// (target) and which is the "smaller" (source); the backend does not
+/// re-derive owned counts here.
+///
+/// The merge runs in a single transaction so a failure mid-step rolls
+/// the catalog back to its pre-merge state — never a half-merged
+/// half-deleted situation. 400 when target == source. 404 when either
+/// id doesn't resolve to a series row.
+async fn merge_duplicates(
+    State(state): State<AppState>,
+    Json(body): Json<MergeDuplicatesBody>,
+) -> Result<Json<MergeDuplicatesResponse>, ApiError> {
+    if body.target_series_id == body.source_series_id {
+        return Err(ApiError::BadRequest {
+            message: "target_series_id and source_series_id must differ".into(),
+        });
+    }
+    // Existence preflight gives a clean 404 on either side instead of
+    // a generic "0 rows affected" that the user has to translate.
+    if series_repo::find_by_id(&state.db, body.target_series_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: body.target_series_id.to_string(),
+        });
+    }
+    if series_repo::find_by_id(&state.db, body.source_series_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: body.source_series_id.to_string(),
+        });
+    }
+
+    let mut tx = state.db.begin().await.map_err(DbError::from)?;
+    series_repo::merge_series(&mut *tx, body.target_series_id, body.source_series_id)
+        .await?;
+    series_repo::hard_delete(&mut *tx, body.source_series_id).await?;
+    tx.commit().await.map_err(DbError::from)?;
+
+    Ok(Json(MergeDuplicatesResponse {
+        target_series_id: body.target_series_id,
+        source_series_id: body.source_series_id,
+    }))
 }

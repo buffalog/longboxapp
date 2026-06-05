@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE issues SET series_id = ? WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "991c9c41527f5a4dfd8a6689cf6a1920b60407f35dda332e278ed64f20bd0f16"
+}

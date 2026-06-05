@@ -150,3 +150,39 @@ export function convertFolders(folderNames: string[]): Promise<{ results: Conver
     body: JSON.stringify({ folder_names: folderNames })
   });
 }
+
+/** One side of a duplicate-pair row. */
+export interface DuplicatePair {
+  /** Detection criterion that surfaced this pair. `same_cv_id` wins
+   *  when both criteria match (defensive against UNIQUE-bypassed data). */
+  kind: 'same_cv_id' | 'same_title_close_year';
+  a_id: number;
+  a_title: string;
+  a_start_year: number | null;
+  a_cv_id: number | null;
+  a_owned_count: number;
+  b_id: number;
+  b_title: string;
+  b_start_year: number | null;
+  b_cv_id: number | null;
+  b_owned_count: number;
+}
+
+export function listDuplicates(): Promise<{ pairs: DuplicatePair[] }> {
+  return apiFetch('/library/tidy/duplicates');
+}
+
+/** Merge `source` into `target`. The caller decides which is which;
+ *  by convention the higher owned-count side is the target. */
+export function mergeDuplicates(
+  targetSeriesId: number,
+  sourceSeriesId: number
+): Promise<{ target_series_id: number; source_series_id: number }> {
+  return apiFetch('/library/tidy/duplicates/merge', {
+    method: 'POST',
+    body: JSON.stringify({
+      target_series_id: targetSeriesId,
+      source_series_id: sourceSeriesId
+    })
+  });
+}

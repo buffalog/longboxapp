@@ -18,7 +18,9 @@
     convertFolders,
     dismissFolders,
     keepPhantom,
+    mergeDuplicates,
     type DiscoveredFolder,
+    type DuplicatePair,
     type PhantomSeries
   } from '$lib/api/reconcile';
   import { deleteSeries } from '$lib/api/series';
@@ -45,6 +47,12 @@
   // can be removed locally without a refetch — same pattern as
   // phantoms / untracked above.
   let enrichmentQueue = $state<EnrichmentQueueRow[]>([...data.enrichmentQueue]);
+  /** Mutable copy of the duplicate-pair list so a successful merge
+   *  can drop the row locally without a re-fetch. */
+  let duplicates = $state<DuplicatePair[]>([...data.duplicates]);
+  /** Per-pair in-flight set, keyed by `${target_id}:${source_id}` so a
+   *  parallel merge of an unrelated pair isn't blocked. */
+  let mergeInFlight = $state<Set<string>>(new Set());
 
   // Destructive-confirmation state. Every "Remove now" click sets a
   // target (or opens the bulk modal); the modal is the only path to
@@ -227,6 +235,70 @@
     }
     bulkPhantomDeleting = false;
     bulkPhantomDeleteOpen = false;
+  }
+
+  // --- duplicate-pair merge ------------------------------------------
+  /// Identify which side of a duplicate pair is the "larger" (merge
+  /// target). Tiebreaker on equal owned counts is lower id wins — the
+  /// older row is the catalog of record. Returns `{target, source}`
+  /// where `target` keeps its identity and `source` is absorbed and
+  /// deleted.
+  function pickMergeRoles(p: DuplicatePair): {
+    target_id: number;
+    target_title: string;
+    source_id: number;
+    source_title: string;
+  } {
+    const aIsTarget =
+      p.a_owned_count > p.b_owned_count ||
+      (p.a_owned_count === p.b_owned_count && p.a_id < p.b_id);
+    return aIsTarget
+      ? {
+          target_id: p.a_id,
+          target_title: p.a_title,
+          source_id: p.b_id,
+          source_title: p.b_title
+        }
+      : {
+          target_id: p.b_id,
+          target_title: p.b_title,
+          source_id: p.a_id,
+          source_title: p.a_title
+        };
+  }
+
+  function pairKey(p: DuplicatePair): string {
+    return `${p.a_id}:${p.b_id}`;
+  }
+
+  async function handleMergeDuplicate(p: DuplicatePair): Promise<void> {
+    const key = pairKey(p);
+    if (mergeInFlight.has(key)) return;
+    const { target_id, target_title, source_id, source_title } = pickMergeRoles(p);
+    mergeInFlight = new Set([...mergeInFlight, key]);
+    error = null;
+    try {
+      await mergeDuplicates(target_id, source_id);
+      // Drop the pair locally. Also drop any other pair that references
+      // the now-deleted source — the backend would 404 on a stale id
+      // anyway, but removing them keeps the UI honest.
+      duplicates = duplicates.filter(
+        (d) =>
+          d.a_id !== source_id &&
+          d.b_id !== source_id &&
+          // Also drop the just-merged pair itself (covered by the two
+          // checks above when the pair has source on a side; explicit
+          // here as belt-and-braces).
+          pairKey(d) !== key
+      );
+      toast.success(`Merged ${source_title} into ${target_title}.`);
+    } catch (e) {
+      const message =
+        e instanceof ApiError ? e.message : 'Could not merge the duplicate series.';
+      toast.warning(message);
+    } finally {
+      mergeInFlight = new Set([...mergeInFlight].filter((k) => k !== key));
+    }
   }
 
   // --- folder mutations ----------------------------------------------
@@ -461,11 +533,11 @@
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}
 
-{#if phantoms.length === 0 && untracked.length === 0 && enrichmentQueue.length === 0}
+{#if phantoms.length === 0 && untracked.length === 0 && enrichmentQueue.length === 0 && duplicates.length === 0}
   <EmptyState
     icon={Sparkles}
     title="Your library is tidy"
-    message="Every tracked series has files on disk, no untracked folders were found, and every shallow series is either CV-linked or still inside its enrichment cooldown."
+    message="Every tracked series has files on disk, no untracked folders were found, every shallow series is either CV-linked or still inside its enrichment cooldown, and no duplicate-series pairs were detected."
   />
 {:else}
   <!-- ===================== Phantom series ===================== -->
@@ -662,6 +734,82 @@
           </ul>
         </div>
       {/if}
+    {/if}
+  </section>
+
+  <!-- ==================== Duplicate series ==================== -->
+  <section class="mb-8">
+    <h2 class="mb-1 text-lg font-semibold">Duplicate series</h2>
+    <p class="mb-2 text-xs text-slate-500">
+      Pairs that look like the same series under two catalog rows — either both linking to the
+      same ComicVine volume, or sharing a normalized title with start years within 2 of each
+      other. "Merge" moves every issue (and its files) from the smaller side into the larger,
+      then deletes the smaller row. The schema's <code class="font-mono">UNIQUE(cv_issue_id)</code>
+      keeps merges safe — collisions are structurally impossible.
+    </p>
+    {#if duplicates.length === 0}
+      <p class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
+        No duplicates detected.
+      </p>
+    {:else}
+      <ul class="space-y-2">
+        {#each duplicates as p (pairKey(p))}
+          {@const roles = pickMergeRoles(p)}
+          {@const isMerging = mergeInFlight.has(pairKey(p))}
+          <li class="rounded-lg border border-slate-200 bg-white p-3">
+            <div class="mb-2 flex items-baseline justify-between gap-2">
+              <span class="text-xs uppercase tracking-wide text-slate-500">
+                {p.kind === 'same_cv_id' ? 'Same ComicVine volume' : 'Same title, close year'}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={isMerging}
+                disabled={isMerging}
+                onclick={() => handleMergeDuplicate(p)}
+              >
+                Merge into {roles.target_title}
+              </Button>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div class="rounded border border-slate-100 bg-slate-50 p-2 text-sm">
+                <div class="font-medium">
+                  <a class="text-blue-600 hover:underline" href={`/series/${p.a_id}`}>
+                    {p.a_title}{p.a_start_year ? ` (${p.a_start_year})` : ''}
+                  </a>
+                  {#if roles.target_id === p.a_id}
+                    <span class="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700">
+                      target
+                    </span>
+                  {/if}
+                </div>
+                <div class="text-xs text-slate-500">
+                  <span class="font-mono">#{p.a_id}</span>
+                  · cv_id: <span class="font-mono">{p.a_cv_id ?? '—'}</span>
+                  · {p.a_owned_count} owned
+                </div>
+              </div>
+              <div class="rounded border border-slate-100 bg-slate-50 p-2 text-sm">
+                <div class="font-medium">
+                  <a class="text-blue-600 hover:underline" href={`/series/${p.b_id}`}>
+                    {p.b_title}{p.b_start_year ? ` (${p.b_start_year})` : ''}
+                  </a>
+                  {#if roles.target_id === p.b_id}
+                    <span class="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700">
+                      target
+                    </span>
+                  {/if}
+                </div>
+                <div class="text-xs text-slate-500">
+                  <span class="font-mono">#{p.b_id}</span>
+                  · cv_id: <span class="font-mono">{p.b_cv_id ?? '—'}</span>
+                  · {p.b_owned_count} owned
+                </div>
+              </div>
+            </div>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </section>
 
