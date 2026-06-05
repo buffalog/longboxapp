@@ -890,6 +890,88 @@ async fn delete_files_uses_title_only_when_start_year_is_null() {
 }
 
 #[tokio::test]
+async fn delete_files_succeeds_when_series_has_owned_present_files() {
+    // Regression: the prior code path applied the owned-files guard to
+    // the delete_files=true branch as well as the bare delete, so the
+    // frontend's "Delete series AND files" confirmation 409'd on the
+    // exact case it was designed to handle. delete_files=true is the
+    // explicit user opt-in to disk-side cleanup — the guard, which
+    // exists to stop accidental orphaning of bytes, should NOT fire.
+    let app = build_test_app().await;
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Owned Files Series".into(),
+            sort_title: "owned files series".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series.id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let folder = app.library_path().join("Owned Files Series (2024)");
+    write_cbz(&folder.join("Owned Files Series 001 (2024).cbz"), None);
+    app.state
+        .scanner
+        .scan_full(app.library_root_id)
+        .await
+        .unwrap();
+    let files = longbox_db::file_repo::list_by_library_root(
+        &app.state.db,
+        app.library_root_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files.len(), 1, "scan should attach the one cbz");
+    assert_eq!(
+        files[0].status, "owned",
+        "file must be in the exact state the guard would 409 on"
+    );
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/series/{}?delete_files=true", series.id),
+        ))
+        .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "delete_files=true must bypass the owned-files guard"
+    );
+    let body = response_json(resp).await;
+    assert_eq!(body["deleted"], series.id);
+    assert!(body["folder_deleted"]
+        .as_str()
+        .unwrap()
+        .ends_with("Owned Files Series (2024)"));
+    assert!(!folder.exists(), "folder must be gone from disk");
+    assert!(series_repo::find_by_id(&app.state.db, series.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn delete_files_succeeds_when_folder_already_absent() {
     // The folder convention may not match (manual rename, never on
     // disk to begin with). The DB delete still happens; the handler
