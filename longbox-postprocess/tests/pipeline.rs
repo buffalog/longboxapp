@@ -14,6 +14,8 @@ use longbox_db::{
     issue_repo, library_root_repo, series_repo, NewIssue, NewLibraryRoot, NewSeries, Pool,
 };
 use longbox_postprocess::processor::{self, Outcome};
+use longbox_postprocess::PendingInterventionsCache;
+use std::sync::Arc;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -123,6 +125,104 @@ fn list_cbz_entries(path: &Path) -> Vec<String> {
     let file = std::fs::File::open(path).unwrap();
     let archive = zip::ZipArchive::new(file).unwrap();
     archive.file_names().map(|s| s.to_string()).collect()
+}
+
+#[tokio::test]
+async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
+    // The Settings page's "Process downloads" button hits
+    // `sweep_now` directly. Cover the per-bucket tally and the
+    // self-consistency invariant: total visited files == sum of
+    // per-bucket counters.
+    let f = seed_basic_fixture().await;
+
+    // Matched → Imported. Filename parses to Saga #1, which the
+    // fixture's series + issue match exactly.
+    let owned = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&owned, None);
+
+    // Unparseable basename → Unsorted (no usable title hint).
+    let mystery = f._watch.path().join("garbage_no_number.cbz");
+    write_cbz(&mystery, None);
+
+    // Conflict: pre-place the canonical target so the second-claim
+    // path fires, source auto-cleaned.
+    let conflict_target_dir = f.library.path().join("Saga (2012)");
+    std::fs::create_dir_all(&conflict_target_dir).unwrap();
+    let conflict_target = conflict_target_dir.join("Saga (2012) 002.cbz");
+    std::fs::write(&conflict_target, b"pre-existing").unwrap();
+    let conflict_source = f._watch.path().join("Saga 002.cbz");
+    write_cbz(&conflict_source, None);
+    // Seed the second issue in the catalog so the conflict-path
+    // resolution actually finds a target — without an issue row,
+    // Saga 002 would have nothing to claim and lands as Unsorted.
+    issue_repo::insert(
+        &f.db,
+        NewIssue {
+            series_id: f.series_id,
+            cv_issue_id: Some(364355),
+            metron_issue_id: None,
+            number: "2".into(),
+            title: None,
+            cover_date: Some("2012-04-14".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let cache = Arc::new(PendingInterventionsCache::new());
+    let summary = longbox_postprocess::sweep_now(
+        f.library.path(),
+        f.library_root_id,
+        f._watch.path(),
+        f.db.clone(),
+        Arc::clone(&cache),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(summary.processed, 1, "Saga 001 → Imported");
+    assert_eq!(summary.unsorted, 1, "garbage_no_number → Unsorted");
+    assert_eq!(summary.conflicts, 1, "Saga 002 → Conflict (target exists)");
+    assert_eq!(summary.failed, 0);
+
+    // Side-effect checks: matched file moved, conflict source cleaned
+    // up (Phase B-bug-2 invariant), target bytes preserved.
+    assert!(!owned.exists(), "matched source must move out of watch");
+    assert!(!conflict_source.exists(), "conflict source must be auto-removed");
+    assert_eq!(
+        std::fs::read(&conflict_target).unwrap(),
+        b"pre-existing",
+        "library bytes must not be overwritten"
+    );
+
+    // Cache: Conflict no longer pushes (it's resolved), Imported and
+    // Unsorted evict — so the cache lands empty for this run.
+    assert!(cache.is_empty(), "no pending interventions expected");
+}
+
+#[tokio::test]
+async fn sweep_now_400s_when_watch_path_is_missing() {
+    let f = seed_basic_fixture().await;
+    let nonexistent = f.library.path().join("does-not-exist");
+    let cache = Arc::new(PendingInterventionsCache::new());
+    let err = longbox_postprocess::sweep_now(
+        f.library.path(),
+        f.library_root_id,
+        &nonexistent,
+        f.db.clone(),
+        cache,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            longbox_postprocess::PostprocessError::WatchPathUnreadable { .. }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

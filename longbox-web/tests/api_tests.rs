@@ -470,6 +470,51 @@ async fn add_series_happy_path() {
 }
 
 #[tokio::test]
+async fn add_series_creates_on_disk_folder() {
+    // The Add page builds the user's expectation that they can drop
+    // a file into the new series' folder immediately after the create.
+    // Confirm POST /api/series's side effect: `{library_root}/{title}
+    // ({start_year})/` exists as a real directory after the call.
+    let app = build_test_app().await;
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-2127/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": { "id": 2127, "name": "The Walking Dead",
+                    "start_year": "2003",
+                    "publisher": { "id": 1, "name": "Image" },
+                    "description": null,
+                    "image": { "medium_url": "https://example.com/wd.jpg" },
+                    "site_detail_url": "https://cv/wd/4050-2127/" } }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 0,
+                "limit": 100, "offset": 0, "results": [] }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let folder = app.library_path().join("The Walking Dead (2003)");
+    assert!(
+        !folder.exists(),
+        "fixture must start clean — folder shouldn't exist before the call"
+    );
+
+    let resp = app
+        .request(json_request("POST", "/api/series", r#"{"cv_id": 2127}"#))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        folder.is_dir(),
+        "POST /api/series must create the on-disk series folder"
+    );
+}
+
+#[tokio::test]
 async fn add_series_duplicate_cv_id_returns_409() {
     let app = build_test_app().await;
     series_repo::insert(

@@ -212,3 +212,13 @@ export interface PendingResponse {
   count: number;
   items: PendingIntervention[];
 }
+
+/** Return body of POST /api/postprocess/trigger. Mirrors
+ *  `longbox_postprocess::SweepSummary`. Counters are cumulative for
+ *  the sweep — sum is the total number of watch-folder files visited. */
+export interface SweepSummary {
+  processed: number;
+  unsorted: number;
+  conflicts: number;
+  failed: number;
+}
