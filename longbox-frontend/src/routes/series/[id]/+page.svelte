@@ -86,8 +86,14 @@
       searching = false;
     }, SEARCH_BUTTON_DISABLED_MS);
     try {
-      await searchSeriesNow(data.series.id);
-      toast.success('Search started.');
+      const { queued, note } = await searchSeriesNow(data.series.id);
+      if (queued > 0) {
+        toast.success(
+          `Searching ${queued} missing issue${queued === 1 ? '' : 's'}…`
+        );
+      } else {
+        toast.info(note ?? 'No missing issues to search.');
+      }
     } catch (e) {
       // Real-error surface (not the silent in-flight guard): 404
       // when the series isn't on the pull list, 409 if a search

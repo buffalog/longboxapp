@@ -200,7 +200,7 @@ describe('missing page series grouping', () => {
   });
 
   it('per-series Search button fires searchSeriesNow for that series only', async () => {
-    vi.mocked(searchSeriesNow).mockResolvedValue();
+    vi.mocked(searchSeriesNow).mockResolvedValue({ queued: 3, note: null });
     render(
       MissingPage,
       pageData([

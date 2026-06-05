@@ -51,7 +51,20 @@ struct Stats {
 async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError> {
     let row = sqlx::query!(
         r#"SELECT
-             (SELECT COUNT(*) FROM series) AS "total_series!: i64",
+             -- "Real" series: enriched (cv_id non-null) OR carrying
+             -- at least one owned, present file. Excludes
+             -- unenriched, file-less phantoms that linger from
+             -- bulk-converted folders and aren't actionable
+             -- catalog state.
+             (SELECT COUNT(*) FROM series s
+              WHERE s.cv_id IS NOT NULL
+                 OR EXISTS (
+                   SELECT 1 FROM files f
+                   JOIN issues i ON f.issue_id = i.id
+                   WHERE i.series_id = s.id
+                     AND f.status = 'owned'
+                     AND f.is_present = 1
+                 )) AS "total_series!: i64",
              (SELECT COUNT(*) FROM issues) AS "total_issues!: i64",
              (SELECT COUNT(*) FROM files
               WHERE status = 'owned' AND is_present = 1) AS "owned_files!: i64",

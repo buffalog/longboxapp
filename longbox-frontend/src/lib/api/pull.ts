@@ -62,6 +62,15 @@ export function checkPull(): Promise<void> {
   return apiFetch('/pull/check', { method: 'POST' });
 }
 
+/** Summary of an on-demand series-search dispatch. `queued` is the
+ *  count of missing issues the engine kicked off searches for;
+ *  `note` is populated only on the zero-queued path (e.g. "no missing
+ *  issues for this series"). */
+export interface SearchSeriesNowResult {
+  queued: number;
+  note: string | null;
+}
+
 /** Trigger an on-demand search for one series. Fire-and-forget — the
  *  server responds 202 immediately and runs the search in the
  *  background; the resulting submissions land on the pull list /
@@ -70,7 +79,7 @@ export function checkPull(): Promise<void> {
  *   - 409 `conflict.pull_search_running` when a search for that same
  *     series is already in flight (a daily sweep running concurrently
  *     does NOT block this — the per-series guard is independent). */
-export function searchSeriesNow(seriesId: number): Promise<void> {
+export function searchSeriesNow(seriesId: number): Promise<SearchSeriesNowResult> {
   return apiFetch(`/pull/search/${seriesId}`, { method: 'POST' });
 }
 

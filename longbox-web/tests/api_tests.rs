@@ -2015,6 +2015,81 @@ async fn settings_put_rejects_unknown_key() {
 /// are spot-checked too so a future refactor of the giant correlated
 /// SELECT can't silently zero them out.
 #[tokio::test]
+async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
+    // ITEM 8: SERIES tile should count only series with at least one
+    // owned+present file OR a non-null cv_id. A bulk-converted shallow
+    // row with no cv_id and no files is catalog noise — exclude.
+    let app = build_test_app().await;
+
+    // Counted: cv_id-only (enriched, no files).
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "Enriched Only".into(),
+            sort_title: "enriched only".into(),
+            start_year: Some(2010),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Counted: files-only (no cv_id, has an owned+present file).
+    let (files_only_sid, files_only_iid) =
+        seed_series_and_issue(&app, "Files Only", "1").await;
+    longbox_db::file_repo::insert(
+        &app.state.db,
+        longbox_db::NewFile {
+            issue_id: Some(files_only_iid),
+            library_root_id: app.library_root_id,
+            path_relative: "Files Only (2012)/Files Only 001.cbz".into(),
+            size_bytes: 1,
+            mtime: time::macros::datetime!(2024-01-01 0:00),
+            last_scanned_at: time::macros::datetime!(2024-01-01 0:00),
+            match_method: "filename".into(),
+            match_confidence: 0.99,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: time::macros::datetime!(2024-01-01 0:00),
+            matched_at: Some(time::macros::datetime!(2024-01-01 0:00)),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = files_only_sid;
+
+    // NOT counted: shallow phantom (no cv_id, no files).
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Phantom".into(),
+            sort_title: "phantom".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body =
+        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(
+        body["total_series"], 2,
+        "enriched_only + files_only count; the cv_id-null no-files phantom is excluded"
+    );
+}
+
+#[tokio::test]
 async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
     let app = build_test_app().await;
 
@@ -4579,6 +4654,146 @@ async fn reconcile_counts_zero_when_nothing_to_reconcile() {
     .await;
     assert_eq!(body["phantoms_with_transition"], 0);
     assert_eq!(body["untracked_folders"], 0);
+}
+
+// -------- Library Tidy duplicates (Tier 3 batch 2 ITEM 12) --------
+
+/// Two series sharing a sort_title with start_year delta of 1 →
+/// flagged as `same_title_close_year`. A reboot a decade later is
+/// outside the 2-year window and is NOT flagged.
+#[tokio::test]
+async fn duplicates_flags_same_title_close_year_pairs() {
+    let app = build_test_app().await;
+    let saga_a = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let saga_b = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2013),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2024),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/library/tidy/duplicates"))
+            .await,
+    )
+    .await;
+    let pairs = body["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0]["kind"], "same_title_close_year");
+    let a = pairs[0]["a_id"].as_i64().unwrap();
+    let b = pairs[0]["b_id"].as_i64().unwrap();
+    assert!(a < b, "pair must be ordered by id ascending");
+    assert_eq!(a, saga_a);
+    assert_eq!(b, saga_b);
+}
+
+#[tokio::test]
+async fn merge_duplicates_moves_issues_and_deletes_source() {
+    let app = build_test_app().await;
+    let (target, target_issue) = seed_series_and_issue(&app, "Saga", "1").await;
+    let (source, source_issue) = seed_series_and_issue(&app, "Saga", "2").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicates/merge",
+            format!(
+                r#"{{"target_series_id":{target},"source_series_id":{source}}}"#
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Source series row is gone.
+    assert!(series_repo::find_by_id(&app.state.db, source)
+        .await
+        .unwrap()
+        .is_none());
+    // Source's issue now lives under target.
+    let migrated = longbox_db::issue_repo::find_by_id(&app.state.db, source_issue)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(migrated.series_id, target);
+    // Target's own issue is untouched.
+    let target_issue_row =
+        longbox_db::issue_repo::find_by_id(&app.state.db, target_issue)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(target_issue_row.series_id, target);
+}
+
+#[tokio::test]
+async fn merge_duplicates_rejects_target_equals_source() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Saga", "1").await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicates/merge",
+            format!(
+                r#"{{"target_series_id":{sid},"source_series_id":{sid}}}"#
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn merge_duplicates_404s_on_unknown_series() {
+    let app = build_test_app().await;
+    let (real, _) = seed_series_and_issue(&app, "Saga", "1").await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicates/merge",
+            format!(
+                r#"{{"target_series_id":{real},"source_series_id":99999}}"#
+            ),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // -------- reconcile: end-to-end (Library Tidy Step 8, folded in) --------

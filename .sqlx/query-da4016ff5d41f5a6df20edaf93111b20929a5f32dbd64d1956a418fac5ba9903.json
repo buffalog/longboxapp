@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH owned_counts AS (\n               SELECT i.series_id AS series_id, COUNT(*) AS n\n               FROM files f JOIN issues i ON f.issue_id = i.id\n               WHERE f.status = 'owned' AND f.is_present = 1\n               GROUP BY i.series_id\n           ),\n           cv_id_pairs AS (\n               SELECT 'same_cv_id' AS kind, s1.id AS a_id, s2.id AS b_id\n               FROM series s1\n               JOIN series s2 ON s1.cv_id = s2.cv_id\n               WHERE s1.cv_id IS NOT NULL AND s1.id < s2.id\n           ),\n           title_pairs AS (\n               SELECT 'same_title_close_year' AS kind, s1.id AS a_id, s2.id AS b_id\n               FROM series s1\n               JOIN series s2 ON s1.sort_title = s2.sort_title\n               WHERE s1.id < s2.id\n                 AND (\n                   (s1.start_year IS NULL AND s2.start_year IS NULL)\n                   OR (s1.start_year IS NOT NULL AND s2.start_year IS NOT NULL\n                       AND ABS(s1.start_year - s2.start_year) <= 2)\n                 )\n           ),\n           all_pairs AS (\n               SELECT * FROM cv_id_pairs\n               UNION ALL\n               SELECT * FROM title_pairs\n           ),\n           dedup AS (\n               -- MIN(kind) puts 'same_cv_id' ahead of 'same_title_close_year'\n               -- when a pair matches both, so we surface the stronger\n               -- criterion in the UI.\n               SELECT a_id, b_id, MIN(kind) AS kind\n               FROM all_pairs\n               GROUP BY a_id, b_id\n           )\n           SELECT\n             d.kind AS \"kind!: String\",\n             sa.id AS \"a_id!: i64\",\n             sa.title AS \"a_title!: String\",\n             sa.start_year AS \"a_start_year?: i64\",\n             sa.cv_id AS \"a_cv_id?: i64\",\n             COALESCE(oa.n, 0) AS \"a_owned_count!: i64\",\n             sb.id AS \"b_id!: i64\",\n             sb.title AS \"b_title!: String\",\n             sb.start_year AS \"b_start_year?: i64\",\n             sb.cv_id AS \"b_cv_id?: i64\",\n             COALESCE(ob.n, 0) AS \"b_owned_count!: i64\"\n           FROM dedup d\n           JOIN series sa ON sa.id = d.a_id\n           JOIN series sb ON sb.id = d.b_id\n           LEFT JOIN owned_counts oa ON oa.series_id = sa.id\n           LEFT JOIN owned_counts ob ON ob.series_id = sb.id\n           ORDER BY sa.sort_title COLLATE NOCASE, sa.id, sb.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "a_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "a_title!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "a_start_year?: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "a_cv_id?: i64",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "a_owned_count!: i64",
+        "ordinal": 5,
+        "type_info": "Int"
+      },
+      {
+        "name": "b_id!: i64",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "b_title!: String",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "b_start_year?: i64",
+        "ordinal": 8,
+        "type_info": "Int64"
+      },
+      {
+        "name": "b_cv_id?: i64",
+        "ordinal": 9,
+        "type_info": "Int64"
+      },
+      {
+        "name": "b_owned_count!: i64",
+        "ordinal": 10,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "da4016ff5d41f5a6df20edaf93111b20929a5f32dbd64d1956a418fac5ba9903"
+}

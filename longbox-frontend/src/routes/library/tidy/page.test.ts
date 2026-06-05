@@ -33,7 +33,8 @@ vi.mock('$lib/api/reconcile', async (importOriginal) => ({
   convertFolders: vi.fn(),
   deletePhantom: vi.fn(),
   dismissFolders: vi.fn(),
-  keepPhantom: vi.fn()
+  keepPhantom: vi.fn(),
+  mergeDuplicates: vi.fn()
 }));
 
 vi.mock('$lib/api/cv', () => ({
@@ -110,6 +111,7 @@ function pageData(
     untracked?: DiscoveredFolder[];
     enrichmentSummary?: EnrichmentSummary;
     enrichmentQueue?: EnrichmentQueueRow[];
+    duplicates?: import('$lib/api/reconcile').DuplicatePair[];
   } = {}
 ) {
   const phantoms = over.phantoms ?? [];
@@ -125,7 +127,8 @@ function pageData(
         },
         untracked: over.untracked ?? [],
         enrichmentSummary: over.enrichmentSummary ?? emptyEnrichmentSummary(),
-        enrichmentQueue: over.enrichmentQueue ?? []
+        enrichmentQueue: over.enrichmentQueue ?? [],
+        duplicates: over.duplicates ?? []
       }
     }
   };
@@ -735,5 +738,51 @@ describe('library tidy page', () => {
     expect(screen.getByText('Kept Three')).toBeInTheDocument();
     expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('1 failed'));
     expect(bulkDeletePhantoms).not.toHaveBeenCalled();
+  });
+
+  // -------- duplicate detection + merge ------------------------------
+
+  it('Merge calls mergeDuplicates(target=larger, source=smaller) and drops the pair', async () => {
+    const { mergeDuplicates } = await import('$lib/api/reconcile');
+    vi.mocked(mergeDuplicates).mockResolvedValue({
+      target_series_id: 10,
+      source_series_id: 11
+    });
+
+    // Side A has more owned files → A becomes target.
+    const dup: import('$lib/api/reconcile').DuplicatePair = {
+      kind: 'same_title_close_year',
+      a_id: 10,
+      a_title: 'Saga',
+      a_start_year: 2012,
+      a_cv_id: null,
+      a_owned_count: 50,
+      b_id: 11,
+      b_title: 'Saga',
+      b_start_year: 2013,
+      b_cv_id: null,
+      b_owned_count: 5
+    };
+    render(TidyPage, pageData({ duplicates: [dup] }));
+
+    // Pair renders with the criterion label.
+    expect(screen.getByText('Same title, close year')).toBeInTheDocument();
+    // The Merge button names the larger side (the target).
+    const mergeBtn = screen.getByRole('button', { name: /Merge into Saga/ });
+    await fireEvent.click(mergeBtn);
+
+    await waitFor(() => expect(mergeDuplicates).toHaveBeenCalledWith(10, 11));
+    // Pair drops from the list after success.
+    await waitFor(() =>
+      expect(screen.queryByText('Same title, close year')).not.toBeInTheDocument()
+    );
+  });
+
+  it('shows the per-section empty state when no duplicates are detected', () => {
+    // Need to render with at least one non-empty section so the page
+    // doesn't hit the global "Your library is tidy" empty state.
+    render(TidyPage, pageData({ phantoms: [phantom()], duplicates: [] }));
+    expect(screen.getByText('Duplicate series')).toBeInTheDocument();
+    expect(screen.getByText('No duplicates detected.')).toBeInTheDocument();
   });
 });

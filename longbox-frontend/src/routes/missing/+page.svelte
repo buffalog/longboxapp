@@ -133,8 +133,14 @@
     // Svelte 5 runes treat the Set as reactive only on reassignment.
     searchingSeries = new Set(searchingSeries).add(seriesId);
     try {
-      await searchSeriesNow(seriesId);
-      toast.success(`Search started for ${seriesTitle}.`);
+      const { queued, note } = await searchSeriesNow(seriesId);
+      if (queued > 0) {
+        toast.success(
+          `Searching ${queued} missing issue${queued === 1 ? '' : 's'} for ${seriesTitle}…`
+        );
+      } else {
+        toast.info(note ?? `No missing issues to search for ${seriesTitle}.`);
+      }
     } catch (e) {
       const message =
         e instanceof ApiError ? e.message : 'Could not start the search.';

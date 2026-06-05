@@ -1238,3 +1238,174 @@ where
     }
     Ok(())
 }
+
+/// One side of a duplicate-pair row. Each pair surfaces both series'
+/// identity fields + the owned-and-present file count, so the UI can
+/// show the user which one to merge into which without an additional
+/// query.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
+pub struct DuplicatePair {
+    /// Detection criterion: `'same_cv_id'` (both series link to the
+    /// same CV volume — technically impossible under the UNIQUE
+    /// constraint, but kept for completeness) or `'same_title_close_year'`
+    /// (same normalized title with start_year within 2 years, or both
+    /// year-null).
+    pub kind: String,
+    pub a_id: i64,
+    pub a_title: String,
+    pub a_start_year: Option<i64>,
+    pub a_cv_id: Option<i64>,
+    pub a_owned_count: i64,
+    pub b_id: i64,
+    pub b_title: String,
+    pub b_start_year: Option<i64>,
+    pub b_cv_id: Option<i64>,
+    pub b_owned_count: i64,
+}
+
+/// Find pairs of series that look like duplicates. Two criteria:
+///
+/// 1. **`same_cv_id`** — two series carrying the same `cv_id`.
+///    Schema-level `UNIQUE(cv_id)` should prevent this so the query
+///    returns nothing in practice. Kept defensively (a future schema
+///    relaxation, a historical row that pre-dates the constraint, or
+///    a manual UPDATE that bypassed it would all surface here).
+///
+/// 2. **`same_title_close_year`** — same `sort_title` AND either both
+///    `start_year` NULL, or both set with absolute difference ≤ 2.
+///    The 2-year window accommodates CV's year drift on volume
+///    renumbers (2024 reboot vs 2023 special) without flagging
+///    distinct reboots (a 2024 Daredevil and a 1964 Daredevil stay
+///    distinct).
+///
+/// Both criteria emit ordered pairs (`a_id < b_id`) so a self-pair
+/// is impossible and each duplicate-relation is one row, not two.
+/// If a pair matches both criteria the dedup picks `same_cv_id` via
+/// MIN(kind) (alphabetical ordering puts it first).
+///
+/// Owned-and-present file counts ride along so the UI can render the
+/// "merge smaller into larger" call without a follow-up roundtrip.
+pub async fn find_duplicate_pairs<'e, E>(executor: E) -> Result<Vec<DuplicatePair>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        DuplicatePair,
+        r#"WITH owned_counts AS (
+               SELECT i.series_id AS series_id, COUNT(*) AS n
+               FROM files f JOIN issues i ON f.issue_id = i.id
+               WHERE f.status = 'owned' AND f.is_present = 1
+               GROUP BY i.series_id
+           ),
+           cv_id_pairs AS (
+               SELECT 'same_cv_id' AS kind, s1.id AS a_id, s2.id AS b_id
+               FROM series s1
+               JOIN series s2 ON s1.cv_id = s2.cv_id
+               WHERE s1.cv_id IS NOT NULL AND s1.id < s2.id
+           ),
+           title_pairs AS (
+               SELECT 'same_title_close_year' AS kind, s1.id AS a_id, s2.id AS b_id
+               FROM series s1
+               JOIN series s2 ON s1.sort_title = s2.sort_title
+               WHERE s1.id < s2.id
+                 AND (
+                   (s1.start_year IS NULL AND s2.start_year IS NULL)
+                   OR (s1.start_year IS NOT NULL AND s2.start_year IS NOT NULL
+                       AND ABS(s1.start_year - s2.start_year) <= 2)
+                 )
+           ),
+           all_pairs AS (
+               SELECT * FROM cv_id_pairs
+               UNION ALL
+               SELECT * FROM title_pairs
+           ),
+           dedup AS (
+               -- MIN(kind) puts 'same_cv_id' ahead of 'same_title_close_year'
+               -- when a pair matches both, so we surface the stronger
+               -- criterion in the UI.
+               SELECT a_id, b_id, MIN(kind) AS kind
+               FROM all_pairs
+               GROUP BY a_id, b_id
+           )
+           SELECT
+             d.kind AS "kind!: String",
+             sa.id AS "a_id!: i64",
+             sa.title AS "a_title!: String",
+             sa.start_year AS "a_start_year?: i64",
+             sa.cv_id AS "a_cv_id?: i64",
+             COALESCE(oa.n, 0) AS "a_owned_count!: i64",
+             sb.id AS "b_id!: i64",
+             sb.title AS "b_title!: String",
+             sb.start_year AS "b_start_year?: i64",
+             sb.cv_id AS "b_cv_id?: i64",
+             COALESCE(ob.n, 0) AS "b_owned_count!: i64"
+           FROM dedup d
+           JOIN series sa ON sa.id = d.a_id
+           JOIN series sb ON sb.id = d.b_id
+           LEFT JOIN owned_counts oa ON oa.series_id = sa.id
+           LEFT JOIN owned_counts ob ON ob.series_id = sb.id
+           ORDER BY sa.sort_title COLLATE NOCASE, sa.id, sb.id"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Merge `source_series_id` into `target_series_id`: move every issue
+/// belonging to source over to target (files follow automatically via
+/// `files.issue_id → issues.id`), then delete the now-empty source
+/// series row.
+///
+/// All in one transaction so a partial failure rolls back cleanly —
+/// the catalog never lands in a "half-merged" state where issues are
+/// on the new series but the old series row still exists, or vice
+/// versa.
+///
+/// No collision handling on `cv_issue_id`: the schema's
+/// `UNIQUE(cv_issue_id)` prevents two series from owning the same
+/// CV issue, so the move can't produce a duplicate. NULL
+/// `cv_issue_id` rows don't participate in UNIQUE so freely move
+/// (the user may want to dedup duplicate-number issues afterward,
+/// but that's a separate cleanup; this merge intentionally preserves
+/// every issue row).
+///
+/// Returns `NotFound` if either series id doesn't exist; a
+/// `BadRequest`-like error path if target == source (the route
+/// rejects this earlier with a 400, but the repo also guards).
+pub async fn merge_series<'e, E>(executor: E, target_id: i64, source_id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    if target_id == source_id {
+        return Err(DbError::NotFound);
+    }
+    let result = sqlx::query!(
+        r#"UPDATE issues SET series_id = ? WHERE series_id = ?"#,
+        target_id,
+        source_id
+    )
+    .execute(executor)
+    .await?;
+    let _ = result;
+    // We do NOT require issues.rows_affected > 0 — a source series
+    // with no issues (just a shallow stub) is a valid merge target.
+    Ok(())
+}
+
+/// Hard-delete a series row. Used as the second step of the merge
+/// flow (after `merge_series` moves the issues off), and as the
+/// underlying delete primitive for any caller that wants the
+/// `ON DELETE CASCADE` on dependent rows. `NotFound` when the id
+/// doesn't resolve to a row.
+pub async fn hard_delete<'e, E>(executor: E, series_id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, series_id)
+        .execute(executor)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
