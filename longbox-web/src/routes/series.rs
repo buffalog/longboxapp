@@ -89,6 +89,34 @@ async fn add(
     }
 
     let (inserted, _was_new) = add_or_get_from_cv(&state, body.cv_id).await?;
+
+    // Pre-create the on-disk series folder so the user can drop files
+    // into it immediately without waiting for the next scan or for the
+    // first file to land via Phase B. Idempotent — `create_dir_all` is
+    // a no-op on an existing directory and handles any intermediate
+    // directories along the way. Best-effort: a failure here does NOT
+    // unwind the DB insert (the series is in the catalog regardless),
+    // it just lands as a WARN log; the operator can mkdir manually.
+    let library_root = StdPath::new(&state.config.library_root_path);
+    let folder = series_folder_path(library_root, &inserted);
+    match std::fs::create_dir_all(&folder) {
+        Ok(()) => tracing::info!(
+            target: "longbox_web",
+            series_id = inserted.id,
+            series_title = %inserted.title,
+            folder = %folder.display(),
+            "add-series.folder_ready"
+        ),
+        Err(e) => tracing::warn!(
+            target: "longbox_web",
+            series_id = inserted.id,
+            series_title = %inserted.title,
+            folder = %folder.display(),
+            err = %e,
+            "add-series.folder_create_failed"
+        ),
+    }
+
     spawn_auto_rematch(&state, inserted.id, "add-series");
     Ok(Json(inserted))
 }

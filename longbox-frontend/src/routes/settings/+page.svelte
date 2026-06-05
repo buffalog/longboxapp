@@ -3,9 +3,10 @@
   // restarting the backend binary; values shown here are reflected from
   // /api/settings. Publisher filters are the one editable surface.
   import { invalidateAll } from '$app/navigation';
-  import { Trash2, RotateCcw, Power } from 'lucide-svelte';
+  import { Trash2, RotateCcw, Power, FolderSync } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { restartServer } from '$lib/api/admin';
+  import { triggerPostprocess } from '$lib/api/postprocess';
   import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
   import { updateSetting, type EditableSettingKey } from '$lib/api/settings';
   import { toast } from '$lib/stores/toast.svelte';
@@ -172,6 +173,36 @@
     }
     // Deliberately leave `restarting = true` on success — the page is
     // about to reload, no point flickering the spinner off.
+  }
+
+  // Manual Phase B sweep. Single in-flight at a time — multiple
+  // sweeps would just walk the same files; the underlying processor
+  // is idempotent but the UX is noisier than useful.
+  let processing = $state(false);
+
+  async function handleProcessDownloads(): Promise<void> {
+    if (processing) return;
+    processing = true;
+    try {
+      const summary = await triggerPostprocess();
+      const total =
+        summary.processed + summary.unsorted + summary.conflicts + summary.failed;
+      if (total === 0) {
+        toast.success('Watch folder is empty — nothing to process.');
+      } else {
+        const parts: string[] = [];
+        parts.push(`processed ${summary.processed}`);
+        if (summary.unsorted > 0) parts.push(`unsorted ${summary.unsorted}`);
+        if (summary.conflicts > 0) parts.push(`conflicts ${summary.conflicts}`);
+        if (summary.failed > 0) parts.push(`failed ${summary.failed}`);
+        toast.success(`Phase B sweep complete · ${parts.join(' · ')}`);
+      }
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : 'Could not run the sweep.';
+      toast.warning(message);
+    } finally {
+      processing = false;
+    }
   }
 </script>
 
@@ -497,14 +528,34 @@
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">System</h2>
-    <p class="mb-3 text-sm text-slate-600">
-      Restart LongBox to pick up new environment variables or recover from a stuck worker. The
-      container exits and Docker brings it back up — in-flight requests will fail and any
-      running scans or sweeps will be cut short.
-    </p>
-    <Button variant="warning" onclick={handleRestart} loading={restarting} disabled={restarting}>
-      <Power class="size-4" aria-hidden="true" />
-      {restarting ? 'Restarting…' : 'Restart LongBox'}
-    </Button>
+    <div class="mb-4">
+      <p class="mb-3 text-sm text-slate-600">
+        Drain the download watch folder now: parse every CBZ/CBR LongBox can find, match it
+        against the catalog, and move owned files into their library folders. Unmatched files
+        land in <code class="rounded bg-slate-100 px-1 py-0.5 text-xs">_unsorted/</code>. Use
+        this after dropping files into the watch folder manually instead of waiting for the
+        background watcher.
+      </p>
+      <Button
+        variant="secondary"
+        onclick={handleProcessDownloads}
+        loading={processing}
+        disabled={processing}
+      >
+        <FolderSync class="size-4" aria-hidden="true" />
+        {processing ? 'Processing…' : 'Process downloads'}
+      </Button>
+    </div>
+    <div>
+      <p class="mb-3 text-sm text-slate-600">
+        Restart LongBox to pick up new environment variables or recover from a stuck worker.
+        The container exits and Docker brings it back up — in-flight requests will fail and
+        any running scans or sweeps will be cut short.
+      </p>
+      <Button variant="warning" onclick={handleRestart} loading={restarting} disabled={restarting}>
+        <Power class="size-4" aria-hidden="true" />
+        {restarting ? 'Restarting…' : 'Restart LongBox'}
+      </Button>
+    </div>
   </section>
 </div>

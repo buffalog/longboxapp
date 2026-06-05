@@ -211,6 +211,118 @@ async fn initial_sweep(root: PathBuf, tx: mpsc::Sender<PathBuf>) {
     );
 }
 
+/// Outcome tally for [`sweep_now`]. Mirrors the [`processor::Outcome`]
+/// enum collapsed to per-bucket counts. Serialized as the response body
+/// of `POST /api/postprocess/trigger` so the frontend can render a
+/// "processed N, conflicts M, unsorted K" toast off one round-trip.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SweepSummary {
+    /// Matched + moved + catalogued as owned.
+    pub processed: usize,
+    /// Couldn't attribute to a known issue; moved to `_unsorted/`.
+    pub unsorted: usize,
+    /// Library already owned canonical bytes; the source was auto-removed
+    /// from the watch folder (see [`processor::cleanup_conflict_source`]).
+    pub conflicts: usize,
+    /// Stage-specific failure during processing (ComicInfo write, move,
+    /// mid-flight disappearance). Counter for the operator; details
+    /// land in the WARN log under `phase_b.sweep_now_error` or
+    /// `phase_b.failed`.
+    pub failed: usize,
+}
+
+/// On-demand drain of the watch folder. Same producer pipeline as the
+/// background `consumer_task` (walk → [`skip::should_skip`] →
+/// [`processor::process_one`] → cache update), but called inline by
+/// the user via `POST /api/postprocess/trigger` so it returns a
+/// summary rather than logging-and-forgetting.
+///
+/// Running concurrently with the watcher is safe but wasteful: both
+/// paths may pick up the same file. The processor's metadata recheck
+/// + same-file conflict cleanup absorb the race — the second arrival
+/// either reports `Failed` (source gone) or `Conflict` (target landed
+/// from the other path). Neither outcome corrupts state.
+pub async fn sweep_now(
+    library_root: &Path,
+    library_root_id: i64,
+    watch_path: &Path,
+    db: longbox_db::Pool,
+    cache: Arc<PendingInterventionsCache>,
+) -> Result<SweepSummary> {
+    // Fail fast on a missing/unreadable watch folder so the route can
+    // turn this into a clean 400 rather than letting walkdir crawl
+    // silently across whatever-the-default is.
+    std::fs::read_dir(watch_path).map_err(|source| PostprocessError::WatchPathUnreadable {
+        path: watch_path.to_path_buf(),
+        source,
+    })?;
+
+    let watch_path_buf = watch_path.to_path_buf();
+    let walk_root = watch_path_buf.clone();
+    let candidates = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&walk_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.into_path();
+            if skip::should_skip(&path).is_none() {
+                out.push(path);
+            }
+        }
+        out
+    })
+    .await
+    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
+
+    let total = candidates.len();
+    tracing::info!(
+        target: "longbox_postprocess",
+        candidates = total,
+        root = %watch_path_buf.display(),
+        "phase_b.sweep_now_started"
+    );
+
+    let mut summary = SweepSummary::default();
+    for path in candidates {
+        match processor::process_one(&path, library_root, library_root_id, &db).await {
+            Ok(outcome) => {
+                use processor::Outcome;
+                match &outcome {
+                    Outcome::Imported { .. } => summary.processed += 1,
+                    Outcome::Unsorted { .. } => summary.unsorted += 1,
+                    Outcome::Conflict { .. } => summary.conflicts += 1,
+                    Outcome::Failed { .. } => summary.failed += 1,
+                }
+                apply_outcome_to_cache(&cache, &path, outcome);
+            }
+            Err(e) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    target: "longbox_postprocess",
+                    path = %path.display(),
+                    err = %e,
+                    "phase_b.sweep_now_error"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        target: "longbox_postprocess",
+        processed = summary.processed,
+        unsorted = summary.unsorted,
+        conflicts = summary.conflicts,
+        failed = summary.failed,
+        "phase_b.sweep_now_complete"
+    );
+    Ok(summary)
+}
+
 /// Per-event filter: turn a `notify::Event` into the set of paths
 /// that should be considered for processing. Permissive on event
 /// kind — the skip filter (extension, in-progress suffix, dotfile)
