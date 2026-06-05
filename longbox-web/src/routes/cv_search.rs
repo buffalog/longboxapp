@@ -9,7 +9,30 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/cv/search", get(handler))
+    Router::new()
+        .route("/cv/search", get(handler))
+        .route("/cv/rate-limit", get(rate_limit))
+}
+
+/// Read-only view of the ComicVine client's sliding-window call
+/// counter. Drives the dashboard / Settings chip that surfaces "42/100
+/// this hour" so the user can see when they're nearing the quota.
+/// `window_started_at` is a unix-second timestamp; the frontend
+/// formats it relative.
+#[derive(Debug, Serialize)]
+struct RateLimitResponse {
+    count: u32,
+    limit_per_hour: u32,
+    window_started_at_unix: i64,
+}
+
+async fn rate_limit(State(state): State<AppState>) -> Json<RateLimitResponse> {
+    let snap = state.cv.rate_limit_snapshot();
+    Json(RateLimitResponse {
+        count: snap.count,
+        limit_per_hour: snap.limit_per_hour,
+        window_started_at_unix: snap.window_started_at_unix,
+    })
 }
 
 #[derive(Debug, Deserialize)]

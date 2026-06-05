@@ -10,6 +10,14 @@ pub const KEY_MATCH_CONFIDENCE_THRESHOLD: &str = "match_confidence_threshold";
 /// `settings.key` value: filesystem path of the library root.
 pub const KEY_LIBRARY_ROOT_PATH: &str = "library_root_path";
 
+/// `settings.key` value: WAL checkpoint interval in hours. A
+/// background task in the web crate sleeps this long, then runs
+/// `PRAGMA wal_checkpoint(TRUNCATE)` to keep the WAL file from
+/// growing unbounded under heavy enrichment / scan loads. Default
+/// 6 hours. Read once per loop iteration so a change tunes the next
+/// sleep without a restart. Set to 0 to disable.
+pub const KEY_WAL_CHECKPOINT_HOURS: &str = "wal_checkpoint_hours";
+
 /// `settings.key` value: optional host-side library path used by the
 /// "Show in Finder" affordance. The container only sees its
 /// `library_root_path` (e.g. `/library`); to render a `file://` URL

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             p.series_id AS \"series_id!: i64\",\n             s.title AS \"title!: String\",\n             s.cv_id AS \"cv_id?: i64\",\n             s.start_year AS \"start_year?: i64\",\n             p.added_at AS \"subscribed_at!: time::PrimitiveDateTime\"\n           FROM pull_list p\n           JOIN series s ON s.id = p.series_id\n           ORDER BY s.sort_title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "cv_id?: i64",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "start_year?: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "subscribed_at!: time::PrimitiveDateTime",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "85e46959c712e18ab7fc4c2a2b42b20bab309a747cda0be121f99078cafab560"
+}

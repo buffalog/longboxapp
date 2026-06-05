@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             1 AS \"db_ok!: i64\",\n             (SELECT MAX(finished_at) FROM scan_runs WHERE status = 'completed')\n               AS \"last_scan_at: PrimitiveDateTime\",\n             (SELECT MAX(last_enrichment_attempt_at) FROM series)\n               AS \"last_enrichment_at: PrimitiveDateTime\",\n             (SELECT COUNT(*) FROM series WHERE cv_id IS NULL)\n               AS \"enrichment_queue_depth!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "db_ok!: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      },
+      {
+        "name": "last_scan_at: PrimitiveDateTime",
+        "ordinal": 1,
+        "type_info": "Null"
+      },
+      {
+        "name": "last_enrichment_at: PrimitiveDateTime",
+        "ordinal": 2,
+        "type_info": "Null"
+      },
+      {
+        "name": "enrichment_queue_depth!: i64",
+        "ordinal": 3,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "da5a5aa286265bb5e0c6a0034e6afb1fa6d89505319db1936ec4ff0a749337f9"
+}

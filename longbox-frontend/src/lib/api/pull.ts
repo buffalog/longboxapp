@@ -95,3 +95,48 @@ export function searchSeriesNow(seriesId: number): Promise<SearchSeriesNowResult
 export function searchIssueNow(seriesId: number, issueId: number): Promise<void> {
   return apiFetch(`/pull/search/${seriesId}/issue/${issueId}`, { method: 'POST' });
 }
+
+/** One row in the pull-list export format. Round-trip safe between
+ *  LongBox instances: the import endpoint accepts the same shape and
+ *  re-links by `cv_id`. */
+export interface PullListExportEntry {
+  series_id: number;
+  title: string;
+  cv_id: number | null;
+  start_year: number | null;
+  subscribed_at: string;
+}
+
+export function exportPullList(): Promise<PullListExportEntry[]> {
+  return apiFetch('/pull-list/export');
+}
+
+/** Per-entry import outcome. `status` is one of:
+ *   - `added` — fresh subscription
+ *   - `already_subscribed` — local pull list already has this series
+ *   - `series_not_found` — no local series with this cv_id; user
+ *     needs to add the volume first
+ *   - `missing_cv_id` — export row had no cv_id (shallow series),
+ *     can't re-link */
+export interface ImportEntryResult {
+  cv_id: number | null;
+  title: string | null;
+  status: 'added' | 'already_subscribed' | 'series_not_found' | 'missing_cv_id';
+}
+
+export interface ImportPullListResponse {
+  added: number;
+  already_subscribed: number;
+  series_not_found: number;
+  missing_cv_id: number;
+  results: ImportEntryResult[];
+}
+
+export function importPullList(
+  entries: Array<{ cv_id: number | null; title?: string | null }>
+): Promise<ImportPullListResponse> {
+  return apiFetch('/pull-list/import', {
+    method: 'POST',
+    body: JSON.stringify(entries)
+  });
+}

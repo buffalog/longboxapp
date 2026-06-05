@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import CvRateLimitBadge from './CvRateLimitBadge.svelte';
   import ScanStatusBadge from './ScanStatusBadge.svelte';
 
   type NavLink = { href: string; label: string };
@@ -147,6 +148,9 @@
         </li>
       {/each}
     </ul>
-    <div class="ml-auto"><ScanStatusBadge /></div>
+    <div class="ml-auto flex items-center gap-2">
+      <CvRateLimitBadge />
+      <ScanStatusBadge />
+    </div>
   </div>
 </nav>
