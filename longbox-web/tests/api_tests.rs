@@ -42,6 +42,97 @@ async fn health_returns_200_with_version() {
     assert!(body["version"].is_string());
 }
 
+#[tokio::test]
+async fn health_carries_db_ok_uptime_and_db_metrics() {
+    let app = build_test_app().await;
+    let resp = app.request(empty_request("GET", "/api/health")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["db_ok"], true);
+    assert!(body["uptime_seconds"].as_i64().unwrap() >= 0);
+    // Fresh test app — no scans, no enrichment attempts.
+    assert!(body["last_scan_at"].is_null());
+    assert!(body["last_enrichment_at"].is_null());
+    assert_eq!(body["enrichment_queue_depth"], 0);
+}
+
+#[tokio::test]
+async fn health_reflects_enrichment_queue_depth() {
+    let app = build_test_app().await;
+    // Two shallow series (cv_id IS NULL) → enrichment_queue_depth = 2.
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Shallow A".into(),
+            sort_title: "shallow a".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Shallow B".into(),
+            sort_title: "shallow b".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // One enriched (cv_id set) — not counted.
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(123),
+            metron_id: None,
+            title: "Enriched".into(),
+            sort_title: "enriched".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body =
+        response_json(app.request(empty_request("GET", "/api/health")).await).await;
+    assert_eq!(body["enrichment_queue_depth"], 2);
+}
+
+// -------- CV rate-limit (Tier 4 ITEM 16) --------
+
+#[tokio::test]
+async fn cv_rate_limit_endpoint_returns_snapshot_shape() {
+    // We don't exercise the counter increment here (that lives inside
+    // the CV client's execute_with_retry path, gated by a wiremock
+    // hit). Just lock the response shape and the default limit
+    // reflected from config (3600/hr for cv_direct; the primary
+    // `cv` client is 180/hr but the route surfaces `state.cv`).
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/cv/rate-limit"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert!(body["count"].as_u64().is_some());
+    assert!(body["limit_per_hour"].as_u64().unwrap() > 0);
+    assert!(body["window_started_at_unix"].as_i64().is_some());
+}
+
 // -------- CV search --------
 
 #[tokio::test]
@@ -3498,6 +3589,126 @@ async fn pull_search_auto_trigger_silently_skips_already_on_list() {
         !app.state.pull_search.is_searching(sid).await,
         "a 409 re-subscribe must NOT re-trigger a search"
     );
+}
+
+// -------- pull-list export / import (Tier 4 ITEM 14) --------
+
+#[tokio::test]
+async fn export_pull_list_returns_subscriptions_with_cv_metadata() {
+    let app = build_test_app().await;
+    // Seed a CV-linked series and a subscription on it.
+    let cv_linked = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    longbox_db::pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: cv_linked,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body =
+        response_json(app.request(empty_request("GET", "/api/pull-list/export")).await)
+            .await;
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["series_id"].as_i64().unwrap(), cv_linked);
+    assert_eq!(arr[0]["title"], "Saga");
+    assert_eq!(arr[0]["cv_id"], 2127);
+    assert_eq!(arr[0]["start_year"], 2012);
+    assert!(arr[0]["subscribed_at"].is_string());
+}
+
+#[tokio::test]
+async fn import_pull_list_upserts_by_cv_id_and_classifies_each_row() {
+    let app = build_test_app().await;
+    // Catalog: one series with cv_id 100 already subscribed, one
+    // with cv_id 200 NOT subscribed.
+    let already = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(100),
+            metron_id: None,
+            title: "Already On List".into(),
+            sort_title: "already on list".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    longbox_db::pull_list_repo::add(
+        &app.state.db,
+        NewPullEntry {
+            series_id: already,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(200),
+            metron_id: None,
+            title: "Adds Cleanly".into(),
+            sort_title: "adds cleanly".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Import payload covers the four outcomes the response classifies:
+    // added (cv_id 200), already (100), series_not_found (999),
+    // missing_cv_id (null).
+    let payload = r#"[
+        {"cv_id": 100, "title": "Already"},
+        {"cv_id": 200, "title": "Fresh"},
+        {"cv_id": 999, "title": "Unknown Volume"},
+        {"cv_id": null, "title": "Shallow"}
+    ]"#;
+    let resp = app
+        .request(json_request("POST", "/api/pull-list/import", payload))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["added"], 1);
+    assert_eq!(body["already_subscribed"], 1);
+    assert_eq!(body["series_not_found"], 1);
+    assert_eq!(body["missing_cv_id"], 1);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    let by_status: std::collections::HashMap<&str, &serde_json::Value> = results
+        .iter()
+        .map(|r| (r["status"].as_str().unwrap(), r))
+        .collect();
+    assert!(by_status.contains_key("added"));
+    assert!(by_status.contains_key("already_subscribed"));
+    assert!(by_status.contains_key("series_not_found"));
+    assert!(by_status.contains_key("missing_cv_id"));
 }
 
 // -------- pull list (Phase A.8 Step 7) --------

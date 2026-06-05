@@ -152,6 +152,7 @@ pub async fn build_test_app() -> TestApp {
         pull_search,
         scan_scheduler,
         enrichment,
+        start_time: time::OffsetDateTime::now_utc(),
     };
 
     let router = build_router(state.clone());

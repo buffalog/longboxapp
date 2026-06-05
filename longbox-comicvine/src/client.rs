@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 use reqwest::{Client as HttpClient, Response, StatusCode};
@@ -48,11 +49,86 @@ impl Default for ComicVineClientConfig {
     }
 }
 
+/// Snapshot of the per-hour call counter — what the `/api/cv/rate-limit`
+/// endpoint reflects up to the frontend. `count` is the number of
+/// successful `acquire()` calls inside the current sliding window;
+/// `limit_per_hour` is the configured cap; `window_started_at` is the
+/// unix-second when the current window opened (first call after the
+/// previous window expired, or process boot for the very first call).
+#[derive(Debug, Clone, Copy)]
+pub struct CvRateLimitSnapshot {
+    pub count: u32,
+    pub limit_per_hour: u32,
+    pub window_started_at_unix: i64,
+}
+
+/// Sliding-window counter for "calls made in the last hour-ish."
+/// Pragmatic implementation: a single atomic counter + a window-start
+/// timestamp. Rolls over when the window expires on the next
+/// `consume` call. Not strictly a 60-minute trailing window — closer
+/// to "since the last roll-over" — but plenty accurate for a UI
+/// chip.
+struct CallCounter {
+    count: AtomicU32,
+    window_started_at: AtomicI64,
+}
+
+impl CallCounter {
+    const WINDOW_SECS: i64 = 3600;
+
+    fn new() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            window_started_at: AtomicI64::new(0),
+        }
+    }
+
+    fn now_unix_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
+
+    /// Increment, rolling the window if it has expired. The atomic
+    /// ordering is loose because the counter is advisory — strict
+    /// linearizability between concurrent increments isn't worth the
+    /// fence overhead for a UI display.
+    fn consume(&self) {
+        let now = Self::now_unix_secs();
+        let start = self.window_started_at.load(Ordering::Acquire);
+        if start == 0 || now - start >= Self::WINDOW_SECS {
+            self.window_started_at.store(now, Ordering::Release);
+            self.count.store(1, Ordering::Release);
+        } else {
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn snapshot(&self, limit_per_hour: u32) -> CvRateLimitSnapshot {
+        let now = Self::now_unix_secs();
+        let start = self.window_started_at.load(Ordering::Acquire);
+        let (count, window_started_at_unix) =
+            if start == 0 || now - start >= Self::WINDOW_SECS {
+                (0, now)
+            } else {
+                (self.count.load(Ordering::Acquire), start)
+            };
+        CvRateLimitSnapshot {
+            count,
+            limit_per_hour,
+            window_started_at_unix,
+        }
+    }
+}
+
 pub struct ComicVineClient {
     http: HttpClient,
     base_url: Url,
     api_key: String,
     limiter: CvRateLimiter,
+    calls: CallCounter,
+    rate_limit_per_hour: u32,
 }
 
 impl std::fmt::Debug for ComicVineClient {
@@ -90,7 +166,15 @@ impl ComicVineClient {
             base_url,
             api_key: config.api_key,
             limiter,
+            calls: CallCounter::new(),
+            rate_limit_per_hour: config.rate_limit_per_hour,
         })
+    }
+
+    /// Read-only view of the rolling per-hour call count. Drives the
+    /// frontend's CV rate-limit chip.
+    pub fn rate_limit_snapshot(&self) -> CvRateLimitSnapshot {
+        self.calls.snapshot(self.rate_limit_per_hour)
     }
 
     #[instrument(target = "longbox_comicvine", skip(self), fields(query = %query))]
@@ -228,6 +312,7 @@ impl ComicVineClient {
 
     async fn execute_with_retry(&self, url: Url) -> Result<String, CvError> {
         self.limiter.acquire().await?;
+        self.calls.consume();
         let resp = self.send(&url).await?;
 
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
@@ -240,6 +325,7 @@ impl ComicVineClient {
             tokio::time::sleep(retry_after).await;
 
             self.limiter.acquire().await?;
+            self.calls.consume();
             let resp2 = self.send(&url).await?;
             if resp2.status() == StatusCode::TOO_MANY_REQUESTS {
                 let secs = parse_retry_after(&resp2).as_secs();

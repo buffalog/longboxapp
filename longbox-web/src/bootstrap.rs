@@ -193,7 +193,19 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         config.metron_api_password.as_deref(),
     );
 
-    // 12. Compose state.
+    // 12. WAL checkpoint background task. SQLite's WAL grows
+    //     unbounded across heavy enrichment / scan sweeps unless
+    //     periodically truncated. The default `PRAGMA
+    //     wal_checkpoint(PASSIVE)` SQLite runs implicitly only
+    //     consolidates pages, doesn't shrink the file. TRUNCATE
+    //     shrinks it back to zero (when no readers are active).
+    //     Reads the interval from settings every loop so a tune
+    //     takes effect on the next sleep without a restart; 0 hours
+    //     disables the loop entirely (returns early on the next
+    //     iteration). Default 6h.
+    spawn_wal_checkpoint(db.clone());
+
+    // 13. Compose state.
     Ok(AppState {
         db,
         cv: cv_arc,
@@ -208,7 +220,73 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         pull_search,
         scan_scheduler,
         enrichment,
+        start_time: time::OffsetDateTime::now_utc(),
     })
+}
+
+/// Fire-and-forget periodic `PRAGMA wal_checkpoint(TRUNCATE)`. Each
+/// iteration: read the configured interval (`wal_checkpoint_hours`,
+/// default 6) from settings, sleep that long, then checkpoint and
+/// log the outcome at INFO. Setting the interval to 0 turns the loop
+/// into a long-sleep no-op (10 minutes) so the loop is still picking
+/// up settings changes; the next non-zero setting resumes the normal
+/// rhythm.
+///
+/// The checkpoint result tuple `(busy, log_pages, checkpointed_pages)`
+/// is what SQLite's `wal_checkpoint(TRUNCATE)` returns: `busy=1` when
+/// the checkpoint couldn't complete because of an active reader (we
+/// log and retry next iteration). `log_pages` is the WAL frame count
+/// pre-checkpoint; `checkpointed_pages` is how many were written back
+/// to the main DB.
+fn spawn_wal_checkpoint(db: longbox_db::Pool) {
+    use longbox_db::settings_repo;
+    tokio::spawn(async move {
+        loop {
+            let hours: i64 = settings_repo::get_or_default(
+                &db,
+                settings_repo::KEY_WAL_CHECKPOINT_HOURS,
+                6_i64,
+            )
+            .await
+            .unwrap_or(6);
+            if hours <= 0 {
+                // Disabled — long-sleep so a tune (settings flip back
+                // to a positive number) is picked up within minutes.
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                continue;
+            }
+            let sleep_secs = u64::try_from(hours)
+                .unwrap_or(6)
+                .saturating_mul(3600);
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+
+            // PRAGMA wal_checkpoint returns one row: (busy, log,
+            // checkpointed). All three columns are integers. Use
+            // query_as with a tuple type.
+            match sqlx::query_as::<_, (i64, i64, i64)>("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&db)
+                .await
+            {
+                Ok((busy, log_pages, checkpointed_pages)) => {
+                    tracing::info!(
+                        target: "longbox_web",
+                        busy,
+                        log_pages,
+                        checkpointed_pages,
+                        interval_hours = hours,
+                        "WAL checkpoint complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "longbox_web",
+                        error = %e,
+                        "WAL checkpoint failed"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Construct the Metron client for [`AppState::metron`], collapsing all

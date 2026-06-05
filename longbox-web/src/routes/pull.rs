@@ -29,6 +29,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/pull/search-all-missing", post(search_all_missing))
         .route("/pull-list", get(list).post(add))
+        .route("/pull-list/export", get(export_pull_list))
+        .route("/pull-list/import", post(import_pull_list))
         .route(
             "/pull-list/:series_id",
             get(get_one).patch(set_paused).delete(remove),
@@ -353,4 +355,162 @@ fn not_found_or(e: longbox_db::DbError, series_id: i64) -> ApiError {
         longbox_db::DbError::NotFound => not_found(series_id),
         other => ApiError::from(other),
     }
+}
+
+// -------- Pull-list export / import (Tier 4 ITEM 14) --------
+
+/// One row in the exported pull-list payload. Carries enough to
+/// re-link a subscription against a fresh catalog (cv_id is the
+/// canonical identity), plus the human-readable title / year for
+/// users browsing the export file directly.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct PullListExportRow {
+    series_id: i64,
+    title: String,
+    cv_id: Option<i64>,
+    start_year: Option<i64>,
+    subscribed_at: time::PrimitiveDateTime,
+}
+
+/// `GET /api/pull-list/export` — dump the user's current pull-list
+/// subscriptions as a JSON array. Frontend triggers a file download.
+/// The payload is the import endpoint's input contract — round-trip
+/// safe between LongBox instances or backup/restore cycles.
+async fn export_pull_list(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PullListExportRow>>, ApiError> {
+    let rows = sqlx::query_as!(
+        PullListExportRow,
+        r#"SELECT
+             p.series_id AS "series_id!: i64",
+             s.title AS "title!: String",
+             s.cv_id AS "cv_id?: i64",
+             s.start_year AS "start_year?: i64",
+             p.added_at AS "subscribed_at!: time::PrimitiveDateTime"
+           FROM pull_list p
+           JOIN series s ON s.id = p.series_id
+           ORDER BY s.sort_title COLLATE NOCASE"#
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("pull-list export query failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    Ok(Json(rows))
+}
+
+/// One row in an import payload. We accept the same shape `export`
+/// produces; `series_id` and `subscribed_at` are accepted but ignored
+/// — they're not portable between instances. The load-bearing field
+/// is `cv_id`, which we use to look up the local series row.
+#[derive(Debug, Deserialize)]
+struct PullListImportRow {
+    cv_id: Option<i64>,
+    /// Display-only; surfaced in the per-entry result so a user can
+    /// tell which line failed. Never written back to the catalog.
+    title: Option<String>,
+}
+
+/// Per-entry outcome reported back to the caller. `added` is a
+/// freshly-inserted subscription; `already_subscribed` short-circuits
+/// the upsert; `series_not_found` means we have no local series for
+/// this cv_id (user needs to add it first); `missing_cv_id` covers
+/// shallow exports where the cv_id was null. Failure modes are not
+/// fatal — every row is processed independently.
+#[derive(Debug, Serialize)]
+struct ImportEntryResult {
+    cv_id: Option<i64>,
+    title: Option<String>,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ImportResponse {
+    added: usize,
+    already_subscribed: usize,
+    series_not_found: usize,
+    missing_cv_id: usize,
+    results: Vec<ImportEntryResult>,
+}
+
+/// `POST /api/pull-list/import` — accept an array of rows in the
+/// export format and add each to the pull list (upsert by cv_id).
+/// Entries that reference an unknown cv_id (no matching series in the
+/// catalog) are reported but not auto-created — the spec is "skip
+/// duplicates," not "auto-add CV volumes." Per-entry results carry
+/// the title back so the UI can render a useful summary.
+async fn import_pull_list(
+    State(state): State<AppState>,
+    Json(entries): Json<Vec<PullListImportRow>>,
+) -> Result<Json<ImportResponse>, ApiError> {
+    use longbox_db::{pull_list_repo, series_repo, NewPullEntry};
+
+    let mut added = 0usize;
+    let mut already_subscribed = 0usize;
+    let mut series_not_found = 0usize;
+    let mut missing_cv_id = 0usize;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let Some(cv_id) = entry.cv_id else {
+            missing_cv_id += 1;
+            results.push(ImportEntryResult {
+                cv_id: None,
+                title: entry.title.clone(),
+                status: "missing_cv_id",
+            });
+            continue;
+        };
+        let Some(series) = series_repo::find_by_cv_id(&state.db, cv_id).await? else {
+            series_not_found += 1;
+            results.push(ImportEntryResult {
+                cv_id: Some(cv_id),
+                title: entry.title.clone(),
+                status: "series_not_found",
+            });
+            continue;
+        };
+        // Idempotency via the pull_list_repo's NotFound-vs-OK split:
+        // `add` returns the new row on insert, and returns
+        // `DbError::Conflict` (mapped from the UNIQUE constraint) when
+        // already subscribed.
+        match pull_list_repo::add(
+            &state.db,
+            NewPullEntry {
+                series_id: series.id,
+                start_issue: None,
+            },
+        )
+        .await
+        {
+            Ok(_) => {
+                added += 1;
+                results.push(ImportEntryResult {
+                    cv_id: Some(cv_id),
+                    title: entry.title.clone(),
+                    status: "added",
+                });
+            }
+            Err(longbox_db::DbError::UniqueViolation {
+                field: "pull_list_series_id",
+            }) => {
+                already_subscribed += 1;
+                results.push(ImportEntryResult {
+                    cv_id: Some(cv_id),
+                    title: entry.title.clone(),
+                    status: "already_subscribed",
+                });
+            }
+            Err(e) => return Err(ApiError::from(e)),
+        }
+    }
+
+    Ok(Json(ImportResponse {
+        added,
+        already_subscribed,
+        series_not_found,
+        missing_cv_id,
+        results,
+    }))
 }
