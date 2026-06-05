@@ -40,21 +40,28 @@ pub const NEEDS_REVIEW_FLOOR: f64 = 0.65;
 /// trusting embedded ComicInfo metadata over filenames.
 pub const FILENAME_CONFIDENCE_CEILING: f64 = 0.90;
 
-/// Default `owned`-vs-`needs_review` boundary. Storable in the `settings`
-/// table; the matcher itself does not consult this — callers apply it
-/// post-hoc to classify status from `MatchResult.confidence`.
+/// SEED-DEFAULT for the `owned`-vs-`needs_review` boundary. The DB
+/// `settings.match_confidence_threshold` row is the single source of
+/// truth at runtime — the scanner reads it per scan run, Phase B
+/// reads it per sweep, the Settings UI exposes it for editing. This
+/// constant fires ONLY when the row is absent or unparseable (first
+/// boot, pre-migration state), and never silently overrides a saved
+/// value. The matcher itself does not consult this — callers apply
+/// it post-hoc to classify status from `MatchResult.confidence`.
 pub const DEFAULT_MATCH_THRESHOLD: f64 = 0.85;
 
-/// Default similarity threshold for the pull engine's pre-grab newznab
-/// series-title filter (Bug 3). Stricter than the catalog matcher's
-/// `NEEDS_REVIEW_FLOOR` because pre-grab errors are asymmetrically costly:
-/// a wrong NZB consumes bandwidth, churns SAB, and pollutes the catalog
-/// when post-process imports it, while a missed legitimate match is a
-/// visible, recoverable park. Calibrated at the Wolverine-MAX boundary
-/// (`wolverine` vs `wolverine max` scores ~0.69, which 0.65 wrongly
-/// accepts and 0.75 correctly rejects). Storable as
-/// `settings.pull_indexer_match_threshold`; the engine re-reads
-/// per-sweep so tuning needs no restart.
+/// SEED-DEFAULT for the pull engine's pre-grab newznab series-title
+/// filter (Bug 3). The DB `settings.pull_indexer_match_threshold`
+/// row is the single source of truth at runtime — the engine reads
+/// it per sweep, the Settings UI exposes it for editing. Stricter
+/// than the catalog matcher's `NEEDS_REVIEW_FLOOR` because pre-grab
+/// errors are asymmetrically costly: a wrong NZB consumes bandwidth,
+/// churns SAB, and pollutes the catalog when Phase B imports it,
+/// while a missed legitimate match is a visible, recoverable park.
+/// Calibrated at the Wolverine-MAX boundary (`wolverine` vs
+/// `wolverine max` scores ~0.69, which 0.65 wrongly accepts and
+/// 0.75 correctly rejects). Falls back to this constant only when
+/// the settings row is absent / unparseable.
 pub const PULL_INDEXER_MATCH_THRESHOLD: f64 = 0.75;
 
 /// Free-function form of [`ComicInfo::parse`].

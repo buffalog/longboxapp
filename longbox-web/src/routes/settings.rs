@@ -40,10 +40,20 @@ struct SettingsResponse {
     download_watch_path: Option<String>,
     version: &'static str,
 
-    /// Runtime-tunable: the scanner's owned-vs-needs_review threshold.
-    /// Read per-scan via `Scanner::load_match_threshold`. Falls back
-    /// to the boot env value when the DB row is missing.
+    /// Runtime-tunable: the catalog match threshold (owned vs
+    /// needs-review). Read per-scan via `Scanner::load_match_threshold`
+    /// AND per-Phase-B-sweep via `longbox_postprocess::load_owned_threshold`
+    /// — both phases agree on what "confident enough to claim" means
+    /// by reading this exact row. Falls back to the boot env value
+    /// when the DB row is missing.
     match_confidence_threshold: f64,
+    /// Runtime-tunable: the pull engine's NZB-to-series similarity
+    /// gate (Bug 3). Separate from `match_confidence_threshold`
+    /// because pre-grab errors are asymmetrically costly (a wrong
+    /// NZB burns bandwidth + churns SAB + pollutes the catalog), so
+    /// the default sits stricter than the catalog matcher's
+    /// needs-review floor. Read per-sweep by the engine.
+    pull_indexer_match_threshold: f64,
     /// Runtime-tunable: CV enrichment title-similarity gate for
     /// candidates with a known start year. Default 0.85.
     cv_enrichment_title_threshold_year_known: f64,
@@ -66,6 +76,12 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         &state.db,
         settings_repo::KEY_MATCH_CONFIDENCE_THRESHOLD,
         state.config.match_threshold,
+    )
+    .await?;
+    let pull_indexer_match_threshold: f64 = settings_repo::get_or_default(
+        &state.db,
+        settings_repo::KEY_PULL_INDEXER_MATCH_THRESHOLD,
+        longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
     )
     .await?;
     let cv_enrichment_title_threshold_year_known: f64 = settings_repo::get_or_default(
@@ -103,6 +119,7 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         download_watch_path: state.config.download_watch_path.clone(),
         version: env!("CARGO_PKG_VERSION"),
         match_confidence_threshold,
+        pull_indexer_match_threshold,
         cv_enrichment_title_threshold_year_known,
         cv_enrichment_title_threshold_year_unknown,
         pull_exclusion_keywords,
@@ -138,6 +155,7 @@ async fn update(
     // typed. Validation happens against the canonical form.
     let stored_value: String = match key.as_str() {
         settings_repo::KEY_MATCH_CONFIDENCE_THRESHOLD
+        | settings_repo::KEY_PULL_INDEXER_MATCH_THRESHOLD
         | settings_repo::KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_KNOWN
         | settings_repo::KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_UNKNOWN => {
             parse_threshold(&key, &body.value)?
@@ -156,6 +174,7 @@ async fn update(
                 message: format!(
                     "setting '{key}' is not editable. Editable keys: \
                      match_confidence_threshold, \
+                     pull_indexer_match_threshold, \
                      cv_enrichment_title_threshold_year_known, \
                      cv_enrichment_title_threshold_year_unknown, \
                      pull_exclusion_keywords, \
