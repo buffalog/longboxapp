@@ -24,7 +24,7 @@ pub use comicinfo_writer::{ComicInfoMetadata, CoverDate};
 pub use error::{CoreError, Result};
 pub use metroninfo_writer::MetronInfoMetadata;
 pub use file::{classify_status, FileStatus, LocalFile, MatchMethod};
-pub use filename::{ParsedFilename, ParsingPattern};
+pub use filename::{normalize_dotted_basename, parse_with_normalization, ParsedFilename, ParsingPattern};
 pub use issue::{Issue, IssueNumber};
 pub use library_path::LibraryPath;
 pub use matcher::{match_file, Candidate, MatchResult};
@@ -65,4 +65,15 @@ pub fn parse_comicinfo(xml: &[u8]) -> Result<ComicInfo> {
 /// Free-function form of [`filename::parse`].
 pub fn parse_filename(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilename> {
     filename::parse(filename, patterns)
+}
+
+/// Free-function form of [`filename::parse_with_normalization`].
+/// Phase B's per-file processor calls this so dot-separated NZB-style
+/// basenames (`Absolute.Green.Lantern.007.(2025).cbz`) parse via the
+/// existing strict patterns instead of dead-ending at `_unsorted/`.
+pub fn parse_filename_with_normalization(
+    filename: &str,
+    patterns: &[ParsingPattern],
+) -> Option<ParsedFilename> {
+    filename::parse_with_normalization(filename, patterns)
 }
