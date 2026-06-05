@@ -118,21 +118,6 @@ pub const KEY_METRON_CALENDAR_CACHE_TTL_HOURS: &str = "metron_calendar_cache_ttl
 /// changing it requires a container restart.
 pub const KEY_PHASE_B_POLL_INTERVAL_SECONDS: &str = "phase_b_poll_interval_seconds";
 
-// -------- GCD placeholders (reserved; not yet functional) --------
-
-/// Reserved settings-row key for a future GCD integration. Default
-/// empty string (set by the 20260601 migration). The
-/// `gcd_api_user` / `gcd_api_password` row pair exists so a future
-/// GCD path doesn't need its own migration just to introduce two
-/// settings rows. Currently unused in code.
-#[allow(dead_code)]
-pub const KEY_GCD_API_USER: &str = "gcd_api_user";
-
-/// Reserved settings-row key for a future GCD integration. See
-/// [`KEY_GCD_API_USER`] for rationale.
-#[allow(dead_code)]
-pub const KEY_GCD_API_PASSWORD: &str = "gcd_api_password";
-
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,
