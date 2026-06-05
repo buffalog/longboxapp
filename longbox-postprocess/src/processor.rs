@@ -80,7 +80,12 @@ pub async fn process_one(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    let filename_parse = longbox_core::parse_filename(basename, &patterns);
+    // Cascade through the dot-to-space normalizer when the strict
+    // patterns can't claim the raw basename — covers scene/NZB-style
+    // names like `Absolute.Green.Lantern.007.(2025).(Digital).cbz`
+    // that would otherwise dead-end at `_unsorted/` because the
+    // patterns require space separators between tokens.
+    let filename_parse = longbox_core::parse_filename_with_normalization(basename, &patterns);
 
     let title_hint = comic_info
         .as_ref()

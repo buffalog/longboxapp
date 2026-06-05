@@ -226,6 +226,55 @@ async fn sweep_now_400s_when_watch_path_is_missing() {
 }
 
 #[tokio::test]
+async fn imports_owned_via_dot_separated_nzb_style_basename() {
+    // Regression for the Phase B parser bug: scene/NZB-style
+    // basenames (dots instead of spaces, parenthesized year + tags)
+    // must parse via the dot-to-space cascade and land as owned,
+    // NOT in `_unsorted/`. The user-visible example:
+    // `Absolute.Green.Lantern.007.(2025).(Digital).(Shan-Empire).cbz`
+    // — same shape with the fixture's Saga catalog.
+    let f = seed_basic_fixture().await;
+
+    let source = f
+        ._watch
+        .path()
+        .join("Saga.001.(2012).(Digital).(Empire).cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db)
+        .await
+        .unwrap();
+    match outcome {
+        Outcome::Imported {
+            series_id,
+            issue_id,
+            target,
+            ..
+        } => {
+            assert_eq!(series_id, f.series_id, "must attribute to the seeded series");
+            assert_eq!(issue_id, f.issue_id, "must attribute to issue #1");
+            // Target lands at the canonical path — the dot-separated
+            // source is moved into the convention-driven library
+            // location.
+            let expected = f
+                .library
+                .path()
+                .join("Saga (2012)")
+                .join("Saga (2012) 001.cbz");
+            assert_eq!(target, expected);
+        }
+        other => panic!(
+            "dot-separated NZB name must import as owned (got {other:?}); \
+             the normalizer cascade in Phase B's processor isn't routing"
+        ),
+    }
+    assert!(
+        !source.exists(),
+        "dot-separated source must move out of /watch on owned import"
+    );
+}
+
+#[tokio::test]
 async fn imports_owned_via_filename_match() {
     let f = seed_basic_fixture().await;
 

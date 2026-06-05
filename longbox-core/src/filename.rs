@@ -6,6 +6,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// A user-editable filename pattern. Stored in the `parsing_patterns` table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +61,94 @@ pub fn parse(filename: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilena
         });
     }
     None
+}
+
+/// Run [`parse`] on the basename; if no pattern claims it, retry with
+/// [`normalize_dotted_basename`] applied first. The normalization
+/// turns scene/NZB-style dot-separated names like
+/// `Absolute.Green.Lantern.007.(2025).(Digital).(Shan-Empire).cbz`
+/// into the canonical `Absolute Green Lantern 007 (2025).cbz` shape
+/// the strict patterns already understand.
+///
+/// Cascade order is correctness-critical: original input wins on any
+/// pattern hit. Without the original-first guard, the normalizer
+/// would alter canonical inputs (e.g. it'd strip the optional year
+/// from `Saga 001 (2014) - Volume One.cbz` and re-emit
+/// `Saga 001 (2014).cbz`, losing the subtitle capture).
+pub fn parse_with_normalization(
+    basename: &str,
+    patterns: &[ParsingPattern],
+) -> Option<ParsedFilename> {
+    if let Some(parsed) = parse(basename, patterns) {
+        return Some(parsed);
+    }
+    let normalized = normalize_dotted_basename(basename);
+    if normalized == basename {
+        return None;
+    }
+    parse(&normalized, patterns)
+}
+
+/// Normalize a dot-separated filename (scene-release / NZB-style) into
+/// the space-separated, parenthesized-year canonical shape the parsing
+/// patterns expect. Mirrors `longbox_newznab::normalize_nzb_title` but
+/// for filesystem basenames — extension is preserved, parens are the
+/// metadata-tag separator (vs square brackets in the NZB form), and
+/// year is captured from the FIRST `(YYYY)` in the stem.
+///
+/// Algorithm:
+/// 1. Split the extension off (`.cbz` / `.cbr` / `.cb7`) so its dot
+///    isn't replaced. Anything without a `.` returns unchanged.
+/// 2. Capture the first `(YYYY)` from the stem — the release-year
+///    tag scene releases (almost) always carry.
+/// 3. Replace every `(...)` and `[...]` segment with a single space.
+///    Erases scanlator markers, group tags, and the year we just
+///    captured (we re-emit it canonically at the end).
+/// 4. Replace dots with spaces — turns scene's separator into the
+///    canonical patterns' separator.
+/// 5. Collapse whitespace runs.
+/// 6. Re-emit: `{cleaned} ({year}).{ext}` when year was captured,
+///    `{cleaned}.{ext}` otherwise — the captured year goes back in
+///    parens so the strict-year patterns (ids 2, 3, 7, 10, etc.) can
+///    claim it.
+///
+/// Idempotent on its own output: a canonical filename (no dots in the
+/// stem) round-trips unchanged after the first call.
+pub fn normalize_dotted_basename(basename: &str) -> String {
+    let (stem, ext) = match basename.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() => (s, Some(e)),
+        _ => return basename.to_owned(),
+    };
+    let year = dotted_year_re()
+        .captures(stem)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()));
+    let without_parens = dotted_paren_re().replace_all(stem, " ");
+    let without_brackets = dotted_bracket_re().replace_all(&without_parens, " ");
+    let dotted = without_brackets.replace('.', " ");
+    let cleaned: String = dotted.split_whitespace().collect::<Vec<_>>().join(" ");
+    match (year, ext) {
+        (Some(y), Some(e)) => format!("{cleaned} ({y}).{e}"),
+        (None, Some(e)) => format!("{cleaned}.{e}"),
+        // Both Some(ext)=None arms above cover every reachable
+        // branch — `rsplit_once` returning None or Some with empty
+        // sides already short-circuited above.
+        _ => unreachable!("ext presence is decided at the rsplit_once branch"),
+    }
+}
+
+static DOTTED_YEAR_RE: OnceLock<Regex> = OnceLock::new();
+fn dotted_year_re() -> &'static Regex {
+    DOTTED_YEAR_RE.get_or_init(|| Regex::new(r"\((\d{4})\)").unwrap())
+}
+
+static DOTTED_PAREN_RE: OnceLock<Regex> = OnceLock::new();
+fn dotted_paren_re() -> &'static Regex {
+    DOTTED_PAREN_RE.get_or_init(|| Regex::new(r"\([^)]*\)").unwrap())
+}
+
+static DOTTED_BRACKET_RE: OnceLock<Regex> = OnceLock::new();
+fn dotted_bracket_re() -> &'static Regex {
+    DOTTED_BRACKET_RE.get_or_init(|| Regex::new(r"\[[^\]]*\]").unwrap())
 }
 
 /// Default seed patterns. The DB migration in `longbox-db` will INSERT
@@ -750,5 +839,124 @@ mod tests {
 
         let p = parse("20th Century Men 01 (0f 06) (2022).cbr", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 5, "(Xf Y) part-of still id=5, not the new (of N)");
+    }
+
+    // ---- dot-to-space normalization for scene/NZB-style filenames ----
+
+    #[test]
+    fn normalize_dotted_basename_user_example() {
+        // The load-bearing case from the bug report. Without this
+        // normalization Phase B sends the file to `_unsorted/`
+        // because none of the strict patterns tolerate dot
+        // separators between series tokens.
+        let n = normalize_dotted_basename(
+            "Absolute.Green.Lantern.007.(2025).(Digital).(Shan-Empire).cbz",
+        );
+        assert_eq!(n, "Absolute Green Lantern 007 (2025).cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_handles_cbr_extension() {
+        let n = normalize_dotted_basename(
+            "Some.Series.001.(2024).(digital).(Group-Empire).cbr",
+        );
+        assert_eq!(n, "Some Series 001 (2024).cbr");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_without_year_tag() {
+        // No `(YYYY)` to capture — re-emit year-less so the catch-all
+        // (id=4) can still claim the result.
+        let n = normalize_dotted_basename("Saga.001.cbz");
+        assert_eq!(n, "Saga 001.cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_strips_square_brackets_too() {
+        // Square-bracket scanlator tags appear in some NZB-style
+        // names; same disposition as parens.
+        let n = normalize_dotted_basename(
+            "Title.001.(2024).[digital].[Empire].cbz",
+        );
+        assert_eq!(n, "Title 001 (2024).cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_first_year_wins() {
+        // Multiple `(YYYY)` segments: first one wins (the release
+        // year tag; later ones are typically scanlator group years
+        // or volume start years).
+        let n = normalize_dotted_basename(
+            "Series.001.(2024).(2023 Reprint).(Digital).cbz",
+        );
+        assert_eq!(n, "Series 001 (2024).cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_no_extension_returns_unchanged() {
+        // Defensive: a stem-only input has no dot to anchor the ext
+        // split. Return unchanged rather than mangle it — the caller
+        // (parse_with_normalization) treats no-change as "skip the
+        // retry pass."
+        assert_eq!(normalize_dotted_basename("README"), "README");
+        assert_eq!(normalize_dotted_basename(""), "");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_collapses_runs_of_whitespace() {
+        // Adjacent strips of parens + dots leave multi-space runs;
+        // collapse so the patterns' `\s+` matches predictably.
+        let n = normalize_dotted_basename("A.B.(2024).(Tag).(Other).cbz");
+        assert_eq!(n, "A B (2024).cbz");
+    }
+
+    #[test]
+    fn parse_with_normalization_claims_user_example() {
+        // End-to-end: the user's filename now parses to series +
+        // number + year via the cascade. Without the cascade this
+        // returned None and Phase B fell through to _unsorted.
+        let p = parse_with_normalization(
+            "Absolute.Green.Lantern.007.(2025).(Digital).(Shan-Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Absolute Green Lantern");
+        assert_eq!(p.number, "007");
+        assert_eq!(p.year, Some(2025));
+    }
+
+    #[test]
+    fn parse_with_normalization_prefers_original_on_pattern_hit() {
+        // Canonical inputs MUST claim against the original basename,
+        // not the normalized one. Skipping this check would silently
+        // strip subtitles: id=10 (the permissive pattern) accepts the
+        // normalized output `Saga 001 (2014).cbz` and loses the
+        // ` - Volume One` capture.
+        let p = parse_with_normalization("Saga 001 (2014) - Volume One.cbz", &patterns())
+            .unwrap();
+        assert_eq!(p.pattern_id, 2, "canonical input must claim against id=2");
+        assert_eq!(p.title.as_deref(), Some("Volume One"));
+    }
+
+    #[test]
+    fn parse_with_normalization_returns_none_when_neither_pass_matches() {
+        // Garbage that the original parser rejects AND the normalizer
+        // can't rescue (no number anywhere). Caller (Phase B) treats
+        // None as "send to _unsorted" — same disposition as before
+        // this fix.
+        assert!(parse_with_normalization("README.txt", &patterns()).is_none());
+        assert!(parse_with_normalization("cover.jpg", &patterns()).is_none());
+    }
+
+    #[test]
+    fn parse_with_normalization_no_double_work_when_input_lacks_dots() {
+        // The `if normalized == basename` short-circuit avoids a
+        // redundant pattern pass when normalization is a no-op (input
+        // has no dots in the stem). Equivalence at the result level
+        // is what matters — same outcome as plain `parse`.
+        let raw = "Wolverine (2024) 005.cbz";
+        let a = parse(raw, &patterns());
+        let b = parse_with_normalization(raw, &patterns());
+        assert_eq!(a, b);
     }
 }
