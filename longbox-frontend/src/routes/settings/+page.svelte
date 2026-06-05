@@ -186,13 +186,13 @@
     try {
       const summary = await triggerPostprocess();
       const total =
-        summary.processed + summary.unsorted + summary.conflicts + summary.failed;
+        summary.processed + summary.skipped + summary.conflicts + summary.failed;
       if (total === 0) {
         toast.success('Watch folder is empty — nothing to process.');
       } else {
         const parts: string[] = [];
         parts.push(`processed ${summary.processed}`);
-        if (summary.unsorted > 0) parts.push(`unsorted ${summary.unsorted}`);
+        if (summary.skipped > 0) parts.push(`skipped ${summary.skipped}`);
         if (summary.conflicts > 0) parts.push(`conflicts ${summary.conflicts}`);
         if (summary.failed > 0) parts.push(`failed ${summary.failed}`);
         toast.success(`Phase B sweep complete · ${parts.join(' · ')}`);
@@ -531,10 +531,10 @@
     <div class="mb-4">
       <p class="mb-3 text-sm text-slate-600">
         Drain the download watch folder now: parse every CBZ/CBR LongBox can find, match it
-        against the catalog, and move owned files into their library folders. Unmatched files
-        land in <code class="rounded bg-slate-100 px-1 py-0.5 text-xs">_unsorted/</code>. Use
-        this after dropping files into the watch folder manually instead of waiting for the
-        background watcher.
+        against the catalog, and move owned files into their library folders. Unmatched
+        files stay in the watch folder — there's no <code class="rounded bg-slate-100 px-1 py-0.5 text-xs">_unsorted/</code>
+        bucket — so you can review or delete them directly. Use this after dropping files
+        into the watch folder manually instead of waiting for the background watcher.
       </p>
       <Button
         variant="secondary"

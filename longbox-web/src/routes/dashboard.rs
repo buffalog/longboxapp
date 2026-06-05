@@ -81,14 +81,15 @@ async fn activity(
     let recent_series = series_repo::list_recent_with_counts(&state.db, limit).await?;
 
     let limit_i64 = i64::from(limit);
-    // `_unsorted/` is the junk drawer the post-processor parks
-    // pending-intervention files in until the user resolves them.
-    // Surfacing those raw paths on the dashboard's "Recently
-    // completed issues" feed reads as catalog noise — they're
-    // matched issues but the path is provisional. Filter with
-    // byte-exact substr equality (10 chars including the trailing
-    // slash) rather than LIKE — LIKE's `_` wildcard would treat the
-    // leading underscore as "any one char" without an ESCAPE clause.
+    // Legacy-data filter: `_unsorted/` files no longer get created
+    // (Jeremy's directive — Phase B leaves unmatched files in the
+    // watch folder). Catalog rows from BEFORE that change may still
+    // point at `_unsorted/<filename>` paths; exclude them from the
+    // dashboard's "Recently completed issues" feed so legacy noise
+    // doesn't surface as freshly-imported. Filter with byte-exact
+    // substr equality (10 chars including the trailing slash) rather
+    // than LIKE — LIKE's `_` wildcard would treat the leading
+    // underscore as "any one char" without an ESCAPE clause.
     let match_rows = sqlx::query_as!(
         RecentMatchRow,
         r#"SELECT

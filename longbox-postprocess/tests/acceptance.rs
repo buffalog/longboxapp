@@ -10,12 +10,13 @@
 //! - **b**: filename-only fallback against a known series → criterion 3
 //!   alternate branch (no ComicInfo, matcher leans on filename)
 //! - **c**: ComicInfo for a series not in the catalog → criterion 4
-//!   (`_unsorted/` with `status='unmatched'`)
+//!   (Skipped, stays in /watch/ per Jeremy's directive — no
+//!   `_unsorted/` parking lot, no catalog row)
 //! - **d**: no ComicInfo, filename with no recognizable shape →
-//!   criterion 4 alt-branch (the no-hint short-circuit in process_one)
+//!   criterion 4 alt-branch (the no-hint short-circuit; also Skipped)
 //! - **e**: matches a known issue whose target path already exists →
-//!   criterion 5 (conflict, source untouched, pending-intervention
-//!   cache gets one entry)
+//!   criterion 5 (conflict; source auto-removed by
+//!   `cleanup_conflict_source`; cache stays empty)
 //! - **f**: present in the watch folder BEFORE `start()` is called →
 //!   criterion 7 (initial-sweep picks up pre-existing files at boot)
 //!
@@ -236,13 +237,15 @@ async fn six_file_acceptance_smoke() {
     let b_path = f.watch.path().join("Saga 002.cbz");
     write_cbz(&b_path, None);
 
-    // (c) ComicInfo for a series NOT in the catalog → _unsorted
+    // (c) ComicInfo for a series NOT in the catalog → Skipped, stays
+    //     in /watch/. Per Jeremy's directive: no _unsorted/ parking
+    //     lot. The watch folder IS the holding pen.
     let c_path = f.watch.path().join("Marvel 1602 001.cbz");
     write_cbz(&c_path, Some(&comic_info_xml("Marvel 1602", "1", 2003)));
 
-    // (d) no ComicInfo, filename with no parseable issue → _unsorted
-    //     via the no-hint short-circuit. The filename has no digit and
-    //     no recognizable {series} {number} shape.
+    // (d) no ComicInfo, filename with no parseable issue → Skipped via
+    //     the no-hint short-circuit. The filename has no digit and no
+    //     recognizable {series} {number} shape. Stays in /watch/.
     let d_path = f.watch.path().join("garbage_no_number.cbz");
     write_cbz(&d_path, None);
 
@@ -252,17 +255,21 @@ async fn six_file_acceptance_smoke() {
 
     // --- Poll for the pipeline to settle ---
     //
-    // Terminal state: 5 catalog rows present (a, b, c, d, f); cache is
-    // empty — file (e)'s conflict is auto-cleaned (source removed from
-    // watch) and no longer surfaces as a pending intervention. 30 s
-    // outer timeout is generous; in practice the test settles well
-    // under a second once notify delivers.
+    // Terminal state: 3 catalog rows present (a, b, f — the three
+    // owned imports); files (c) and (d) stay in /watch/ as Skipped
+    // (no _unsorted/ — Jeremy's directive); file (e)'s conflict is
+    // auto-cleaned (source removed from watch); cache is empty.
+    // 30 s outer timeout is generous; settles well under a second.
     let library_root_id = f.library_root_id;
     let db = f.db.clone();
     let cache_for_poll = Arc::clone(&cache);
+    let c_for_poll = c_path.clone();
+    let d_for_poll = d_path.clone();
     wait_until(Duration::from_secs(30), "pipeline to settle", || {
         let db = db.clone();
         let cache = Arc::clone(&cache_for_poll);
+        let c = c_for_poll.clone();
+        let d = d_for_poll.clone();
         async move {
             let saga_001 =
                 file_repo::find_by_path(&db, library_root_id, "Saga (2012)/Saga (2012) 001.cbz")
@@ -279,19 +286,14 @@ async fn six_file_acceptance_smoke() {
             )
             .await
             .unwrap();
-            let unsorted_c =
-                file_repo::find_by_path(&db, library_root_id, "_unsorted/Marvel 1602 001.cbz")
-                    .await
-                    .unwrap();
-            let unsorted_d =
-                file_repo::find_by_path(&db, library_root_id, "_unsorted/garbage_no_number.cbz")
-                    .await
-                    .unwrap();
+            // Skipped files must still be sitting at their source path
+            // in /watch/. We poll on filesystem presence rather than DB
+            // rows because Skipped intentionally writes no catalog row.
             saga_001.is_some()
                 && saga_002.is_some()
                 && watchmen_001.is_some()
-                && unsorted_c.is_some()
-                && unsorted_d.is_some()
+                && c.exists()
+                && d.exists()
                 && cache.is_empty()
         }
     })
@@ -395,24 +397,43 @@ async fn six_file_acceptance_smoke() {
     assert_eq!(row_b.match_method, "phase_b");
     assert!(row_b.matched_at.is_some());
 
-    // Criterion 4 — file (c): ComicInfo for unknown series → _unsorted.
+    // Criterion 4 — file (c): ComicInfo for unknown series → Skipped,
+    // file STAYS in /watch/. Per Jeremy's directive: no _unsorted/
+    // parking lot. The WARN log carries the reason; the operator can
+    // see the file directly in the watch folder.
+    assert!(
+        c_path.exists(),
+        "source (c) must stay in /watch/ — no _unsorted/ migration"
+    );
     let row_c = file_repo::find_by_path(&f.db, f.library_root_id, "_unsorted/Marvel 1602 001.cbz")
         .await
-        .unwrap()
-        .expect("file c must land in _unsorted");
-    assert_eq!(row_c.status, "unmatched");
-    assert_eq!(row_c.match_method, "phase_b");
-    assert!(row_c.issue_id.is_none());
-    assert!(!c_path.exists(), "source (c) must have moved to _unsorted");
+        .unwrap();
+    assert!(
+        row_c.is_none(),
+        "no catalog row should exist for the Skipped file (c)"
+    );
 
-    // Criterion 4 alt — file (d): no-hint short-circuit → _unsorted.
+    // Criterion 4 alt — file (d): no-hint short-circuit → Skipped,
+    // file STAYS in /watch/.
+    assert!(
+        d_path.exists(),
+        "source (d) must stay in /watch/ — no _unsorted/ migration"
+    );
     let row_d =
         file_repo::find_by_path(&f.db, f.library_root_id, "_unsorted/garbage_no_number.cbz")
             .await
-            .unwrap()
-            .expect("file d must land in _unsorted via no-hint branch");
-    assert_eq!(row_d.status, "unmatched");
-    assert!(row_d.issue_id.is_none());
+            .unwrap();
+    assert!(
+        row_d.is_none(),
+        "no catalog row should exist for the Skipped file (d)"
+    );
+
+    // Library root must never gain a phantom `_unsorted/` directory —
+    // the move_to_unsorted path is entirely removed.
+    assert!(
+        !f.library.path().join("_unsorted").exists(),
+        "library root must not contain an _unsorted/ directory anymore"
+    );
 
     // Criterion 5 — file (e): target exists → conflict; source is
     // auto-removed from the watch folder (the library already owns

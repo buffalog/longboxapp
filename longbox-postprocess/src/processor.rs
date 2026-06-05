@@ -1,10 +1,10 @@
 //! Per-file processing pipeline. Owns the full lifecycle for one
 //! watch-folder file (CBZ or CBR):
 //! stability check → ComicInfo + filename extraction → match → either
-//! (write ComicInfo, move to library, upsert as owned) OR
-//! (move to `_unsorted/`, insert as unmatched). Errors at any stage
-//! land as `phase_b.failed` logs at the consumer caller, file left
-//! where it sits for manual intervention.
+//! (write ComicInfo, move to library, upsert as owned) OR (leave the
+//! file where it sits in the watch folder and emit a `phase_b.skipped`
+//! WARN with the reason). The watch folder IS the holding pen for
+//! unplaceable files — there is no `_unsorted/` parking lot.
 //!
 //! Public for test reach. Production consumers go through
 //! [`process_one`] directly.
@@ -19,9 +19,9 @@ use longbox_core::{
 };
 use longbox_db::{
     file_repo, find_candidates, issue_repo, parsing_pattern_repo, pull_attempt_repo, series_repo,
-    FileRow, FileUpdate, IssueRow, NewFile, Pool, SeriesRow,
+    IssueRow, Pool, SeriesRow,
 };
-use time::{OffsetDateTime, PrimitiveDateTime};
+use time::OffsetDateTime;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -38,15 +38,11 @@ use crate::Result;
 const STABILITY_WINDOW: Duration = Duration::from_secs(2);
 
 /// Phase B match-threshold floor for owned classification. Below this,
-/// the file lands in `_unsorted/` even if the matcher returned a
-/// non-Unmatched method. Set to Phase A's `DEFAULT_MATCH_THRESHOLD` so
-/// needs-review-tier matches (which the scanner would have flagged for
-/// user review) aren't silently auto-imported as owned.
+/// Phase B leaves the file in the watch folder rather than silently
+/// auto-importing a needs-review-tier match as owned. Same value as
+/// Phase A's `DEFAULT_MATCH_THRESHOLD` so the two phases agree on what
+/// "confident enough to claim" means.
 const PHASE_B_OWNED_THRESHOLD: f64 = longbox_core::DEFAULT_MATCH_THRESHOLD;
-
-/// Subfolder for unmatched arrivals. Leading underscore is deliberate —
-/// sorts before alphabetical entries in directory listings.
-const UNSORTED_DIR: &str = "_unsorted";
 
 /// Process exactly one file. Errors are returned to the caller (the
 /// consumer task) which logs and continues — a per-file failure does
@@ -93,9 +89,13 @@ pub async fn process_one(
         .or_else(|| filename_parse.as_ref().map(|p| p.series_title.clone()));
 
     let Some(hint) = title_hint.filter(|s| !s.trim().is_empty()) else {
-        // No usable hint at all — straight to _unsorted.
-        let outcome =
-            move_to_unsorted(source, library_root, library_root_id, size, mtime, db).await?;
+        // No usable hint at all — neither the embedded ComicInfo nor
+        // the filename parser produced a series title to look up.
+        // The file stays in the watch folder; the operator can place
+        // it manually or delete it.
+        let outcome = Outcome::Skipped {
+            reason: "no series hint from filename or ComicInfo".into(),
+        };
         log_outcome(&outcome, started_at, source);
         return Ok(outcome);
     };
@@ -109,8 +109,8 @@ pub async fn process_one(
     let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), &candidates);
 
     // Phase B owned-classification uses the same threshold as Phase A's
-    // post-hoc classify_status; needs-review-tier matches go to
-    // _unsorted/ rather than silently claiming status='owned'.
+    // post-hoc classify_status; needs-review-tier matches stay in the
+    // watch folder rather than silently claiming status='owned'.
     let status = classify_status(
         match_result.issue_id,
         match_result.confidence,
@@ -131,7 +131,21 @@ pub async fn process_one(
             )
             .await?
         }
-        _ => move_to_unsorted(source, library_root, library_root_id, size, mtime, db).await?,
+        (Some(_), _) => Outcome::Skipped {
+            reason: format!(
+                "needs-review-tier match for series hint {hint:?} \
+                 (confidence={:.2}, method={:?}); below owned threshold {:.2}",
+                match_result.confidence, match_result.method, PHASE_B_OWNED_THRESHOLD
+            ),
+        },
+        (None, _) => Outcome::Skipped {
+            reason: format!(
+                "no catalog match for series hint {hint:?} \
+                 (candidates considered: {}, year_hint: {:?})",
+                candidates.len(),
+                year_hint
+            ),
+        },
     };
 
     log_outcome(&outcome, started_at, source);
@@ -141,11 +155,13 @@ pub async fn process_one(
 /// What happened to the file. Returned so callers (and tests) can
 /// assert on the result without scraping logs.
 ///
-/// `Imported` and `Unsorted` are success outcomes; the consumer task
-/// evicts any matching cache entry for the source path on these.
-/// `Conflict` and `Failed` are stuck outcomes; the consumer task pushes
-/// a `PendingIntervention` into the cache. `size` rides along on the
-/// stuck variants so the consumer doesn't have to re-stat the source.
+/// `Imported` is the only outcome that moves the source; everything
+/// else leaves the file where it sits in the watch folder. The cache
+/// disposition is uniform across non-Failed outcomes (evict any prior
+/// entry for the source path) — the watch folder IS the holding pen,
+/// the pending-intervention list exists only for Failed (stage-specific
+/// errors needing operator action). `size` rides along on stuck
+/// variants so the consumer doesn't have to re-stat the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Matched + moved + catalogued as owned.
@@ -155,15 +171,21 @@ pub enum Outcome {
         issue_id: i64,
         file_id: i64,
     },
-    /// No match (or sub-threshold match); moved to `_unsorted/`.
-    Unsorted { target: PathBuf, file_id: i64 },
-    /// Target path already existed; source left in watch folder for
-    /// manual intervention. Surfaces in the pending-intervention cache
-    /// with `InterventionReason::Conflict`.
+    /// No usable hint, no catalog match, or a sub-threshold (needs-review)
+    /// match. The file stays in the watch folder; no DB write, no disk
+    /// move. `reason` is the WARN-log payload. Replaces the old
+    /// `Unsorted { target, file_id }` variant per Jeremy's directive
+    /// to eliminate `_unsorted/` — the watch folder is the holding pen
+    /// for unplaceable files.
+    Skipped { reason: String },
+    /// Target path already existed; the duplicate source was removed
+    /// from the watch folder by `cleanup_conflict_source`. No pending
+    /// intervention — the library has canonical bytes.
     Conflict { target: PathBuf, size: i64 },
-    /// Stage-specific failure during the import/move flow. `reason`
-    /// distinguishes ComicInfoWriteFailed vs MoveFailed; the source file
-    /// stays in the watch folder for manual intervention.
+    /// Stage-specific failure during the owned-import flow (ComicInfo
+    /// write, move). The source stays in the watch folder and the
+    /// outcome pushes a `PendingIntervention` so the operator sees it
+    /// on the dashboard.
     Failed {
         reason: InterventionReason,
         target: PathBuf,
@@ -402,131 +424,6 @@ async fn import_as_owned(
     })
 }
 
-async fn move_to_unsorted(
-    source: &Path,
-    library_root: &Path,
-    library_root_id: i64,
-    size: i64,
-    mtime: OffsetDateTime,
-    db: &Pool,
-) -> Result<Outcome> {
-    let basename = source
-        .file_name()
-        .ok_or_else(|| PostprocessError::Io(std::io::Error::other("source has no filename")))?;
-    let unsorted_dir = library_root.join(UNSORTED_DIR);
-    let target_abs = unsorted_dir.join(basename);
-
-    if target_abs.exists() {
-        // Same-basename collision in `_unsorted`. We can't introspect
-        // whether the source's bytes equal the target's, but Phase B
-        // has already failed to attribute the source to a known issue,
-        // so leaving a stuck duplicate-by-name in the complete folder
-        // forever isn't useful either. Mirror the matched-conflict
-        // semantics: clean the source up and let the operator inspect
-        // `_unsorted` if they care.
-        cleanup_conflict_source(source, &target_abs, size);
-        return Ok(Outcome::Conflict {
-            target: target_abs,
-            size,
-        });
-    }
-
-    // No ComicInfo rewrite — just move the file as-is. The scanner's
-    // future passes might enrich it, but Phase B's job for unmatched
-    // is "get it out of the watch folder without claiming a match."
-    // Filesystem failures here surface as MoveFailed; there's no
-    // ComicInfo stage in the unmatched path.
-    let source_owned = source.to_path_buf();
-    let target_owned = target_abs.clone();
-    let move_res = tokio::task::spawn_blocking(move || {
-        if let Some(parent) = target_owned.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        copy_then_unlink(&source_owned, &target_owned)
-    })
-    .await
-    .map_err(|e| PostprocessError::Io(std::io::Error::other(format!("join: {e}"))))?;
-
-    if let Err(e) = move_res {
-        return Ok(Outcome::Failed {
-            reason: InterventionReason::MoveFailed(e.to_string()),
-            target: target_abs,
-            size,
-        });
-    }
-
-    let path_relative = format!("{UNSORTED_DIR}/{}", basename.to_string_lossy());
-    let row = upsert_unmatched(db, library_root_id, &path_relative, size, mtime).await?;
-
-    Ok(Outcome::Unsorted {
-        target: target_abs,
-        file_id: row.id,
-    })
-}
-
-/// Insert-or-update for the unmatched path. Mirrors the policy of
-/// [`file_repo::upsert_imported`] but with issue_id=None,
-/// status='unmatched', match_confidence=0.0. Idempotent on
-/// `path_relative`.
-async fn upsert_unmatched(
-    db: &Pool,
-    library_root_id: i64,
-    path_relative: &str,
-    size: i64,
-    mtime: OffsetDateTime,
-) -> Result<FileRow> {
-    let mtime_p = PrimitiveDateTime::new(mtime.date(), mtime.time());
-    let now_p = {
-        let n = OffsetDateTime::now_utc();
-        PrimitiveDateTime::new(n.date(), n.time())
-    };
-
-    let row = if let Some(existing) =
-        file_repo::find_by_path(db, library_root_id, path_relative).await?
-    {
-        // next_matched_at handles the issue_id=None case (clears
-        // matched_at). The brief's "match_confidence=null" can't be
-        // honored (schema is REAL NOT NULL); we store 0.0, matching
-        // scanner's own unmatched-insert pattern.
-        let matched_at =
-            file_repo::next_matched_at(existing.issue_id, None, existing.matched_at, now_p);
-        let patch = FileUpdate {
-            issue_id: None,
-            size_bytes: size,
-            mtime: mtime_p,
-            last_scanned_at: now_p,
-            match_method: MatchMethod::PhaseB.as_db_str().to_owned(),
-            match_confidence: 0.0,
-            status: FileStatus::Unmatched.as_db_str().to_owned(),
-            cached_comicinfo_xml: None,
-            cached_at: None,
-            is_present: true,
-            last_seen_at: now_p,
-            matched_at,
-        };
-        file_repo::update(db, existing.id, patch).await?
-    } else {
-        let new = NewFile {
-            issue_id: None,
-            library_root_id,
-            path_relative: path_relative.to_owned(),
-            size_bytes: size,
-            mtime: mtime_p,
-            last_scanned_at: now_p,
-            match_method: MatchMethod::PhaseB.as_db_str().to_owned(),
-            match_confidence: 0.0,
-            status: FileStatus::Unmatched.as_db_str().to_owned(),
-            cached_comicinfo_xml: None,
-            cached_at: None,
-            is_present: true,
-            last_seen_at: now_p,
-            matched_at: None,
-        };
-        file_repo::insert(db, new).await?
-    };
-    Ok(row)
-}
-
 fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
     let cover_date = parse_cover_date(issue.cover_date.as_deref());
     let web = issue
@@ -678,30 +575,6 @@ fn commit_move(temp: tempfile::NamedTempFile, target: &Path, source: &Path) -> R
     Ok(())
 }
 
-/// As-is move of a file into the library — used by the unmatched
-/// path where no ComicInfo rewrite happens. Copies bytes into a temp
-/// in the target dir, renames, deletes source. Same atomicity
-/// guarantee as [`rewrite_and_move`].
-fn copy_then_unlink(source: &Path, target: &Path) -> Result<()> {
-    let target_dir = target.parent().ok_or_else(|| {
-        PostprocessError::Io(std::io::Error::other("target has no parent directory"))
-    })?;
-    let temp = tempfile::Builder::new()
-        .prefix(".longbox-phase-b-")
-        .suffix(".cbz.tmp")
-        .tempfile_in(target_dir)?;
-    {
-        let mut src = std::fs::File::open(source)?;
-        let mut dst = temp.as_file();
-        std::io::copy(&mut src, &mut dst)?;
-        dst.flush()?;
-    }
-    temp.persist(target)
-        .map_err(|e| PostprocessError::Io(e.error))?;
-    std::fs::remove_file(source)?;
-    Ok(())
-}
-
 fn system_time_to_offset(t: SystemTime) -> OffsetDateTime {
     OffsetDateTime::from(t)
 }
@@ -726,14 +599,24 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
                 "phase_b.processed"
             );
         }
-        Outcome::Unsorted { target, file_id } => {
-            tracing::info!(
+        Outcome::Skipped { reason } => {
+            // WARN per Jeremy's directive: unplaceable files staying in
+            // /watch/ should be visible at the default log verbosity so
+            // the operator can audit what didn't get filed. Includes
+            // the basename (not the full /watch/.../filename path) to
+            // keep grep ergonomics close to what a user would see in
+            // the file browser.
+            let basename = source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unparseable basename>");
+            tracing::warn!(
                 target: "longbox_postprocess",
                 source = %source.display(),
-                target = %target.display(),
-                file_id,
+                basename,
+                reason = %reason,
                 duration_ms,
-                "phase_b.unmatched (moved to _unsorted)"
+                "phase_b.skipped (left in watch folder)"
             );
         }
         Outcome::Conflict { target, .. } => {
@@ -742,7 +625,7 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
                 source = %source.display(),
                 target = %target.display(),
                 reason = "conflict",
-                "phase_b.skipped"
+                "phase_b.skipped (conflict; source cleaned up)"
             );
         }
         Outcome::Failed { reason, target, .. } => {

@@ -18,9 +18,10 @@ pub struct PostprocessConfig {
     /// Absolute path to the watch folder. CBZs that land in here (or
     /// any subdirectory) are candidates for import.
     pub watch_path: PathBuf,
-    /// Absolute path to the catalog's library root. Imports land in
-    /// the per-series subfolder of this directory; the `_unsorted/`
-    /// fallback also lives under it.
+    /// Absolute path to the catalog's library root. Owned imports land
+    /// in the per-series subfolder of this directory. Unplaceable
+    /// files stay in `watch_path` (no `_unsorted/` fallback per
+    /// Jeremy's directive — the watch folder is the holding pen).
     pub library_root: PathBuf,
     /// How often the polling watcher walks `watch_path`. From the
     /// `phase_b_poll_interval_seconds` settings row at boot, default

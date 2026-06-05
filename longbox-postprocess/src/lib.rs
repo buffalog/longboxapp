@@ -214,15 +214,18 @@ async fn initial_sweep(root: PathBuf, tx: mpsc::Sender<PathBuf>) {
 /// Outcome tally for [`sweep_now`]. Mirrors the [`processor::Outcome`]
 /// enum collapsed to per-bucket counts. Serialized as the response body
 /// of `POST /api/postprocess/trigger` so the frontend can render a
-/// "processed N, conflicts M, unsorted K" toast off one round-trip.
+/// "processed N, skipped K, conflicts M" toast off one round-trip.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SweepSummary {
     /// Matched + moved + catalogued as owned.
     pub processed: usize,
-    /// Couldn't attribute to a known issue; moved to `_unsorted/`.
-    pub unsorted: usize,
+    /// No usable hint, no catalog match, or sub-threshold match — the
+    /// source stays in the watch folder. WARN log carries the reason.
+    /// Replaces the old `unsorted` bucket (which moved files to a
+    /// `_unsorted/` parking lot) per Jeremy's directive.
+    pub skipped: usize,
     /// Library already owned canonical bytes; the source was auto-removed
-    /// from the watch folder (see [`processor::cleanup_conflict_source`]).
+    /// from the watch folder (see `processor::cleanup_conflict_source`).
     pub conflicts: usize,
     /// Stage-specific failure during processing (ComicInfo write, move,
     /// mid-flight disappearance). Counter for the operator; details
@@ -294,7 +297,7 @@ pub async fn sweep_now(
                 use processor::Outcome;
                 match &outcome {
                     Outcome::Imported { .. } => summary.processed += 1,
-                    Outcome::Unsorted { .. } => summary.unsorted += 1,
+                    Outcome::Skipped { .. } => summary.skipped += 1,
                     Outcome::Conflict { .. } => summary.conflicts += 1,
                     Outcome::Failed { .. } => summary.failed += 1,
                 }
@@ -315,7 +318,7 @@ pub async fn sweep_now(
     tracing::info!(
         target: "longbox_postprocess",
         processed = summary.processed,
-        unsorted = summary.unsorted,
+        skipped = summary.skipped,
         conflicts = summary.conflicts,
         failed = summary.failed,
         "phase_b.sweep_now_complete"
@@ -517,10 +520,12 @@ async fn consumer_task(
         }
         match processor::process_one(&path, &library_root, library_root_id, &db).await {
             Ok(outcome) => {
-                if matches!(
-                    &outcome,
-                    processor::Outcome::Imported { .. } | processor::Outcome::Unsorted { .. }
-                ) {
+                // Imported is the only outcome that removes the source
+                // from /watch/. Skipped intentionally leaves the file
+                // in place (per Jeremy's directive — /watch/ is the
+                // holding pen), so the parent dir is still non-empty
+                // and we must NOT try to remove it.
+                if matches!(&outcome, processor::Outcome::Imported { .. }) {
                     cleanup_empty_parent(&path, &canonical_watch_root);
                 }
                 apply_outcome_to_cache(&cache, &path, outcome);
@@ -602,19 +607,17 @@ fn apply_outcome_to_cache(
 ) {
     use processor::Outcome;
     match outcome {
-        Outcome::Imported { .. } | Outcome::Unsorted { .. } => {
-            cache.remove_by_source_path(source);
-        }
-        Outcome::Conflict { .. } => {
-            // `processor::process_one` removes the source before
-            // returning Conflict (best-effort; failure logged at WARN
-            // by `cleanup_conflict_source`). Either way the source is
-            // no longer "pending intervention" — the library has
-            // canonical bytes for matched conflicts and the operator's
-            // recourse for un-cleanable conflicts is to inspect the
-            // WARN log, not poke the dashboard. Drop any prior cache
-            // entry for this source path so a previously-stuck conflict
-            // disappears from the pending list on the next sweep.
+        Outcome::Imported { .. } | Outcome::Skipped { .. } | Outcome::Conflict { .. } => {
+            // Three non-Failed outcomes, all evict any prior pending-
+            // intervention entry:
+            //   - Imported: moved + catalogued, nothing to intervene on.
+            //   - Skipped: stays in /watch/; the file is visible in
+            //     the watch folder and `phase_b.skipped` WARN logs the
+            //     reason. We deliberately do NOT push the operator
+            //     a dashboard task — the holding pen IS the surface.
+            //   - Conflict: cleanup_conflict_source removed the source
+            //     (or logged conflict_cleanup_failed); library has
+            //     canonical bytes either way.
             cache.remove_by_source_path(source);
         }
         Outcome::Failed {
@@ -820,7 +823,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_evicts_on_unsorted() {
+    fn apply_outcome_evicts_on_skipped() {
+        // Skipped files stay in /watch/; the WARN log is the operator
+        // surface, NOT a pending-intervention entry. A previously-stuck
+        // Failed entry for the same source path gets cleared when the
+        // next pass classifies the file as Skipped (e.g. the user
+        // added the missing series in the meantime, or the file just
+        // never matches — either way it's no longer "stuck", it's
+        // "deliberately left where the operator can see it").
         use processor::Outcome;
         let cache = PendingInterventionsCache::new();
         let source = PathBuf::from("/watch/mystery.cbz");
@@ -836,12 +846,11 @@ mod tests {
         apply_outcome_to_cache(
             &cache,
             &source,
-            Outcome::Unsorted {
-                target: PathBuf::from("/lib/_unsorted/mystery.cbz"),
-                file_id: 7,
+            Outcome::Skipped {
+                reason: "no catalog match for series hint \"Unknown\"".into(),
             },
         );
-        assert!(cache.is_empty(), "Unsorted should evict the stale entry");
+        assert!(cache.is_empty(), "Skipped must evict any stale entry");
     }
 
     #[test]

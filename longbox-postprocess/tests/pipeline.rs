@@ -140,7 +140,8 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
     let owned = f._watch.path().join("Saga 001.cbz");
     write_cbz(&owned, None);
 
-    // Unparseable basename → Unsorted (no usable title hint).
+    // Unparseable basename → Skipped (no usable title hint). The file
+    // stays in /watch/; no DB write, no disk move.
     let mystery = f._watch.path().join("garbage_no_number.cbz");
     write_cbz(&mystery, None);
 
@@ -183,14 +184,20 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
     .unwrap();
 
     assert_eq!(summary.processed, 1, "Saga 001 → Imported");
-    assert_eq!(summary.unsorted, 1, "garbage_no_number → Unsorted");
+    assert_eq!(summary.skipped, 1, "garbage_no_number → Skipped");
     assert_eq!(summary.conflicts, 1, "Saga 002 → Conflict (target exists)");
     assert_eq!(summary.failed, 0);
 
     // Side-effect checks: matched file moved, conflict source cleaned
-    // up (Phase B-bug-2 invariant), target bytes preserved.
+    // up (Phase B-bug-2 invariant), target bytes preserved, and the
+    // Skipped file stays in /watch/ untouched (per Jeremy's directive
+    // — the watch folder is the holding pen, not _unsorted/).
     assert!(!owned.exists(), "matched source must move out of watch");
     assert!(!conflict_source.exists(), "conflict source must be auto-removed");
+    assert!(
+        mystery.exists(),
+        "Skipped source must stay in /watch/ — no _unsorted/ parking lot"
+    );
     assert_eq!(
         std::fs::read(&conflict_target).unwrap(),
         b"pre-existing",
@@ -415,43 +422,51 @@ async fn overwrites_existing_comicinfo_in_source() {
 }
 
 #[tokio::test]
-async fn unmatched_file_lands_in_unsorted() {
+async fn unmatched_file_stays_in_watch_folder() {
+    // Per Jeremy's directive: the `_unsorted/` parking lot is gone.
+    // When Phase B can't match a downloaded file to a catalog series,
+    // it leaves the file in /watch/ untouched, emits a
+    // `phase_b.skipped` WARN with the reason, and writes NO catalog
+    // row. The watch folder is the holding pen.
     let f = seed_basic_fixture().await;
 
-    // Filename doesn't match the seeded series. The matcher returns
-    // Unmatched; the file should move to _unsorted/.
     let source = f._watch.path().join("Totally Unknown 042.cbz");
     write_cbz(&source, None);
 
     let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db)
         .await
         .unwrap();
-    let target = match outcome {
-        Outcome::Unsorted { target, .. } => target,
-        other => panic!("expected Unsorted, got {other:?}"),
+    let reason = match outcome {
+        Outcome::Skipped { reason } => reason,
+        other => panic!("expected Skipped, got {other:?}"),
     };
+    assert!(
+        reason.contains("Totally Unknown") || reason.contains("no catalog match"),
+        "WARN reason should be operator-readable; got {reason:?}"
+    );
 
-    let expected = f
-        .library
-        .path()
-        .join("_unsorted")
-        .join("Totally Unknown 042.cbz");
-    assert_eq!(target, expected);
-    assert!(target.exists());
-    assert!(!source.exists());
+    // Source untouched: still sitting at the watch-folder path.
+    assert!(
+        source.exists(),
+        "Skipped file must stay in /watch/ — no _unsorted/ migration"
+    );
 
+    // No `_unsorted/` directory was ever created under library_root.
+    assert!(
+        !f.library.path().join("_unsorted").exists(),
+        "library root must not gain a phantom _unsorted/ directory"
+    );
+
+    // No catalog row written — the file isn't in the library, so it
+    // can't be in `files`.
     let row = longbox_db::file_repo::find_by_path(
         &f.db,
         f.library_root_id,
         "_unsorted/Totally Unknown 042.cbz",
     )
     .await
-    .unwrap()
     .unwrap();
-    assert_eq!(row.status, "unmatched");
-    assert_eq!(row.match_method, "phase_b");
-    assert_eq!(row.issue_id, None);
-    assert!(row.matched_at.is_none());
+    assert!(row.is_none(), "no DB row should exist for an unmatched watch-folder file");
 }
 
 #[tokio::test]
