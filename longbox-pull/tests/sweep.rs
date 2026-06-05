@@ -5,9 +5,9 @@
 //! downloader.
 
 use longbox_db::{
-    downloader_config_repo, indexer_config_repo, issue_repo, library_root_repo, pull_attempt_repo,
-    pull_list_repo, series_repo, NewDownloaderConfig, NewIndexerConfig, NewIssue, NewLibraryRoot,
-    NewPullAttempt, NewPullEntry, NewSeries, Pool,
+    downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
+    pull_attempt_repo, pull_list_repo, series_repo, NewDownloaderConfig, NewFile,
+    NewIndexerConfig, NewIssue, NewLibraryRoot, NewPullAttempt, NewPullEntry, NewSeries, Pool,
 };
 use longbox_pull::sweep;
 use wiremock::matchers::{method, path, query_param};
@@ -552,6 +552,70 @@ async fn sweep_single_issue_skips_when_an_in_flight_attempt_exists() {
         after.len()
     );
     assert_eq!(after[0].id, baseline[0].id, "the existing row is preserved");
+}
+
+#[tokio::test]
+async fn sweep_single_issue_skips_when_issue_is_already_owned() {
+    // Regression: the on-demand single-issue path bypasses the
+    // scheduled sweep's `list_pull_candidates` filter (which excludes
+    // owned issues SQL-side), so without an engine-level guard the
+    // per-issue Search button would happily submit a duplicate NZB
+    // for an issue the catalog already owns. The fix lives in
+    // `engine::sweep_single_issue` before the in-flight guard and
+    // before any indexer call.
+    let (db, series_id, issue_id) = seed_catalog().await;
+
+    // Catalog the issue as owned-and-present. library_root_id=1 is
+    // the only root seed_catalog inserted.
+    let now = time::OffsetDateTime::now_utc();
+    let now_pdt = time::PrimitiveDateTime::new(now.date(), now.time());
+    file_repo::insert(
+        &db,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id: 1,
+            path_relative: "Saga (2012)/Saga (2012) 001.cbz".into(),
+            size_bytes: 4096,
+            mtime: now_pdt,
+            last_scanned_at: now_pdt,
+            match_method: "phase_b".into(),
+            match_confidence: 1.0,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: now_pdt,
+            matched_at: Some(now_pdt),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Wire a real indexer + downloader so a bug where the guard fails
+    // to short-circuit would submit. The guard must fire BEFORE the
+    // indexer call.
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-should-not-be-fetched")).await;
+    sab_accepts(&downloader, "nzo-should-not-be-handed-off").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(summary, longbox_pull::SweepSummary::default());
+
+    // No pull_attempts row was inserted — the guard fired before the
+    // engine wrote anything.
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert!(
+        attempts.is_empty(),
+        "owned-files guard must short-circuit before any attempt insert; got {} rows",
+        attempts.len()
+    );
 }
 
 #[tokio::test]

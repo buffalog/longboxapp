@@ -603,6 +603,23 @@ pub async fn sweep_single_issue(
         });
     }
 
+    // Owned-files guard. The scheduled sweep filters owned-and-present
+    // issues at the candidate-list level (`list_pull_candidates`), but
+    // the on-demand single-issue path (per-issue Search button,
+    // `search_all_missing` race-loser, future callers) bypasses that
+    // query — so without this defensive check the engine will happily
+    // submit an NZB for an issue the catalog already owns. Silent
+    // no-op once "we have the bytes."
+    if issue_repo::has_owned_present_file(db, issue_id).await? {
+        tracing::info!(
+            target: "longbox_pull",
+            series_id,
+            issue_id,
+            "pull.search_skipped (issue already owned)"
+        );
+        return Ok(summary);
+    }
+
     // In-flight guard. Replaces the unique-key absorption I had wrongly
     // assumed existed at the schema level. `pull_attempts` carries
     // multiple rows per (series_id, issue_id) by design (retry history),

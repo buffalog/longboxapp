@@ -203,6 +203,53 @@ fn read_comic_info_xml(source: &Path) -> Result<Option<String>> {
     Ok(longbox_archive::read_comic_info(source)?)
 }
 
+/// Best-effort unlink of a watch-folder source after a Phase B conflict.
+/// On success emits `phase_b.conflict_source_removed` at WARN — the
+/// outcome is both expected (library has canonical bytes) and worth
+/// logging at default verbosity so operators can audit what got
+/// auto-cleaned. On failure emits `phase_b.conflict_cleanup_failed`,
+/// also WARN; the caller still returns `Outcome::Conflict` so the
+/// outer cache logic can react.
+///
+/// Same-path short-circuit: if `source` and `target` resolve to the
+/// same file (re-processing a file that's already sitting at its
+/// canonical library path — see `pipeline::idempotent_reprocessing`),
+/// deleting the source would destroy the library's canonical bytes.
+/// Detect that case and no-op. Comparison goes through `canonicalize`
+/// so symlinks, `.` segments, and relative-vs-absolute differences
+/// don't fool it; PathBuf equality is the fallback when one or both
+/// canonicalize calls fail (e.g. target only existed up to the dir).
+fn cleanup_conflict_source(source: &Path, target: &Path, size: i64) {
+    let same_file = match (std::fs::canonicalize(source), std::fs::canonicalize(target)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => source == target,
+    };
+    if same_file {
+        tracing::debug!(
+            target: "longbox_postprocess",
+            source = %source.display(),
+            "phase_b.conflict_cleanup_skipped (source IS target)"
+        );
+        return;
+    }
+    match std::fs::remove_file(source) {
+        Ok(()) => tracing::warn!(
+            target: "longbox_postprocess",
+            source = %source.display(),
+            target = %target.display(),
+            size,
+            "phase_b.conflict_source_removed"
+        ),
+        Err(e) => tracing::warn!(
+            target: "longbox_postprocess",
+            source = %source.display(),
+            target = %target.display(),
+            err = %e,
+            "phase_b.conflict_cleanup_failed"
+        ),
+    }
+}
+
 async fn import_as_owned(
     source: &Path,
     issue_id: i64,
@@ -232,6 +279,15 @@ async fn import_as_owned(
     let target_abs = library_path.full(library_root);
 
     if target_abs.exists() {
+        // The library already owns this exact (series, issue). The
+        // source in the watch folder is — by definition of the path
+        // collision — a duplicate of canonical bytes already on disk.
+        // Leaving it pending forever (the prior behavior) just clogs
+        // the complete folder; clean it up so SAB / the watcher don't
+        // re-fire it on the next sweep. Failure to delete is logged
+        // and treated as resolved anyway — the catalog is what matters
+        // and operator action on the stale file is easy.
+        cleanup_conflict_source(source, &target_abs, size);
         return Ok(Outcome::Conflict {
             target: target_abs,
             size,
@@ -356,6 +412,14 @@ async fn move_to_unsorted(
     let target_abs = unsorted_dir.join(basename);
 
     if target_abs.exists() {
+        // Same-basename collision in `_unsorted`. We can't introspect
+        // whether the source's bytes equal the target's, but Phase B
+        // has already failed to attribute the source to a known issue,
+        // so leaving a stuck duplicate-by-name in the complete folder
+        // forever isn't useful either. Mirror the matched-conflict
+        // semantics: clean the source up and let the operator inspect
+        // `_unsorted` if they care.
+        cleanup_conflict_source(source, &target_abs, size);
         return Ok(Outcome::Conflict {
             target: target_abs,
             size,
