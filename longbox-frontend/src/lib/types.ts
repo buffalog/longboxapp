@@ -71,8 +71,14 @@ export interface SeriesDetail extends Series {
    *  backend's delete-series guard uses. Authoritative; do NOT
    *  derive from `issues[].file` for delete-confirmation gating —
    *  that surface underreports for shallow / unenriched series and
-   *  was the cause of the modal-skip 409 bug. */
-  owned_file_count: number;
+   *  was the cause of the modal-skip 409 bug.
+   *
+   *  Marked optional purely to acknowledge the runtime defensive
+   *  fallback in the page component (a Safari-only bug had this
+   *  arriving as undefined despite the API payload including it).
+   *  Backend always populates the field; treat absence as a
+   *  client-side anomaly, not a server contract. */
+  owned_file_count?: number;
 }
 
 export interface FileRow {
