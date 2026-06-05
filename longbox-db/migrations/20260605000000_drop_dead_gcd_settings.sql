@@ -1,0 +1,14 @@
+-- Finding 2: Drop the dead `gcd_api_user` / `gcd_api_password`
+-- placeholder rows seeded by 20260601000000_add_metron_integration.
+-- They were reserved real estate for a future GCD integration that
+-- never shipped; their constants in settings_repo.rs were `dead_code`-
+-- annotated from day one, no consumer ever read them, and the empty
+-- strings cluttered the Settings UI when users browsed raw rows.
+--
+-- Idempotent — DELETE on a missing row is a no-op, so this migration
+-- is safe on databases that never seeded the placeholders (test DBs,
+-- pre-20260601 deployments, manually-cleaned production).
+--
+-- If GCD integration ever ships, the new migration can re-seed the
+-- rows with the same keys; no schema concern.
+DELETE FROM settings WHERE key IN ('gcd_api_user', 'gcd_api_password');
