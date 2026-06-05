@@ -52,17 +52,25 @@
   // Authoritative owned+present file count for this series, sourced
   // from the same SQL the backend's delete-series guard uses
   // (`files JOIN issues WHERE series_id=? AND status='owned' AND
-  // is_present=1`). The page-load handler now embeds it directly in
+  // is_present=1`). The page-load handler embeds it directly in
   // the SeriesDetail response.
   //
-  // We deliberately do NOT derive this from `data.series.issues[].file`
-  // — that surface underreports for shallow/unenriched series where
-  // the per-issue file lookup returns nothing (the bug that surfaced
-  // when the modal-skip guard ran on file-counted-as-0 series and
-  // the backend 409'd because the join-based guard saw real owned
-  // files). The server count is the only signal that aligns with
-  // what the delete endpoint will see.
-  const ownedFileCount = $derived(data.series.owned_file_count);
+  // Defensive fallback to the issues-array derivation when the
+  // field is missing. Surfaced as a Safari-specific bug where the
+  // field came back undefined on the client even though the API
+  // payload included a positive value — likely a Safari disk-cache
+  // serving a pre-field response. With the field present (the
+  // happy path) we use the authoritative count; with it missing we
+  // fall back to whatever the issues array tells us. The fallback
+  // underreports on shallow series (which is exactly why the
+  // server field exists), but it's the right safety net: a few
+  // false positives showing the modal beats a 409 ambush from
+  // skipping the modal entirely.
+  const ownedFileCount = $derived.by(() => {
+    const serverCount = data.series.owned_file_count;
+    if (typeof serverCount === 'number') return serverCount;
+    return data.series.issues.filter((i) => i.file?.status === 'owned').length;
+  });
 
   // "Missing" mirrors IssueRow's derivation exactly: no file, and
   // not in the solicited window. Surface the search affordance only

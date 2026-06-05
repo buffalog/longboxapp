@@ -226,6 +226,58 @@ describe('series detail page', () => {
     expect(screen.queryByText(/permanently delete the series folder/)).not.toBeInTheDocument();
   });
 
+  it('falls back to the issues-array count when owned_file_count is missing from the response', async () => {
+    // Safari-specific regression: the field arrived as undefined on
+    // the client even though the API payload included a positive
+    // value. The defensive derived prefers the server count when
+    // present and falls back to the issues array when it isn't.
+    // Without the fallback, undefined would slip past the `=== 0`
+    // guard, the user would click Delete, runDelete(false) would
+    // post to the backend, and the join-based guard there would 409.
+    vi.mocked(deleteSeries).mockResolvedValue({ deleted: 1 });
+    render(
+      Page,
+      pageData({
+        ...seriesDetail({
+          title: 'Field Missing',
+          start_year: 2022,
+          issues: [
+            {
+              id: 1,
+              series_id: 1,
+              cv_issue_id: null,
+              metron_issue_id: null,
+              number: '1',
+              title: null,
+              cover_date: null,
+              cover_url: null,
+              summary: null,
+              created_at: '2026-05-20 00:00:00',
+              updated_at: '2026-05-20 00:00:00',
+              file: {
+                id: 1,
+                path_relative: 'Field Missing (2022)/01.cbz',
+                status: 'owned',
+                is_present: true
+              }
+            }
+          ]
+        }),
+        // Field deliberately missing — simulates the Safari bug
+        // shape where the API field came back undefined.
+        owned_file_count: undefined as never
+      })
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: /Delete series/ }));
+
+    // The modal renders — fallback derived count is 1.
+    expect(screen.getByText(/Folder to be removed/)).toBeInTheDocument();
+    expect(screen.getByText(/1 file from disk/)).toBeInTheDocument();
+    // No direct call to deleteSeries; the user still has to confirm.
+    expect(deleteSeries).not.toHaveBeenCalled();
+  });
+
   it('opens the modal on owned_file_count > 0 even when issues[].file is empty', async () => {
     // Bug regression: shallow / unenriched series surface owned files
     // through the join-based server count, but `issues[].file` can
