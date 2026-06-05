@@ -182,6 +182,44 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             priority: 25,
             enabled: true,
         },
+        // `(of N)` part-of-mini marker — `A Vicious Circle 002 (of 03)
+        // (2023) (Digital-Empire).cbr`. Three variants cover the
+        // common shape combinations: with year directly after the
+        // marker, year-first with marker after the number, and
+        // year-less. Without these, every existing pattern fails the
+        // load-bearing scan path (year-after-number patterns reject
+        // the `(of NN)` interloper; the catchall has a strict end);
+        // `parse_basename` returns None and the scanner errors at
+        // 422.
+        ParsingPattern {
+            id: 11,
+            name: "Series N (of M) (YYYY)".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 13,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 12,
+            name: "Series (YYYY) N (of M)".into(),
+            // Year-first variant — `Wolverine (2024) 003 (of 06)
+            // (Digital).cbr`-shaped filenames where the year sits
+            // before the number and the part-of marker after. Mirrors
+            // id=7's year-first ordering.
+            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 14,
+            enabled: true,
+        },
+        ParsingPattern {
+            id: 13,
+            name: "Series N (of M) yearless".into(),
+            // No year anchor. Sits just above the catch-all so it only
+            // fires on shapes the strict patterns (11, 12) and every
+            // pattern above them couldn't claim. Permissive `.*?`
+            // tolerates trailing scanlator markers without a year.
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 28,
+            enabled: true,
+        },
     ]
 }
 
@@ -640,5 +678,77 @@ mod tests {
         // of the new patterns claim a no-year shape.
         let p = parse("Saga 1.cbz", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 4, "spaced no-year still claimed by id=4");
+    }
+
+    /// `(of N)` part-of-mini marker — the load-bearing case the user
+    /// surfaced via HTTP 422 on `A Vicious Circle 002 (of 03) (2023)
+    /// (Digital-Empire).cbr`. Without ids 11/12/13 every other
+    /// pattern fails: the year-after-number variants (2, 3, 10)
+    /// can't tolerate the interloping marker; id=5's part-of marker
+    /// is the different `(Xf Y)` shape; the catch-all (id=4) has a
+    /// strict end. `parse_basename` returned None and the scanner
+    /// errored.
+    #[test]
+    fn of_n_marker_with_year_is_claimed_by_id_11() {
+        let p = parse(
+            "A Vicious Circle 002 (of 03) (2023) (Digital-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 11);
+        assert_eq!(p.series_title, "A Vicious Circle");
+        assert_eq!(p.number, "002");
+        assert_eq!(p.year, Some(2023));
+    }
+
+    #[test]
+    fn of_n_marker_with_single_digit_count() {
+        // `(of 6)` rather than `(of 06)` — the regex's `\d+` matches
+        // either, but worth a sanity check on the single-digit form.
+        let p = parse("Mini 03 (of 6) (2020).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 11);
+        assert_eq!(p.series_title, "Mini");
+        assert_eq!(p.number, "03");
+        assert_eq!(p.year, Some(2020));
+    }
+
+    #[test]
+    fn of_n_marker_year_first_is_claimed_by_id_12() {
+        let p = parse(
+            "Wolverine (2024) 003 (of 06) (Digital).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 12);
+        assert_eq!(p.series_title, "Wolverine");
+        assert_eq!(p.number, "003");
+        assert_eq!(p.year, Some(2024));
+    }
+
+    #[test]
+    fn of_n_marker_yearless_is_claimed_by_id_13() {
+        // No year anywhere — `Series N (of M).cbz` style. id=13 sits
+        // above the catch-all (id=4) so it claims the `(of N)` shape
+        // even when no year shows up.
+        let p = parse("Some Mini 02 (of 04).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 13);
+        assert_eq!(p.series_title, "Some Mini");
+        assert_eq!(p.number, "02");
+        assert_eq!(p.year, None);
+    }
+
+    #[test]
+    fn of_n_patterns_do_not_steal_claims_from_existing_shapes() {
+        // The `(of N)` patterns must not poach filenames the existing
+        // strict patterns handle. Spot-check the most common shapes
+        // claim the right pattern.
+        let p = parse("Saga 001 (2014).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 2, "plain (YYYY) still id=2, not an (of N) variant");
+
+        let p = parse("Wolverine (2024) 001.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 7, "plain year-first still id=7");
+
+        let p = parse("20th Century Men 01 (0f 06) (2022).cbr", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 5, "(Xf Y) part-of still id=5, not the new (of N)");
     }
 }

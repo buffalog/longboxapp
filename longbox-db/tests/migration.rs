@@ -72,8 +72,9 @@ async fn seed_settings_row_present() {
 async fn seed_parsing_patterns_at_correct_priorities() {
     // The original four (5/10/20/30), the A.9 parser hot-fix three
     // (11/12/15) for year-before-number / subtitled / part-of-N
-    // shapes, and the A.9 Bug 1b three (6/7/25) for TPB-vN /
-    // TPB-Book / permissive-date-stamp shapes. Update both this
+    // shapes, the A.9 Bug 1b three (6/7/25) for TPB-vN / TPB-Book /
+    // permissive-date-stamp shapes, and the Tier 4 `(of N)` three
+    // (13/14/28) for part-of-mini markers. Update both this
     // assertion and `longbox-core::filename::default_patterns`
     // together when adding more.
     let pool = fresh_pool().await;
@@ -93,9 +94,12 @@ async fn seed_parsing_patterns_at_correct_priorities() {
             (10, "Series #NNN (YYYY)"),
             (11, "Series N (Xf Y) (YYYY)"),
             (12, "Series N - Subtitle (YYYY)"),
+            (13, "Series N (of M) (YYYY)"),
+            (14, "Series (YYYY) N (of M)"),
             (15, "Series (YYYY) NNN"),
             (20, "Series NNN (YYYY)"),
             (25, "Series NNN (YYYY[-MM]) permissive"),
+            (28, "Series N (of M) yearless"),
             (30, "Series_NNN or Series NNN"),
         ]
     );
