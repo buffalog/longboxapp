@@ -39,6 +39,16 @@ struct SeriesDetail {
     #[serde(flatten)]
     series: SeriesRow,
     issues: Vec<IssueWithFile>,
+    /// Owned-and-present file count for this series, sourced from
+    /// the same SQL the `delete_series` guard uses (`files JOIN
+    /// issues WHERE series_id=? AND status='owned' AND
+    /// is_present=1`). Sidestepped the bug where the frontend
+    /// derived the count from `issues[].file` and underreported on
+    /// shallow series — the modal-skip guard would fire on a
+    /// false 0 and the delete would 409 because the backend
+    /// counted real owned files via the join. With this field the
+    /// frontend reads the same number the guard does.
+    owned_file_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,9 +258,30 @@ async fn detail(
         });
         with_files.push(IssueWithFile { issue, file });
     }
+    // Authoritative owned-files count. Same predicate as the
+    // delete_series guard (issue→series join, status='owned',
+    // is_present=1) so the frontend's modal-skip decision aligns
+    // with what the backend will actually do on the delete call.
+    let owned_file_count = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+           FROM files f
+           JOIN issues i ON f.issue_id = i.id
+           WHERE i.series_id = ?
+             AND f.status = 'owned'
+             AND f.is_present = 1"#,
+        id
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("owned-file count query failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+
     Ok(Json(SeriesDetail {
         series,
         issues: with_files,
+        owned_file_count,
     }))
 }
 
