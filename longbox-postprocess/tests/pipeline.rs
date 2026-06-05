@@ -306,10 +306,16 @@ async fn unmatched_file_lands_in_unsorted() {
 }
 
 #[tokio::test]
-async fn conflict_leaves_source_untouched() {
+async fn conflict_cleans_source_and_preserves_target() {
+    // Phase B detects target_abs.exists() → Conflict. The library
+    // already owns canonical bytes for this (series, issue), so
+    // process_one removes the duplicate from the watch folder
+    // instead of stranding it forever (the prior behavior was a
+    // documented "leaves files stranded" complaint). Target bytes
+    // and absence of a catalog row are the load-bearing invariants
+    // — the cleanup is best-effort but expected.
     let f = seed_basic_fixture().await;
 
-    // Pre-place a file at the target location.
     let target_dir = f.library.path().join("Saga (2012)");
     std::fs::create_dir_all(&target_dir).unwrap();
     let existing_target = target_dir.join("Saga (2012) 001.cbz");
@@ -326,14 +332,15 @@ async fn conflict_leaves_source_untouched() {
         other => panic!("expected Conflict, got {other:?}"),
     }
 
-    assert!(source.exists(), "source must stay put on conflict");
+    assert!(
+        !source.exists(),
+        "source must be cleaned up on conflict — leaving it strands the duplicate"
+    );
     let existing_bytes = std::fs::read(&existing_target).unwrap();
     assert_eq!(
         existing_bytes, b"pre-existing",
         "target must not be overwritten"
     );
-
-    // No catalog row was written for the source.
     let row = longbox_db::file_repo::find_by_path(
         &f.db,
         f.library_root_id,
@@ -342,6 +349,35 @@ async fn conflict_leaves_source_untouched() {
     .await
     .unwrap();
     assert!(row.is_none(), "no catalog row expected on conflict");
+}
+
+#[tokio::test]
+async fn conflict_cleanup_skips_when_source_is_target() {
+    // Re-processing a file that already sits at its canonical library
+    // path: source == target, so the cleanup MUST short-circuit or it
+    // would delete the library's canonical bytes. This guards the
+    // `idempotent_reprocessing` invariant from regressing if the
+    // cleanup logic ever changes.
+    let f = seed_basic_fixture().await;
+    let target_dir = f.library.path().join("Saga (2012)");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let at_target = target_dir.join("Saga (2012) 001.cbz");
+    write_cbz(&at_target, None);
+    let bytes_before = std::fs::read(&at_target).unwrap();
+
+    let outcome = processor::process_one(&at_target, f.library.path(), f.library_root_id, &f.db)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Outcome::Conflict { .. }));
+    assert!(
+        at_target.exists(),
+        "file at canonical path must survive same-file conflict cleanup"
+    );
+    assert_eq!(
+        std::fs::read(&at_target).unwrap(),
+        bytes_before,
+        "bytes must be untouched"
+    );
 }
 
 #[tokio::test]

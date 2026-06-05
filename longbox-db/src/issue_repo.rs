@@ -206,6 +206,31 @@ where
     Ok(rows)
 }
 
+/// True when an owned, present file row points at this issue. Same
+/// predicate the catalog's "missing" SQL uses (`list_pull_candidates`,
+/// `list_missing_for_series`, the dashboard stats query), exposed as a
+/// one-shot point query so the pull engine's `sweep_single_issue` can
+/// short-circuit a per-issue search before it submits an NZB for an
+/// issue the catalog already owns. The scheduled sweep filters owned
+/// issues at the candidate-list level; the on-demand path needs this
+/// defensive check because it bypasses that filter by design (the user
+/// asked for THIS specific issue).
+pub async fn has_owned_present_file<'e, E>(executor: E, issue_id: i64) -> Result<bool>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT 1 AS "x: i64"
+           FROM files
+           WHERE issue_id = ? AND status = 'owned' AND is_present = 1
+           LIMIT 1"#,
+        issue_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.is_some())
+}
+
 pub async fn insert<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,

@@ -35,7 +35,7 @@ use longbox_db::{
     file_repo, issue_repo, library_root_repo, series_repo, NewIssue, NewLibraryRoot, NewSeries,
     Pool,
 };
-use longbox_postprocess::{InterventionReason, PendingInterventionsCache, PostprocessConfig};
+use longbox_postprocess::{PendingInterventionsCache, PostprocessConfig};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -252,9 +252,11 @@ async fn six_file_acceptance_smoke() {
 
     // --- Poll for the pipeline to settle ---
     //
-    // Terminal state: 5 catalog rows present (a, b, c, d, f), cache has
-    // 1 conflict entry (e). 30 s outer timeout is generous; in practice
-    // the test settles in well under a second once notify delivers.
+    // Terminal state: 5 catalog rows present (a, b, c, d, f); cache is
+    // empty — file (e)'s conflict is auto-cleaned (source removed from
+    // watch) and no longer surfaces as a pending intervention. 30 s
+    // outer timeout is generous; in practice the test settles well
+    // under a second once notify delivers.
     let library_root_id = f.library_root_id;
     let db = f.db.clone();
     let cache_for_poll = Arc::clone(&cache);
@@ -290,7 +292,7 @@ async fn six_file_acceptance_smoke() {
                 && watchmen_001.is_some()
                 && unsorted_c.is_some()
                 && unsorted_d.is_some()
-                && cache.len() == 1
+                && cache.is_empty()
         }
     })
     .await;
@@ -412,10 +414,16 @@ async fn six_file_acceptance_smoke() {
     assert_eq!(row_d.status, "unmatched");
     assert!(row_d.issue_id.is_none());
 
-    // Criterion 5 — file (e): target exists → conflict; source preserved;
-    // target bytes preserved; cache contains exactly one entry for the
-    // source path with reason=conflict.
-    assert!(e_path.exists(), "source (e) must stay in watch on conflict");
+    // Criterion 5 — file (e): target exists → conflict; source is
+    // auto-removed from the watch folder (the library already owns
+    // canonical bytes, leaving the dupe pending forever clutters the
+    // complete folder); target bytes preserved; cache stays empty
+    // (cleaned-up conflicts are no longer pending interventions); no
+    // catalog row written.
+    assert!(
+        !e_path.exists(),
+        "source (e) must be cleaned up on conflict, not stranded in watch"
+    );
     let bytes_after = std::fs::read(&conflict_target).unwrap();
     assert_eq!(
         bytes_after, conflict_target_bytes_before,
@@ -433,33 +441,16 @@ async fn six_file_acceptance_smoke() {
         "no catalog row should be written for the conflicting source"
     );
     let snap = cache.snapshot();
-    assert_eq!(snap.len(), 1, "exactly one conflict expected in cache");
-    let conflict_item = &snap[0];
-    // macOS notify delivers paths with /private prefix (FSEvents
-    // canonicalizes through the /var -> /private/var symlink); the
-    // TempDir handle hands back the un-canonicalized form. Compare by
-    // canonicalized form so the test works on both Linux and macOS.
-    assert_eq!(
-        std::fs::canonicalize(&conflict_item.source_path).unwrap(),
-        std::fs::canonicalize(&e_path).unwrap(),
-        "conflict source_path should match the dropped file"
-    );
     assert!(
-        matches!(conflict_item.reason, InterventionReason::Conflict),
-        "cache reason must be Conflict, got {:?}",
-        conflict_item.reason
-    );
-    // target_path on the cache item must point at the would-be library
-    // location, not the pre-existing file's path (they're the same path
-    // here, but the semantic is: where Phase B *wanted* to put it).
-    let expected_target = f
-        .library
-        .path()
-        .join("Hellboy (1994)")
-        .join("Hellboy (1994) 001.cbz");
-    assert_eq!(
-        std::fs::canonicalize(&conflict_item.target_path).unwrap(),
-        std::fs::canonicalize(&expected_target).unwrap()
+        snap.iter().all(|item| {
+            std::fs::canonicalize(&item.source_path)
+                .ok()
+                .zip(std::fs::canonicalize(&e_path).ok())
+                .map(|(a, b)| a != b)
+                .unwrap_or(true)
+        }),
+        "conflict (e) must NOT appear as a pending intervention — \
+         the source is cleaned up so there's nothing to intervene on"
     );
 
     // Criterion 7 — file (f): pre-staged before start(), picked up by

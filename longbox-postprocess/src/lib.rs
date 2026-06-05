@@ -493,14 +493,17 @@ fn apply_outcome_to_cache(
         Outcome::Imported { .. } | Outcome::Unsorted { .. } => {
             cache.remove_by_source_path(source);
         }
-        Outcome::Conflict { target, size } => {
-            cache.push(PendingIntervention {
-                source_path: source.to_path_buf(),
-                target_path: target,
-                reason: InterventionReason::Conflict,
-                size,
-                last_attempt: time::OffsetDateTime::now_utc(),
-            });
+        Outcome::Conflict { .. } => {
+            // `processor::process_one` removes the source before
+            // returning Conflict (best-effort; failure logged at WARN
+            // by `cleanup_conflict_source`). Either way the source is
+            // no longer "pending intervention" — the library has
+            // canonical bytes for matched conflicts and the operator's
+            // recourse for un-cleanable conflicts is to inspect the
+            // WARN log, not poke the dashboard. Drop any prior cache
+            // entry for this source path so a previously-stuck conflict
+            // disappears from the pending list on the next sweep.
+            cache.remove_by_source_path(source);
         }
         Outcome::Failed {
             reason,
@@ -621,10 +624,25 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_caches_conflict() {
+    fn apply_outcome_evicts_on_conflict() {
+        // Phase B now removes the source on conflict
+        // (`processor::cleanup_conflict_source`), so the cache must
+        // treat Conflict as resolved — same disposition as Imported /
+        // Unsorted. A previously-stuck entry for the same source path
+        // is evicted; a fresh Conflict adds nothing.
         use processor::Outcome;
         let cache = PendingInterventionsCache::new();
         let source = PathBuf::from("/watch/saga 001.cbz");
+        // Pre-seed a stuck entry directly (the prior cache-push path
+        // is gone, so we can't seed via apply_outcome_to_cache).
+        cache.push(PendingIntervention {
+            source_path: source.clone(),
+            target_path: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+            reason: InterventionReason::Conflict,
+            size: 4096,
+            last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+        });
+        assert_eq!(cache.len(), 1);
         apply_outcome_to_cache(
             &cache,
             &source,
@@ -633,11 +651,7 @@ mod tests {
                 size: 4096,
             },
         );
-        let snap = cache.snapshot();
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].source_path, source);
-        assert_eq!(snap[0].reason, InterventionReason::Conflict);
-        assert_eq!(snap[0].size, 4096);
+        assert!(cache.is_empty(), "Conflict must evict, not cache");
     }
 
     #[test]
@@ -667,12 +681,14 @@ mod tests {
         use processor::Outcome;
         let cache = PendingInterventionsCache::new();
         let source = PathBuf::from("/watch/saga 001.cbz");
-        // Pre-seed a stuck entry, then run a successful import for the
-        // same source path — self-healing behavior.
+        // Pre-seed a stuck Failed entry (Conflict no longer pushes to
+        // the cache; Failed is the surviving stuck-state path), then
+        // run a successful import for the same source — self-healing.
         apply_outcome_to_cache(
             &cache,
             &source,
-            Outcome::Conflict {
+            Outcome::Failed {
+                reason: InterventionReason::MoveFailed("EXDEV".into()),
                 target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
                 size: 4096,
             },

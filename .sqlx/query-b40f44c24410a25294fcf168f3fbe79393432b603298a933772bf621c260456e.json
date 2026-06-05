@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"x: i64\"\n           FROM files\n           WHERE issue_id = ? AND status = 'owned' AND is_present = 1\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "x: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b40f44c24410a25294fcf168f3fbe79393432b603298a933772bf621c260456e"
+}
