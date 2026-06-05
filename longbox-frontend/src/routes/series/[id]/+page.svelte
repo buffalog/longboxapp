@@ -235,44 +235,52 @@
 
 <SeriesHeader series={data.series} {ownedCount} {totalCount}>
   {#snippet actions()}
-    <!-- Refresh re-fetches the volume + issues from ComicVine, which
-         requires a cv_id. Shallow series (cv_id NULL — bulk-converted
-         folders without a CV link) have nothing to refresh from;
-         hide the affordance entirely rather than render a button that
-         400s. Matches SeriesHeader/IssueRow's cv-conditional pattern. -->
-    {#if data.series.cv_id}
+    <!-- Primary actions group: refresh/search are the high-traffic
+         affordances for an actively-curated series. Refresh requires
+         cv_id (shallow series 400 the CV refetch path); Search missing
+         requires at least one un-owned issue. If neither condition holds
+         the whole group elides so we don't render an empty gap-4 slot. -->
+    {#if data.series.cv_id || hasMissingIssues}
+      <div class="flex items-center gap-2">
+        {#if data.series.cv_id}
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={refreshing}
+            onclick={handleRefresh}
+          >
+            <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
+          </Button>
+        {/if}
+        {#if hasMissingIssues}
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={searching}
+            disabled={searching}
+            onclick={handleSearchMissing}
+          >
+            <Search class="size-3.5" aria-hidden="true" /> Search missing
+          </Button>
+        {/if}
+      </div>
+    {/if}
+    <!-- Metadata group: identity + filesystem affordances. Both render
+         unconditionally so this group is always present. -->
+    <div class="flex items-center gap-2">
       <Button
         variant="secondary"
         size="sm"
-        loading={refreshing}
-        onclick={handleRefresh}
+        onclick={() => (matchFixerOpen = !matchFixerOpen)}
+        disabled={fixingMatch}
       >
-        <RefreshCw class="size-3.5" aria-hidden="true" /> Refresh
+        <Edit3 class="size-3.5" aria-hidden="true" />
+        {data.series.cv_id ? 'Change match' : 'Fix match'}
       </Button>
-    {/if}
-    {#if hasMissingIssues}
-      <Button
-        variant="secondary"
-        size="sm"
-        loading={searching}
-        disabled={searching}
-        onclick={handleSearchMissing}
-      >
-        <Search class="size-3.5" aria-hidden="true" /> Search missing
+      <Button variant="secondary" size="sm" onclick={handleShowInFinder}>
+        <FolderOpen class="size-3.5" aria-hidden="true" /> Show in Finder
       </Button>
-    {/if}
-    <Button
-      variant="secondary"
-      size="sm"
-      onclick={() => (matchFixerOpen = !matchFixerOpen)}
-      disabled={fixingMatch}
-    >
-      <Edit3 class="size-3.5" aria-hidden="true" />
-      {data.series.cv_id ? 'Change match' : 'Fix match'}
-    </Button>
-    <Button variant="secondary" size="sm" onclick={handleShowInFinder}>
-      <FolderOpen class="size-3.5" aria-hidden="true" /> Show in Finder
-    </Button>
+    </div>
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
 </SeriesHeader>
