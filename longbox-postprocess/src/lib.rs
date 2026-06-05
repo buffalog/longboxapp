@@ -674,6 +674,29 @@ fn apply_outcome_to_cache(
             target,
             size,
         } => {
+            // Race-straggler guard: if the source isn't on disk by the
+            // time the outcome lands here, another path (watcher
+            // consumer or a concurrent sweep_now walker) already
+            // handled the file — typically by importing it before this
+            // run got there, and the failure we're holding is the
+            // loser's ENOENT during read or move. Pushing a Failed
+            // entry now would surface a phantom intervention for a
+            // file the operator can't act on (Finder-link 404s, the
+            // dashboard claims pending work that's already done).
+            // Evict any stale entry too so a previously-stuck row from
+            // a different race clears at the same time.
+            //
+            // The guard is correctness-preserving for the genuine
+            // failure case: a Failed outcome that actually has a
+            // source on disk (stage-1 rewrite failed, stage-2 move
+            // failed mid-flight with bytes still at the source) sees
+            // `source.exists() == true` and gets pushed exactly as
+            // before. The only behavior change is in the no-source
+            // case, which by definition has nothing to intervene on.
+            if !source.exists() {
+                cache.remove_by_source_path(source);
+                return;
+            }
             cache.push(PendingIntervention {
                 source_path: source.to_path_buf(),
                 target_path: target,
@@ -819,10 +842,16 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_caches_failed_with_stage_reason() {
+    fn apply_outcome_caches_failed_when_source_is_on_disk() {
+        // Genuine failure: source bytes are still in /watch/ because
+        // the import broke mid-flight (stage-1 rewrite, stage-2 move).
+        // The cache MUST push so the operator sees the stuck file.
         use processor::Outcome;
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("saga 001.cbz");
+        std::fs::write(&source, b"placeholder bytes").unwrap();
+
         let cache = PendingInterventionsCache::new();
-        let source = PathBuf::from("/watch/saga 001.cbz");
         apply_outcome_to_cache(
             &cache,
             &source,
@@ -833,7 +862,7 @@ mod tests {
             },
         );
         let snap = cache.snapshot();
-        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.len(), 1, "genuine Failed with on-disk source must push");
         assert!(matches!(
             snap[0].reason,
             InterventionReason::MoveFailed(ref m) if m == "EXDEV"
@@ -841,22 +870,73 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_evicts_on_imported() {
+    fn apply_outcome_evicts_failed_when_source_already_imported_by_race_winner() {
+        // The fix for the watcher/sweep race observed in production:
+        // when 165 files were bulk-mv'd into /watch/, the notify
+        // watcher and a concurrent sweep_now both picked up each file.
+        // The watcher consumer won most races and successfully
+        // imported; sweep_now lost and got ENOENT during its rewrite/
+        // move stage, surfacing as `Outcome::Failed { MoveFailed }`.
+        //
+        // Pre-fix: those 92 lost-race Failures pushed phantom
+        // pending-intervention entries for files that were ALREADY in
+        // the library — the dashboard's Finder link would 404 because
+        // the source path no longer existed.
+        //
+        // Fix: when Failed lands and source.exists() == false, treat
+        // it as "another path already handled this; nothing to
+        // intervene on" — evict any stale entry (could be from yet
+        // another race) and bail without pushing.
         use processor::Outcome;
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("imported-by-watcher.cbz");
+        assert!(!source.exists(), "fixture: source is intentionally absent");
+
         let cache = PendingInterventionsCache::new();
-        let source = PathBuf::from("/watch/saga 001.cbz");
-        // Pre-seed a stuck Failed entry (Conflict no longer pushes to
-        // the cache; Failed is the surviving stuck-state path), then
-        // run a successful import for the same source — self-healing.
+        // Simulate a stale entry from a prior race round.
+        cache.push(PendingIntervention {
+            source_path: source.clone(),
+            target_path: PathBuf::from("/lib/stale.cbz"),
+            reason: InterventionReason::MoveFailed("old race".into()),
+            size: 1,
+            last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+        });
+        assert_eq!(cache.len(), 1);
+
         apply_outcome_to_cache(
             &cache,
             &source,
             Outcome::Failed {
-                reason: InterventionReason::MoveFailed("EXDEV".into()),
+                reason: InterventionReason::MoveFailed(
+                    "io error: No such file or directory (os error 2)".into(),
+                ),
                 target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
                 size: 4096,
             },
         );
+        assert!(
+            cache.is_empty(),
+            "race-straggler Failed must NOT push when source is missing; \
+             and any stale prior entry must be cleared at the same time"
+        );
+    }
+
+    #[test]
+    fn apply_outcome_evicts_on_imported() {
+        use processor::Outcome;
+        let cache = PendingInterventionsCache::new();
+        let source = PathBuf::from("/watch/saga 001.cbz");
+        // Pre-seed a stuck Failed entry directly (the race-guard rule
+        // means we can't seed via apply_outcome_to_cache + Failed on a
+        // synthetic path), then run a successful import for the same
+        // source — self-healing.
+        cache.push(PendingIntervention {
+            source_path: source.clone(),
+            target_path: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+            reason: InterventionReason::MoveFailed("EXDEV".into()),
+            size: 4096,
+            last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+        });
         assert_eq!(cache.len(), 1);
         apply_outcome_to_cache(
             &cache,
@@ -883,15 +963,15 @@ mod tests {
         use processor::Outcome;
         let cache = PendingInterventionsCache::new();
         let source = PathBuf::from("/watch/mystery.cbz");
-        apply_outcome_to_cache(
-            &cache,
-            &source,
-            Outcome::Failed {
-                reason: InterventionReason::ComicInfoWriteFailed("permission".into()),
-                target: PathBuf::from("/lib/Unknown.cbz"),
-                size: 1,
-            },
-        );
+        // Direct seed — synthetic path won't push via Failed now that
+        // the race-guard checks source.exists().
+        cache.push(PendingIntervention {
+            source_path: source.clone(),
+            target_path: PathBuf::from("/lib/Unknown.cbz"),
+            reason: InterventionReason::ComicInfoWriteFailed("permission".into()),
+            size: 1,
+            last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+        });
         apply_outcome_to_cache(
             &cache,
             &source,
