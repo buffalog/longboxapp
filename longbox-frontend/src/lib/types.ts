@@ -158,6 +158,14 @@ export interface Stats {
   /** Distinct series with at least one missing issue. Always
    *  `<= total_series`. */
   series_with_missing: number;
+  /** Series on the pull list. Powers the dashboard "Pull list" tile. */
+  pull_list_count: number;
+  /** Issues whose most recent pull attempt failed. Combined with
+   *  `pending_interventions_count` to render the dashboard's
+   *  "Needs attention" tile. */
+  pull_failures_count: number;
+  /** Files stuck in the post-processor's pending-intervention cache. */
+  pending_interventions_count: number;
 }
 
 export interface StartScanResponse {

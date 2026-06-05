@@ -10,10 +10,7 @@
     type PullThisWeek,
     type ReleaseOfNote
   } from '$lib/api/releases';
-  import { listPullList } from '$lib/api/pull';
-  import { getPullFailures } from '$lib/api/needs_attention';
   import { getStats } from '$lib/api/stats';
-  import { getPendingInterventions } from '$lib/api/postprocess';
   import { triggerFullScan } from '$lib/api/scans';
   import { scanStatus } from '$lib/stores/scanStatus.svelte';
   import { formatRelative } from '$lib/format';
@@ -29,12 +26,6 @@
 
   let stats = $state<Stats | null>(null);
   let activity = $state<DashboardActivity | null>(null);
-  // The "Needs attention" tile sums Phase B pending interventions and
-  // failed pulls — the two surfaces the /needs-attention page shows.
-  let pendingCount = $state(0);
-  let pullFailureCount = $state(0);
-  // Count of subscribed series, for the "Pull list" tile.
-  let pullListCount = $state(0);
   let loading = $state(true);
   let error = $state<ApiError | null>(null);
   let triggering = $state(false);
@@ -50,6 +41,17 @@
   // /api/library-roots failed at boot — which would have also surfaced
   // via the global ErrorBanner.
   const libraryRootId = $derived(data.libraryRoot?.id ?? null);
+
+  // Needs-attention tile aggregates the two failure surfaces the
+  // /needs-attention page shows: post-processor stuck files +
+  // failure-class pull attempts. Both counts arrive in the single
+  // /api/stats payload now — previously this required three separate
+  // HTTP round-trips (/postprocess/pending, /needs-attention/pull-
+  // failures, /pull-list), which is the dashboard-slowness that
+  // FIX 3 from the kickoff brief was about.
+  const needsAttentionCount = $derived(
+    (stats?.pending_interventions_count ?? 0) + (stats?.pull_failures_count ?? 0)
+  );
 
   onMount(async () => {
     // The reconciliation banner is a non-critical nudge — fetch its
@@ -75,18 +77,14 @@
       .catch(() => {});
 
     try {
-      const [s, a, p, pl, pf] = await Promise.all([
-        getStats(),
-        getActivity(6),
-        getPendingInterventions(),
-        listPullList(),
-        getPullFailures()
-      ]);
+      // Two calls: stats (everything for the tiles) + activity (the
+      // recent-completed feed). Pull-list / pull-failures / pending-
+      // interventions counts ride along inside the stats payload — the
+      // three /api/* endpoints they used to come from are still
+      // available, just not consumed here.
+      const [s, a] = await Promise.all([getStats(), getActivity(6)]);
       stats = s;
       activity = a;
-      pendingCount = p.count;
-      pullListCount = pl.length;
-      pullFailureCount = pf.length;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
@@ -138,37 +136,55 @@
   <LoadingSpinner />
 {:else if stats}
   <section class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-8">
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    <a
+      href="/series"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-slate-500">Series</div>
       <div class="text-2xl font-semibold">{stats.total_series}</div>
-    </div>
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    </a>
+    <a
+      href="/series"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-slate-500">Issues</div>
       <div class="text-2xl font-semibold">{stats.total_issues}</div>
-    </div>
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    </a>
+    <a
+      href="/files?status=owned"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-status-owned">Owned</div>
       <div class="text-2xl font-semibold">{stats.owned_files}</div>
-    </div>
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    </a>
+    <a
+      href="/files?status=needs_review"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-status-needs_review">Needs review</div>
       <div class="text-2xl font-semibold">{stats.needs_review_files}</div>
-    </div>
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    </a>
+    <a
+      href="/files?status=unmatched"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-status-unmatched">Unmatched</div>
       <div class="text-2xl font-semibold">{stats.unmatched_files}</div>
-    </div>
-    <div class="rounded-lg border border-slate-200 bg-white p-3">
+    </a>
+    <a
+      href="/missing"
+      class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
+    >
       <div class="text-xs uppercase text-status-missing">Missing</div>
       <div class="text-2xl font-semibold">{stats.missing_issues}</div>
-    </div>
+    </a>
     <a
       href="/needs-attention"
       class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
-      title="Failed pulls and files the post-processor couldn't place automatically"
+      title="Failed pulls and files that could not be processed automatically"
     >
       <div class="text-xs uppercase text-status-needs_review">Needs attention</div>
-      <div class="text-2xl font-semibold">{pendingCount + pullFailureCount}</div>
+      <div class="text-2xl font-semibold">{needsAttentionCount}</div>
     </a>
     <a
       href="/releases/pull-list"
@@ -176,7 +192,7 @@
       title="Series subscribed for auto-download"
     >
       <div class="text-xs uppercase text-slate-500">Pull list</div>
-      <div class="text-2xl font-semibold">{pullListCount}</div>
+      <div class="text-2xl font-semibold">{stats.pull_list_count}</div>
     </a>
   </section>
 
