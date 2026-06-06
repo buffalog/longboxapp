@@ -515,6 +515,155 @@ async fn add_series_creates_on_disk_folder() {
 }
 
 #[tokio::test]
+async fn add_series_response_includes_pull_search_queued_count() {
+    // Auto-search fires when the pull engine is fully configured.
+    // Seed a downloader + indexer, mount CV mocks that return TWO
+    // shipped issues (cover_date in the past), POST /api/series, and
+    // assert `pull_search_queued == 2`. The fire-and-forget engine
+    // tasks may not finish before this test ends — that's fine; the
+    // contract is the count reported back to the frontend, not the
+    // eventual `pull_attempts` rows.
+    let app = build_test_app().await;
+    longbox_db::indexer_config_repo::insert(
+        &app.state.db,
+        longbox_db::NewIndexerConfig {
+            name: "stub-indexer".into(),
+            base_url: "https://stub.example/api".into(),
+            api_key: "KEY".into(),
+            enabled: true,
+            priority: 0,
+            maxage_days: 1500,
+        },
+    )
+    .await
+    .unwrap();
+    longbox_db::downloader_config_repo::upsert(
+        &app.state.db,
+        longbox_db::NewDownloaderConfig {
+            kind: "sab".into(),
+            base_url: "https://stub.example/sab".into(),
+            username: None,
+            secret: "KEY".into(),
+            category: String::new(),
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-2127/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": { "id": 2127, "name": "The Walking Dead",
+                    "start_year": "2003",
+                    "publisher": { "id": 1, "name": "Image" },
+                    "description": null,
+                    "image": { "medium_url": "https://example.com/wd.jpg" },
+                    "site_detail_url": "https://cv/wd/4050-2127/" } }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+    // Both issues are dated 2003 — well in the past, so the
+    // "shipped not solicited" predicate (cover_date <= today)
+    // accepts them.
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK",
+                "number_of_total_results": 2, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 10001, "issue_number": "1", "name": "Days Gone Bye",
+                      "cover_date": "2003-10-08", "description": null,
+                      "image": { "medium_url": "https://example.com/wd-1.jpg" },
+                      "site_detail_url": "https://cv/4000-10001/" },
+                    { "id": 10002, "issue_number": "2", "name": null,
+                      "cover_date": "2003-11-12", "description": null,
+                      "image": null,
+                      "site_detail_url": "https://cv/4000-10002/" }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(json_request("POST", "/api/series", r#"{"cv_id": 2127}"#))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["title"], "The Walking Dead");
+    assert_eq!(
+        body["pull_search_queued"], 2,
+        "auto-search must dispatch one task per missing-and-shipped issue"
+    );
+}
+
+#[tokio::test]
+async fn add_series_skips_auto_search_silently_without_downloader() {
+    // Spec: when the pull engine isn't configured (no downloader, or
+    // downloader disabled, or no indexers), the auto-search is a
+    // silent no-op — the response carries `pull_search_queued: 0` so
+    // the frontend renders the plain "Added X" toast.
+    let app = build_test_app().await;
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-2127/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": { "id": 2127, "name": "The Walking Dead",
+                    "start_year": "2003",
+                    "publisher": { "id": 1, "name": "Image" },
+                    "description": null,
+                    "image": { "medium_url": "https://example.com/wd.jpg" },
+                    "site_detail_url": "https://cv/wd/4050-2127/" } }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{ "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 10001, "issue_number": "1", "name": null,
+                      "cover_date": "2003-10-08", "description": null,
+                      "image": null,
+                      "site_detail_url": "https://cv/4000-10001/" }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(json_request("POST", "/api/series", r#"{"cv_id": 2127}"#))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["pull_search_queued"], 0,
+        "silent skip: no downloader → no queued searches reported"
+    );
+    // Sanity: no pull_attempts row should have been written either.
+    let row = series_repo::find_by_cv_id(&app.state.db, 2127)
+        .await
+        .unwrap()
+        .unwrap();
+    let issues = issue_repo::list_by_series(&app.state.db, row.id)
+        .await
+        .unwrap();
+    for issue in issues {
+        let attempts =
+            longbox_db::pull_attempt_repo::list_for_issue(&app.state.db, row.id, issue.id)
+                .await
+                .unwrap();
+        assert!(
+            attempts.is_empty(),
+            "no auto-search task should have written a pull_attempts row"
+        );
+    }
+}
+
+#[tokio::test]
 async fn add_series_duplicate_cv_id_returns_409() {
     let app = build_test_app().await;
     series_repo::insert(

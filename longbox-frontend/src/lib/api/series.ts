@@ -9,7 +9,16 @@ export function getSeries(id: number): Promise<SeriesDetail> {
   return apiFetch(`/series/${id}`);
 }
 
-export function addSeries(cvId: number): Promise<Series> {
+/** Return body of POST /api/series. The series fields are flattened
+ *  from the backend's `AddSeriesResponse` for backwards-compat reads.
+ *  `pull_search_queued` is the number of issues for which an
+ *  auto-search was just fired; 0 when the pull engine isn't fully
+ *  configured (silent skip per the add-flow spec). */
+export interface AddSeriesResponse extends Series {
+  pull_search_queued: number;
+}
+
+export function addSeries(cvId: number): Promise<AddSeriesResponse> {
   return apiFetch('/series', {
     method: 'POST',
     body: JSON.stringify({ cv_id: cvId })
