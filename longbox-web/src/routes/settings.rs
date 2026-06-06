@@ -105,7 +105,7 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
     let host_library_path: String = settings_repo::get_or_default(
         &state.db,
         settings_repo::KEY_HOST_LIBRARY_PATH,
-        String::new(),
+        state.config.host_library_path.clone().unwrap_or_default(),
     )
     .await?;
 
