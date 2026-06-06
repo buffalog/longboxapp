@@ -129,11 +129,14 @@
       envVar: 'BIND_ADDR',
       mono: true
     },
-    {
-      label: 'Match threshold',
-      value: s.match_threshold.toFixed(2),
-      envVar: 'MATCH_THRESHOLD'
-    },
+    // `MATCH_THRESHOLD` env var was the original boot-time tunable.
+    // It's now superseded by the `match_confidence_threshold` DB row
+    // exposed in the Tunable settings section below — that's the
+    // value the scanner / Phase B actually read. Displaying both
+    // here just produced "0.85 set via MATCH_THRESHOLD" right above
+    // "Currently saved: 0.75" on the same page. The env value is now
+    // documented as a seed-only fallback in the backend and elided
+    // from the read-only Configuration list.
     {
       label: 'Log level',
       value: s.log_level,

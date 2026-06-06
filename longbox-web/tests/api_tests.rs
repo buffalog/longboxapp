@@ -2268,8 +2268,13 @@ async fn settings_returns_configured_values() {
     // `comicvine_api_key_configured` is structurally always true today
     // (boot fails without a key); shape contract only.
     assert_eq!(body["comicvine_api_key_configured"], true);
-    // Bare value sanity, not a literal version assertion.
-    assert!(body["version"].as_str().unwrap().starts_with("0."));
+    // Bare value sanity — assert the field is present and looks like
+    // semver; a literal-version assertion would break on every bump.
+    let v = body["version"].as_str().unwrap();
+    assert!(
+        v.split('.').count() == 3 && v.chars().all(|c| c.is_ascii_digit() || c == '.'),
+        "expected MAJOR.MINOR.PATCH semver, got {v:?}"
+    );
 }
 
 #[tokio::test]
