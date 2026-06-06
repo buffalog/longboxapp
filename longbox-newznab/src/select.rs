@@ -123,25 +123,123 @@ fn nzb_bracket_re() -> &'static Regex {
     NZB_BRACKET_RE.get_or_init(|| Regex::new(r"\[[^\]]*\]").unwrap())
 }
 
+/// Scene-format → canonical-filename shape adapter, extended to also
+/// handle fully dot-separated scene names with mini-series notation
+/// (`Arcana.Royale.01.of.04.2025.digital.Son.of.Ultron-Empire`). The
+/// load-bearing addition over the original four-step transform is
+/// step 3: wrapping the `\d+ of \d+` substring as `\d+ (of \d+)` so
+/// the parser's `\(of\s+\d+\)` matchers (default patterns id=11, 12,
+/// 13) can claim the mini-series shape. Without that wrap, the bare
+/// `01 of 04 (2025)` mis-captures as series=`... 01 of`, number=`04`
+/// via pattern id=10's permissive tail.
+///
+/// Transforms in order:
+///
+///  1. **Strip trailing `-Group` suffix.** The last hyphenated single-
+///     word token (e.g. `-Empire`, `-DCP`, `-LeDuch`) at the END of
+///     the string gets removed. The regex is anchored so internal
+///     hyphenated tokens (`digital-mobile`, `Spider-Man`) survive.
+///
+///  2. **Dots → spaces, blanket.** Title-internal dots
+///     (`S.W.O.R.D.`, `G.I.Joe`) lose their structure but the
+///     matcher's `normalize_title` reduces both sides to the same
+///     punctuation-free form, so similarity scoring isn't affected.
+///
+///  3. **Wrap `\d+ of \d+` as `\d+ (of \d+)`.** Mini-series notation
+///     in scene format is dot-separated (`01.of.04`); the parser
+///     patterns expect parenthesized form (`01 (of 04)`). Whole-word
+///     digit-of-digit match, so `Life of Wolverine` and similar
+///     letter-flanked `of` tokens are untouched.
+///
+///  4. **Strip standalone noise tokens.** `digital`, `digital-mobile`,
+///     `digital-rip`, `digital-hd`, `webrip`, `webdl`, `mobile`.
+///     Case-insensitive, whole-word only. Not strictly required for
+///     parse correctness (the parser tolerates trailing junk via
+///     `.*?\.cbz$`) but cleaner output reads better in logs and the
+///     dashboard.
+///
+///  5. **Wrap the rightmost in-range bare year as `(YYYY)`.** Scene
+///     format places the release year last, after the issue number,
+///     so rightmost = release year. Wrapping only the rightmost match
+///     preserves title-internal years (`2000 AD`).
+///
+///  6. **Collapse whitespace runs** left by the strip steps.
+///
+///  7. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor
+///     in every pattern matches. The fact that scene NZBs aren't
+///     actually CBZs is irrelevant — we're feeding the *parser*, not
+///     the downloader.
 pub fn normalize_scene_title(input: &str) -> String {
-    // 1. dots → spaces
-    let with_spaces = input.replace('.', " ");
-    // 2. rightmost-only year wrap
+    let degrouped = strip_scene_group_suffix(input);
+    let with_spaces = degrouped.replace('.', " ");
+    let with_of = wrap_of_marker(&with_spaces);
+    let denoised = strip_scene_noise(&with_of);
+    let with_year = wrap_rightmost_year(&denoised);
+    let collapsed: String = with_year.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{collapsed}.cbz")
+}
+
+/// Strip the trailing `-Group` scene suffix when present. The hyphen
+/// must be the LAST one in the string and followed only by an
+/// alphanumeric token to end-of-string — so `digital-mobile` mid-string
+/// and `Spider-Man` series titles survive; only `-Empire`, `-DCP`,
+/// `-LeDuch`, etc. at the very end get stripped.
+fn strip_scene_group_suffix(input: &str) -> &str {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"-[A-Za-z][A-Za-z0-9]*$").unwrap());
+    match re.find(input) {
+        Some(m) => &input[..m.start()],
+        None => input,
+    }
+}
+
+/// Wrap `\d+ of \d+` mini-series markers as `\d+ (of \d+)`. Whole-word
+/// digit-of-digit match, case-insensitive on the literal `of`. Letter-
+/// flanked `of` (`Life of Wolverine`, `Eye of Odin`) is preserved
+/// because the regex requires digits on both sides.
+fn wrap_of_marker(input: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\b(\d+)\s+(?i:of)\s+(\d+)\b").unwrap());
+    re.replace_all(input, "$1 (of $2)").into_owned()
+}
+
+/// Strip standalone scene-noise tokens. Whole-word case-insensitive
+/// match; the order in the alternation matters only for readability.
+/// `digital-mobile` and friends are listed BEFORE `digital` so the
+/// longer match wins — the regex engine is greedy on alternation
+/// position, not match length, so we put long-before-short by hand.
+fn strip_scene_noise(input: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:digital-mobile|digital-rip|digital-hd|digital|webrip|webdl|mobile)\b",
+        )
+        .unwrap()
+    });
+    re.replace_all(input, " ").into_owned()
+}
+
+/// Wrap the rightmost in-range bare year token in parens. Skips
+/// already-wrapped `(YYYY)` so a prior pass doesn't get double-wrapped.
+fn wrap_rightmost_year(input: &str) -> String {
     let re = scene_year_re();
-    let wrapped = if let Some(last) = re.find_iter(&with_spaces).last() {
-        let (start, end) = (last.start(), last.end());
-        let mut out = String::with_capacity(with_spaces.len() + 2);
-        out.push_str(&with_spaces[..start]);
-        out.push('(');
-        out.push_str(&with_spaces[start..end]);
-        out.push(')');
-        out.push_str(&with_spaces[end..]);
-        out
-    } else {
-        with_spaces
+    let Some(last) = re.find_iter(input).last() else {
+        return input.to_owned();
     };
-    // 3. append .cbz
-    format!("{wrapped}.cbz")
+    let bytes = input.as_bytes();
+    // Don't double-wrap if the match is already inside `(...)`.
+    let prev = last.start().checked_sub(1).and_then(|i| bytes.get(i)).copied();
+    let next = bytes.get(last.end()).copied();
+    if prev == Some(b'(') && next == Some(b')') {
+        return input.to_owned();
+    }
+    let mut out = String::with_capacity(input.len() + 2);
+    out.push_str(&input[..last.start()]);
+    out.push('(');
+    out.push_str(&input[last.start()..last.end()]);
+    out.push(')');
+    out.push_str(&input[last.end()..]);
+    out
 }
 
 /// Run the parser on the raw title; fall back through two repair
@@ -1060,6 +1158,142 @@ mod tests {
             "Wolverine",
             "005",
             Some(2024),
+        );
+    }
+
+    // -------- normalize_scene_title: dot-separated mini-series notation --------
+    //
+    // The third NZB title format Jeremy reported: fully dot-separated
+    // scene names with `\d+.of.\d+` mini-series notation, no brackets.
+    // Pre-fix, `normalize_scene_title` produced `01 of 04 (2025)` which
+    // mis-captured through pattern id=10 as series=`... 01 of`,
+    // number=`04`. The wrap_of_marker step now produces `01 (of 04)
+    // (2025)` so pattern id=11 claims it cleanly.
+
+    #[test]
+    fn normalize_real_arcana_royale_of_marker_with_year() {
+        // The exact user-reported title. End-to-end through the
+        // parse_release_title cascade: scene normalizer + parser
+        // pattern id=11.
+        check_normalized_parses_to(
+            "Arcana.Royale.01.of.04.2025.digital.Son.of.Ultron-Empire",
+            "Arcana Royale",
+            "01",
+            Some(2025),
+        );
+    }
+
+    #[test]
+    fn normalize_dotted_of_marker_year_less_falls_to_id_13() {
+        // Year-less variant: rightmost-year-wrap finds nothing, and
+        // the `\d+ (of \d+)` shape falls through to pattern id=13
+        // (`Series N (of M) yearless`).
+        check_normalized_parses_to(
+            "Some.Mini.02.of.04.digital.Empire",
+            "Some Mini",
+            "02",
+            None,
+        );
+    }
+
+    #[test]
+    fn normalize_dotted_padded_of_marker() {
+        // Three-digit issue number with two-digit mini count.
+        // Confirms `\b(\d+)\s+(?i:of)\s+(\d+)\b` accepts either width
+        // and the parser's `\(of\s+\d+\)` is similarly permissive.
+        check_normalized_parses_to(
+            "Be.Not.Afraid.004.of.006.2025.Digital-HD.LeDuch",
+            "Be Not Afraid",
+            "004",
+            Some(2025),
+        );
+    }
+
+    #[test]
+    fn normalize_scene_letter_flanked_of_is_not_a_marker() {
+        // `Life of Wolverine` has `of` flanked by letter tokens, NOT
+        // by digit tokens. The wrap_of_marker regex must not fire
+        // here or it'd produce `Life (of Wolverine)` and break the
+        // existing real-world parse. This is the load-bearing guard
+        // against false positives on titles containing the word `of`.
+        check_normalized_parses_to(
+            "Life.of.Wolverine.-.Infinity.Comic.005.2022.digital-mobile.Empire",
+            "Life of Wolverine - Infinity Comic",
+            "005",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn normalize_scene_eye_of_odin_still_works() {
+        // Another letter-flanked `of` regression guard. This case
+        // existed before; the new wrap_of_marker MUST leave it alone.
+        check_normalized_parses_to(
+            "Beware.the.Eye.of.Odin.001.2022.Digital.Mephisto-Empire",
+            "Beware the Eye of Odin",
+            "001",
+            Some(2022),
+        );
+    }
+
+    #[test]
+    fn strip_scene_group_suffix_removes_trailing_dash_group_only() {
+        // The helper removes a trailing `-Word` suffix but leaves
+        // internal hyphenated tokens (`digital-mobile`, `Spider-Man`)
+        // alone.
+        assert_eq!(
+            strip_scene_group_suffix("Foo.001.2022.Digital.Zone-Empire"),
+            "Foo.001.2022.Digital.Zone"
+        );
+        assert_eq!(
+            strip_scene_group_suffix("Spider-Man.005.2022.Digital.Empire"),
+            "Spider-Man.005.2022.Digital.Empire",
+            "Empire has no leading hyphen at the end — input unchanged"
+        );
+        assert_eq!(
+            strip_scene_group_suffix("Foo.001.2022.digital-mobile.Empire"),
+            "Foo.001.2022.digital-mobile.Empire",
+            "Empire has no leading hyphen; digital-mobile mid-string is preserved"
+        );
+        assert_eq!(
+            strip_scene_group_suffix("Foo.001.2022.digital.Hourman-DCP"),
+            "Foo.001.2022.digital.Hourman"
+        );
+    }
+
+    #[test]
+    fn wrap_of_marker_handles_digit_flanked_only() {
+        assert_eq!(wrap_of_marker("01 of 04"), "01 (of 04)");
+        assert_eq!(wrap_of_marker("001 of 06"), "001 (of 06)");
+        assert_eq!(wrap_of_marker("a 01 of 04 b"), "a 01 (of 04) b");
+        // Letter-flanked `of` is preserved.
+        assert_eq!(wrap_of_marker("Life of Wolverine"), "Life of Wolverine");
+        assert_eq!(wrap_of_marker("Eye of Odin"), "Eye of Odin");
+        // Multiple matches all get wrapped.
+        assert_eq!(
+            wrap_of_marker("01 of 04 and 02 of 05"),
+            "01 (of 04) and 02 (of 05)"
+        );
+    }
+
+    #[test]
+    fn strip_scene_noise_drops_known_tokens_only() {
+        // Whole-word, case-insensitive. Adjacent tokens get replaced
+        // with a space; whitespace collapse happens at the call-site.
+        assert_eq!(
+            strip_scene_noise("Foo 001 2022 digital Empire"),
+            "Foo 001 2022   Empire"
+        );
+        assert_eq!(
+            strip_scene_noise("Foo 001 2022 Digital-Mobile bar"),
+            "Foo 001 2022   bar"
+        );
+        // Letters embedded in larger words must not match (no false
+        // positive on `digital-something-else` that we don't know).
+        assert_eq!(
+            strip_scene_noise("Foo digitalize bar"),
+            "Foo digitalize bar",
+            "`digitalize` isn't a noise token; substring match must not fire"
         );
     }
 
