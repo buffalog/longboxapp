@@ -643,11 +643,15 @@ async fn folder_path(
     // Host-side path: substitute the container's library root prefix
     // with the configured host path. Both sides get trimmed of
     // trailing slashes so the substitution doesn't produce
-    // `/host//Saga (2012)`.
+    // `/host//Saga (2012)`. The DB settings row is the runtime source
+    // of truth; the env-var fallback (`HOST_LIBRARY_PATH`) seeds the
+    // typical Docker-Compose deployment so operators don't have to
+    // re-type the same path into the Settings UI after every fresh
+    // bring-up.
     let host_library_path: String = settings_repo::get_or_default(
         &state.db,
         settings_repo::KEY_HOST_LIBRARY_PATH,
-        String::new(),
+        state.config.host_library_path.clone().unwrap_or_default(),
     )
     .await?;
     let host_library_path_trimmed = host_library_path.trim().trim_end_matches('/');

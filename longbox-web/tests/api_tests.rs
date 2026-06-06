@@ -2295,6 +2295,132 @@ async fn settings_never_exposes_the_cv_api_key() {
 /// enrichment per cycle) read the same row via `settings_repo`, so
 /// what GET shows here is what the next scan/cycle actually uses.
 #[tokio::test]
+async fn series_folder_path_uses_env_var_host_library_path_fallback() {
+    // The Show-in-Finder bug: with the `host_library_path` settings
+    // row empty AND HOST_LIBRARY_PATH env var configured, the endpoint
+    // should return a host_path substituted from the env value rather
+    // than echoing the container path back with
+    // `host_path_configured: false`. Operators on a fresh Docker
+    // bring-up don't have to re-type the path into the Settings UI.
+    let mut app = build_test_app().await;
+    app.set_host_library_path_fallback(Some("/Users/jeremy/Comics".into()));
+    let series_id = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "DC K.O.".into(),
+            sort_title: "dc k.o.".into(),
+            start_year: Some(2025),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let resp = app
+        .request(empty_request(
+            "GET",
+            &format!("/api/series/{series_id}/folder-path"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["host_path"], "/Users/jeremy/Comics/DC K.O. (2025)",
+        "env-var fallback must build the host-side path"
+    );
+    assert_eq!(
+        body["host_path_configured"], true,
+        "host_path_configured must reflect the fallback being usable, not just the DB row"
+    );
+}
+
+#[tokio::test]
+async fn series_folder_path_db_row_overrides_env_var_fallback() {
+    // The DB settings row stays authoritative when the operator
+    // edits it via the UI — the env var is a SEED default, not a
+    // runtime hard-pin. Set the row to a different prefix; expect
+    // the response to reflect the row, not the env.
+    let mut app = build_test_app().await;
+    app.set_host_library_path_fallback(Some("/seed/from/env".into()));
+    longbox_db::settings_repo::set(
+        &app.state.db,
+        "host_library_path",
+        "/runtime/from/db",
+    )
+    .await
+    .unwrap();
+    let series_id = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            &format!("/api/series/{series_id}/folder-path"),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(body["host_path"], "/runtime/from/db/Saga (2012)");
+}
+
+#[tokio::test]
+async fn series_folder_path_falls_back_to_container_when_neither_env_nor_db_set() {
+    // No env, no settings row → response carries the container path
+    // verbatim and `host_path_configured: false` so the frontend
+    // surfaces it copy-only rather than as an active link. Existing
+    // behavior; locked in with a test now that the env-var fallback
+    // landed.
+    let app = build_test_app().await;
+    let series_id = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2012),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            &format!("/api/series/{series_id}/folder-path"),
+        ))
+        .await,
+    )
+    .await;
+    let container = body["container_path"].as_str().unwrap();
+    assert_eq!(body["host_path"], container);
+    assert_eq!(body["host_path_configured"], false);
+}
+
+#[tokio::test]
 async fn settings_put_match_confidence_threshold_persists_and_round_trips() {
     let app = build_test_app().await;
     // Default-seeded row is 0.85 (from the 20260516040415 initial

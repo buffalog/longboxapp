@@ -40,6 +40,18 @@ impl TestApp {
         self.library_dir.path().to_path_buf()
     }
 
+    /// Replace `config.host_library_path` and rebuild the router.
+    /// Used by the Show-in-Finder tests to exercise the env-var
+    /// fallback path that consumers of the `host_library_path`
+    /// setting use when the DB row is absent.
+    #[allow(dead_code)]
+    pub fn set_host_library_path_fallback(&mut self, path: Option<String>) {
+        let mut config = (*self.state.config).clone();
+        config.host_library_path = path;
+        self.state.config = Arc::new(config);
+        self.router = build_router(self.state.clone());
+    }
+
     /// Wire up a Metron client backed by `server` and rebuild the
     /// router from the modified state. Subsequent requests route
     /// through the new client. Item A v2 piece-3 tests use this to
@@ -106,6 +118,7 @@ pub async fn build_test_app() -> TestApp {
         metron_api_password: None,
         pull_schedule_time: time::macros::time!(05:00),
         scan_schedule_time: time::macros::time!(03:00),
+        host_library_path: None,
     };
 
     // The pull + scan schedulers run in every test app; with their

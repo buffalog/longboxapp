@@ -33,6 +33,14 @@ pub struct AppConfig {
     /// `SCAN_SCHEDULE_TIME` (`HH:MM`, default 03:00 — before the pull
     /// sweep, so the catalog is fresh). UTC, same rationale as above.
     pub scan_schedule_time: time::Time,
+    /// Host-side mirror of the library bind-mount source path. Seed
+    /// value for the `host_library_path` settings row; the UI's "Show
+    /// in Finder" affordance reads the live row at request time and
+    /// falls back to this when the row is empty. `None` when the env
+    /// var is unset — operators on bare-metal deployments (no
+    /// container) typically don't need it and the UI keeps a copy-only
+    /// display. Source: `HOST_LIBRARY_PATH` env var.
+    pub host_library_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -101,6 +109,11 @@ impl AppConfig {
             None => time::macros::time!(03:00),
         };
 
+        // Host-side library path. Stripped of trailing slashes
+        // up-front so the consumers' substitution code doesn't have to
+        // re-trim the value on every call.
+        let host_library_path = optional("HOST_LIBRARY_PATH").map(|p| normalize_path(&p));
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -114,6 +127,7 @@ impl AppConfig {
             metron_api_password,
             pull_schedule_time,
             scan_schedule_time,
+            host_library_path,
         })
     }
 }

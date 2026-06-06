@@ -33,6 +33,13 @@ services:
       # Phase B: when set, web spawns the post-process watcher at boot.
       # Maps to the /watch bind mount above.
       DOWNLOAD_WATCH_PATH: ${DOWNLOAD_WATCH_PATH:-}
+      # Host-side mirror of the LIBRARY_PATH bind-mount source. Used by
+      # the "Show in Finder" affordance to translate the container path
+      # (/library/Saga (2012)) back into the host path the browser/Finder
+      # can open (e.g. /Users/jeremy/Comics/Saga (2012)). Seed value for
+      # the `host_library_path` settings row; the UI can override at
+      # runtime. Typically equal to LIBRARY_PATH on macOS/Linux hosts.
+      HOST_LIBRARY_PATH: ${HOST_LIBRARY_PATH:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
       interval: 30s
