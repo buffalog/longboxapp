@@ -296,6 +296,87 @@ pub(crate) fn spawn_auto_rematch(state: &AppState, series_id: i64, caller: &'sta
     });
 }
 
+/// Fire-and-forget chain used by `PATCH /api/series/:id/cv-id` (Change
+/// Match): first `scan_series_folder` to discover any on-disk files
+/// the catalog never knew about (the load-bearing case — the user
+/// dropped files into the folder before the CV identity was fixed),
+/// then `rematch_for_series` to retroactively claim the needs-review
+/// pool against the fresh issues. Plain `spawn_auto_rematch` is a
+/// no-op when there are no DB records to rematch against, which was
+/// the recurring user complaint.
+pub(crate) fn spawn_scan_and_rematch_for_series(
+    state: &AppState,
+    series_id: i64,
+    caller: &'static str,
+) {
+    let scanner = state.scanner.clone();
+    tokio::spawn(async move {
+        // Step 4 of the user's spec: walk the series folder and import
+        // any undiscovered files into the catalog as needs_review. The
+        // full match cascade runs on each one — so a file whose
+        // ComicInfo embeds a CV URL pointing to the now-correct
+        // volume gets claimed in this pass already.
+        match scanner.scan_series_folder(series_id).await {
+            Ok(report) => tracing::info!(
+                target: "longbox_web",
+                series_id,
+                files_seen = report.files_seen,
+                files_added = report.files_added,
+                files_updated = report.files_updated,
+                caller,
+                "set-cv-id.series_scan_completed"
+            ),
+            Err(longbox_scanner::ScanError::AlreadyRunning) => {
+                tracing::warn!(
+                    target: "longbox_web",
+                    series_id,
+                    caller,
+                    "set-cv-id.series_scan_deferred (another scan is in progress)"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_web",
+                    series_id,
+                    caller,
+                    error = %e,
+                    "set-cv-id.series_scan_failed"
+                );
+                return;
+            }
+        }
+        // Step 5: rematch against the focused single-series candidate
+        // pool. Catches files the scan left as needs_review (Tier 1/2/3
+        // failed against the broader catalog) and re-tries them with
+        // just this series' issues — the cleaner "we know this folder
+        // is THIS series, force the lookup" semantic Change Match was
+        // always supposed to provide.
+        match scanner.rematch_for_series(series_id).await {
+            Ok(report) => tracing::info!(
+                target: "longbox_web",
+                series_id,
+                matched = report.matched_owned,
+                caller,
+                "set-cv-id.rematch_completed"
+            ),
+            Err(longbox_scanner::ScanError::AlreadyRunning) => tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                caller,
+                "set-cv-id.rematch_deferred (another scan is in progress)"
+            ),
+            Err(e) => tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                caller,
+                error = %e,
+                "set-cv-id.rematch_failed"
+            ),
+        }
+    });
+}
+
 /// Fire-and-forget `rescan_unmatched` for the configured library root.
 /// Used by `DELETE /api/series/:id?force=true` after unlinking the
 /// duplicate's files — the freshly `needs_review`-flagged files need
@@ -575,10 +656,14 @@ async fn set_cv_id(
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
     // The new issues need rematching against the catalog files
-    // that were owned-but-pointing-at-the-now-deleted issues. The
-    // pre-commit UPDATE above flipped those files to `needs_review`
-    // so `rematch_for_series` actually sees them.
-    spawn_auto_rematch(&state, id, "set-cv-id");
+    // that were owned-but-pointing-at-the-now-deleted issues. Plus
+    // we want to catch files that exist ON DISK in the series folder
+    // but never made it into the `files` table — the recurring user
+    // complaint was a Change Match that was a no-op because the
+    // folder was never scanned. `spawn_scan_and_rematch_for_series`
+    // chains a scoped scan first (discovers any orphan files via
+    // the full match cascade) and THEN runs the focused rematch.
+    spawn_scan_and_rematch_for_series(&state, id, "set-cv-id");
     Ok(Json(updated))
 }
 

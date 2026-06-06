@@ -380,6 +380,111 @@ impl Scanner {
         Ok(report)
     }
 
+    /// Walk a single series folder and feed every discovered comic file
+    /// through `process_file` — the full insert-or-update + match
+    /// cascade Phase A normally runs across the whole library. Used by
+    /// `PATCH /api/series/:id/cv-id` so the disambiguation flow picks
+    /// up files that exist on disk but never made it into the `files`
+    /// table (the user dropped a folder in without scanning).
+    ///
+    /// `path_relative` on every persisted row is library-root-relative
+    /// (`DC K.O. Knightfight (2026)/issue 001.cbz`), matching the
+    /// convention `scan_full` uses, so subsequent rematches and the
+    /// dashboard queries all line up.
+    ///
+    /// `Ok(report)` with `files_seen = 0` when the series folder doesn't
+    /// exist in any configured library root — not an error: it means
+    /// the user hasn't dropped files in yet, which is a perfectly valid
+    /// state.
+    #[instrument(target = "longbox_scanner", skip(self), fields(series_id = series_id))]
+    pub async fn scan_series_folder(
+        &self,
+        series_id: i64,
+    ) -> Result<ScanReport, ScanError> {
+        let _guard = self
+            .scan_lock
+            .try_lock()
+            .map_err(|_| ScanError::AlreadyRunning)?;
+
+        let started_at = utc_now();
+        let series = longbox_db::series_repo::find_by_id(&self.db, series_id)
+            .await?
+            .ok_or_else(|| ScanError::Db(longbox_db::DbError::NotFound))?;
+        let folder_name = match series.start_year {
+            Some(year) => format!("{} ({})", series.title, year),
+            None => series.title.clone(),
+        };
+
+        let patterns = load_patterns(&self.db).await?;
+        let match_threshold = self.load_match_threshold().await?;
+        let mut report = ScanReport::new(0, started_at);
+
+        // Walk every configured library_root. Phase A is one-root
+        // typical but the schema supports multi-root; the series might
+        // live under any of them, and a stale entry in one root
+        // shouldn't block discovery in another.
+        for library_root in library_root_repo::list_all(&self.db).await? {
+            let root_path = PathBuf::from(&library_root.path);
+            let series_folder = root_path.join(&folder_name);
+            if !series_folder.is_dir() {
+                continue;
+            }
+            report.library_root_id = library_root.id;
+
+            for entry in walk_library(&series_folder) {
+                let inner = match entry {
+                    Ok(d) => d,
+                    Err(e) => {
+                        report.errors.push(ScanFileError {
+                            path_relative: String::new(),
+                            error_message: e.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                // `walk_library` computed `path_relative` against the
+                // SERIES folder. Rewrite it against the LIBRARY ROOT so
+                // `process_file`'s `find_by_path` index lookup matches
+                // the convention every other write site uses.
+                let path_relative_to_root = match inner.path_absolute.strip_prefix(&root_path) {
+                    Ok(rel) => rel
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .trim_start_matches('/')
+                        .to_string(),
+                    Err(_) => continue,
+                };
+                let discovered = DiscoveredFile {
+                    path_absolute: inner.path_absolute,
+                    path_relative: path_relative_to_root,
+                    size_bytes: inner.size_bytes,
+                    mtime: inner.mtime,
+                };
+                report.files_seen += 1;
+                if let Err(e) = self
+                    .process_file(
+                        &discovered,
+                        library_root.id,
+                        &patterns,
+                        match_threshold,
+                        &mut report,
+                    )
+                    .await
+                {
+                    report.errors.push(ScanFileError {
+                        path_relative: discovered.path_relative.clone(),
+                        error_message: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        let completed_at = utc_now();
+        report.completed_at = completed_at;
+        report.duration_ms = duration_ms(started_at, completed_at);
+        Ok(report)
+    }
+
     async fn process_file(
         &self,
         discovered: &DiscoveredFile,
