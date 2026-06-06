@@ -348,15 +348,99 @@ pub async fn sweep_now(
         }
     }
 
+    // SAB drops one job folder per download (`/watch/Saga 001/`); once
+    // Phase B moves the CBZ out, the folder is empty. The per-file
+    // `cleanup_empty_parent` covers Imported outcomes during the loop,
+    // but Skipped/Conflict/Failed don't trigger it, AND a folder
+    // becoming empty AFTER its last file imports earlier in the sweep
+    // wouldn't be visible to the per-file pass. End-of-sweep walk
+    // catches both cases. Operates ONLY on directly-empty directories
+    // (zero entries) — leftover `.par2`/`.nfo` files are preserved.
+    let dirs_removed = cleanup_empty_watch_dirs(watch_path);
+
     tracing::info!(
         target: "longbox_postprocess",
         processed = summary.processed,
         skipped = summary.skipped,
         conflicts = summary.conflicts,
         failed = summary.failed,
+        dirs_removed,
         "phase_b.sweep_now_complete"
     );
     Ok(summary)
+}
+
+/// Walk `watch_path` bottom-up and remove any subdirectory that has
+/// zero entries. Returns the count removed for telemetry. Never
+/// touches the watch root itself; never recurses into something that
+/// isn't a directory; silently skips entries that fail to canonicalize
+/// or that another process removed between the walk and the rmdir
+/// (best-effort, race-tolerant).
+///
+/// Bottom-up ordering is load-bearing: a folder that contains only
+/// empty subfolders becomes itself empty after the inner ones get
+/// removed, so we must process leaves first. `walkdir::contents_first`
+/// provides that order natively.
+fn cleanup_empty_watch_dirs(watch_path: &Path) -> usize {
+    let canonical_root = match std::fs::canonicalize(watch_path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(
+                target: "longbox_postprocess",
+                root = %watch_path.display(),
+                err = %e,
+                "phase_b.cleanup_empty_dirs_skipped (root canonicalize failed)"
+            );
+            return 0;
+        }
+    };
+    let mut removed = 0usize;
+    for entry in walkdir::WalkDir::new(watch_path)
+        .follow_links(false)
+        .contents_first(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let canonical = match std::fs::canonicalize(entry.path()) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // Never remove the watch root itself. Same guard as
+        // `cleanup_empty_parent` — losing it would silently break the
+        // pipeline by removing the directory the watcher is observing.
+        if canonical == canonical_root {
+            continue;
+        }
+        let entry_count = match std::fs::read_dir(&canonical) {
+            Ok(it) => it.count(),
+            Err(_) => continue,
+        };
+        if entry_count != 0 {
+            continue;
+        }
+        match std::fs::remove_dir(&canonical) {
+            Ok(()) => {
+                removed += 1;
+                tracing::debug!(
+                    target: "longbox_postprocess",
+                    dir = %canonical.display(),
+                    "phase_b.watch_dir_cleaned (end-of-sweep)"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "longbox_postprocess",
+                    dir = %canonical.display(),
+                    err = %e,
+                    "phase_b.watch_dir_cleanup_failed (end-of-sweep)"
+                );
+            }
+        }
+    }
+    removed
 }
 
 /// Per-event filter: turn a `notify::Event` into the set of paths
@@ -1085,6 +1169,76 @@ mod tests {
 
         cleanup_empty_parent(&phantom_source, &watch_root);
         // Reaching this line without panic is the assertion.
+    }
+
+    #[test]
+    fn cleanup_empty_watch_dirs_removes_all_empty_subdirs_at_end_of_sweep() {
+        // End-of-sweep helper: walks the watch root bottom-up and
+        // removes every empty subdirectory. Covers the Skipped /
+        // Conflict / Failed cases where the per-file
+        // `cleanup_empty_parent` doesn't fire, AND the case where a
+        // dir becomes empty later in the sweep due to other-path
+        // removals.
+        let watch = TempDir::new().unwrap();
+        // Three empty job folders (Skipped/Conflict/Failed leftovers).
+        let empty_a = watch.path().join("empty-job-a");
+        let empty_b = watch.path().join("empty-job-b");
+        let empty_nested = watch.path().join("nested-empty/inner");
+        std::fs::create_dir(&empty_a).unwrap();
+        std::fs::create_dir(&empty_b).unwrap();
+        std::fs::create_dir_all(&empty_nested).unwrap();
+        // One non-empty job folder (operator left a .par2 behind, or
+        // a Failed outcome's source is still there).
+        let nonempty = watch.path().join("nonempty-job");
+        std::fs::create_dir(&nonempty).unwrap();
+        std::fs::write(nonempty.join("leftover.par2"), b"data").unwrap();
+
+        let removed = cleanup_empty_watch_dirs(watch.path());
+
+        assert!(!empty_a.exists(), "empty-job-a must be removed");
+        assert!(!empty_b.exists(), "empty-job-b must be removed");
+        assert!(
+            !empty_nested.exists(),
+            "nested-empty/inner must be removed"
+        );
+        assert!(
+            !empty_nested.parent().unwrap().exists(),
+            "nested-empty parent must be removed (bottom-up cascades)"
+        );
+        assert!(nonempty.exists(), "non-empty dir must survive");
+        assert!(nonempty.join("leftover.par2").exists());
+        // The watch root itself must always survive.
+        assert!(watch.path().exists());
+        assert_eq!(
+            removed, 4,
+            "two flat + two nested removals expected; got {removed}"
+        );
+    }
+
+    #[test]
+    fn cleanup_empty_watch_dirs_never_removes_the_watch_root() {
+        // Same load-bearing safety guard as `cleanup_empty_parent`:
+        // even on a brand-new empty watch folder, the root itself
+        // must NOT be removed — losing it would silently break the
+        // pipeline.
+        let watch = TempDir::new().unwrap();
+        assert_eq!(std::fs::read_dir(watch.path()).unwrap().count(), 0);
+
+        let removed = cleanup_empty_watch_dirs(watch.path());
+
+        assert_eq!(removed, 0);
+        assert!(watch.path().exists(), "watch root must survive");
+    }
+
+    #[test]
+    fn cleanup_empty_watch_dirs_tolerates_missing_root() {
+        // If the watch path itself vanished (mount lost, user
+        // intervention), the function must no-op silently rather
+        // than panic.
+        let removed = cleanup_empty_watch_dirs(std::path::Path::new(
+            "/longbox-test-nonexistent-watch-path",
+        ));
+        assert_eq!(removed, 0);
     }
 
     #[test]

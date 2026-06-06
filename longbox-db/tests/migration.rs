@@ -73,10 +73,12 @@ async fn seed_parsing_patterns_at_correct_priorities() {
     // The original four (5/10/20/30), the A.9 parser hot-fix three
     // (11/12/15) for year-before-number / subtitled / part-of-N
     // shapes, the A.9 Bug 1b three (6/7/25) for TPB-vN / TPB-Book /
-    // permissive-date-stamp shapes, and the Tier 4 `(of N)` three
-    // (13/14/28) for part-of-mini markers. Update both this
-    // assertion and `longbox-core::filename::default_patterns`
-    // together when adding more.
+    // permissive-date-stamp shapes, the Tier 4 `(of N)` three
+    // (13/14/28) for part-of-mini markers, and the SAB-vNN-no-subtitle
+    // pattern (priority 9, id=14) for `Series vNN (YYYY)` collected
+    // editions like `EC - Cruel Universe v01 (2025)`. Update both this
+    // assertion and `longbox-core::filename::default_patterns` together
+    // when adding more.
     let pool = fresh_pool().await;
     let patterns = longbox_db::parsing_pattern_repo::list_enabled(&pool)
         .await
@@ -91,6 +93,7 @@ async fn seed_parsing_patterns_at_correct_priorities() {
             (5, "Series Vol N #M"),
             (6, "Series vN - Subtitle (YYYY)"),
             (7, "Series Book N (YYYY)"),
+            (9, "Series vNN (YYYY) no subtitle"),
             (10, "Series #NNN (YYYY)"),
             (11, "Series N (Xf Y) (YYYY)"),
             (12, "Series N - Subtitle (YYYY)"),
