@@ -61,9 +61,21 @@
     error = null;
     successMessage = null;
     try {
-      await addSeries(cvId);
+      const result = await addSeries(cvId);
       addedIds = new Set(addedIds).add(cvId);
-      successMessage = `Added "${name}". Issues will sync from ComicVine; the next scan picks them up.`;
+      // Build the success message based on what the auto-search did.
+      // `pull_search_queued === 0` covers both (a) no missing-and-shipped
+      // issues (rare for a brand-new add) and (b) pull engine not
+      // configured (silent skip per spec). Either way, the user gets
+      // the plain confirmation; the searching-N variant fires when
+      // the engine actually queued work.
+      if (result.pull_search_queued > 0) {
+        const n = result.pull_search_queued;
+        const noun = n === 1 ? 'issue' : 'issues';
+        successMessage = `Added "${name}" — searching for ${n} missing ${noun}.`;
+      } else {
+        successMessage = `Added "${name}". Issues will sync from ComicVine; the next scan picks them up.`;
+      }
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {

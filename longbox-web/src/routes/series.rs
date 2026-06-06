@@ -5,8 +5,8 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
-    issue_repo, library_root_repo, series_repo, settings_repo, IssueRow, NewIssue, NewSeries,
-    SeriesRow, SeriesUpdate, SeriesWithCounts,
+    downloader_config_repo, indexer_config_repo, issue_repo, library_root_repo, series_repo,
+    settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -68,10 +68,25 @@ struct FileSummary {
 
 // -------- handlers --------
 
+/// Response body for `POST /api/series`. Flattens the inserted
+/// `SeriesRow` so existing frontend reads of fields like `id` /
+/// `title` keep working; the new `pull_search_queued` field carries
+/// the count of issues for which a search task was just fired so the
+/// frontend can render a "searching for N missing issues" toast. The
+/// field is `0` when the pull engine isn't configured (no downloader
+/// or no enabled indexers) — the auto-search silently skips per the
+/// product spec.
+#[derive(Debug, Serialize)]
+struct AddSeriesResponse {
+    #[serde(flatten)]
+    series: SeriesRow,
+    pull_search_queued: usize,
+}
+
 async fn add(
     State(state): State<AppState>,
     Json(body): Json<AddSeriesBody>,
-) -> Result<Json<SeriesRow>, ApiError> {
+) -> Result<Json<AddSeriesResponse>, ApiError> {
     if body.cv_id <= 0 {
         return Err(ApiError::BadRequest {
             message: "cv_id must be > 0".into(),
@@ -118,7 +133,82 @@ async fn add(
     }
 
     spawn_auto_rematch(&state, inserted.id, "add-series");
-    Ok(Json(inserted))
+
+    // Auto-search: same semantics as the Search-missing button on
+    // series detail, fired automatically as part of the add flow.
+    // Silent-skip when the pull engine can't actually do anything (no
+    // downloader configured, downloader disabled, or no enabled
+    // indexers) so a freshly-added series during a paused-pull-engine
+    // period doesn't claim "searching N issues" when it actually
+    // isn't.
+    let pull_search_queued =
+        spawn_auto_pull_search(&state, inserted.id, &inserted.title).await?;
+
+    Ok(Json(AddSeriesResponse {
+        series: inserted,
+        pull_search_queued,
+    }))
+}
+
+/// Pre-flight the pull engine's configuration AND dispatch a search
+/// task for every missing-and-shipped issue of the just-added series.
+/// Returns the number of issues for which `fire_issue_search` was
+/// called. Returns 0 — without any disk or indexer side-effects —
+/// when the pull engine isn't fully configured.
+async fn spawn_auto_pull_search(
+    state: &AppState,
+    series_id: i64,
+    series_title: &str,
+) -> Result<usize, ApiError> {
+    let downloader = match downloader_config_repo::get(&state.db).await? {
+        Some(d) if d.enabled => d,
+        Some(_) => {
+            tracing::info!(
+                target: "longbox_web",
+                series_id,
+                "add-series.auto_search_skipped (downloader disabled)"
+            );
+            return Ok(0);
+        }
+        None => {
+            tracing::info!(
+                target: "longbox_web",
+                series_id,
+                "add-series.auto_search_skipped (no downloader configured)"
+            );
+            return Ok(0);
+        }
+    };
+    let _ = downloader;
+    let indexers = indexer_config_repo::list_enabled(&state.db).await?;
+    if indexers.is_empty() {
+        tracing::info!(
+            target: "longbox_web",
+            series_id,
+            "add-series.auto_search_skipped (no enabled indexers)"
+        );
+        return Ok(0);
+    }
+    // Same predicate the per-series Search-missing button uses
+    // (`issue_repo::list_missing_for_series`): cover_date present and
+    // `<= today` (shipped), no owned-and-present file. The freshly-
+    // added series typically has every issue in this state.
+    let missing = issue_repo::list_missing_for_series(&state.db, series_id).await?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let queued = missing.len();
+    for issue in missing {
+        longbox_pull::fire_issue_search(state.db.clone(), series_id, issue.id);
+    }
+    tracing::info!(
+        target: "longbox_web",
+        series_id,
+        series_title,
+        queued,
+        "add-series.auto_search_dispatched"
+    );
+    Ok(queued)
 }
 
 /// Shared series-creation helper used by `POST /api/series` and
