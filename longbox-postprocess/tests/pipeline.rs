@@ -288,6 +288,158 @@ async fn imports_owned_via_dot_separated_nzb_style_basename() {
 }
 
 #[tokio::test]
+async fn tier1_folder_name_match_overrides_unparseable_scene_filename() {
+    // The load-bearing redesign: SAB drops one job folder per
+    // download. The folder name IS the search query LongBox sent the
+    // indexer (`Saga 001`), so it faithfully encodes series + issue.
+    // The scene group then renames the INNER file to whatever
+    // (`Sga.001.(2012).(Digital).(Zone-Empire).cbr` — `Sga` not
+    // `Saga`, deliberately broken to make sure Tier 2 cannot rescue
+    // this case). Tier 1's folder-name match catches it via the
+    // folder; Tier 2's filename parse would skip.
+    let f = seed_basic_fixture().await;
+    let job_folder = f._watch.path().join("Saga 001");
+    std::fs::create_dir_all(&job_folder).unwrap();
+    // Inner file uses `.cbz` so `write_cbz`'s ZIP bytes land at an
+    // extension Phase B's archive reader can open. The Tier 1 fix
+    // is about the FOLDER NAME being authoritative regardless of
+    // what the inner filename says; the extension is incidental.
+    let source = job_folder.join("Sga.001.(2012).(Digital).(Zone-Empire).cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        Outcome::Imported {
+            series_id,
+            issue_id,
+            target,
+            ..
+        } => {
+            assert_eq!(series_id, f.series_id);
+            assert_eq!(issue_id, f.issue_id);
+            assert_eq!(
+                target,
+                f.library
+                    .path()
+                    .join("Saga (2012)")
+                    .join("Saga (2012) 001.cbz")
+            );
+        }
+        other => panic!("expected Imported via Tier 1 folder match, got {other:?}"),
+    }
+    assert!(!source.exists(), "source must move to library");
+}
+
+#[tokio::test]
+async fn tier1_handles_bare_folder_name_with_no_year() {
+    // Folder name shape the user called out: `{title} {issue}` with
+    // no year, no parens, no extension. Parses cleanly via id=4
+    // catch-all once the cascade appends `.cbz`. Synthetic series
+    // because the fixture's Saga has start_year=2012 and the
+    // bare-form test wants to prove the year-less path works.
+    let f = seed_basic_fixture().await;
+    longbox_db::series_repo::insert(
+        &f.db,
+        longbox_db::NewSeries {
+            cv_id: Some(424242),
+            metron_id: None,
+            title: "Y The Last Man".into(),
+            sort_title: "y the last man".into(),
+            start_year: Some(2002),
+            publisher: Some("DC".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let issue = longbox_db::issue_repo::insert(
+        &f.db,
+        longbox_db::NewIssue {
+            series_id: 2,
+            cv_issue_id: Some(424201),
+            metron_issue_id: None,
+            number: "42".into(),
+            title: None,
+            cover_date: Some("2006-02-01".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let job_folder = f._watch.path().join("Y The Last Man 42");
+    std::fs::create_dir_all(&job_folder).unwrap();
+    // Inner file is also bare — both shapes must parse. Uses
+    // `.cbz` to match the ZIP bytes `write_cbz` writes; the parser
+    // accepts either extension via id=4's `(?i:cbz|cbr|cb7)`.
+    let source = job_folder.join("Y The Last Man 42.cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        Outcome::Imported { issue_id, .. } => {
+            assert_eq!(issue_id, issue.id, "must attribute to Y The Last Man #42");
+        }
+        other => panic!("bare folder + bare filename must import; got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tier1_falls_through_to_tier2_when_folder_parse_misses() {
+    // File dropped DIRECTLY in /watch/ — `source.parent()` is the
+    // watch root, whose name ("watch", "complete", etc.) is not a
+    // catalog series. Tier 1 returns None; Tier 2's filename parse
+    // does the actual matching.
+    let f = seed_basic_fixture().await;
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        Outcome::Imported {
+            series_id,
+            issue_id,
+            ..
+        } => {
+            assert_eq!(series_id, f.series_id);
+            assert_eq!(issue_id, f.issue_id);
+        }
+        other => panic!(
+            "Tier 2 fallback must still work when Tier 1 has no folder context; got {other:?}"
+        ),
+    }
+}
+
+#[tokio::test]
 async fn imports_owned_via_filename_match() {
     let f = seed_basic_fixture().await;
 

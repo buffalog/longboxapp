@@ -86,12 +86,51 @@ pub async fn process_one(
 
     let mtime = system_time_to_offset(meta.modified()?);
 
+    let patterns = load_patterns(db).await?;
+
+    // TIER 1: folder-name match. SAB creates one job folder per
+    // download whose name IS the search query LongBox sent the
+    // indexer — so by construction it carries `{series} {issue}` in
+    // a form the parser can recognise. The scene group then renames
+    // the inner file to whatever it wants (`Thunder.007.(2025).
+    // (Zone-Empire).cbr` inside a `Blood & Thunder 7/` folder; the
+    // filename loses "Blood &" entirely). Trying the folder first
+    // short-circuits a whole class of "scene-name dropped a token"
+    // skip-to-/watch failures.
+    //
+    // The folder match overrides ComicInfo and filename — if the
+    // SAB job folder matches a catalog issue at the owned-confidence
+    // threshold, we take that match unconditionally. ComicInfo may
+    // point at a different volume (CV-URL drift on re-releases),
+    // and the scene-stripped filename may be ambiguous; the folder
+    // is the user's authoritative signal because it mirrors the
+    // search query LongBox itself just issued.
+    if let Some(folder_issue_id) =
+        try_folder_match(source, db, &patterns, owned_threshold).await?
+    {
+        let outcome = import_as_owned(
+            source,
+            folder_issue_id,
+            library_root,
+            library_root_id,
+            size,
+            mtime,
+            db,
+        )
+        .await?;
+        log_outcome(&outcome, started_at, source);
+        return Ok(outcome);
+    }
+
+    // TIER 2: existing ComicInfo + filename flow. Reached when Tier
+    // 1 had no folder context (file dropped directly in /watch/), no
+    // catalog series matched the folder-name parse at the owned
+    // threshold, or the folder name itself was unparseable.
     let comic_info_xml = read_comic_info_xml(source)?;
     let comic_info = comic_info_xml
         .as_deref()
         .and_then(|xml| ComicInfo::parse(xml.as_bytes()).ok());
 
-    let patterns = load_patterns(db).await?;
     let basename = source
         .file_name()
         .and_then(|n| n.to_str())
@@ -275,6 +314,96 @@ fn read_comic_info_xml(source: &Path) -> Result<Option<String>> {
 /// so symlinks, `.` segments, and relative-vs-absolute differences
 /// don't fool it; PathBuf equality is the fallback when one or both
 /// canonicalize calls fail (e.g. target only existed up to the dir).
+/// TIER 1 matcher. Pull `source`'s parent-directory name (the SAB
+/// job folder), feed it through the same parser-with-normalization
+/// the file path uses, and look up the resulting series+number in
+/// the catalog. Returns `Some(issue_id)` only when the match clears
+/// the owned-confidence threshold — partial-confidence matches fall
+/// through to Tier 2 so ComicInfo can still rescue them.
+///
+/// Returns `None` (without an error) for every benign skip case:
+///   - source has no parent (`/file.cbz` style — unreachable in
+///     practice, defensive),
+///   - source is at the watch root directly (no job folder context
+///     — the parent folder name is "watch" or whatever the operator
+///     called the bind mount),
+///   - the folder name is empty or unparseable,
+///   - the parsed series has no catalog hit,
+///   - the matcher returns sub-threshold confidence.
+async fn try_folder_match(
+    source: &Path,
+    db: &Pool,
+    patterns: &[ParsingPattern],
+    owned_threshold: f64,
+) -> Result<Option<i64>> {
+    let Some(parent) = source.parent() else {
+        return Ok(None);
+    };
+    let Some(folder_name) = parent.file_name().and_then(|n| n.to_str()) else {
+        return Ok(None);
+    };
+    if folder_name.trim().is_empty() {
+        return Ok(None);
+    }
+
+    // Append `.cbz` so the parser's `\.(?i:cbz|cbr|cb7)$` anchor
+    // matches. The folder doesn't have an extension; the parser
+    // doesn't care that the trailing `.cbz` is synthetic — it's
+    // shape, not provenance. Same trick the newznab pull engine
+    // uses for indexer-returned search-result titles.
+    let synthetic = format!("{folder_name}.cbz");
+    let Some(folder_parse) =
+        longbox_core::parse_filename_with_normalization(&synthetic, patterns)
+    else {
+        return Ok(None);
+    };
+    let hint = folder_parse.series_title.trim();
+    if hint.is_empty() {
+        return Ok(None);
+    }
+
+    let candidates = find_candidates(db, hint, folder_parse.year).await?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    // No ComicInfo passed — Tier 1 is explicitly folder-driven; the
+    // file's embedded metadata gets a chance in Tier 2 if the
+    // folder doesn't carry us home.
+    let match_result = match_file(None, Some(&folder_parse), &candidates);
+    let status = classify_status(
+        match_result.issue_id,
+        match_result.confidence,
+        match_result.method,
+        owned_threshold,
+    );
+    let issue_id = match (match_result.issue_id, status) {
+        (Some(id), FileStatus::Owned) => id,
+        _ => {
+            tracing::debug!(
+                target: "longbox_postprocess",
+                source = %source.display(),
+                folder_name,
+                series_hint = hint,
+                confidence = match_result.confidence,
+                threshold = owned_threshold,
+                "phase_b.folder_match_below_threshold (falling through to Tier 2)"
+            );
+            return Ok(None);
+        }
+    };
+
+    tracing::info!(
+        target: "longbox_postprocess",
+        source = %source.display(),
+        folder_name,
+        issue_id,
+        confidence = match_result.confidence,
+        method = ?match_result.method,
+        "phase_b.folder_match_hit"
+    );
+    Ok(Some(issue_id))
+}
+
 fn cleanup_conflict_source(source: &Path, target: &Path, size: i64) {
     let same_file = match (std::fs::canonicalize(source), std::fs::canonicalize(target)) {
         (Ok(a), Ok(b)) => a == b,
