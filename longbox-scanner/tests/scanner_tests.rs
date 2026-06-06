@@ -438,6 +438,111 @@ async fn rescan_unmatched_only_touches_needs_review() {
 }
 
 #[tokio::test]
+async fn scan_series_folder_imports_undiscovered_on_disk_files() {
+    // The Change Match bug fix: when a series folder has files on
+    // disk but the catalog's `files` table has zero records, the
+    // existing `rematch_for_series` is a no-op (nothing in the DB to
+    // rematch). `scan_series_folder` walks the folder directly so the
+    // file ends up in the DB AND matched against the catalog issues.
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    // Series row + one issue exist in the catalog (the user just
+    // ran Change Match against the right CV volume) but `files`
+    // table has no row for the file on disk yet.
+    let series = longbox_db::series_repo::insert(
+        &pool,
+        longbox_db::NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "DC K.O. Knightfight".into(),
+            sort_title: "dc k.o. knightfight".into(),
+            start_year: Some(2026),
+            publisher: Some("DC Comics".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let issue = longbox_db::issue_repo::insert(
+        &pool,
+        longbox_db::NewIssue {
+            series_id: series.id,
+            cv_issue_id: Some(9001),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // File on disk in the series folder, no DB row exists for it.
+    let folder = tmp.path().join("DC K.O. Knightfight (2026)");
+    std::fs::create_dir_all(&folder).unwrap();
+    let cbz = folder.join("DC K.O. Knightfight 001 (2026).cbz");
+    write_cbz(&cbz, None);
+    assert!(longbox_db::file_repo::find_by_path(
+        &pool,
+        library_root_id,
+        "DC K.O. Knightfight (2026)/DC K.O. Knightfight 001 (2026).cbz",
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let scanner = scanner_for(pool.clone());
+    let report = scanner.scan_series_folder(series.id).await.unwrap();
+    assert_eq!(report.files_seen, 1, "must walk the series folder");
+    assert_eq!(report.files_added, 1, "must insert the new row");
+
+    // File row now exists, linked to the issue we seeded.
+    let row = find_file(
+        &pool,
+        library_root_id,
+        "DC K.O. Knightfight (2026)/DC K.O. Knightfight 001 (2026).cbz",
+    )
+    .await;
+    assert_eq!(row.issue_id, Some(issue.id), "must match the seeded issue");
+    assert_eq!(row.status, "owned");
+}
+
+#[tokio::test]
+async fn scan_series_folder_is_a_clean_noop_when_folder_does_not_exist() {
+    // Catalog row but no folder on disk yet — the typical
+    // "Add Series, files coming later" state. Must NOT error.
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    let series = longbox_db::series_repo::insert(
+        &pool,
+        longbox_db::NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Ghost Series".into(),
+            sort_title: "ghost series".into(),
+            start_year: Some(2099),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let scanner = scanner_for(pool.clone());
+    let report = scanner.scan_series_folder(series.id).await.unwrap();
+    assert_eq!(report.files_seen, 0);
+    assert_eq!(report.files_added, 0);
+    assert!(report.errors.is_empty(), "missing folder is not an error");
+}
+
+#[tokio::test]
 async fn rematch_for_series_finds_previously_unmatched_files() {
     let tmp = TempDir::new().unwrap();
     build_fixture_library(tmp.path());
