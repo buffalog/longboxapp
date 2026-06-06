@@ -57,12 +57,13 @@ fn http_client() -> reqwest::Client {
 
 /// Search a single indexer with one explicit search term. Public for
 /// callers/tests that want the low-level entry point; [`find_release`]
-/// is the normal way in.
+/// is the normal way in. Uses the indexer's configured `maxage_days`
+/// verbatim — no issue context here to compute a back-catalog override.
 pub async fn search_indexer(
     indexer: &IndexerConfig,
     search_term: &str,
 ) -> Result<Vec<Release>, IndexerError> {
-    search_with(&http_client(), indexer, search_term).await
+    search_with(&http_client(), indexer, search_term, None).await
 }
 
 /// Probe an indexer: confirm it is reachable and the API key is
@@ -78,13 +79,17 @@ pub async fn test_connection(indexer: &IndexerConfig) -> Result<(), IndexerError
 
 /// The real single-request implementation, parameterized on a shared
 /// `reqwest::Client` so `find_release` can reuse one connection pool
-/// across its indexer loop.
+/// across its indexer loop. `maxage_override` is `None` for the
+/// low-level / test_connection callers (use the indexer's configured
+/// value) and `Some(effective)` from the engine path (per-issue
+/// back-catalog widening, see [`query::effective_maxage_days`]).
 async fn search_with(
     client: &reqwest::Client,
     indexer: &IndexerConfig,
     search_term: &str,
+    maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
-    let url = build_url(indexer, search_term)?;
+    let url = build_url(indexer, search_term, maxage_override)?;
     let resp = client.get(&url).send().await.map_err(|e| {
         IndexerError::HttpFailure(format!("request to {} failed: {e}", indexer.name))
     })?;
@@ -111,13 +116,14 @@ async fn search_one_indexer(
     indexer: &IndexerConfig,
     series: &str,
     issue: &str,
+    maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
     // No `year` parameter: it does not belong in the q-term (see
     // `build_search_term` for the full rationale). It is still used
     // downstream for similarity-filter ranking — that lives in the
     // callers, which keep year in their own scope.
     let padded = build_search_term(series, issue, true);
-    let first = search_with(client, indexer, &padded).await?;
+    let first = search_with(client, indexer, &padded, maxage_override).await?;
     if !first.is_empty() {
         return Ok(first);
     }
@@ -127,7 +133,7 @@ async fn search_one_indexer(
         // Non-numeric issue — both variations identical, no retry.
         return Ok(first);
     }
-    match search_with(client, indexer, &unpadded).await {
+    match search_with(client, indexer, &unpadded, maxage_override).await {
         Ok(second) => Ok(second),
         Err(e) => {
             tracing::debug!(
@@ -160,7 +166,7 @@ pub async fn find_release(
     issue: &str,
     year: Option<i32>,
 ) -> Result<Option<Release>, NewznabError> {
-    Ok(find_release_excluding(indexers, series, issue, year, &[])
+    Ok(find_release_excluding(indexers, series, issue, year, &[], None)
         .await?
         .map(|(_indexer, release)| release))
 }
@@ -180,6 +186,7 @@ pub async fn find_release_excluding(
     issue: &str,
     year: Option<i32>,
     exclude_guids: &[String],
+    cover_date: Option<&str>,
 ) -> Result<Option<(IndexerId, Release)>, NewznabError> {
     if indexers.is_empty() {
         return Ok(None);
@@ -202,7 +209,9 @@ pub async fn find_release_excluding(
     let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
 
     for indexer in ordered {
-        match search_one_indexer(&client, indexer, series, issue).await {
+        let effective_maxage =
+            crate::query::effective_maxage_days(i64::from(indexer.maxage_days), cover_date);
+        match search_one_indexer(&client, indexer, series, issue, Some(effective_maxage)).await {
             Ok(results) => {
                 let kept: Vec<Release> = results
                     .into_iter()
@@ -272,6 +281,7 @@ pub async fn find_release_excluding_filtered(
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
     exclusion_keywords: &[String],
+    cover_date: Option<&str>,
 ) -> Result<FindOutcome, NewznabError> {
     if indexers.is_empty() {
         return Ok(FindOutcome::NoMatch);
@@ -286,12 +296,21 @@ pub async fn find_release_excluding_filtered(
     // Fan out to ALL indexers simultaneously. Every indexer is queried in
     // parallel and the best release from the combined pool wins — the same
     // model Prowlarr uses. A single slow or empty indexer no longer blocks
-    // the others.
+    // the others. Per-indexer effective maxage is the load-bearing fix
+    // for back-catalog searches: a 20-year-old issue's NZBs were getting
+    // server-side filtered by the configured `maxage_days` (4 years by
+    // default), so the engine never saw them. The dynamic max() in
+    // `effective_maxage_days` keeps the configured floor for fresh
+    // issues and automatically extends for older ones.
     let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
         futures::future::join_all(
             ordered
                 .iter()
-                .map(|idx| search_one_indexer(&client, idx, series, issue)),
+                .map(|idx| {
+                    let effective_maxage =
+                        crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
+                    search_one_indexer(&client, idx, series, issue, Some(effective_maxage))
+                }),
         )
         .await;
 
@@ -444,7 +463,7 @@ mod tests {
         let indexers = [cfg(server.uri())];
 
         // No exclusion: the cbz wins, and the serving indexer id comes back.
-        let (id, rel) = find_release_excluding(&indexers, "Wolverine", "5", None, &[])
+        let (id, rel) = find_release_excluding(&indexers, "Wolverine", "5", None, &[], None)
             .await
             .unwrap()
             .unwrap();
@@ -453,7 +472,7 @@ mod tests {
 
         // Exclude the cbz: the cbr is picked instead.
         let (_, rel) =
-            find_release_excluding(&indexers, "Wolverine", "5", None, &["abc-123".into()])
+            find_release_excluding(&indexers, "Wolverine", "5", None, &["abc-123".into()], None)
                 .await
                 .unwrap()
                 .unwrap();
@@ -466,6 +485,7 @@ mod tests {
             "5",
             None,
             &["abc-123".into(), "def-456".into()],
+            None,
         )
         .await
         .unwrap();
@@ -512,6 +532,7 @@ mod tests {
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -556,6 +577,7 @@ mod tests {
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         )
         .await
         .unwrap();
