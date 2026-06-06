@@ -197,6 +197,69 @@ where
     Ok(result.rows_affected())
 }
 
+/// Single-row lookup for the dismiss endpoint. Returns `None` for a
+/// stale-UI / double-click delete on an already-gone row. Only the
+/// fields the dismiss flow needs (series_id, issue_id) are extracted —
+/// callers chasing the full row should use [`list_for_issue`].
+pub async fn find_series_issue_by_id<'e, E>(
+    executor: E,
+    id: i64,
+) -> Result<Option<(i64, i64)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT series_id AS "series_id!: i64", issue_id AS "issue_id!: i64"
+           FROM pull_attempts WHERE id = ?"#,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|r| (r.series_id, r.issue_id)))
+}
+
+/// Age threshold for the "stale submitted" purge. An attempt that's
+/// been `submitted` longer than this is presumed dropped — the poll
+/// loop lost track (container restart orphaned the SAB job handle, SAB
+/// evicted it from its queue, indexer hiccup wedged the row). 6h is
+/// well past any reasonable SAB download time; tune up if real
+/// large-queue SAB deployments surface false purges.
+///
+/// Kept as a documented constant in Rust + hardcoded as
+/// `datetime('now', '-6 hours')` in the SQL bodies below — sqlx's
+/// compile-time check needs SQL literals, so the two MUST stay in
+/// lockstep when changed.
+pub const STALE_SUBMITTED_HOURS: i64 = 6;
+
+/// Delete `submitted` pull attempts for one issue whose `attempted_at`
+/// is older than [`STALE_SUBMITTED_HOURS`]. Returns the number of rows
+/// removed. Called from the on-demand search path
+/// (`engine::sweep_single_issue`) and from the `dismiss_pull_failure`
+/// endpoint so a stale row never blocks a legitimate retry. Genuinely
+/// fresh `submitted` rows (poll loop hasn't caught up yet) are left
+/// alone — they're potentially still being downloaded.
+pub async fn purge_stale_submitted_for_issue<'e, E>(
+    executor: E,
+    series_id: i64,
+    issue_id: i64,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM pull_attempts
+           WHERE series_id = ?
+             AND issue_id = ?
+             AND status = 'submitted'
+             AND attempted_at < datetime('now', '-6 hours')"#,
+        series_id,
+        issue_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Delete an issue's failure-class pull attempts (`'failed'` and
 /// `'mismatched'`) — the "Retry" un-park. With the failure history gone
 /// the candidate query no longer treats the issue as parked, so the

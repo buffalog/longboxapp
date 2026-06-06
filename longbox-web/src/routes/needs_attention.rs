@@ -84,14 +84,45 @@ async fn retry(
 }
 
 /// Dismiss a single pull-failure surface row by `pull_attempts.id`.
-/// Surgical — does not touch any other attempt for the same issue, so
-/// an older failure-class attempt may resurface on the next list. 204
-/// on both delete and no-op (stale UI dismissing an already-gone row).
+/// Surgical on the failure-class rows — does not touch any older
+/// failure-class attempt for the same issue, so a deeper history row
+/// may resurface on the next list. 204 on both delete and no-op
+/// (stale UI dismissing an already-gone row).
+///
+/// Also purges any stale `submitted` row (>
+/// `STALE_SUBMITTED_HOURS` old) for the same issue at the same time.
+/// Without this, the user's observed workflow is:
+///   1. Dismiss the visible failure on Needs-Attention.
+///   2. Click Search to retry.
+///   3. Nothing happens — the issue still has an orphaned stale
+///      `submitted` row from a prior run (poll loop never resolved
+///      it; SAB evicted the job).
+/// The dismiss action covers both rows in one trip so future
+/// searches actually fire.
 async fn dismiss_pull_failure(
     State(state): State<AppState>,
     Path(attempt_id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
+    // Look up (series_id, issue_id) BEFORE the delete so we can
+    // chase the stale-submitted purge for the same issue. None when
+    // the row already vanished (double-click / stale UI).
+    let owner = pull_attempt_repo::find_series_issue_by_id(&state.db, attempt_id).await?;
     pull_attempt_repo::delete_by_id(&state.db, attempt_id).await?;
+    if let Some((series_id, issue_id)) = owner {
+        let purged = pull_attempt_repo::purge_stale_submitted_for_issue(
+            &state.db, series_id, issue_id,
+        )
+        .await?;
+        if purged > 0 {
+            tracing::info!(
+                target: "longbox_web",
+                series_id,
+                issue_id,
+                purged,
+                "dismiss_pull_failure.stale_submitted_purged"
+            );
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

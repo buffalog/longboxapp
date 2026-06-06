@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pull_attempts\n           WHERE series_id = ?\n             AND issue_id = ?\n             AND status = 'submitted'\n             AND attempted_at < datetime('now', '-6 hours')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4544087f2f103fa4ca54fe4d7d0efc291510c963b982c0cbb1adc16ec2363c9e"
+}

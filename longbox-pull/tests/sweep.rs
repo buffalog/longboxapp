@@ -555,6 +555,106 @@ async fn sweep_single_issue_skips_when_an_in_flight_attempt_exists() {
 }
 
 #[tokio::test]
+async fn sweep_single_issue_purges_stale_submitted_before_in_flight_guard() {
+    // Regression for the load-bearing bug: 87 stale `submitted` rows
+    // in production were blocking Search-missing clicks because
+    // their poll never resolved. The fix purges any `submitted` row
+    // for the target issue older than STALE_SUBMITTED_HOURS (6h)
+    // BEFORE the in-flight guard, so the user's explicit retry
+    // actually fires.
+    let (db, series_id, issue_id) = seed_catalog().await;
+
+    // Seed a `submitted` row, then backdate it to 24h ago — older
+    // than the 6h stale threshold.
+    let stale = pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-stale".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-stale-orphan".into()),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?")
+        .bind(stale.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Wire a real indexer + downloader so the engine can actually
+    // submit once the stale row is out of the way.
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-fresh-retry")).await;
+    sab_accepts(&downloader, "nzo-fresh-retry").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(summary.submitted, 1, "must submit the retry after purging stale");
+
+    // Stale row gone, fresh `submitted` row in its place.
+    let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "exactly one row after purge + retry");
+    assert_ne!(after[0].id, stale.id, "stale row must have been deleted");
+    assert_eq!(after[0].status, "submitted");
+    assert_eq!(after[0].release_id.as_deref(), Some("guid-fresh-retry"));
+}
+
+#[tokio::test]
+async fn sweep_single_issue_still_blocks_on_fresh_submitted_under_threshold() {
+    // Counterpart to the stale-purge test: a `submitted` row that's
+    // FRESH (under 6h) MUST still block. The poll loop may yet
+    // resolve it; we'd double-submit if the guard didn't fire.
+    let (db, series_id, issue_id) = seed_catalog().await;
+
+    // Default attempted_at = now → well under the 6h stale threshold.
+    pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-fresh".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-still-in-flight".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-should-not-submit")).await;
+    sab_accepts(&downloader, "nzo-should-not-submit").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(summary, longbox_pull::SweepSummary::default());
+
+    let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "fresh submitted must still block; no duplicate row");
+    assert_eq!(after[0].release_id.as_deref(), Some("guid-fresh"));
+}
+
+#[tokio::test]
 async fn sweep_single_issue_skips_when_issue_is_already_owned() {
     // Regression: the on-demand single-issue path bypasses the
     // scheduled sweep's `list_pull_candidates` filter (which excludes

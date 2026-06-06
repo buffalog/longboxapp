@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT series_id AS \"series_id!: i64\", issue_id AS \"issue_id!: i64\"\n           FROM pull_attempts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "dcc40126c4035baf6636aef0b8725b5dc8e84e54c2c3efe85f3159ead4209bdb"
+}
