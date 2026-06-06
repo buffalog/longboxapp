@@ -1171,7 +1171,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "longbox-archive"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "tempfile",
  "thiserror 1.0.69",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-comicvine"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "governor",
  "longbox-core",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-core"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "quick-xml 0.31.0",
  "regex",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-cv-enrichment"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "governor",
  "longbox-comicvine",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-db"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "longbox-core",
  "serde",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-downloader"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "pretty_assertions",
  "reqwest",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-metron"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "governor",
  "pretty_assertions",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-newznab"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "futures",
  "longbox-core",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-postprocess"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "filetime",
  "longbox-archive",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-pull"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "longbox-core",
  "longbox-db",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-scan-scheduler"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "time",
  "tokio",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-scanner"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "longbox-archive",
  "longbox-core",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-web"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "longbox-webhooks"
-version = "0.0.1"
+version = "2.1.0"
 dependencies = [
  "pretty_assertions",
  "reqwest",
