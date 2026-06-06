@@ -3,6 +3,11 @@
 use crate::error::IndexerError;
 use crate::types::IndexerConfig;
 
+/// One-year slack added to an issue's age when computing the dynamic
+/// maxage floor. Covers (a) digital releases posted ahead of the
+/// printed cover date, and (b) a generous indexer clock-skew buffer.
+const ISSUE_AGE_SLACK_DAYS: i64 = 365;
+
 /// Newznab category id for comics (under the "Other" 7000 range).
 const COMICS_CATEGORY: &str = "7030";
 
@@ -41,12 +46,65 @@ pub fn build_search_term(series: &str, issue: &str, padded: bool) -> String {
     format!("{series} {issue_part}")
 }
 
+/// Compute the effective `maxage` (in days) for a search against an
+/// indexer for a particular issue. The static per-indexer
+/// `configured_maxage` is treated as a FLOOR for fresh issues —
+/// back-catalog issues automatically extend the window so old NZB
+/// postings aren't filtered out at the indexer.
+///
+/// `cover_date` is the catalog issue's `YYYY-MM-DD` cover-date
+/// string. `None` (or a malformed value) falls back to the
+/// configured floor — same behavior as before this helper existed.
+///
+/// Formula: `max(configured, days_since_cover + ISSUE_AGE_SLACK_DAYS)`
+/// where `days_since_cover` is the integer days between today and the
+/// issue's cover date. A 3-month-old issue stays at the configured
+/// value (typically 1500 days ≈ 4 years); a 20-year-old back-catalog
+/// issue automatically opens to ~7660 days. Negative ages (cover_date
+/// in the future, e.g. upcoming solicitations) clamp to the
+/// configured floor.
+pub fn effective_maxage_days(configured_maxage: i64, cover_date: Option<&str>) -> i64 {
+    let Some(date_str) = cover_date else {
+        return configured_maxage;
+    };
+    let Some(cover) = parse_yyyy_mm_dd(date_str) else {
+        return configured_maxage;
+    };
+    let today = time::OffsetDateTime::now_utc().date();
+    let days_old = (today - cover).whole_days();
+    if days_old <= 0 {
+        return configured_maxage;
+    }
+    configured_maxage.max(days_old + ISSUE_AGE_SLACK_DAYS)
+}
+
+fn parse_yyyy_mm_dd(s: &str) -> Option<time::Date> {
+    if s.len() < 10 {
+        return None;
+    }
+    let year: i32 = s.get(..4)?.parse().ok()?;
+    let month: u8 = s.get(5..7)?.parse().ok()?;
+    let day: u8 = s.get(8..10)?.parse().ok()?;
+    let month = time::Month::try_from(month).ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
 /// Build the full Newznab search URL for an indexer + search term.
-/// `t=search`, `cat=7030`, `o=xml`, `maxage` from the indexer config.
-pub fn build_url(indexer: &IndexerConfig, search_term: &str) -> Result<String, IndexerError> {
+/// `t=search`, `cat=7030`, `o=xml`. `maxage` comes from the indexer
+/// config by default; callers pass `Some(N)` to override (the engine
+/// does this per-issue via [`effective_maxage_days`] so back-catalog
+/// searches aren't filtered server-side by stale postings).
+pub fn build_url(
+    indexer: &IndexerConfig,
+    search_term: &str,
+    maxage_override: Option<i64>,
+) -> Result<String, IndexerError> {
     let base = indexer.base_url.trim_end_matches('/');
     let endpoint = format!("{base}/api");
-    let maxage = indexer.maxage_days.to_string();
+    let maxage = maxage_override
+        .unwrap_or(i64::from(indexer.maxage_days))
+        .max(0)
+        .to_string();
     let limit = RESULT_LIMIT.to_string();
     let params: [(&str, &str); 7] = [
         ("t", "search"),
@@ -126,7 +184,7 @@ mod tests {
 
     #[test]
     fn url_carries_all_required_params() {
-        let url = build_url(&cfg(), "Wolverine 005").unwrap();
+        let url = build_url(&cfg(), "Wolverine 005", None).unwrap();
         assert!(url.starts_with("https://idx.example.com/api?"));
         assert!(url.contains("t=search"));
         assert!(url.contains("apikey=KEY123"));
@@ -142,8 +200,71 @@ mod tests {
     fn url_normalizes_trailing_slash_on_base() {
         let mut c = cfg();
         c.base_url = "https://idx.example.com/".into();
-        let url = build_url(&c, "x").unwrap();
+        let url = build_url(&c, "x", None).unwrap();
         assert!(url.starts_with("https://idx.example.com/api?"));
         assert!(!url.contains("//api"));
+    }
+
+    #[test]
+    fn url_maxage_override_takes_precedence_over_indexer_config() {
+        // The engine passes the issue-age-derived effective maxage so a
+        // back-catalog issue doesn't get filtered out by the static
+        // indexer config. The override path is what makes this work.
+        let url = build_url(&cfg(), "Y The Last Man 029", Some(8400)).unwrap();
+        assert!(url.contains("maxage=8400"));
+        assert!(!url.contains("maxage=1500"));
+    }
+
+    // -------- effective_maxage_days --------
+
+    #[test]
+    fn effective_maxage_returns_configured_for_missing_cover_date() {
+        assert_eq!(effective_maxage_days(1500, None), 1500);
+    }
+
+    #[test]
+    fn effective_maxage_returns_configured_for_malformed_cover_date() {
+        // Garbage strings, truncated, non-ISO formats — all fall back.
+        assert_eq!(effective_maxage_days(1500, Some("")), 1500);
+        assert_eq!(effective_maxage_days(1500, Some("garbage")), 1500);
+        assert_eq!(effective_maxage_days(1500, Some("20240101")), 1500);
+        assert_eq!(effective_maxage_days(1500, Some("2024-13-01")), 1500);
+        assert_eq!(effective_maxage_days(1500, Some("2024-02-30")), 1500);
+    }
+
+    #[test]
+    fn effective_maxage_clamps_to_configured_for_future_cover_date() {
+        // Solicitation issues with a cover_date months in the future
+        // shouldn't shrink the window below the configured value.
+        let next_year = (time::OffsetDateTime::now_utc().date().year() + 1).to_string();
+        let date = format!("{next_year}-01-01");
+        assert_eq!(effective_maxage_days(1500, Some(&date)), 1500);
+    }
+
+    #[test]
+    fn effective_maxage_extends_for_back_catalog_issues() {
+        // A 20-year-old comic should get a wide-open window, not the
+        // configured 4-year (1500-day) default.
+        let twenty_years_ago = (time::OffsetDateTime::now_utc().date().year() - 20).to_string();
+        let date = format!("{twenty_years_ago}-01-01");
+        let n = effective_maxage_days(1500, Some(&date));
+        // 20 years ≈ 7300 days + 365 slack = ~7665.
+        assert!(
+            n >= 7300 + 365 - 1 && n <= 7300 + 365 + 366,
+            "expected ~7665, got {n}"
+        );
+    }
+
+    #[test]
+    fn effective_maxage_does_not_shrink_below_configured() {
+        // A recent issue (cover 6 months ago) should keep the
+        // configured 1500-day floor; the dynamic value would be ~545
+        // and the max preserves the floor.
+        let today = time::OffsetDateTime::now_utc().date();
+        let six_months = today
+            .checked_sub(time::Duration::days(180))
+            .unwrap()
+            .to_string();
+        assert_eq!(effective_maxage_days(1500, Some(&six_months)), 1500);
     }
 }
