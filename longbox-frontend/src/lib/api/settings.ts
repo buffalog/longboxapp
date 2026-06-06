@@ -44,6 +44,11 @@ export interface Settings {
    *  `file://` URLs for the Show-in-Finder affordance. Empty when
    *  unset (the frontend then shows the container path copy-only). */
   host_library_path: string;
+  /** Runtime-tunable: Phase B size floor in megabytes. CBR/CBZ/CB7
+   *  files smaller than this get rejected with a WARN log and stay
+   *  in /watch/ — catches partial/corrupt SAB deliveries. Default 35
+   *  (seeded by migration). `0` disables the floor entirely. */
+  min_file_size_mb: number;
 }
 
 /** A whitelisted runtime-tunable setting. The backend rejects any
@@ -55,7 +60,8 @@ export type EditableSettingKey =
   | 'cv_enrichment_title_threshold_year_known'
   | 'cv_enrichment_title_threshold_year_unknown'
   | 'pull_exclusion_keywords'
-  | 'host_library_path';
+  | 'host_library_path'
+  | 'min_file_size_mb';
 
 export function getSettings(): Promise<Settings> {
   return apiFetch('/settings');

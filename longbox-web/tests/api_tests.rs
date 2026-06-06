@@ -2447,6 +2447,59 @@ async fn settings_put_match_confidence_threshold_persists_and_round_trips() {
 }
 
 #[tokio::test]
+async fn settings_put_min_file_size_mb_persists_and_round_trips() {
+    // New Phase B size-floor tunable. Default seeded by the
+    // 20260607 migration is 35; a write to 50 round-trips through the
+    // PUT/GET endpoints. The integer validator rejects fractional and
+    // negative values — covered separately by the parse_megabytes
+    // unit tests.
+    let app = build_test_app().await;
+
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(
+        body["min_file_size_mb"], 35,
+        "seed default from the migration must surface verbatim"
+    );
+
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/settings/min_file_size_mb",
+            r#"{"value":"50"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["key"], "min_file_size_mb");
+    assert_eq!(body["value"], "50");
+
+    let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
+    assert_eq!(body["min_file_size_mb"], 50);
+}
+
+#[tokio::test]
+async fn settings_put_min_file_size_mb_rejects_invalid_values() {
+    // The integer ceiling, fractional, and garbage paths each get a
+    // 400 with a human-readable error — confirmed end-to-end so the
+    // Settings UI can surface the message verbatim.
+    let app = build_test_app().await;
+    for raw in ["35.5", "-1", "10241", "banana", ""] {
+        let resp = app
+            .request(json_request(
+                "PUT",
+                "/api/settings/min_file_size_mb",
+                &format!(r#"{{"value":"{raw}"}}"#),
+            ))
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "value {raw:?} must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
 async fn settings_put_pull_indexer_match_threshold_persists_and_round_trips() {
     // Finding 3 regression: the pull engine's NZB-to-series similarity
     // gate must be tunable via the Settings API now that it's exposed.

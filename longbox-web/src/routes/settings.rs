@@ -69,6 +69,13 @@ struct SettingsResponse {
     /// when unset; consumers fall back to the container path
     /// (informational but not openable from a browser).
     host_library_path: String,
+    /// Runtime-tunable: Phase B size floor in MEGABYTES. Files
+    /// smaller than this are presumed partial/corrupt SAB deliveries
+    /// and get rejected with a WARN log; the file stays in /watch/.
+    /// Default 35 (seeded by migration). Phase B reads per-file so
+    /// tuning via the Settings UI takes effect on the next watch
+    /// arrival without a restart.
+    min_file_size_mb: u32,
 }
 
 async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>, ApiError> {
@@ -108,6 +115,14 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         state.config.host_library_path.clone().unwrap_or_default(),
     )
     .await?;
+    let min_file_size_mb: u32 = settings_repo::get_or_default(
+        &state.db,
+        settings_repo::KEY_MIN_FILE_SIZE_MB,
+        // 35 mirrors `longbox_postprocess::MIN_FILE_SIZE_MB_DEFAULT`.
+        // Keep in lockstep when changing one.
+        35,
+    )
+    .await?;
 
     Ok(Json(SettingsResponse {
         library_root_path: state.config.library_root_path.clone(),
@@ -124,6 +139,7 @@ async fn handler(State(state): State<AppState>) -> Result<Json<SettingsResponse>
         cv_enrichment_title_threshold_year_unknown,
         pull_exclusion_keywords,
         host_library_path,
+        min_file_size_mb,
     }))
 }
 
@@ -169,6 +185,7 @@ async fn update(
         // newline at copy-paste time would silently break the prefix
         // substitution.
         settings_repo::KEY_HOST_LIBRARY_PATH => body.value.trim().to_string(),
+        settings_repo::KEY_MIN_FILE_SIZE_MB => parse_megabytes(&key, &body.value)?,
         _ => {
             return Err(ApiError::BadRequest {
                 message: format!(
@@ -178,7 +195,8 @@ async fn update(
                      cv_enrichment_title_threshold_year_known, \
                      cv_enrichment_title_threshold_year_unknown, \
                      pull_exclusion_keywords, \
-                     host_library_path."
+                     host_library_path, \
+                     min_file_size_mb."
                 ),
             });
         }
@@ -206,6 +224,22 @@ fn parse_threshold(key: &str, raw: &str) -> Result<String, ApiError> {
     if !(0.0..=1.0).contains(&parsed) {
         return Err(ApiError::BadRequest {
             message: format!("'{key}' must be between 0.0 and 1.0 inclusive; got {parsed}."),
+        });
+    }
+    Ok(parsed.to_string())
+}
+
+/// Parse an unsigned megabyte count, returning the canonical decimal
+/// string. Accepts `0..=10240` (10 GB ceiling — more than any
+/// reasonable single-issue download). Rejects negatives, decimals,
+/// and overflow; 0 explicitly allowed as "disable the floor."
+fn parse_megabytes(key: &str, raw: &str) -> Result<String, ApiError> {
+    let parsed: u32 = raw.trim().parse().map_err(|_| ApiError::BadRequest {
+        message: format!("'{key}' must be a whole number of MB; got '{raw}'."),
+    })?;
+    if parsed > 10_240 {
+        return Err(ApiError::BadRequest {
+            message: format!("'{key}' must be ≤ 10240 MB (10 GB); got {parsed}."),
         });
     }
     Ok(parsed.to_string())
@@ -245,5 +279,23 @@ mod tests {
     fn threshold_rejects_garbage() {
         assert!(parse_threshold("k", "banana").is_err());
         assert!(parse_threshold("k", "").is_err());
+    }
+
+    #[test]
+    fn megabytes_accepts_whole_numbers_within_ceiling() {
+        assert_eq!(parse_megabytes("k", "0").unwrap(), "0");
+        assert_eq!(parse_megabytes("k", "35").unwrap(), "35");
+        assert_eq!(parse_megabytes("k", "10240").unwrap(), "10240");
+        // Whitespace tolerated for copy-paste ergonomics.
+        assert_eq!(parse_megabytes("k", "  100  ").unwrap(), "100");
+    }
+
+    #[test]
+    fn megabytes_rejects_decimals_negatives_overflow_and_garbage() {
+        assert!(parse_megabytes("k", "35.5").is_err()); // no fractional MB
+        assert!(parse_megabytes("k", "-1").is_err());
+        assert!(parse_megabytes("k", "10241").is_err()); // above 10 GB ceiling
+        assert!(parse_megabytes("k", "banana").is_err());
+        assert!(parse_megabytes("k", "").is_err());
     }
 }

@@ -49,6 +49,7 @@ function settings(over: Partial<Settings> = {}): Settings {
     cv_enrichment_title_threshold_year_unknown: 0.95,
     pull_exclusion_keywords: '',
     host_library_path: '',
+    min_file_size_mb: 35,
     ...over
   };
 }
@@ -72,7 +73,7 @@ beforeEach(() => {
 });
 
 describe('Settings page — Tunable settings', () => {
-  it('renders the five tunables seeded from server values', () => {
+  it('renders the six tunables seeded from server values', () => {
     render(
       Page,
       pageData({
@@ -80,7 +81,8 @@ describe('Settings page — Tunable settings', () => {
         pull_indexer_match_threshold: 0.72,
         cv_enrichment_title_threshold_year_known: 0.7,
         cv_enrichment_title_threshold_year_unknown: 0.99,
-        pull_exclusion_keywords: 'infinity comic'
+        pull_exclusion_keywords: 'infinity comic',
+        min_file_size_mb: 50
       })
     );
 
@@ -102,6 +104,7 @@ describe('Settings page — Tunable settings', () => {
     expect(screen.getByLabelText('Pull exclusion keywords value')).toHaveValue(
       'infinity comic'
     );
+    expect(screen.getByLabelText('Minimum file size MB value')).toHaveValue('50');
   });
 
   it('Save on match threshold PUTs the new value and invalidates the page', async () => {
@@ -173,6 +176,39 @@ describe('Settings page — Tunable settings', () => {
 
     await waitFor(() =>
       expect(updateSetting).toHaveBeenCalledWith('pull_exclusion_keywords', 'a, b, c')
+    );
+  });
+
+  it('min_file_size_mb saves an integer MB count', async () => {
+    vi.mocked(updateSetting).mockResolvedValue({
+      key: 'min_file_size_mb',
+      value: '50'
+    });
+    render(Page, pageData());
+
+    const input = screen.getByLabelText('Minimum file size MB value');
+    await fireEvent.input(input, { target: { value: '50' } });
+    // Order: match, pull indexer, enrich-known, enrich-unknown,
+    // keywords, host path, min file size → 7th Save button.
+    const saveButtons = screen.getAllByRole('button', { name: 'Save' });
+    await fireEvent.click(saveButtons[6]!);
+
+    await waitFor(() =>
+      expect(updateSetting).toHaveBeenCalledWith('min_file_size_mb', '50')
+    );
+  });
+
+  it('min_file_size_mb rejects fractional values client-side', async () => {
+    render(Page, pageData());
+    const input = screen.getByLabelText('Minimum file size MB value');
+    await fireEvent.input(input, { target: { value: '35.5' } });
+    const saveButtons = screen.getAllByRole('button', { name: 'Save' });
+    await fireEvent.click(saveButtons[6]!);
+
+    expect(updateSetting).not.toHaveBeenCalled();
+    const { toast } = await import('$lib/stores/toast.svelte');
+    expect(toast.warning).toHaveBeenCalledWith(
+      expect.stringContaining('whole number')
     );
   });
 });
