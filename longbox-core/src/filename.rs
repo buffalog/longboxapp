@@ -309,6 +309,31 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             priority: 28,
             enabled: true,
         },
+        ParsingPattern {
+            id: 14,
+            name: "Series vNN (YYYY) no subtitle".into(),
+            // TPB / collection volume notation WITHOUT a subtitle
+            // separator: `EC - Cruel Universe v01 (2025).cbz`,
+            // `Hunt. Kill. Repeat. v01 (2023) (Collection).cbz`.
+            // Mirrors id=8's `Series vN - Subtitle (YYYY)` shape but
+            // with `(YYYY)` directly after the volume number; id=8
+            // can't claim these because it requires ` - Subtitle ` in
+            // between. Captures volume number AS the issue number
+            // (same pragmatic choice id=8 makes for TPB-only series).
+            //
+            // Priority 9 — between id=9 (Book N at 7) and id=2 (#NNN
+            // at 10), so the more specific volume form wins before the
+            // bare-digit patterns get to backtrack-greedy-eat the
+            // `vNN` token as part of the series capture. The series
+            // group's non-greedy `.+?` happily absorbs title-internal
+            // dots (`Hunt. Kill. Repeat.`) and hyphens (`EC -`)
+            // because the trailing-period / trailing-dash isn't
+            // ambiguous — the only `\s+(?i:v|vol|volume)\s*\d+` lookahead
+            // sits at the boundary the series capture must end at.
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            priority: 9,
+            enabled: true,
+        },
     ]
 }
 
@@ -839,6 +864,112 @@ mod tests {
 
         let p = parse("20th Century Men 01 (0f 06) (2022).cbr", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 5, "(Xf Y) part-of still id=5, not the new (of N)");
+    }
+
+    // ---- id=14: `Series vNN (YYYY)` collected editions, no subtitle ----
+
+    #[test]
+    fn matches_series_vnn_year_no_subtitle_id_14() {
+        // The exact user-reported filename: EC's `Cruel Universe v01`
+        // TPB. Pre-fix this fell through every pattern and Phase B
+        // routed it to /watch/ as Skipped. id=14 claims it now with
+        // the volume number as the issue number.
+        let p = parse(
+            "EC - Cruel Universe v01 (2025) (digital) (Son of Ultron-Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 14);
+        assert_eq!(p.series_title, "EC - Cruel Universe");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2025));
+
+        // Title-internal dots + volume notation:
+        // `Hunt. Kill. Repeat. v01 (2023) (Collection) ...`.
+        let p = parse(
+            "Hunt. Kill. Repeat. v01 (2023) (Collection) (digital) (Son of Ultron-Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 14);
+        assert_eq!(p.series_title, "Hunt. Kill. Repeat.");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2023));
+
+        // Case-insensitive `V` / `Vol` / `Volume` markers.
+        let p = parse("Foo Vol 3 (1995).cbr", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 14);
+        assert_eq!(p.number, "3");
+
+        let p = parse("Foo Volume 12 (2020).cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 14);
+        assert_eq!(p.number, "12");
+    }
+
+    #[test]
+    fn id_14_does_not_steal_claims_from_id_8() {
+        // id=8 (Series vN - Subtitle (YYYY)) is more specific (it
+        // requires a subtitle); it MUST still win on its shape even
+        // though id=14 would match too. Priority ordering: id=8 at 6
+        // vs id=14 at 9.
+        let p = parse(
+            "Fear Agent v01 - Re-Ignition (2007) (digital) (Son of Ultron-Empire).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 8, "vN with subtitle must still claim via id=8");
+    }
+
+    #[test]
+    fn id_14_does_not_steal_claims_from_id_1() {
+        // id=1 (Series Vol N #M) handles single-issue volume form
+        // (`Iron Man Vol 1 #100`); id=14 requires `(YYYY)` after the
+        // volume so it leaves these alone. Confirm id=1 still wins.
+        let p = parse("Iron Man Vol 1 #100.cbz", &patterns()).unwrap();
+        assert_eq!(p.pattern_id, 1, "Vol N #M still claimed by id=1");
+        assert_eq!(p.volume, Some(1));
+        assert_eq!(p.number, "100");
+    }
+
+    // ---- regression locks for filenames that already parse correctly ----
+    //
+    // The user reported these as Phase B failures along with the
+    // vNN-format ones. Tracing showed they actually parse cleanly via
+    // id=10's permissive tail; the Phase B failure must've been a
+    // downstream issue (missing catalog series, etc.). Lock the
+    // current correct behavior so a future pattern reorder can't
+    // silently regress them.
+
+    #[test]
+    fn series_with_short_prefix_and_hyphen_parses_via_id_10() {
+        // `Y - The Last Man` — single-letter prefix joined to the
+        // series name by ` - `. id=10 backtracks past the hyphen and
+        // captures the full series correctly.
+        let p = parse(
+            "Y - The Last Man 057 (2007) (Digital) (Monafekk-Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 10);
+        assert_eq!(p.series_title, "Y - The Last Man");
+        assert_eq!(p.number, "057");
+        assert_eq!(p.year, Some(2007));
+    }
+
+    #[test]
+    fn series_with_internal_dots_and_hyphen_parses_via_id_10() {
+        // `DC K.O. - Superman vs. Captain Atom` — multiple
+        // title-internal dots PLUS a ` - ` separator. id=10's
+        // non-greedy series capture handles both.
+        let p = parse(
+            "DC K.O. - Superman vs. Captain Atom 001 (2026) (digital) (Son of Ultron-Empire).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.pattern_id, 10);
+        assert_eq!(p.series_title, "DC K.O. - Superman vs. Captain Atom");
+        assert_eq!(p.number, "001");
+        assert_eq!(p.year, Some(2026));
     }
 
     // ---- dot-to-space normalization for scene/NZB-style filenames ----
