@@ -6803,6 +6803,117 @@ async fn needs_attention_dismiss_deletes_one_attempt_by_id() {
 }
 
 #[tokio::test]
+async fn needs_attention_dismiss_also_purges_stale_submitted_for_same_issue() {
+    // The user-observed bug: Dismiss surgically removes the visible
+    // failure row, but a stale `submitted` row from a prior run is
+    // STILL there blocking future Search clicks. After this fix the
+    // dismiss endpoint chases the same (series_id, issue_id) and
+    // purges any `submitted` row older than 6h. Fresh submitted rows
+    // (potentially still downloading) are left alone.
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_and_issue(&app, "Saga", "1").await;
+
+    // Visible failure (the row the user will click Dismiss on).
+    let failed_id = pull_attempt_repo::insert(
+        &app.state.db,
+        failed_attempt(series, issue, Some("rel-old")),
+    )
+    .await
+    .unwrap()
+    .id;
+    // Invisible stale `submitted` row from a prior container run.
+    let stale_id = pull_attempt_repo::insert(
+        &app.state.db,
+        longbox_db::NewPullAttempt {
+            series_id: series,
+            issue_id: issue,
+            indexer_id: None,
+            release_id: Some("rel-stale".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-stale".into()),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?")
+        .bind(stale_id)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/needs-attention/pull-failures/{failed_id}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // BOTH rows must be gone — failure surgically, stale-submitted via
+    // the chase-purge. The issue now has zero pull_attempts and the
+    // next Search will fire.
+    let remaining = pull_attempt_repo::list_for_issue(&app.state.db, series, issue)
+        .await
+        .unwrap();
+    assert!(
+        remaining.is_empty(),
+        "Dismiss must clear both the surgical row AND any stale submitted; got {} rows",
+        remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn needs_attention_dismiss_preserves_fresh_submitted_for_same_issue() {
+    // Counterpart guard: a `submitted` row that's FRESH (under 6h)
+    // is potentially still downloading. Dismissing an unrelated
+    // failure row MUST NOT purge it. Only stale submitted rows go.
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_and_issue(&app, "Saga", "1").await;
+    let failed_id = pull_attempt_repo::insert(
+        &app.state.db,
+        failed_attempt(series, issue, Some("rel-old")),
+    )
+    .await
+    .unwrap()
+    .id;
+    let fresh_id = pull_attempt_repo::insert(
+        &app.state.db,
+        longbox_db::NewPullAttempt {
+            series_id: series,
+            issue_id: issue,
+            indexer_id: None,
+            release_id: Some("rel-fresh".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-fresh".into()),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    // Default attempted_at = now → well within the 6h threshold.
+
+    let resp = app
+        .request(empty_request(
+            "DELETE",
+            &format!("/api/needs-attention/pull-failures/{failed_id}"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let remaining = pull_attempt_repo::list_for_issue(&app.state.db, series, issue)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "fresh submitted must survive");
+    assert_eq!(remaining[0].id, fresh_id);
+    assert_eq!(remaining[0].status, "submitted");
+}
+
+#[tokio::test]
 async fn needs_attention_dismiss_unknown_id_is_a_no_op() {
     // A stale UI dismissing a row that was already cleared (retry,
     // bulk-clear, a race with another tab) gets a clean 204 — the

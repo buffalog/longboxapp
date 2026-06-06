@@ -1316,6 +1316,7 @@ dependencies = [
  "longbox-newznab",
  "longbox-webhooks",
  "pretty_assertions",
+ "sqlx",
  "thiserror 1.0.69",
  "time",
  "tokio",

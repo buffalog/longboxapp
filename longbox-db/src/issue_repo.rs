@@ -195,8 +195,12 @@ where
              AND NOT EXISTS (
                SELECT 1 FROM pull_attempts pa
                WHERE pa.issue_id = i.id
-                 AND (pa.status IN ('pending', 'submitted', 'grabbed')
-                      OR pa.retry_count >= 3)
+                 AND (
+                   pa.status IN ('pending', 'grabbed')
+                   OR (pa.status = 'submitted'
+                       AND pa.attempted_at >= datetime('now', '-6 hours'))
+                   OR pa.retry_count >= 3
+                 )
              )
            ORDER BY i.cover_date ASC, i.id ASC"#,
         series_id

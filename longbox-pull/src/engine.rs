@@ -620,10 +620,32 @@ pub async fn sweep_single_issue(
         return Ok(summary);
     }
 
+    // Stale-submitted purge — the load-bearing fix for the
+    // "Search-missing does nothing" symptom. The poll loop
+    // (`poll_in_flight`) only runs during a scheduled `sweep()`, and
+    // even then SAB may have evicted ancient job handles, leaving
+    // `submitted` rows orphaned in the DB. Those rows then fail the
+    // in-flight guard below and block every retry indefinitely.
+    // Delete any `submitted` row for THIS issue older than
+    // `STALE_SUBMITTED_HOURS` before the guard runs so the user's
+    // explicit retry doesn't get swallowed.
+    let purged = pull_attempt_repo::purge_stale_submitted_for_issue(db, series_id, issue_id).await?;
+    if purged > 0 {
+        tracing::info!(
+            target: "longbox_pull",
+            series_id,
+            issue_id,
+            purged,
+            "pull.stale_submitted_purged"
+        );
+    }
+
     // In-flight guard. Replaces the unique-key absorption I had wrongly
     // assumed existed at the schema level. `pull_attempts` carries
     // multiple rows per (series_id, issue_id) by design (retry history),
     // so a duplicate INSERT here would create a real duplicate submit.
+    // Failure-class rows (`failed`, `mismatched`) don't block — the
+    // user clicking Search IS the retry signal for those.
     let prior = pull_attempt_repo::list_for_issue(db, series_id, issue_id).await?;
     if prior
         .iter()
