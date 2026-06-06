@@ -131,7 +131,7 @@ async fn caught_file_with_an_in_flight_attempt_is_attributed_to_the_pull_engine(
     let source = f.watch.path().join("Saga 001.cbz");
     write_saga_1(&source);
 
-    let outcome = process_one(&source, &f.library_root, f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = process_one(&source, &f.library_root, f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     let Outcome::Imported {
@@ -165,7 +165,7 @@ async fn caught_file_without_an_attempt_is_an_ordinary_phase_b_catch() {
     let source = f.watch.path().join("Saga 001.cbz");
     write_saga_1(&source);
 
-    let outcome = process_one(&source, &f.library_root, f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = process_one(&source, &f.library_root, f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     let Outcome::Imported { file_id, .. } = outcome else {

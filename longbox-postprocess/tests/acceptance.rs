@@ -184,6 +184,16 @@ where
 async fn six_file_acceptance_smoke() {
     let f = seed_acceptance_fixture().await;
 
+    // Stub CBZs in this test are ~200 bytes; the seeded
+    // `min_file_size_mb=35` would reject every one of them. Override
+    // the setting to 0 (no floor) before the watcher starts so the
+    // test exercises the normal import path. Production deployments
+    // keep the seeded 35 — see `tests/pipeline.rs` for the dedicated
+    // RejectedTooSmall regression.
+    longbox_db::settings_repo::set(&f.db, "min_file_size_mb", "0")
+        .await
+        .unwrap();
+
     // --- Pre-stage state that must exist BEFORE start() ---
 
     // For file (e)'s conflict: a real file already sitting at the

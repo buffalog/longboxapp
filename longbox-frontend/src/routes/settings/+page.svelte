@@ -45,6 +45,22 @@
   let pullKeywordsSaving = $state(false);
   let hostLibraryPathDraft = $state(data.settings.host_library_path);
   let hostLibraryPathSaving = $state(false);
+  let minFileSizeMbDraft = $state(String(data.settings.min_file_size_mb));
+  let minFileSizeMbSaving = $state(false);
+
+  /// Client-side megabyte validation. Mirrors the backend's
+  /// `parse_megabytes`: whole number 0..=10240. The `0` sentinel
+  /// disables the size floor entirely (Phase B accepts everything).
+  function validateMegabytes(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (trimmed === '') return 'Enter a whole number of MB (use 0 to disable the floor).';
+    if (!/^\d+$/.test(trimmed))
+      return `'${raw}' must be a whole number — fractional MB aren't accepted.`;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return `'${raw}' is not a valid number.`;
+    if (n > 10240) return `Must be ≤ 10240 MB (10 GB); got ${n}.`;
+    return null;
+  }
 
   /// Client-side threshold validation. Mirrors the backend's
   /// `parse_threshold`: must be a finite number in [0.0, 1.0].
@@ -484,6 +500,43 @@
             aria-label="Host library path value"
           />
           <Button type="submit" loading={hostLibraryPathSaving} disabled={hostLibraryPathSaving}>
+            Save
+          </Button>
+        </form>
+      </div>
+
+      <div class="border-t border-slate-100 pt-4">
+        <h3 class="text-sm font-semibold text-slate-800">Minimum file size (MB)</h3>
+        <p class="mb-2 text-xs text-slate-500">
+          Phase B size floor. Any CBR/CBZ/CB7 arriving in the watch folder smaller than this gets
+          rejected with a WARN log and stays in <code class="font-mono">/watch/</code> — catches
+          partial/corrupt SAB deliveries (e.g. an Absolute Batman issue that should be ~50 MB
+          arriving at 16 MB with five pages). Set to <code>0</code> to disable the floor entirely.
+          Currently saved:
+          <code class="font-mono">{s.min_file_size_mb} MB</code>.
+        </p>
+        <form
+          class="flex gap-2"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void saveTunable(
+              'min_file_size_mb',
+              minFileSizeMbDraft,
+              (b) => (minFileSizeMbSaving = b),
+              validateMegabytes,
+              'Minimum file size saved.'
+            );
+          }}
+        >
+          <input
+            type="text"
+            inputmode="numeric"
+            bind:value={minFileSizeMbDraft}
+            disabled={minFileSizeMbSaving}
+            class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            aria-label="Minimum file size MB value"
+          />
+          <Button type="submit" loading={minFileSizeMbSaving} disabled={minFileSizeMbSaving}>
             Save
           </Button>
         </form>

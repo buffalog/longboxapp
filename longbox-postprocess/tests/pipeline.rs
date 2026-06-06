@@ -134,6 +134,12 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
     // self-consistency invariant: total visited files == sum of
     // per-bucket counters.
     let f = seed_basic_fixture().await;
+    // Stub CBZs are 200 bytes; disable the 35 MB size floor so the
+    // test exercises the normal import path. See the dedicated
+    // RejectedTooSmall test for size-floor coverage.
+    longbox_db::settings_repo::set(&f.db, "min_file_size_mb", "0")
+        .await
+        .unwrap();
 
     // Matched → Imported. Filename parses to Saga #1, which the
     // fixture's series + issue match exactly.
@@ -248,7 +254,7 @@ async fn imports_owned_via_dot_separated_nzb_style_basename() {
         .join("Saga.001.(2012).(Digital).(Empire).cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     match outcome {
@@ -288,7 +294,7 @@ async fn imports_owned_via_filename_match() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
 
@@ -354,7 +360,7 @@ async fn imports_owned_cbr_converting_to_cbz() {
     let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
     filetime::set_file_mtime(&source, filetime::FileTime::from_system_time(earlier)).ok();
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
 
@@ -395,7 +401,7 @@ async fn overwrites_existing_comicinfo_in_source() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, Some(stale_xml));
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     let target = match outcome {
@@ -434,6 +440,9 @@ async fn sweep_now_honors_live_match_confidence_threshold_from_settings() {
     // (0.10) so even the weak filename-only path classifies as owned,
     // and confirm the file imports rather than skipping.
     let f = seed_basic_fixture().await;
+    longbox_db::settings_repo::set(&f.db, "min_file_size_mb", "0")
+        .await
+        .unwrap();
     longbox_db::settings_repo::set(&f.db, "match_confidence_threshold", "0.10")
         .await
         .unwrap();
@@ -461,6 +470,86 @@ async fn sweep_now_honors_live_match_confidence_threshold_from_settings() {
 }
 
 #[tokio::test]
+async fn rejects_files_below_min_size_threshold_and_leaves_them_in_watch() {
+    // Phase B size floor: a CBR/CBZ smaller than `min_file_size_mb`
+    // bypasses every downstream stage (archive open, ComicInfo parse,
+    // candidate lookup) and lands as `Outcome::RejectedTooSmall`.
+    // The file STAYS in /watch/ — same disposition as Skipped — so
+    // the operator can decide whether to replace the bad download or
+    // delete it. The stub CBZ here is well under 35 MB (~200 bytes),
+    // so a 35 MB threshold trips the floor unambiguously.
+    let f = seed_basic_fixture().await;
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        35,
+    )
+    .await
+    .unwrap();
+
+    match outcome {
+        Outcome::RejectedTooSmall { size, threshold_mb } => {
+            assert!(
+                size < 35 * 1024 * 1024,
+                "fixture must be under the threshold; got {size} bytes"
+            );
+            assert_eq!(threshold_mb, 35);
+        }
+        other => panic!("expected RejectedTooSmall, got {other:?}"),
+    }
+
+    assert!(
+        source.exists(),
+        "rejected source must stay in /watch/ for operator review"
+    );
+    let row = longbox_db::file_repo::find_by_path(
+        &f.db,
+        f.library_root_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+    )
+    .await
+    .unwrap();
+    assert!(
+        row.is_none(),
+        "rejected files must not create catalog rows"
+    );
+}
+
+#[tokio::test]
+async fn min_size_zero_disables_the_floor_for_test_fixtures() {
+    // The 0 sentinel is what every other test passes — explicit
+    // confirmation it's a no-op so future test authors don't get
+    // surprised by an unexpected RejectedTooSmall on their 200-byte
+    // stubs. With `min_file_size_mb = 0`, the size check
+    // (`size < 0 * 1024 * 1024`) is never satisfied; the file flows
+    // through to the normal import path.
+    let f = seed_basic_fixture().await;
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, Outcome::Imported { .. }),
+        "min_size=0 must not reject; got {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn unmatched_file_stays_in_watch_folder() {
     // Per Jeremy's directive: the `_unsorted/` parking lot is gone.
     // When Phase B can't match a downloaded file to a catalog series,
@@ -472,7 +561,7 @@ async fn unmatched_file_stays_in_watch_folder() {
     let source = f._watch.path().join("Totally Unknown 042.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     let reason = match outcome {
@@ -527,7 +616,7 @@ async fn conflict_cleans_source_and_preserves_target() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     match outcome {
@@ -568,7 +657,7 @@ async fn conflict_cleanup_skips_when_source_is_target() {
     write_cbz(&at_target, None);
     let bytes_before = std::fs::read(&at_target).unwrap();
 
-    let outcome = processor::process_one(&at_target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&at_target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     assert!(matches!(outcome, Outcome::Conflict { .. }));
@@ -593,7 +682,7 @@ async fn idempotent_reprocessing() {
 
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
-    let first = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let first = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     let target = match first {
@@ -604,7 +693,7 @@ async fn idempotent_reprocessing() {
     // Reprocess the target itself: it already lives in the library
     // and has a catalog row. process_one should detect the conflict
     // (target exists at its own path).
-    let outcome2 = processor::process_one(&target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome2 = processor::process_one(&target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
     // Already-at-target reprocessing surfaces as Conflict (the target
@@ -632,7 +721,7 @@ async fn rewrite_failure_surfaces_as_outcome_failed() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD)
+    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
         .await
         .unwrap();
 

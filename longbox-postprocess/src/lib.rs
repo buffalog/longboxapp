@@ -229,6 +229,24 @@ async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
     Ok(value)
 }
 
+/// Read the live `min_file_size_mb` setting. Phase B rejects any
+/// incoming CBR/CBZ/CB7 smaller than this many megabytes — catches
+/// partial/corrupt SAB deliveries that look valid at the archive
+/// level. Default `MIN_FILE_SIZE_MB_DEFAULT` (35) if the row is
+/// absent / unparseable; the 20260607 migration seeds the row so
+/// production never hits that fallback.
+const MIN_FILE_SIZE_MB_DEFAULT: u32 = 35;
+
+async fn load_min_file_size_mb(db: &longbox_db::Pool) -> Result<u32> {
+    let value = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_MIN_FILE_SIZE_MB,
+        MIN_FILE_SIZE_MB_DEFAULT,
+    )
+    .await?;
+    Ok(value)
+}
+
 /// Outcome tally for [`sweep_now`]. Mirrors the [`processor::Outcome`]
 /// enum collapsed to per-bucket counts. Serialized as the response body
 /// of `POST /api/postprocess/trigger` so the frontend can render a
@@ -284,6 +302,7 @@ pub async fn sweep_now(
     // fallback only applies when the row is absent/unparseable
     // (initial-boot state, never after the first save).
     let owned_threshold = load_owned_threshold(&db).await?;
+    let min_file_size_mb = load_min_file_size_mb(&db).await?;
 
     let watch_path_buf = watch_path.to_path_buf();
     let walk_root = watch_path_buf.clone();
@@ -323,6 +342,7 @@ pub async fn sweep_now(
             library_root_id,
             &db,
             owned_threshold,
+            min_file_size_mb,
         )
         .await
         {
@@ -330,7 +350,14 @@ pub async fn sweep_now(
                 use processor::Outcome;
                 match &outcome {
                     Outcome::Imported { .. } => summary.processed += 1,
-                    Outcome::Skipped { .. } => summary.skipped += 1,
+                    // RejectedTooSmall tallies under `skipped` for the
+                    // wire response — same user-facing disposition
+                    // (file stays in /watch/, no DB row). The WARN log
+                    // carries the size + threshold detail for the
+                    // operator who wants to know WHY it was skipped.
+                    Outcome::Skipped { .. } | Outcome::RejectedTooSmall { .. } => {
+                        summary.skipped += 1
+                    }
                     Outcome::Conflict { .. } => summary.conflicts += 1,
                     Outcome::Failed { .. } => summary.failed += 1,
                 }
@@ -649,8 +676,26 @@ async fn consumer_task(
                 longbox_core::DEFAULT_MATCH_THRESHOLD
             }
         };
-        match processor::process_one(&path, &library_root, library_root_id, &db, owned_threshold)
-            .await
+        let min_file_size_mb = match load_min_file_size_mb(&db).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_postprocess",
+                    err = %e,
+                    "phase_b.min_file_size_load_failed (falling back to compiled default)"
+                );
+                MIN_FILE_SIZE_MB_DEFAULT
+            }
+        };
+        match processor::process_one(
+            &path,
+            &library_root,
+            library_root_id,
+            &db,
+            owned_threshold,
+            min_file_size_mb,
+        )
+        .await
         {
             Ok(outcome) => {
                 // Imported is the only outcome that removes the source
@@ -740,8 +785,11 @@ fn apply_outcome_to_cache(
 ) {
     use processor::Outcome;
     match outcome {
-        Outcome::Imported { .. } | Outcome::Skipped { .. } | Outcome::Conflict { .. } => {
-            // Three non-Failed outcomes, all evict any prior pending-
+        Outcome::Imported { .. }
+        | Outcome::Skipped { .. }
+        | Outcome::Conflict { .. }
+        | Outcome::RejectedTooSmall { .. } => {
+            // Four non-Failed outcomes, all evict any prior pending-
             // intervention entry:
             //   - Imported: moved + catalogued, nothing to intervene on.
             //   - Skipped: stays in /watch/; the file is visible in
@@ -751,6 +799,9 @@ fn apply_outcome_to_cache(
             //   - Conflict: cleanup_conflict_source removed the source
             //     (or logged conflict_cleanup_failed); library has
             //     canonical bytes either way.
+            //   - RejectedTooSmall: same /watch/-as-surface disposition
+            //     as Skipped; the WARN `phase_b.rejected_too_small`
+            //     log carries the size + threshold detail.
             cache.remove_by_source_path(source);
         }
         Outcome::Failed {

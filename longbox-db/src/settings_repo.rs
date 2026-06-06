@@ -118,6 +118,17 @@ pub const KEY_METRON_CALENDAR_CACHE_TTL_HOURS: &str = "metron_calendar_cache_ttl
 /// changing it requires a container restart.
 pub const KEY_PHASE_B_POLL_INTERVAL_SECONDS: &str = "phase_b_poll_interval_seconds";
 
+/// Minimum file size in MEGABYTES the Phase B processor accepts.
+/// Anything smaller is presumed a partial/corrupt SAB delivery
+/// (e.g. an `Absolute Batman` issue that should be 50+ MB arriving
+/// at 16 MB with five rendered pages) and gets rejected: WARN log,
+/// no DB row, file stays in /watch/ so the operator can investigate
+/// or replace the broken download. Default 35 — catches the most
+/// common pad-and-pray failure modes while still allowing legitimate
+/// ashcans / single-issue digital comics that come in around 30-50
+/// MB. Phase B reads per-file so tuning needs no restart.
+pub const KEY_MIN_FILE_SIZE_MB: &str = "min_file_size_mb";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,

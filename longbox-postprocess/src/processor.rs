@@ -43,17 +43,18 @@ const STABILITY_WINDOW: Duration = Duration::from_secs(2);
 ///
 /// `owned_threshold` is the live `match_confidence_threshold` value
 /// the caller read from `settings` (see [`load_owned_threshold`]).
-/// Passing it as a parameter — rather than reading it inside each
-/// process_one call — lets `sweep_now` amortize the SELECT across the
-/// whole batch and keeps `process_one` pure-ish (one less DB roundtrip
-/// per file). The scanner uses the identical pattern via
-/// `Scanner::load_match_threshold`.
+/// `min_file_size_mb` is the size floor — anything smaller is
+/// presumed a partial/corrupt SAB delivery and gets rejected with a
+/// WARN log; see [`load_min_file_size_mb`]. Both are passed as
+/// parameters so `sweep_now` amortizes the SELECT across the whole
+/// batch and `process_one` stays pure-ish.
 pub async fn process_one(
     source: &Path,
     library_root: &Path,
     library_root_id: i64,
     db: &Pool,
     owned_threshold: f64,
+    min_file_size_mb: u32,
 ) -> Result<Outcome> {
     let started_at = std::time::Instant::now();
     wait_for_stability(source).await;
@@ -66,6 +67,23 @@ pub async fn process_one(
         Err(e) => return Err(PostprocessError::Io(e)),
     };
     let size = meta.len() as i64;
+
+    // Size floor — reject suspicious partial deliveries BEFORE any
+    // expensive work (archive open, ComicInfo parse, candidate
+    // lookup). A complete-looking CBR that's 16 MB when it should be
+    // 50+ MB is almost always SAB handing off a half-downloaded job.
+    // Operator action: investigate or replace the bad NZB. File
+    // stays in /watch/.
+    let threshold_bytes = i64::from(min_file_size_mb) * 1024 * 1024;
+    if size < threshold_bytes {
+        let outcome = Outcome::RejectedTooSmall {
+            size,
+            threshold_mb: min_file_size_mb,
+        };
+        log_outcome(&outcome, started_at, source);
+        return Ok(outcome);
+    }
+
     let mtime = system_time_to_offset(meta.modified()?);
 
     let comic_info_xml = read_comic_info_xml(source)?;
@@ -194,6 +212,14 @@ pub enum Outcome {
         target: PathBuf,
         size: i64,
     },
+    /// File size is below `min_file_size_mb` — almost certainly a
+    /// partial/corrupt SAB delivery (e.g. an Absolute Batman issue
+    /// that should be 50+ MB arriving at 16 MB with five rendered
+    /// pages). The file stays in the watch folder; no archive open,
+    /// no ComicInfo parse, no candidate lookup happened. WARN log
+    /// `phase_b.rejected_too_small` carries the size + threshold so
+    /// the operator can investigate or replace the bad download.
+    RejectedTooSmall { size: i64, threshold_mb: u32 },
 }
 
 async fn wait_for_stability(source: &Path) {
@@ -639,6 +665,27 @@ fn log_outcome(outcome: &Outcome, started_at: std::time::Instant, source: &Path)
                 reason = ?reason,
                 duration_ms,
                 "phase_b.failed"
+            );
+        }
+        Outcome::RejectedTooSmall { size, threshold_mb } => {
+            // WARN at default verbosity per the spec — the operator
+            // needs to see when SAB delivers a half-downloaded file.
+            // Format: `file=X size=NMB threshold=NMB` matches the
+            // user-stated log shape.
+            let size_mb = *size / (1024 * 1024);
+            let basename = source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unparseable basename>");
+            tracing::warn!(
+                target: "longbox_postprocess",
+                file = basename,
+                source = %source.display(),
+                size_mb,
+                size_bytes = size,
+                threshold_mb,
+                duration_ms,
+                "phase_b.rejected_too_small (left in watch folder)"
             );
         }
     }
