@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"exists!: i64\"\n           FROM pull_attempts\n           WHERE issue_id = ?\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "14dd25c34da1a41dc0c644d9a4b54a87a9aceeb5faaab6e4bcc143750dfb6dd7"
+}
