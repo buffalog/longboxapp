@@ -176,6 +176,24 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     // Phase 1: poll in-flight attempts (needs only the downloader).
     poll_in_flight(db, &downloader, &mut summary).await?;
 
+    // Phase 1.5: workspace-wide stale-`grabbed` purge. A `grabbed`
+    // row whose Phase B import never landed (SAB silently failed,
+    // file got cleaned out of /watch/, source archive rejected as
+    // malformed) blocks the issue from `list_pull_candidates`
+    // forever — the candidate SQL excludes any issue with a
+    // `pending` or `grabbed` row regardless of age. Purging
+    // `grabbed`>24h with no owned+present file re-opens the issue
+    // for retry. Audit rows for successful pulls (owned file
+    // present) are preserved.
+    let purged_grabbed = pull_attempt_repo::purge_stale_grabbed_workspace(db).await?;
+    if purged_grabbed > 0 {
+        tracing::info!(
+            target: "longbox_pull",
+            purged = purged_grabbed,
+            "pull.stale_grabbed_purged_workspace"
+        );
+    }
+
     // Phase 2: submit new pulls. Needs at least one enabled indexer.
     let indexer_rows = indexer_config_repo::list_enabled(db).await?;
     if indexer_rows.is_empty() {
@@ -638,6 +656,28 @@ pub async fn sweep_single_issue(
             issue_id,
             purged,
             "pull.stale_submitted_purged"
+        );
+    }
+
+    // Stale-grabbed purge — same symptom shape ("Search-missing does
+    // nothing"), one layer further down the pipeline. A `grabbed`
+    // row that never materialized as an owned file (SAB silently
+    // failed, /watch/ delivery got cleaned, source archive rejected
+    // by Phase B) blocks the in-flight guard below indefinitely.
+    // Delete any `grabbed` row for THIS issue older than
+    // `STALE_GRABBED_HOURS` so the retry actually fires. Owned-issue
+    // audit rows are preserved by the SQL's NOT EXISTS clause —
+    // belt-and-suspenders with the `has_owned_present_file` check
+    // above (which already short-circuited for owned issues).
+    let purged_grabbed =
+        pull_attempt_repo::purge_stale_grabbed_for_issue(db, series_id, issue_id).await?;
+    if purged_grabbed > 0 {
+        tracing::info!(
+            target: "longbox_pull",
+            series_id,
+            issue_id,
+            purged = purged_grabbed,
+            "pull.stale_grabbed_purged"
         );
     }
 

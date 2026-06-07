@@ -612,6 +612,140 @@ async fn sweep_single_issue_purges_stale_submitted_before_in_flight_guard() {
 }
 
 #[tokio::test]
+async fn sweep_single_issue_purges_stale_grabbed_when_unowned() {
+    // Live-DB regression: Absolute Batman #15-19 sat at status='grabbed'
+    // for 4 days with zero owned files. SAB had silently failed (or
+    // Phase B never picked the file up) and the row blocked
+    // `sweep_single_issue`'s in-flight guard forever. Fix: purge
+    // grabbed rows older than STALE_GRABBED_HOURS (24h) for the issue
+    // when no owned+present file backs them.
+    let (db, series_id, issue_id) = seed_catalog().await;
+
+    // Seed a `grabbed` row backdated to 48h ago — past the 24h
+    // threshold. No owned file is inserted, so it's a phantom grab.
+    let stale = pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-grabbed-but-never-imported".into()),
+            status: "grabbed".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-vanished".into()),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-48 hours') WHERE id = ?")
+        .bind(stale.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Wire real services so the retry can actually submit.
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    indexer_returns(&indexer, rss_one("guid-fresh-after-purge")).await;
+    sab_accepts(&downloader, "nzo-fresh-after-purge").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.submitted, 1,
+        "must submit the retry after purging the stale grabbed row"
+    );
+
+    // Stale grabbed row gone, fresh `submitted` row in its place.
+    let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "exactly one row after purge + retry");
+    assert_ne!(after[0].id, stale.id, "stale grabbed row must have been deleted");
+    assert_eq!(after[0].status, "submitted");
+    assert_eq!(after[0].release_id.as_deref(), Some("guid-fresh-after-purge"));
+}
+
+#[tokio::test]
+async fn sweep_single_issue_preserves_grabbed_audit_when_issue_is_owned() {
+    // Counterpart to the stale-grabbed purge: a `grabbed` row that
+    // DOES have a matching owned+present file is the audit trail of
+    // a successful pull. Its release_id feeds the exclusion list on
+    // any future re-pulls. The SQL's NOT EXISTS clause is what
+    // protects it. (The skip-owned guard in sweep_single_issue
+    // short-circuits before purge runs in this path; this test
+    // proves the purge SQL itself is also safe by exercising the
+    // dismiss / workspace paths via a direct call.)
+    let (db, series_id, issue_id) = seed_catalog().await;
+
+    // Seed a `grabbed` row backdated past the threshold.
+    let preserved = pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-real-successful-pull".into()),
+            status: "grabbed".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-real".into()),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-72 hours') WHERE id = ?")
+        .bind(preserved.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Catalog the issue as owned-and-present — this row is the
+    // RESULT of the successful pull above.
+    let now = time::OffsetDateTime::now_utc();
+    let now_pdt = time::PrimitiveDateTime::new(now.date(), now.time());
+    file_repo::insert(
+        &db,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id: 1,
+            path_relative: "Saga (2012)/Saga (2012) 001.cbz".into(),
+            size_bytes: 4096,
+            mtime: now_pdt,
+            last_scanned_at: now_pdt,
+            match_method: "phase_b".into(),
+            match_confidence: 1.0,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: now_pdt,
+            matched_at: Some(now_pdt),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Call the per-issue purge directly — guard the SQL, not the
+    // sweep-level short-circuit.
+    let purged = pull_attempt_repo::purge_stale_grabbed_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(purged, 0, "owned issue's grabbed audit row must be preserved");
+
+    let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, preserved.id, "audit row must survive");
+    assert_eq!(after[0].status, "grabbed");
+}
+
+#[tokio::test]
 async fn sweep_single_issue_still_blocks_on_fresh_submitted_under_threshold() {
     // Counterpart to the stale-purge test: a `submitted` row that's
     // FRESH (under 6h) MUST still block. The poll loop may yet

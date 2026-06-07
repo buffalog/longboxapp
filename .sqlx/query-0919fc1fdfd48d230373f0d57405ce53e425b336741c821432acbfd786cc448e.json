@@ -41,7 +41,7 @@
       {
         "name": "awaiting_first_download!: bool",
         "ordinal": 7,
-        "type_info": "Null"
+        "type_info": "Int"
       },
       {
         "name": "auto_tidy_due_at: _",
