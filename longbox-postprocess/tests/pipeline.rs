@@ -750,6 +750,102 @@ async fn unmatched_file_stays_in_watch_folder() {
 }
 
 #[tokio::test]
+async fn sub_threshold_match_imports_when_pull_attempt_exists() {
+    // Trust override: when Phase B's local matcher scores below the
+    // owned threshold, but the pull engine had previously asked for
+    // this issue (any pull_attempts row, any status), the file is
+    // accepted as Owned. The pull engine's indexer-time series-title
+    // filter already cleared the title; the local floor would be
+    // double-jeopardy. See live-log examples in the bug report:
+    // "Y The Last Man" at 0.71, "Hell to Pay" at 0.73, "DC K.O. ..."
+    // at 0.67 — all real series, all sub-threshold under 0.75, all
+    // originally requested by the pull engine.
+    let f = seed_basic_fixture().await;
+
+    // File whose filename parses to "Saga" issue 1 — same series as
+    // the seeded catalog row. Force a sub-threshold local score by
+    // passing an impossibly strict threshold (0.99). Without the
+    // pull_attempt this should land as Skipped (NeedsReview tier);
+    // with the pull_attempt it must Import.
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    longbox_db::pull_attempt_repo::insert(
+        &f.db,
+        longbox_db::NewPullAttempt {
+            series_id: f.series_id,
+            issue_id: f.issue_id,
+            indexer_id: None,
+            release_id: Some("guid-saga-001-pulled".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-saga-001".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        0.99, // tighter than any real local score → forces NeedsReview
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Imported {
+                series_id,
+                issue_id,
+                ..
+            } if series_id == f.series_id && issue_id == f.issue_id
+        ),
+        "sub-threshold match must import when a pull_attempt exists; got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn sub_threshold_match_skipped_when_no_pull_attempt_exists() {
+    // Counterpart: the trust override is gated on pull-attempt
+    // history. A sub-threshold match for an issue we did NOT ask
+    // for stays Skipped — the file might be the right series at low
+    // confidence, but it might also be wrong-volume drift. The
+    // existing 0.75-floor behavior is preserved for organic
+    // arrivals.
+    let f = seed_basic_fixture().await;
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    // No pull_attempt row inserted.
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        0.99,
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome, Outcome::Skipped { .. }),
+        "sub-threshold match without pull_attempt history must stay Skipped; got {outcome:?}"
+    );
+    assert!(
+        source.exists(),
+        "Skipped file must stay in /watch/"
+    );
+}
+
+#[tokio::test]
 async fn conflict_cleans_source_and_preserves_target() {
     // Phase B detects target_abs.exists() → Conflict. The library
     // already owns canonical bytes for this (series, issue), so

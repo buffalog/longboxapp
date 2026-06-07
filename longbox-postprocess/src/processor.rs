@@ -178,8 +178,19 @@ pub async fn process_one(
         owned_threshold,
     );
 
-    let outcome = match (match_result.issue_id, status) {
-        (Some(issue_id), FileStatus::Owned) => {
+    // Pull-engine trust override: a sub-threshold match for an issue
+    // we ourselves asked an indexer for is accepted as Owned. The
+    // pull engine already cleared the series-title similarity
+    // filter at submit time, so the local confidence floor is
+    // redundant evidence we can afford to skip. See
+    // `pull_attempt_repo::issue_has_attempt` for the rationale.
+    let trust_via_pull = match match_result.issue_id {
+        Some(id) => pull_attempt_repo::issue_has_attempt(db, id).await?,
+        None => false,
+    };
+
+    let outcome = match (match_result.issue_id, status, trust_via_pull) {
+        (Some(issue_id), FileStatus::Owned, _) => {
             import_as_owned(
                 source,
                 issue_id,
@@ -191,14 +202,35 @@ pub async fn process_one(
             )
             .await?
         }
-        (Some(_), _) => Outcome::Skipped {
+        (Some(issue_id), _, true) => {
+            tracing::info!(
+                target: "longbox_postprocess",
+                source = %source.display(),
+                issue_id,
+                confidence = match_result.confidence,
+                threshold = owned_threshold,
+                method = ?match_result.method,
+                "phase_b.match_trusted_via_pull_attempt"
+            );
+            import_as_owned(
+                source,
+                issue_id,
+                library_root,
+                library_root_id,
+                size,
+                mtime,
+                db,
+            )
+            .await?
+        }
+        (Some(_), _, false) => Outcome::Skipped {
             reason: format!(
                 "needs-review-tier match for series hint {hint:?} \
                  (confidence={:.2}, method={:?}); below owned threshold {:.2}",
                 match_result.confidence, match_result.method, owned_threshold
             ),
         },
-        (None, _) => Outcome::Skipped {
+        (None, _, _) => Outcome::Skipped {
             reason: format!(
                 "no catalog match for series hint {hint:?} \
                  (candidates considered: {}, year_hint: {:?})",
@@ -376,8 +408,29 @@ async fn try_folder_match(
         match_result.method,
         owned_threshold,
     );
-    let issue_id = match (match_result.issue_id, status) {
-        (Some(id), FileStatus::Owned) => id,
+    // Pull-engine trust override (mirrors Tier 2 in `process_one`):
+    // a sub-threshold folder match for an issue with pull-attempt
+    // history is accepted as Owned. The pull engine's indexer-time
+    // series-title filter already cleared the title; the local
+    // floor is redundant.
+    let trust_via_pull = match match_result.issue_id {
+        Some(id) => pull_attempt_repo::issue_has_attempt(db, id).await?,
+        None => false,
+    };
+    let issue_id = match (match_result.issue_id, status, trust_via_pull) {
+        (Some(id), FileStatus::Owned, _) => id,
+        (Some(id), _, true) => {
+            tracing::info!(
+                target: "longbox_postprocess",
+                source = %source.display(),
+                folder_name,
+                issue_id = id,
+                confidence = match_result.confidence,
+                threshold = owned_threshold,
+                "phase_b.folder_match_trusted_via_pull_attempt"
+            );
+            id
+        }
         _ => {
             tracing::debug!(
                 target: "longbox_postprocess",

@@ -424,6 +424,39 @@ where
     Ok(rows)
 }
 
+/// Whether the pull engine has *ever* recorded an attempt for this
+/// issue — any status, any age. Phase B uses this as a confidence
+/// override: when a caught file's matcher score is sub-threshold but
+/// the issue carries pull-attempt history, the pull engine already
+/// verified the series at indexer time (the `q`-term and similarity
+/// filter cleared the title before the NZB was even submitted), so
+/// Phase B trusts the match regardless of the local score.
+///
+/// Catches the recurring "scene punctuation/caps don't match the
+/// catalog title verbatim" case — "Y The Last Man" vs "Y: The Last
+/// Man" landing at 0.71 confidence; "Hell to Pay" vs "Hell To Pay"
+/// at 0.73; "DC K.O. - Superman vs. Captain Atom" at 0.67. All
+/// correct matches, all rejected by the 0.75 floor, all originally
+/// requested by the pull engine.
+///
+/// Distinct from [`has_in_flight_attempt`] (which is narrower:
+/// `pending|submitted` only, used for grab/import attribution).
+pub async fn issue_has_attempt<'e, E>(executor: E, issue_id: i64) -> Result<bool>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT 1 AS "exists!: i64"
+           FROM pull_attempts
+           WHERE issue_id = ?
+           LIMIT 1"#,
+        issue_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Whether an issue has an in-flight attempt (`pending` or
 /// `submitted`). Phase B's processor calls this to decide whether a
 /// caught file should be attributed to the pull engine.
