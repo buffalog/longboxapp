@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto, invalidateAll } from '$app/navigation';
-  import { Edit3, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-svelte';
+  import { Copy, Edit3, RefreshCw, Search, Trash2 } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { setSeriesCvId } from '$lib/api/enrichment';
   import { searchSeriesNow } from '$lib/api/pull';
@@ -127,37 +127,70 @@
   /// nothing on disk to remove — and the backend's path safety guards
   /// still cleanly handle a stray folder if one happens to exist
   /// (folder absent → warn + 200; we don't surface that here).
-  /// Open the series folder in the host OS's file browser (Finder on
-  /// macOS, Explorer on Windows). The backend computes the host path
-  /// via the `host_library_path` setting prefix substitution; the
-  /// `file://` URL is whatever the host OS will resolve.
+  /// Path-copy fallback state. Populated only when the Clipboard
+  /// API write rejects (insecure context, permission denied, headless
+  /// browser without a clipboard backend). The template renders a
+  /// readonly input with this path pre-selected so the user can
+  /// Cmd+C manually. `null` keeps the fallback panel hidden.
+  let copyFallbackPath = $state<string | null>(null);
+  let copyFallbackInput = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    // Auto-select the path text whenever the fallback appears, so the
+    // user only has to press Cmd+C. `select()` is idempotent and a
+    // no-op if the element is already focused with text selected.
+    if (copyFallbackPath !== null && copyFallbackInput) {
+      copyFallbackInput.focus();
+      copyFallbackInput.select();
+    }
+  });
+
+  /// Copy the series folder path to the clipboard. The backend
+  /// substitutes the `host_library_path` prefix for the container
+  /// `library_root_path` so the copied string is the path the user's
+  /// host OS understands — paste into Finder's Cmd+Shift+G, Explorer's
+  /// address bar, a terminal `cd`, etc.
   ///
-  /// Two real constraints on this affordance:
-  ///   1) Without `host_library_path` configured the backend returns
-  ///      the container path, which `file://` can't open from the
-  ///      host (it points inside Docker). We surface that as a toast
-  ///      with a copyable path rather than a broken link.
-  ///   2) Even with the host path configured, some browsers (Chrome
-  ///      notably) block `file://` from an `http://` origin entirely.
-  ///      Safari prompts the user once; Firefox warns. The toast
-  ///      fallback keeps the path one Cmd+V away from being useful.
-  async function handleShowInFinder(): Promise<void> {
+  /// LongBox ships as a Docker container, so the old "Show in Finder"
+  /// affordance was structurally broken: neither a backend `open -R`
+  /// (Docker can't reach the host shell) nor a frontend `file://` URL
+  /// (browsers block `file://` from an `http://` origin) actually
+  /// opens Finder. Copy-to-clipboard is the affordance that genuinely
+  /// works across host OSes.
+  ///
+  /// Fallback path when Clipboard API rejects:
+  ///   - Insecure context (rare — localhost is considered secure)
+  ///   - Permission denied (Safari over LAN without explicit grant)
+  ///   - Headless / older browsers without `navigator.clipboard`
+  /// In those cases we surface the path in a readonly input below the
+  /// header actions, focused and pre-selected, so the user can finish
+  /// the copy with a manual Cmd+C.
+  async function handleCopyPath(): Promise<void> {
     try {
       const { host_path, host_path_configured } = await getSeriesFolderPath(
         data.series.id
       );
-      if (!host_path_configured) {
-        await navigator.clipboard.writeText(host_path).catch(() => {});
+      try {
+        await navigator.clipboard.writeText(host_path);
+        copyFallbackPath = null;
+        if (host_path_configured) {
+          toast.success('Path copied — use Cmd+Shift+G in Finder to open.');
+        } else {
+          // host_library_path unset → backend echoes the container
+          // path. Still useful to copy (the operator can paste it
+          // into Settings to derive a host translation), but warn
+          // so they know it's not Finder-pasteable as-is.
+          toast.warning(
+            'Container path copied — set HOST_LIBRARY_PATH in Settings for a Finder-pasteable path.'
+          );
+        }
+      } catch {
+        // Clipboard API rejected. Reveal the fallback input; the
+        // `$effect` above focuses + selects it on the next tick.
+        copyFallbackPath = host_path;
         toast.warning(
-          `host_library_path is not set. Copied container path to clipboard: ${host_path}`
+          'Could not copy automatically. Path selected below — press Cmd+C (or Ctrl+C) to copy.'
         );
-        return;
       }
-      // `file://` URLs require absolute paths with proper encoding —
-      // spaces and parens in series titles need escaping or the OS
-      // either errors or opens the wrong directory.
-      const url = `file://${encodeURI(host_path)}`;
-      window.open(url, '_blank');
     } catch (e) {
       const message =
         e instanceof ApiError ? e.message : 'Could not look up the folder path.';
@@ -277,13 +310,38 @@
         <Edit3 class="size-3.5" aria-hidden="true" />
         {data.series.cv_id ? 'Change match' : 'Fix match'}
       </Button>
-      <Button variant="secondary" size="sm" onclick={handleShowInFinder}>
-        <FolderOpen class="size-3.5" aria-hidden="true" /> Show in Finder
+      <Button variant="secondary" size="sm" onclick={handleCopyPath}>
+        <Copy class="size-3.5" aria-hidden="true" /> Copy Path
       </Button>
     </div>
     <PullListToggle seriesId={data.series.id} entry={data.pullEntry} />
   {/snippet}
 </SeriesHeader>
+
+{#if copyFallbackPath !== null}
+  <!-- Clipboard write rejected (insecure context, permission denied,
+       headless browser). Show the path in a readonly input, focused
+       and pre-selected via the `$effect` above so the user only has
+       to press Cmd+C. Dismisses on the button — no auto-hide; the
+       user may want to keep it visible while switching to Finder. -->
+  <section
+    class="mt-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3"
+    aria-label="Folder path copy fallback"
+  >
+    <input
+      bind:this={copyFallbackInput}
+      type="text"
+      readonly
+      value={copyFallbackPath}
+      aria-label="Series folder path"
+      class="flex-1 rounded-md border border-amber-300 bg-white px-3 py-1.5 font-mono text-xs shadow-sm focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+      onfocus={(e) => (e.currentTarget as HTMLInputElement).select()}
+    />
+    <Button variant="ghost" size="sm" onclick={() => (copyFallbackPath = null)}>
+      Done
+    </Button>
+  </section>
+{/if}
 
 {#if matchFixerOpen}
   <!-- Inline CV picker. Pre-populated with the series title so the

@@ -436,33 +436,38 @@ describe('series detail page', () => {
     expect(screen.getByLabelText('ComicVine match picker')).toBeInTheDocument();
   });
 
-  // -------- Show in Finder ---------------------------------------------
+  // -------- Copy Path --------------------------------------------------
+  //
+  // The old "Show in Finder" affordance was structurally broken: LongBox
+  // runs in Docker, so a backend `open -R` can't reach the host shell
+  // and a frontend `file://` URL is blocked by browsers from an
+  // `http://` origin. Replaced with a clipboard copy — the user pastes
+  // into Finder's Cmd+Shift+G to actually open the folder.
 
-  it('Show in Finder opens a file:// URL when host_library_path is configured', async () => {
+  it('Copy Path writes the host-translated path to the clipboard and toasts success', async () => {
     const { getSeriesFolderPath } = await import('$lib/api/series');
     vi.mocked(getSeriesFolderPath).mockResolvedValue({
       container_path: '/library/Adventureman (2020)',
       host_path: '/Volumes/Comics/Adventureman (2020)',
       host_path_configured: true
     });
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
     render(Page, pageData(seriesDetail({ id: 7 })));
 
-    await fireEvent.click(screen.getByRole('button', { name: /Show in Finder/ }));
+    await fireEvent.click(screen.getByRole('button', { name: /Copy Path/ }));
 
     await waitFor(() => expect(getSeriesFolderPath).toHaveBeenCalledWith(7));
-    await waitFor(() => {
-      // Spaces and parens in the title must be percent-encoded so the
-      // OS doesn't split or misroute the URL.
-      expect(openSpy).toHaveBeenCalledWith(
-        'file:///Volumes/Comics/Adventureman%20(2020)',
-        '_blank'
-      );
-    });
-    openSpy.mockRestore();
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('/Volumes/Comics/Adventureman (2020)')
+    );
+    const { toast } = await import('$lib/stores/toast.svelte');
+    expect(toast.success).toHaveBeenCalledWith(
+      expect.stringContaining('Cmd+Shift+G')
+    );
   });
 
-  it('Show in Finder falls back to clipboard copy when host_library_path is unset', async () => {
+  it('Copy Path copies the container path and warns when host_library_path is unset', async () => {
     const { getSeriesFolderPath } = await import('$lib/api/series');
     vi.mocked(getSeriesFolderPath).mockResolvedValue({
       container_path: '/library/Adventureman (2020)',
@@ -470,22 +475,45 @@ describe('series detail page', () => {
       host_path_configured: false
     });
     const writeText = vi.fn().mockResolvedValue(undefined);
-    // jsdom doesn't ship a clipboard API by default — stub it.
     Object.assign(navigator, { clipboard: { writeText } });
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
-
     render(Page, pageData(seriesDetail({ id: 7 })));
-    await fireEvent.click(screen.getByRole('button', { name: /Show in Finder/ }));
+
+    await fireEvent.click(screen.getByRole('button', { name: /Copy Path/ }));
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith('/library/Adventureman (2020)')
     );
-    // No window.open — opening file:// to the container path is useless.
-    expect(openSpy).not.toHaveBeenCalled();
     const { toast } = await import('$lib/stores/toast.svelte');
     expect(toast.warning).toHaveBeenCalledWith(
-      expect.stringContaining('host_library_path is not set')
+      expect.stringContaining('HOST_LIBRARY_PATH')
     );
-    openSpy.mockRestore();
+  });
+
+  it('Copy Path reveals a fallback input when the Clipboard API rejects', async () => {
+    const { getSeriesFolderPath } = await import('$lib/api/series');
+    vi.mocked(getSeriesFolderPath).mockResolvedValue({
+      container_path: '/library/Adventureman (2020)',
+      host_path: '/Volumes/Comics/Adventureman (2020)',
+      host_path_configured: true
+    });
+    // Simulate `navigator.clipboard.writeText` being denied (Safari
+    // over LAN, insecure context, headless without a clipboard
+    // backend). The fallback input must surface so the user can
+    // finish the copy with a manual Cmd+C.
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(Page, pageData(seriesDetail({ id: 7 })));
+
+    await fireEvent.click(screen.getByRole('button', { name: /Copy Path/ }));
+
+    await waitFor(() => {
+      const input = screen.getByLabelText('Series folder path') as HTMLInputElement;
+      expect(input.value).toBe('/Volumes/Comics/Adventureman (2020)');
+      expect(input.readOnly).toBe(true);
+    });
+    const { toast } = await import('$lib/stores/toast.svelte');
+    expect(toast.warning).toHaveBeenCalledWith(
+      expect.stringContaining('Could not copy automatically')
+    );
   });
 });
