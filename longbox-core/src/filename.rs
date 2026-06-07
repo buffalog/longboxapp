@@ -89,12 +89,12 @@ pub fn parse_with_normalization(
     parse(&normalized, patterns)
 }
 
-/// Normalize a dot-separated filename (scene-release / NZB-style) into
-/// the space-separated, parenthesized-year canonical shape the parsing
-/// patterns expect. Mirrors `longbox_newznab::normalize_nzb_title` but
-/// for filesystem basenames — extension is preserved, parens are the
-/// metadata-tag separator (vs square brackets in the NZB form), and
-/// year is captured from the FIRST `(YYYY)` in the stem.
+/// Normalize a machine-separator filename (scene-release / NZB-style)
+/// into the space-separated, parenthesized-year canonical shape the
+/// parsing patterns expect. Mirrors `longbox_newznab::normalize_nzb_title`
+/// but for filesystem basenames — extension is preserved, parens are
+/// the metadata-tag separator (vs square brackets in the NZB form),
+/// and year is captured from the FIRST `(YYYY)` in the stem.
 ///
 /// Algorithm:
 /// 1. Split the extension off (`.cbz` / `.cbr` / `.cb7`) so its dot
@@ -104,16 +104,20 @@ pub fn parse_with_normalization(
 /// 3. Replace every `(...)` and `[...]` segment with a single space.
 ///    Erases scanlator markers, group tags, and the year we just
 ///    captured (we re-emit it canonically at the end).
-/// 4. Replace dots with spaces — turns scene's separator into the
-///    canonical patterns' separator.
+/// 4. Replace dots AND underscores with spaces — turns scene's
+///    separators (both forms occur in the wild, sometimes mixed in
+///    one filename) into the canonical patterns' separator. No
+///    legitimate comic series carries `_` in its title, so the
+///    transform is safe.
 /// 5. Collapse whitespace runs.
 /// 6. Re-emit: `{cleaned} ({year}).{ext}` when year was captured,
 ///    `{cleaned}.{ext}` otherwise — the captured year goes back in
 ///    parens so the strict-year patterns (ids 2, 3, 7, 10, etc.) can
 ///    claim it.
 ///
-/// Idempotent on its own output: a canonical filename (no dots in the
-/// stem) round-trips unchanged after the first call.
+/// Idempotent on its own output: a canonical filename (no dots /
+/// underscores in the stem) round-trips unchanged after the first
+/// call.
 pub fn normalize_dotted_basename(basename: &str) -> String {
     let (stem, ext) = match basename.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() && !e.is_empty() => (s, Some(e)),
@@ -124,7 +128,7 @@ pub fn normalize_dotted_basename(basename: &str) -> String {
         .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()));
     let without_parens = dotted_paren_re().replace_all(stem, " ");
     let without_brackets = dotted_bracket_re().replace_all(&without_parens, " ");
-    let dotted = without_brackets.replace('.', " ");
+    let dotted = without_brackets.replace(['.', '_'], " ");
     let cleaned: String = dotted.split_whitespace().collect::<Vec<_>>().join(" ");
     match (year, ext) {
         (Some(y), Some(e)) => format!("{cleaned} ({y}).{e}"),
@@ -1039,6 +1043,58 @@ mod tests {
         // collapse so the patterns' `\s+` matches predictably.
         let n = normalize_dotted_basename("A.B.(2024).(Tag).(Other).cbz");
         assert_eq!(n, "A B (2024).cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_handles_underscore_separator() {
+        // Scene/NZB names sometimes use `_` instead of `.` as the
+        // token separator (older releases, certain repackagers). The
+        // normalizer treats both equivalently — comic series titles
+        // don't contain underscores, so the substitution is safe.
+        let n = normalize_dotted_basename(
+            "American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz",
+        );
+        assert_eq!(n, "American Vampire 019 (2011).cbz");
+    }
+
+    #[test]
+    fn normalize_dotted_basename_handles_mixed_underscore_and_dot() {
+        // Both separators in one filename. Both collapse to spaces.
+        let n = normalize_dotted_basename("A_B.C_D.(2024).cbz");
+        assert_eq!(n, "A B C D (2024).cbz");
+    }
+
+    #[test]
+    fn parse_with_normalization_claims_underscore_separated_name() {
+        // End-to-end via the cascade: underscores normalize to
+        // spaces, then pattern 2 (Series #NNN (YYYY)) claims it.
+        let p = parse_with_normalization(
+            "American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "American Vampire");
+        assert_eq!(p.number, "019");
+        assert_eq!(p.year, Some(2011));
+    }
+
+    #[test]
+    fn parse_with_normalization_claims_extra_paren_tag_between_number_and_year() {
+        // BRZRKR case from the bug report. An extra parenthetical
+        // tag (e.g. `(OS)` for "one-shot") sits between the issue
+        // number and the year, breaking every strict pattern's
+        // adjacency requirement. The normalizer strips ALL paren
+        // groups and re-emits with the captured year, collapsing
+        // the shape to one the strict patterns claim. Em dash in
+        // the series title rides along untouched.
+        let p = parse_with_normalization(
+            "BRZRKR \u{2013} The Bleeding Tide 01 (OS) (2025) (Digital Rip) (Hourman-DCP).cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "BRZRKR \u{2013} The Bleeding Tide");
+        assert_eq!(p.number, "01");
+        assert_eq!(p.year, Some(2025));
     }
 
     #[test]

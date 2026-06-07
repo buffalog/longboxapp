@@ -469,7 +469,14 @@ fn try_resolve_issue_number(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&file.path_relative);
-    longbox_core::parse_filename(basename, patterns).map(|p| p.number)
+    // Use the normalizing variant so scene/NZB shapes parse — covers
+    // underscore separators (`American_Vampire_019_(2011)...`),
+    // bracketed group tags between number and year tag
+    // (`BRZRKR – The Bleeding Tide 01 (OS) (2025) ...`), and the
+    // generic dot-separated form Phase B's per-file processor also
+    // uses. Without normalization Accept Match always 422'd on these
+    // shapes despite the issue number being plainly visible.
+    longbox_core::parse_filename_with_normalization(basename, patterns).map(|p| p.number)
 }
 
 #[derive(Debug, Deserialize)]
