@@ -11,12 +11,12 @@
       {
         "name": "last_scan_at: PrimitiveDateTime",
         "ordinal": 1,
-        "type_info": "Null"
+        "type_info": "Text"
       },
       {
         "name": "last_enrichment_at: PrimitiveDateTime",
         "ordinal": 2,
-        "type_info": "Null"
+        "type_info": "Text"
       },
       {
         "name": "enrichment_queue_depth!: i64",

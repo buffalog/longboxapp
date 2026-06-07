@@ -260,6 +260,83 @@ where
     Ok(result.rows_affected())
 }
 
+/// Age threshold for the "stale grabbed" purge. A `grabbed` row that's
+/// stuck this long without a matching owned+present file is presumed
+/// dead — Phase B never saw the import (SAB silently failed, the file
+/// got cleaned out of `/watch/`, the source archive was malformed and
+/// rejected, etc.). 24h is well past any reasonable SAB+Phase-B
+/// pipeline; tune up if real deployments surface false purges.
+///
+/// `grabbed` rows that DO have an owned+present file are audit history
+/// of a successful pull — those are never purged regardless of age.
+///
+/// Kept as a documented constant in Rust + hardcoded as
+/// `datetime('now', '-24 hours')` in the SQL bodies below — sqlx's
+/// compile-time check needs SQL literals, so the two MUST stay in
+/// lockstep when changed.
+pub const STALE_GRABBED_HOURS: i64 = 24;
+
+/// Delete `grabbed` pull attempts for one issue older than
+/// [`STALE_GRABBED_HOURS`] **only when the issue has no owned+present
+/// file**. The owned-file guard preserves the audit trail of
+/// successful pulls (the row's `release_id` feeds the exclusion list
+/// on future re-pulls). Returns the number of rows removed. Called
+/// from the on-demand search path (`engine::sweep_single_issue`) and
+/// from `dismiss_pull_failure` so a stuck-grabbed row never blocks a
+/// legitimate retry.
+pub async fn purge_stale_grabbed_for_issue<'e, E>(
+    executor: E,
+    series_id: i64,
+    issue_id: i64,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM pull_attempts
+           WHERE series_id = ?
+             AND issue_id = ?
+             AND status = 'grabbed'
+             AND attempted_at < datetime('now', '-24 hours')
+             AND NOT EXISTS (
+               SELECT 1 FROM files f
+               WHERE f.issue_id = pull_attempts.issue_id
+                 AND f.status = 'owned'
+                 AND f.is_present = 1
+             )"#,
+        series_id,
+        issue_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Workspace-wide counterpart to [`purge_stale_grabbed_for_issue`].
+/// One DELETE across the whole DB — the scheduled `sweep()` calls
+/// this once at the top so issues whose Phase B import never landed
+/// re-enter `list_pull_candidates`. Same owned-file guard preserves
+/// successful-pull audit rows. Returns the number of rows removed.
+pub async fn purge_stale_grabbed_workspace<'e, E>(executor: E) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM pull_attempts
+           WHERE status = 'grabbed'
+             AND attempted_at < datetime('now', '-24 hours')
+             AND NOT EXISTS (
+               SELECT 1 FROM files f
+               WHERE f.issue_id = pull_attempts.issue_id
+                 AND f.status = 'owned'
+                 AND f.is_present = 1
+             )"#
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Delete an issue's failure-class pull attempts (`'failed'` and
 /// `'mismatched'`) — the "Retry" un-park. With the failure history gone
 /// the candidate query no longer treats the issue as parked, so the

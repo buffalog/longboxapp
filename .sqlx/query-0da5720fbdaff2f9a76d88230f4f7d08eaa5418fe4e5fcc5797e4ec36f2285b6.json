@@ -31,7 +31,7 @@
       {
         "name": "owned_count!: i64",
         "ordinal": 5,
-        "type_info": "Null"
+        "type_info": "Int"
       }
     ],
     "parameters": {

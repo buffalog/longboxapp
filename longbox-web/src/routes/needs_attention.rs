@@ -90,14 +90,17 @@ async fn retry(
 /// (stale UI dismissing an already-gone row).
 ///
 /// Also purges any stale `submitted` row (>
-/// `STALE_SUBMITTED_HOURS` old) for the same issue at the same time.
-/// Without this, the user's observed workflow is:
+/// `STALE_SUBMITTED_HOURS` old) AND any stale `grabbed` row
+/// (> `STALE_GRABBED_HOURS` old without a backing owned file) for
+/// the same issue at the same time. Without this, the user's
+/// observed workflow is:
 ///   1. Dismiss the visible failure on Needs-Attention.
 ///   2. Click Search to retry.
 ///   3. Nothing happens — the issue still has an orphaned stale
 ///      `submitted` row from a prior run (poll loop never resolved
-///      it; SAB evicted the job).
-/// The dismiss action covers both rows in one trip so future
+///      it; SAB evicted the job) OR a stuck `grabbed` row whose
+///      Phase B import never landed.
+/// The dismiss action covers all three rows in one trip so future
 /// searches actually fire.
 async fn dismiss_pull_failure(
     State(state): State<AppState>,
@@ -120,6 +123,19 @@ async fn dismiss_pull_failure(
                 issue_id,
                 purged,
                 "dismiss_pull_failure.stale_submitted_purged"
+            );
+        }
+        let purged_grabbed = pull_attempt_repo::purge_stale_grabbed_for_issue(
+            &state.db, series_id, issue_id,
+        )
+        .await?;
+        if purged_grabbed > 0 {
+            tracing::info!(
+                target: "longbox_web",
+                series_id,
+                issue_id,
+                purged = purged_grabbed,
+                "dismiss_pull_failure.stale_grabbed_purged"
             );
         }
     }
