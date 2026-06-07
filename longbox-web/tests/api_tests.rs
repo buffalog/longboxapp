@@ -1731,6 +1731,47 @@ async fn match_from_cv_resolves_issue_number_from_filename() {
 }
 
 #[tokio::test]
+async fn match_from_cv_resolves_issue_number_via_normalization() {
+    // Regression: Accept Match used to 422 with
+    // `unprocessable.issue_number_unresolved` on filenames that the
+    // strict patterns wouldn't claim — underscores between tokens,
+    // extra parenthetical tags between number and year, etc. — even
+    // though `parse_filename_with_normalization` handled them just
+    // fine in Phase B. The endpoint now uses the same normalizing
+    // parser so the UX matches.
+    let app = build_test_app().await;
+    let file_id = setup_match_from_cv(
+        &app,
+        7777,
+        "American Vampire",
+        &[(80001, "1"), (80019, "19")],
+        // Underscore-separated scene shape — no whitespace, group
+        // tag at end. The strict parser (`parse_filename`) returns
+        // None on this; the normalizer collapses it to
+        // "American Vampire 019 (2011).cbz" which pattern 2 claims.
+        "American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz",
+        None,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            &format!("/api/files/{file_id}/match-from-cv"),
+            r#"{"cv_volume_id": 7777}"#,
+        ))
+        .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "underscore-separated filename must resolve via the normalizer"
+    );
+    let body = response_json(resp).await;
+    assert_eq!(body["issue"]["number"], "19");
+    assert_eq!(body["match_method"], "manual");
+}
+
+#[tokio::test]
 async fn match_from_cv_explicit_issue_number_overrides_filename() {
     let app = build_test_app().await;
     let file_id = setup_match_from_cv(

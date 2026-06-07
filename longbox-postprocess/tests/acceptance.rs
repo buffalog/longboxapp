@@ -275,11 +275,13 @@ async fn six_file_acceptance_smoke() {
     let cache_for_poll = Arc::clone(&cache);
     let c_for_poll = c_path.clone();
     let d_for_poll = d_path.clone();
+    let e_for_poll = e_path.clone();
     wait_until(Duration::from_secs(30), "pipeline to settle", || {
         let db = db.clone();
         let cache = Arc::clone(&cache_for_poll);
         let c = c_for_poll.clone();
         let d = d_for_poll.clone();
+        let e = e_for_poll.clone();
         async move {
             let saga_001 =
                 file_repo::find_by_path(&db, library_root_id, "Saga (2012)/Saga (2012) 001.cbz")
@@ -299,11 +301,15 @@ async fn six_file_acceptance_smoke() {
             // Skipped files must still be sitting at their source path
             // in /watch/. We poll on filesystem presence rather than DB
             // rows because Skipped intentionally writes no catalog row.
+            // File (e) is the conflict case — wait for its cleanup
+            // (source removed by `cleanup_conflict_source`) so the
+            // assertion below isn't racing the consumer task.
             saga_001.is_some()
                 && saga_002.is_some()
                 && watchmen_001.is_some()
                 && c.exists()
                 && d.exists()
+                && !e.exists()
                 && cache.is_empty()
         }
     })
