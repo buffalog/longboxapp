@@ -13,6 +13,7 @@ dest_abs="$(cd "$(dirname "$dest")" && pwd)/$(basename "$dest")"
 dest_dir="$(dirname "$dest_abs")"
 
 docker run --rm \
+  --user 1000:1000 \
   -v longbox-db:/src:ro \
   -v "$dest_dir":/dest \
   keinos/sqlite3 \

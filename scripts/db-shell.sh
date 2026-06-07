@@ -36,7 +36,11 @@ if [[ -z $write ]]; then
   sqlite_flags+=(-readonly)
 fi
 
-docker_args=(--rm -v "$mount_opts")
+# Run as uid:gid 1000:1000 to match the volume file ownership
+# (longbox container's `longbox` user). Without this, keinos/sqlite3
+# (uid 100) hits "Permission denied" trying to touch -wal/-shm even
+# in readonly mode — SQLite WAL needs to update shared-memory pages.
+docker_args=(--rm --user 1000:1000 -v "$mount_opts")
 (( ${#one_shot[@]} )) || docker_args+=(-it)
 
 exec docker run "${docker_args[@]}" \
