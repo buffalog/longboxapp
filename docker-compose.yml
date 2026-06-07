@@ -9,7 +9,18 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ${DB_PATH}:/data
+      # The SQLite catalog lives on a Docker-managed named volume,
+      # NOT a host bind mount. macOS Docker Desktop's virtiofs +
+      # fakeowner mount stack double-opens WAL files through
+      # incoherent mount layers, producing intermittent
+      # `database disk image is malformed` and `disk I/O error`
+      # under concurrent reads+writes. SQLite's own docs warn off
+      # networked / virtualized filesystems for this reason. The
+      # named volume lives inside the Linux VM's overlayfs —
+      # POSIX locks, mmap coherence, and fsync all behave
+      # correctly. Use `scripts/db-shell.sh` and
+      # `scripts/db-backup.sh` for host-side access.
+      - longbox-db:/data
       - ${LIBRARY_PATH}:/library
       # Phase B watch folder. Bind-mounted as writable (Step 6 will
       # move files out of it). Optional — when DOWNLOAD_WATCH_HOST is
@@ -47,3 +58,9 @@ services:
       retries: 3
       start_period: 10s
 
+volumes:
+  longbox-db:
+    # Pin the on-disk name — without this, Compose prefixes with the
+    # project name (e.g. `longbox_longbox-db`), and the host-side
+    # helpers in scripts/db-*.sh would need to track the prefix.
+    name: longbox-db
