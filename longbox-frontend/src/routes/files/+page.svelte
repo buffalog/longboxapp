@@ -39,6 +39,13 @@
   let cvSelected = $state<SeriesSearchResult | null>(null);
   let cvIssueNumberInput = $state('');
   let cvSubmitting = $state(false);
+  // Set when `match-from-cv` rejects with
+  // `unprocessable.issue_number_unresolved` (auto-detection from
+  // filename + ComicInfo both failed). Surfaces an inline prompt on
+  // the issue-number input instead of dumping the error to the
+  // generic banner; the user types the number and re-submits.
+  let cvNeedsIssueNumber = $state(false);
+  let cvIssueNumberRef: HTMLInputElement | null = $state(null);
 
   // Folder-grouped view state. `view` and `folderFilter` are URL-synced
   // (?view=flat|folder, ?folder_filter=…) so a shared link reproduces the
@@ -418,6 +425,7 @@
     cvSelected = null;
     cvIssueNumberInput = '';
     cvSubmitting = false;
+    cvNeedsIssueNumber = false;
   }
 
   function closeChange(): void {
@@ -426,6 +434,7 @@
     cvSelected = null;
     cvIssueNumberInput = '';
     cvSubmitting = false;
+    cvNeedsIssueNumber = false;
   }
 
   async function submitIssueId(): Promise<void> {
@@ -455,7 +464,20 @@
       closeChange();
       await invalidateAll();
     } catch (e) {
-      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      // Inline-prompt path: when the backend can't auto-resolve the
+      // issue number from filename + ComicInfo, surface a focused
+      // prompt on the input field rather than the generic banner so
+      // the user has an obvious path forward (type the number,
+      // click Match again).
+      if (
+        e instanceof ApiError &&
+        e.code === 'unprocessable.issue_number_unresolved'
+      ) {
+        cvNeedsIssueNumber = true;
+        requestAnimationFrame(() => cvIssueNumberRef?.focus());
+      } else {
+        error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      }
     } finally {
       cvSubmitting = false;
     }
@@ -828,15 +850,40 @@
           >Change selection</button>
         </div>
         <label class="mb-3 block">
-          <span class="mb-1 block text-xs font-medium text-slate-600">
-            Issue number (optional — leave blank to use the filename / ComicInfo)
+          <span
+            class="mb-1 block text-xs font-medium"
+            class:text-slate-600={!cvNeedsIssueNumber}
+            class:text-amber-700={cvNeedsIssueNumber}
+          >
+            {cvNeedsIssueNumber
+              ? 'Issue number? (auto-detection failed — required to continue)'
+              : 'Issue number (optional — leave blank to use the filename / ComicInfo)'}
           </span>
           <input
             type="text"
-            class="w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            class="w-full rounded-md border px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-1"
+            class:border-slate-300={!cvNeedsIssueNumber}
+            class:focus:border-blue-500={!cvNeedsIssueNumber}
+            class:focus:ring-blue-500={!cvNeedsIssueNumber}
+            class:border-amber-400={cvNeedsIssueNumber}
+            class:bg-amber-50={cvNeedsIssueNumber}
+            class:focus:border-amber-500={cvNeedsIssueNumber}
+            class:focus:ring-amber-500={cvNeedsIssueNumber}
             placeholder="e.g. 12, Annual 1, ½"
             bind:value={cvIssueNumberInput}
+            bind:this={cvIssueNumberRef}
+            oninput={() => {
+              if (cvNeedsIssueNumber && cvIssueNumberInput.trim() !== '') {
+                cvNeedsIssueNumber = false;
+              }
+            }}
           />
+          {#if cvNeedsIssueNumber}
+            <p class="mt-1 text-xs text-amber-700">
+              Could not determine the issue number from the filename or embedded ComicInfo.
+              Enter it manually and click Match again.
+            </p>
+          {/if}
         </label>
         <div class="flex justify-end gap-2">
           <Button variant="ghost" onclick={closeChange}>Cancel</Button>
