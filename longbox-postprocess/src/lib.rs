@@ -232,10 +232,19 @@ async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
 /// Read the live `min_file_size_mb` setting. Phase B rejects any
 /// incoming CBR/CBZ/CB7 smaller than this many megabytes — catches
 /// partial/corrupt SAB deliveries that look valid at the archive
-/// level. Default `MIN_FILE_SIZE_MB_DEFAULT` (35) if the row is
-/// absent / unparseable; the 20260607 migration seeds the row so
-/// production never hits that fallback.
-const MIN_FILE_SIZE_MB_DEFAULT: u32 = 35;
+/// level. Default `MIN_FILE_SIZE_MB_DEFAULT` (10) if the row is
+/// absent / unparseable; the 20260607 migration seeds the row at
+/// install, and the 20260608010000 migration lowered the live
+/// value from 35 to 10 to match this default.
+///
+/// 35 MB was too aggressive — it was rejecting legitimate older
+/// CBR/CBZ releases (Y The Last Man at 26 MB, Fear Agent at 32 MB,
+/// Scalped at 14 MB, etc.) as `phase_b.rejected_too_small`. 10 MB
+/// still catches the original load-bearing failure mode (Absolute
+/// Batman partial delivery at 16 MB, 5 rendered pages) while
+/// admitting the historical-back-catalog releases the user actually
+/// owns.
+const MIN_FILE_SIZE_MB_DEFAULT: u32 = 10;
 
 async fn load_min_file_size_mb(db: &longbox_db::Pool) -> Result<u32> {
     let value = settings_repo::get_or_default(

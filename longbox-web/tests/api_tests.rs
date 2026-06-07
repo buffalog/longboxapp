@@ -2453,17 +2453,18 @@ async fn settings_put_match_confidence_threshold_persists_and_round_trips() {
 
 #[tokio::test]
 async fn settings_put_min_file_size_mb_persists_and_round_trips() {
-    // New Phase B size-floor tunable. Default seeded by the
-    // 20260607 migration is 35; a write to 50 round-trips through the
-    // PUT/GET endpoints. The integer validator rejects fractional and
-    // negative values — covered separately by the parse_megabytes
-    // unit tests.
+    // Phase B size-floor tunable. Initial seed (20260607 migration)
+    // was 35; the 20260608010000 migration lowered it to 10 — that
+    // value is what GET surfaces. A write to 50 round-trips through
+    // the PUT/GET endpoints. The integer validator rejects
+    // fractional and negative values — covered separately by the
+    // parse_megabytes unit tests.
     let app = build_test_app().await;
 
     let body = response_json(app.request(empty_request("GET", "/api/settings")).await).await;
     assert_eq!(
-        body["min_file_size_mb"], 35,
-        "seed default from the migration must surface verbatim"
+        body["min_file_size_mb"], 10,
+        "post-migration seed value must surface verbatim"
     );
 
     let resp = app
