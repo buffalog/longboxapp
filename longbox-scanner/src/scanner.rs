@@ -832,11 +832,18 @@ fn compute_status(
     match_result: &MatchResult,
     threshold: f64,
 ) -> FileStatus {
-    // Preserve a user's Ignored decision even if the underlying file would
-    // re-classify differently.
     if let Some(row) = existing {
+        // Preserve a user's Ignored decision even if the underlying file
+        // would re-classify differently.
         if row.status == FileStatus::Ignored.as_db_str() {
             return FileStatus::Ignored;
+        }
+        // Preserve a user's Accept Match decision. Without this guard, a
+        // rescan whose Tier-2 confidence falls below `threshold` would
+        // downgrade a manually-accepted row from Owned back to NeedsReview,
+        // silently undoing the click.
+        if row.match_method == MatchMethod::Manual.as_db_str() {
+            return FileStatus::Owned;
         }
     }
     classify_status(
@@ -961,5 +968,68 @@ async fn record_outcome(db: &Pool, scan_run_id: i64, result: &Result<ScanReport,
                       "failed to persist scan_runs fail row");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use longbox_db::FileRow;
+    use time::{Date, Month, Time};
+
+    fn row(status: FileStatus, method: MatchMethod) -> FileRow {
+        let ts = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::January, 1).unwrap(),
+            Time::MIDNIGHT,
+        );
+        FileRow {
+            id: 1,
+            issue_id: Some(42),
+            library_root_id: 1,
+            path_relative: "Foo/Foo 001.cbz".into(),
+            size_bytes: 1024,
+            mtime: ts,
+            last_scanned_at: ts,
+            match_method: method.as_db_str().to_string(),
+            match_confidence: 1.0,
+            status: status.as_db_str().to_string(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: ts,
+            matched_at: Some(ts),
+        }
+    }
+
+    fn rescan_result(confidence: f64) -> MatchResult {
+        MatchResult {
+            issue_id: Some(42),
+            method: MatchMethod::FilenameRegex,
+            confidence,
+        }
+    }
+
+    #[test]
+    fn compute_status_preserves_ignored_against_high_confidence_rematch() {
+        let existing = row(FileStatus::Ignored, MatchMethod::Ignored);
+        let status = compute_status(Some(&existing), &rescan_result(0.95), 0.85);
+        assert_eq!(status, FileStatus::Ignored);
+    }
+
+    #[test]
+    fn compute_status_preserves_manual_against_low_confidence_rematch() {
+        // The regression: a user clicked Accept Match (method=Manual,
+        // status=Owned), then a rescan's Tier-2 score came in below the
+        // threshold. Without the guard, this would downgrade to NeedsReview.
+        let existing = row(FileStatus::Owned, MatchMethod::Manual);
+        let status = compute_status(Some(&existing), &rescan_result(0.40), 0.85);
+        assert_eq!(status, FileStatus::Owned);
+    }
+
+    #[test]
+    fn compute_status_classifies_normally_when_no_user_decision() {
+        let existing = row(FileStatus::Owned, MatchMethod::FilenameRegex);
+        let status = compute_status(Some(&existing), &rescan_result(0.40), 0.85);
+        assert_eq!(status, FileStatus::NeedsReview);
     }
 }
