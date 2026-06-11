@@ -283,44 +283,56 @@ async fn add_to_pull_list_bulk(
     State(state): State<AppState>,
     Json(body): Json<BulkAddBody>,
 ) -> Result<Json<BulkAddResponse>, ApiError> {
-    let mut results = Vec::with_capacity(body.items.len());
-    for item in body.items {
-        // Resolve first — failures here (e.g. Metron series without
-        // cv_id) become per-item `failed` results, not 4xx on the
-        // whole batch.
-        let resolution = resolve_subscription_target(&state, &item).await;
-        let result = match resolution {
-            Ok((cv_volume_id, metron_origin)) => match try_add_one(&state, cv_volume_id).await {
-                Ok((series_id, status)) => {
-                    if let Some(metron_series_id) = metron_origin {
-                        backfill_metron_id(&state, series_id, metron_series_id).await;
+    // Per-item failures (CV rate limit, unknown volume, Metron series
+    // with no cv_id, etc.) are captured as `failed` results and never
+    // abort the batch. Resolution + insert run concurrently — the
+    // dominant cost is the Metron API call inside
+    // `resolve_cv_id_via_metron`, so overlapping them is the win. Cap
+    // matches the prior-art `buffer_unordered(20)` calendar hydration
+    // path lower-bounded to be polite to CV's per-key rate limit.
+    let results: Vec<BulkAddResult> = stream::iter(body.items)
+        .map(|item| {
+            let state = state.clone();
+            async move {
+                let resolution = resolve_subscription_target(&state, &item).await;
+                match resolution {
+                    Ok((cv_volume_id, metron_origin)) => {
+                        match try_add_one(&state, cv_volume_id).await {
+                            Ok((series_id, status)) => {
+                                if let Some(metron_series_id) = metron_origin {
+                                    backfill_metron_id(&state, series_id, metron_series_id).await;
+                                }
+                                BulkAddResult {
+                                    cv_volume_id: Some(cv_volume_id),
+                                    metron_series_id: metron_origin,
+                                    status,
+                                    series_id: Some(series_id),
+                                    error: None,
+                                }
+                            }
+                            Err(e) => BulkAddResult {
+                                cv_volume_id: Some(cv_volume_id),
+                                metron_series_id: metron_origin,
+                                status: "failed",
+                                series_id: None,
+                                error: Some(e.to_string()),
+                            },
+                        }
                     }
-                    BulkAddResult {
-                        cv_volume_id: Some(cv_volume_id),
-                        metron_series_id: metron_origin,
-                        status,
-                        series_id: Some(series_id),
-                        error: None,
-                    }
+                    Err(e) => BulkAddResult {
+                        cv_volume_id: item.cv_volume_id,
+                        metron_series_id: item.metron_series_id,
+                        status: "failed",
+                        series_id: None,
+                        error: Some(e.to_string()),
+                    },
                 }
-                Err(e) => BulkAddResult {
-                    cv_volume_id: Some(cv_volume_id),
-                    metron_series_id: metron_origin,
-                    status: "failed",
-                    series_id: None,
-                    error: Some(e.to_string()),
-                },
-            },
-            Err(e) => BulkAddResult {
-                cv_volume_id: item.cv_volume_id,
-                metron_series_id: item.metron_series_id,
-                status: "failed",
-                series_id: None,
-                error: Some(e.to_string()),
-            },
-        };
-        results.push(result);
-    }
+            }
+        })
+        .buffer_unordered(10)
+        .collect()
+        .await;
+
     Ok(Json(BulkAddResponse { results }))
 }
 
