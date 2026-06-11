@@ -425,6 +425,43 @@ If you use Usenet and want LongBox to automatically search for and download miss
 
 **Linux users:** If "Test connection" fails with SABnzbd, `host.docker.internal` may not work on your Docker version. Either use your machine's LAN IP instead (e.g., `http://192.168.1.100:8080`), or uncomment the `extra_hosts` line in your docker-compose.yml, then restart the container.
 
+#### Optional: faster retries with the SAB post-processing script
+
+LongBox's pull engine polls SABnzbd once per sweep (daily by default), so a failed download — par2 repair failure, incomplete article count, etc. — sits for up to 24h before LongBox notices and retries with a different release. You can close that gap by giving SABnzbd a one-liner script that pings LongBox at the moment a job ends.
+
+1. Save this script as `longbox-notify.sh` in your SABnzbd scripts folder (Config → Folders → "Post-Processing Scripts Folder"):
+
+   ```bash
+   #!/bin/bash
+   # LongBox download notification script. SABnzbd invokes this on
+   # every job completion; LongBox ignores successes (Phase B catches
+   # the file in the watch folder) and immediately retries failures
+   # against a different release.
+   #
+   # SABnzbd positional args ($1..$8):
+   #   $1 final dir, $2 original name, $3 clean name, $4 msgid,
+   #   $5 category, $6 group, $7 status, $8 nzo_id
+
+   NZO_ID="$8"
+   STATUS="$7"
+
+   curl -s -X POST http://localhost:8081/api/downloader/notify \
+     -H "Content-Type: application/json" \
+     -d "{\"nzo_id\": \"${NZO_ID}\", \"status\": \"${STATUS}\", \"fail_msg\": \"\"}" \
+     > /dev/null
+
+   exit 0
+   ```
+
+2. Make it executable: `chmod +x /path/to/longbox-notify.sh`.
+
+3. In SABnzbd, set it on the category LongBox uses (Config → Categories → your category → "Script: longbox-notify.sh"), or as a global default if every job should ping LongBox.
+
+Notes:
+- The URL `http://localhost:8081` is the LongBox host port from the default `docker-compose.yml`. Match it to whatever host:port your deployment exposes.
+- The endpoint always returns 200 — it never errors back to SAB, so a misconfigured URL just silently no-ops.
+- "Completed" notifications are ignored. LongBox finds the file in the watch folder via Phase B regardless. Only failures trigger an immediate retry search.
+
 ### Metron release calendar
 
 For the release calendar feature (new issues on sale this week), create a free account at [https://metron.cloud/](https://metron.cloud/) and add your credentials to `.env`:
