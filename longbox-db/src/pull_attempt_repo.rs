@@ -402,6 +402,35 @@ where
     Ok(row.id)
 }
 
+/// Find a `submitted` pull attempt by its downloader job handle
+/// (`nzo_id` for SABnzbd, `NZBID` for NZBGet). Returns `None` when the
+/// handle isn't found or the attempt is not in `submitted` state
+/// (already failed, grabbed, etc.). Used by the
+/// `POST /downloader/notify` webhook so a SAB failure notification
+/// fires immediate retry instead of waiting for the next sweep poll.
+pub async fn find_submitted_by_handle<'e, E>(
+    executor: E,
+    handle: &str,
+) -> Result<Option<PullAttemptRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query_as!(
+        PullAttemptRow,
+        r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
+                  issue_id AS "issue_id!: i64", attempted_at AS "attempted_at: _",
+                  indexer_id, release_id, status, error_message,
+                  retry_count AS "retry_count!: i64", download_handle,
+                  unknown_polls AS "unknown_polls!: i64"
+           FROM pull_attempts
+           WHERE download_handle = ? AND status = 'submitted'"#,
+        handle
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row)
+}
+
 /// Every `submitted` attempt — the pull engine's in-flight set, polled
 /// for downloader status at the top of each sweep.
 pub async fn list_submitted<'e, E>(executor: E) -> Result<Vec<PullAttemptRow>>

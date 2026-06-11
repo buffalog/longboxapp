@@ -9,7 +9,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_db::{downloader_config_repo, DownloaderConfigRow, NewDownloaderConfig};
+use longbox_db::{
+    downloader_config_repo, pull_attempt_repo, DownloaderConfigRow, NewDownloaderConfig,
+};
 use longbox_downloader::{connect, Downloader, DownloaderAuth, DownloaderConfig};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +25,7 @@ pub fn router() -> Router<AppState> {
             get(get_config).put(put_config).delete(remove),
         )
         .route("/downloader/test", post(test))
+        .route("/downloader/notify", post(notify))
 }
 
 /// The two supported downloader kinds — the `downloader_config.kind`
@@ -173,6 +176,95 @@ async fn resolve_secret(state: &AppState, submitted: &str) -> Result<String, Api
             message: "secret is required (no stored downloader credentials to reuse)".into(),
         }),
     }
+}
+
+/// SABnzbd/NZBGet post-processing notification body. Mirrors the
+/// substitution variables a SAB script can pass back:
+///
+///   nzo_id   — job identifier (maps to `pull_attempts.download_handle`)
+///   status   — SAB's vocabulary: "Completed" | "Failed" | "Warning"
+///   fail_msg — optional fail_message string (present on failure)
+#[derive(Debug, Deserialize)]
+struct NotifyBody {
+    nzo_id: String,
+    /// SABnzbd status string. "Completed" is a no-op (Phase B handles
+    /// the file landing in the watch folder). Anything else triggers
+    /// failure processing.
+    status: String,
+    #[serde(default)]
+    fail_msg: String,
+}
+
+/// SABnzbd/NZBGet post-processing webhook. Closes the gap between SAB
+/// knowing a download failed and the next pull-sweep poll noticing —
+/// up to 24h on the daily cadence. The script SAB invokes lives in
+/// `SETUP.md`.
+///
+/// Contract: **always 200**. The downloader retries jobs whose
+/// post-processing script returned an error code, and an alarming
+/// status would cascade noise back to the user. Every branch — Completed,
+/// unknown nzo_id, already-failed attempt, even a DB write that fails
+/// inside `record_failure` — logs and returns 200.
+async fn notify(State(state): State<AppState>, Json(body): Json<NotifyBody>) -> StatusCode {
+    if body.status == "Completed" {
+        // Phase B owns the success path — the file is landing in the
+        // watch folder and the post-process pipeline will flip the
+        // attempt to `grabbed` when it imports.
+        return StatusCode::OK;
+    }
+
+    let attempt = match pull_attempt_repo::find_submitted_by_handle(&state.db, &body.nzo_id).await
+    {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            tracing::debug!(
+                target: "longbox_web",
+                nzo_id = %body.nzo_id,
+                status = %body.status,
+                "notify.no_matching_attempt"
+            );
+            return StatusCode::OK;
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_web",
+                nzo_id = %body.nzo_id,
+                err = %e,
+                "notify.lookup_failed"
+            );
+            return StatusCode::OK;
+        }
+    };
+
+    let error_message = if body.fail_msg.trim().is_empty() {
+        format!("SABnzbd status: {}", body.status)
+    } else {
+        body.fail_msg.clone()
+    };
+
+    if let Err(e) =
+        pull_attempt_repo::record_failure(&state.db, attempt.id, &error_message).await
+    {
+        tracing::warn!(
+            target: "longbox_web",
+            attempt_id = attempt.id,
+            err = %e,
+            "notify.record_failure_failed"
+        );
+        return StatusCode::OK;
+    }
+
+    longbox_pull::fire_issue_search(state.db.clone(), attempt.series_id, attempt.issue_id);
+
+    tracing::info!(
+        target: "longbox_web",
+        nzo_id = %body.nzo_id,
+        series_id = attempt.series_id,
+        issue_id = attempt.issue_id,
+        error_message = %error_message,
+        "notify.failure_processed"
+    );
+    StatusCode::OK
 }
 
 /// Map a validated config into the `longbox-downloader` client input.
