@@ -39,24 +39,33 @@ fn strip_leading_article(s: &str) -> &str {
     s
 }
 
-/// Trim a trailing `" by ..."` author-attribution suffix. We require at
-/// least one token before the `by` (so a series literally called `By Me`
-/// keeps its title) and the suffix runs to end-of-string. Common shapes:
-/// `Stillwater by Zdarsky & Pérez`, `Series by Author Name`.
+/// Trim a trailing `" by ..."` author-attribution suffix. Be conservative
+/// — many series carry "by" as part of the title:
+///   - `Step By Bloody Step`
+///   - `The Nice House by the Sea`
+///   - `Touched by a Demon`
+///   - `Door to Door, Night by Night`
+///
+/// Only strip when the suffix has a hallmark of a multi-author list:
+/// `&`, a comma, or a free-standing ` and `. Misses single-author shapes
+/// like `Series by Brian Wood` — an acceptable trade-off; single-author
+/// verbose ComicInfo titles are rare, and corrupting legitimate
+/// `by`-in-title series would be worse.
 fn strip_author_attribution(s: &str) -> &str {
-    // Look for the LAST ` by ` — handles `Foo Bar by X` while leaving
-    // a hypothetical `Foo by Bar by X` mostly intact (the more
-    // aggressive cut would be the first occurrence, which we don't
-    // want).
     let Some(idx) = s.rfind(" by ") else {
         return s;
     };
     let head = &s[..idx];
-    // Require non-empty prefix to avoid stripping a one-word title.
     if head.trim().is_empty() {
-        s
-    } else {
+        return s;
+    }
+    let suffix = &s[idx + 4..];
+    let looks_like_attribution =
+        suffix.contains('&') || suffix.contains(',') || suffix.contains(" and ");
+    if looks_like_attribution {
         head
+    } else {
+        s
     }
 }
 
@@ -165,17 +174,60 @@ mod tests {
     }
 
     #[test]
-    fn strips_trailing_by_author_attribution() {
-        // Amazon-scraped ComicInfo + verbose scene names tack on a
-        // `by <author>` suffix that the catalog row doesn't carry.
-        // Strip it so token-set similarity doesn't collapse to ~0.25.
+    fn strips_trailing_by_attribution_with_ampersand() {
+        // The motivating case: Amazon-scraped ComicInfo carries the
+        // verbose `Stillwater by Zdarsky & Pérez` form. The `&` marks
+        // it as a multi-author list; strip cleanly so token-set
+        // similarity matches the catalog's terse `Stillwater`.
         assert_eq!(
             normalize_title("Stillwater by Zdarsky & Pérez"),
             "stillwater"
         );
+    }
+
+    #[test]
+    fn strips_trailing_by_attribution_with_comma_or_and() {
+        // Comma-separated and ` and ` author lists are the other
+        // multi-author hallmarks the strip recognizes.
         assert_eq!(
-            normalize_title("Some Series by Author Name"),
-            "some series"
+            normalize_title("Foo by Author One, Author Two"),
+            "foo"
+        );
+        assert_eq!(
+            normalize_title("Bar by Brian K Vaughan and Pia Guerra"),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn preserves_title_internal_by_without_attribution_markers() {
+        // The four live-catalog cases that previously got mangled by
+        // an over-aggressive strip. Each `by` is part of the title
+        // itself; no `&`, `,`, or ` and ` in the suffix → leave it.
+        assert_eq!(
+            normalize_title("Step By Bloody Step"),
+            "step by bloody step"
+        );
+        assert_eq!(
+            normalize_title("The Nice House by the Sea"),
+            "nice house by the sea"
+        );
+        assert_eq!(normalize_title("Touched by a Demon"), "touched by a demon");
+        assert_eq!(
+            normalize_title("Door to Door, Night by Night"),
+            "door to door night by night"
+        );
+    }
+
+    #[test]
+    fn does_not_strip_single_author_by_attribution() {
+        // Conservative trade-off: `Series by Brian Wood` has no `&`
+        // / `,` / ` and ` marker so we can't distinguish it from
+        // `title by Title-Internal Words`. Leave it untouched.
+        // Documented expected behavior, not aspirational.
+        assert_eq!(
+            normalize_title("Series by Brian Wood"),
+            "series by brian wood"
         );
     }
 
