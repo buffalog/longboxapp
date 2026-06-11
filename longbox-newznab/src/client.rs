@@ -220,7 +220,12 @@ pub async fn find_release_excluding(
                 // First indexer with a usable result wins (matches
                 // Mylar). select_best is `None` only on an empty pool —
                 // an all-excluded indexer falls through like a zero-hit.
-                if let Some(best) = select_best(kept) {
+                // Bare variant skips the pre-grab size floor — it's
+                // only used by tests and lower-level callers; production
+                // (the pull engine) goes through
+                // `find_release_excluding_filtered` which threads the
+                // floor through.
+                if let Some(best) = select_best(kept, None) {
                     return Ok(Some((indexer.id, best)));
                 }
             }
@@ -282,6 +287,7 @@ pub async fn find_release_excluding_filtered(
     similarity_threshold: f64,
     exclusion_keywords: &[String],
     cover_date: Option<&str>,
+    min_size_bytes: Option<i64>,
 ) -> Result<FindOutcome, NewznabError> {
     if indexers.is_empty() {
         return Ok(FindOutcome::NoMatch);
@@ -335,6 +341,7 @@ pub async fn find_release_excluding_filtered(
                     year,
                     similarity_threshold,
                     exclusion_keywords,
+                    min_size_bytes,
                 );
                 for release in &outcome.kept {
                     guid_to_indexer.insert(release.guid.clone(), indexer.id);
@@ -363,8 +370,11 @@ pub async fn find_release_excluding_filtered(
         return Err(NewznabError::AllIndexersFailed(failures));
     }
 
-    // select_best across the combined pool from all indexers.
-    if let Some(best) = select_best(all_kept) {
+    // select_best across the combined pool from all indexers. The size
+    // floor is applied symmetrically at both the per-indexer filter and
+    // here so it can't be defeated by an indexer that ranks an
+    // undersized release ahead of an OK one in its own pool.
+    if let Some(best) = select_best(all_kept, min_size_bytes) {
         let indexer_id = guid_to_indexer
             .get(&best.guid)
             .copied()
@@ -533,6 +543,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            None,
         )
         .await
         .unwrap();
@@ -577,6 +588,7 @@ mod tests {
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
             None,
         )
         .await

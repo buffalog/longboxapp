@@ -362,7 +362,25 @@ pub fn filter_by_series_title(
     requested_year: Option<i32>,
     threshold: f64,
     exclusion_keywords: &[String],
+    min_size_bytes: Option<i64>,
 ) -> FilterOutcome {
+    // Pre-grab size floor. Drop releases whose reported size is below
+    // the configured Phase B threshold so we never even submit them to
+    // SAB. `map_or(true, ...)` is load-bearing: indexers that don't
+    // emit `newznab:attr name="size"` leave `size_bytes = None`, and
+    // those must pass through — Phase B's post-download check still
+    // catches them as a second line of defense. This runs BEFORE the
+    // exclusion-keyword + parse + similarity filters so undersized
+    // releases don't bloat `total_results` and mislead the diagnostic.
+    let releases: Vec<Release> = if let Some(floor) = min_size_bytes {
+        releases
+            .into_iter()
+            .filter(|r| r.size_bytes.map_or(true, |s| s >= floor))
+            .collect()
+    } else {
+        releases
+    };
+
     let requested_normalized = normalize_title(requested_series_title);
 
     // Pre-filter excluded releases BEFORE counting total_results. An
@@ -480,8 +498,14 @@ fn format_rank(title: &str) -> u8 {
 }
 
 /// Pick the best release from a non-prioritized pool, or `None` when
-/// the pool is empty.
-pub fn select_best(mut releases: Vec<Release>) -> Option<Release> {
+/// the pool is empty. `min_size_bytes = Some(floor)` filters out any
+/// release whose `size_bytes` is reported AND below `floor`; releases
+/// with `size_bytes = None` always pass (the indexer didn't tell us,
+/// so we can't reject — Phase B catches them post-download).
+pub fn select_best(mut releases: Vec<Release>, min_size_bytes: Option<i64>) -> Option<Release> {
+    if let Some(floor) = min_size_bytes {
+        releases.retain(|r| r.size_bytes.map_or(true, |s| s >= floor));
+    }
     releases.sort_by(cmp_releases);
     releases.into_iter().next()
 }
@@ -531,7 +555,7 @@ mod tests {
             release("Wolverine 005.cbr", Some(100)),
             release("Wolverine 005.cbz", Some(5)),
         ];
-        assert_eq!(select_best(pool).unwrap().title, "Wolverine 005.cbz");
+        assert_eq!(select_best(pool, None).unwrap().title, "Wolverine 005.cbz");
     }
 
     #[test]
@@ -541,7 +565,7 @@ mod tests {
             release("b.cbz", Some(80)),
             release("c.cbz", Some(40)),
         ];
-        assert_eq!(select_best(pool).unwrap().title, "b.cbz");
+        assert_eq!(select_best(pool, None).unwrap().title, "b.cbz");
     }
 
     #[test]
@@ -551,18 +575,69 @@ mod tests {
         let mut newer = release("new.cbz", Some(10));
         newer.published = Some(datetime!(2025-01-01 0:00 UTC));
         let pool = vec![older, newer];
-        assert_eq!(select_best(pool).unwrap().title, "new.cbz");
+        assert_eq!(select_best(pool, None).unwrap().title, "new.cbz");
     }
 
     #[test]
     fn cbr_still_selectable_when_no_cbz() {
         let pool = vec![release("only.cbr", Some(1))];
-        assert_eq!(select_best(pool).unwrap().title, "only.cbr");
+        assert_eq!(select_best(pool, None).unwrap().title, "only.cbr");
     }
 
     #[test]
     fn empty_pool_is_none() {
-        assert!(select_best(vec![]).is_none());
+        assert!(select_best(vec![], None).is_none());
+    }
+
+    // -------- size-floor pre-grab gate --------
+
+    #[test]
+    fn select_best_drops_release_below_size_floor() {
+        let mut tiny = release("tiny.cbz", Some(10));
+        tiny.size_bytes = Some(5 * 1024 * 1024); // 5 MB — below floor
+        let mut ok = release("ok.cbz", Some(10));
+        ok.size_bytes = Some(30 * 1024 * 1024); // 30 MB — above floor
+        let pool = vec![tiny, ok];
+        let pick = select_best(pool, Some(10 * 1024 * 1024)).unwrap();
+        assert_eq!(pick.title, "ok.cbz");
+    }
+
+    #[test]
+    fn select_best_passes_release_with_unknown_size_through_the_floor() {
+        // `map_or(true, ...)` semantics: an indexer that doesn't emit
+        // `<newznab:attr name="size">` leaves size_bytes = None. Those
+        // releases must NOT be rejected — Phase B's post-download check
+        // is the second line of defense for unknown-size cases.
+        let unknown = release("unknown.cbz", Some(10)); // size_bytes = None
+        let pool = vec![unknown];
+        assert!(select_best(pool, Some(10 * 1024 * 1024)).is_some());
+    }
+
+    #[test]
+    fn filter_by_series_title_drops_undersized_before_counting() {
+        // Pre-grab size floor runs BEFORE the parse / similarity gates
+        // so undersized releases don't bloat `total_results` and emit
+        // misleading diagnostics. With one undersized release and one
+        // OK release, the surviving outcome should reflect only the
+        // OK release.
+        let patterns = default_patterns();
+        let mut undersized = release("Saga 001 (2012) (digital).cbz", Some(20));
+        undersized.size_bytes = Some(2 * 1024 * 1024); // 2 MB — drop
+        let mut healthy = release("Saga 002 (2012) (digital).cbz", Some(20));
+        healthy.size_bytes = Some(40 * 1024 * 1024); // 40 MB — keep
+        let pool = vec![undersized, healthy];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Saga",
+            None,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
+            Some(10 * 1024 * 1024),
+        );
+        assert_eq!(outcome.kept.len(), 1);
+        assert_eq!(outcome.kept[0].title, "Saga 002 (2012) (digital).cbz");
+        assert!(outcome.mismatch.is_none());
     }
 
     // -------- filter_by_series_title (Bug 3) --------
@@ -587,6 +662,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty(), "kept should be empty");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -611,6 +687,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -632,6 +709,7 @@ mod tests {
             Some(2024),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -651,6 +729,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD, // 0.75
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
         let diag = outcome.mismatch.unwrap();
@@ -675,6 +754,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(outcome.kept.len(), 1, "subtitle variant should pass");
     }
@@ -693,6 +773,7 @@ mod tests {
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -718,6 +799,7 @@ mod tests {
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -738,6 +820,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("all-unparseable → mismatch");
@@ -765,6 +848,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         let diag = outcome.mismatch.expect("mismatch expected");
         assert_eq!(diag.total_results, 2);
@@ -800,6 +884,7 @@ mod tests {
             Some(1982),
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -830,6 +915,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
+            None,
         );
         assert!(outcome.kept.is_empty(), "excluded release must be dropped");
         assert!(
@@ -864,6 +950,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
+            None,
         );
         assert!(
             outcome.kept.is_empty(),
@@ -890,6 +977,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(
             outcome.kept.len(),
@@ -917,6 +1005,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Trade Paperback".into()],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none(), "exclusion must be silent");
@@ -934,6 +1023,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Hardcover".into()],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -951,6 +1041,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Omnibus".into()],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1410,6 +1501,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1485,6 +1577,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -1514,6 +1607,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -1532,6 +1626,7 @@ mod tests {
             None,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
+            None,
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());

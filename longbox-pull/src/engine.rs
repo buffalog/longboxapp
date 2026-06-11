@@ -87,6 +87,14 @@ struct SweepContext {
     /// a substring — used to keep digital-only formats (Marvel
     /// Infinity Comic, DC Infinite Comic) out of the library.
     exclusion_keywords: Vec<String>,
+    /// Pre-grab size floor in bytes — derived from the
+    /// `min_file_size_mb` setting (same key Phase B uses). Passed to
+    /// `find_release_excluding_filtered` so undersized candidates are
+    /// rejected before SAB submission. `None` only when the setting
+    /// can't be loaded (degenerate edge case); in practice always
+    /// `Some` since `get_or_default` falls back to
+    /// `MIN_FILE_SIZE_MB_DEFAULT`.
+    min_size_bytes: Option<i64>,
 }
 
 /// Reasons a sweep can't run. `NoDownloader` and `DownloaderDisabled`
@@ -126,6 +134,7 @@ async fn load_sweep_context(db: &Pool) -> Result<Result<SweepContext, SweepGate>
     )
     .await?;
     let exclusion_keywords = load_exclusion_keywords(db).await?;
+    let min_size_bytes = Some(load_min_size_bytes(db).await?);
 
     Ok(Ok(SweepContext {
         downloader,
@@ -133,7 +142,22 @@ async fn load_sweep_context(db: &Pool) -> Result<Result<SweepContext, SweepGate>
         patterns,
         similarity_threshold,
         exclusion_keywords,
+        min_size_bytes,
     }))
+}
+
+/// Load the `min_file_size_mb` setting and convert to bytes. Shared
+/// helper so `sweep` and `load_sweep_context` derive the same floor
+/// — same setting key as Phase B's post-download check, so the two
+/// gates stay in sync without an extra column.
+async fn load_min_size_bytes(db: &Pool) -> Result<i64, PullError> {
+    let mb: u32 = settings_repo::get_or_default(
+        db,
+        settings_repo::KEY_MIN_FILE_SIZE_MB,
+        longbox_postprocess::MIN_FILE_SIZE_MB_DEFAULT,
+    )
+    .await?;
+    Ok(i64::from(mb) * 1024 * 1024)
 }
 
 /// Read `pull_exclusion_keywords` from settings, split on `,`, trim
@@ -210,6 +234,7 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     )
     .await?;
     let exclusion_keywords = load_exclusion_keywords(db).await?;
+    let min_size_bytes = Some(load_min_size_bytes(db).await?);
 
     for entry in pull_list_repo::list_active(db).await? {
         sweep_series(
@@ -220,6 +245,7 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
             &patterns,
             similarity_threshold,
             &exclusion_keywords,
+            min_size_bytes,
             &mut summary,
         )
         .await?;
@@ -271,6 +297,7 @@ pub async fn sweep_single_series(
         &ctx.patterns,
         ctx.similarity_threshold,
         &ctx.exclusion_keywords,
+        ctx.min_size_bytes,
         &mut summary,
     )
     .await?;
@@ -364,6 +391,7 @@ async fn sweep_series(
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
     exclusion_keywords: &[String],
+    min_size_bytes: Option<i64>,
     summary: &mut SweepSummary,
 ) -> Result<(), PullError> {
     let Some(series) = series_repo::find_by_id(db, entry.series_id).await? else {
@@ -386,6 +414,7 @@ async fn sweep_series(
             patterns,
             similarity_threshold,
             exclusion_keywords,
+            min_size_bytes,
             summary,
         )
         .await?
@@ -442,6 +471,7 @@ async fn attempt_pull_for_candidate(
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
     exclusion_keywords: &[String],
+    min_size_bytes: Option<i64>,
     summary: &mut SweepSummary,
 ) -> Result<AttemptOutcome, PullError> {
     let series_id = series.id;
@@ -484,6 +514,7 @@ async fn attempt_pull_for_candidate(
         similarity_threshold,
         exclusion_keywords,
         issue.cover_date.as_deref(),
+        min_size_bytes,
     )
     .await
     {
@@ -728,6 +759,7 @@ pub async fn sweep_single_issue(
         &ctx.patterns,
         ctx.similarity_threshold,
         &ctx.exclusion_keywords,
+        ctx.min_size_bytes,
         &mut summary,
     )
     .await?;

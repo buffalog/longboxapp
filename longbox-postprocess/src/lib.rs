@@ -244,7 +244,7 @@ async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
 /// Batman partial delivery at 16 MB, 5 rendered pages) while
 /// admitting the historical-back-catalog releases the user actually
 /// owns.
-const MIN_FILE_SIZE_MB_DEFAULT: u32 = 10;
+pub const MIN_FILE_SIZE_MB_DEFAULT: u32 = 10;
 
 async fn load_min_file_size_mb(db: &longbox_db::Pool) -> Result<u32> {
     let value = settings_repo::get_or_default(
