@@ -824,7 +824,13 @@ fn parse_basename(path_relative: &str, patterns: &[ParsingPattern]) -> Option<Pa
     let basename = Path::new(path_relative)
         .file_name()
         .and_then(|s| s.to_str())?;
-    longbox_core::parse_filename(basename, patterns)
+    // Use the cascading variant so scene/NZB-style names with `_` or `.`
+    // separators parse correctly — same shape Phase B already uses. The
+    // cascade prefers the original input on any pattern hit, so
+    // canonical filenames keep their id=2/id=7/id=10 captures
+    // unchanged; the normalized retry only fires when nothing claims
+    // the raw input.
+    longbox_core::parse_filename_with_normalization(basename, patterns)
 }
 
 fn compute_status(

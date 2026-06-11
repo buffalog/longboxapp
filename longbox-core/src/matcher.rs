@@ -145,9 +145,23 @@ fn best_candidate_match<'a>(
     }
     let normalized = normalize_title(title_text);
 
+    // Apply `normalize_title` to BOTH sides at comparison time. The
+    // stored `sort_title` is supposed to be normalized at insert time,
+    // but real-world data shows ~50% of catalog rows have un-normalized
+    // sort_titles (mixed case, etc.) from historical paths that
+    // skipped normalization. Symmetric normalization here is durable
+    // against that drift — without it `Y The Last Man` filenames score
+    // ~0.71 against the stored `Y The Last Man` sort_title (case
+    // mismatch destroys jaccard), falling below the 0.65 needs-review
+    // floor and dead-ending as unmatched.
     let mut scored: Vec<(f64, &Candidate)> = candidates
         .iter()
-        .map(|c| (similarity(&normalized, &c.series.sort_title), c))
+        .map(|c| {
+            (
+                similarity(&normalized, &normalize_title(&c.series.sort_title)),
+                c,
+            )
+        })
         .collect();
 
     scored.sort_by(|a, b| {
@@ -404,6 +418,111 @@ mod tests {
             "expected Tier 2 confidence below filename ceiling, got {}",
             r.confidence
         );
+    }
+
+    #[test]
+    fn symmetric_normalize_rescues_un_normalized_sort_title() {
+        // Live data shows ~50% of catalog rows have un-normalized
+        // sort_titles (mixed case, etc.) — `Series::new` builds them
+        // via `normalize_title` for new rows, but historical paths
+        // (older inserts, batch imports) stored them raw. Without
+        // symmetric normalization at match time, a filename hint
+        // `Y The Last Man` (normalized to `y the last man`) scored
+        // ~0.71 against a stored `Y The Last Man` sort_title — below
+        // the 0.85 owned threshold, sometimes below the 0.65
+        // needs-review floor, dead-ending as unmatched. With the
+        // symmetric normalize this scores 1.0.
+        let s = Series {
+            id: 1,
+            cv_id: None,
+            metron_id: None,
+            title: "Y The Last Man".into(),
+            sort_title: "Y The Last Man".into(), // un-normalized!
+            start_year: Some(2002),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        };
+        let candidates = vec![candidate(s, vec![issue(10, 1, "1")])];
+        let parsed = ParsedFilename {
+            series_title: "Y The Last Man".into(),
+            number: "1".into(),
+            volume: None,
+            year: Some(2002),
+            title: None,
+            pattern_id: 4,
+        };
+        let r = match_file(None, Some(&parsed), &candidates);
+        assert_eq!(r.method, MatchMethod::FilenameRegex);
+        assert_eq!(r.issue_id, Some(10));
+        assert!(
+            (r.confidence - FILENAME_CONFIDENCE_CEILING).abs() < 1e-9,
+            "expected ceiling 0.90 from a 1.0 raw similarity, got {}",
+            r.confidence
+        );
+    }
+
+    #[test]
+    fn nfc_normalization_makes_decomposed_unicode_match_precomposed() {
+        // A filename pulled from macOS HFS+ stores `é` as decomposed
+        // `e` + combining-acute. The catalog's `sort_title` (built from
+        // CV's NFC-encoded data) carries the precomposed `é`. Before
+        // NFC in `normalize_title` the two compared as different
+        // strings; jaccard treated `pérez` (NFD) and `pérez` (NFC) as
+        // disjoint tokens.
+        let s = Series {
+            id: 1,
+            cv_id: None,
+            metron_id: None,
+            title: "Pérez".into(),         // precomposed
+            sort_title: "pérez".into(),    // precomposed (NFC)
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        };
+        let candidates = vec![candidate(s, vec![issue(10, 1, "1")])];
+        let parsed = ParsedFilename {
+            series_title: "Pe\u{0301}rez".into(), // decomposed (NFD)
+            number: "1".into(),
+            volume: None,
+            year: None,
+            title: None,
+            pattern_id: 4,
+        };
+        let r = match_file(None, Some(&parsed), &candidates);
+        assert_eq!(r.issue_id, Some(10));
+    }
+
+    #[test]
+    fn by_author_attribution_strip_makes_verbose_filename_match_terse_catalog() {
+        // Real case: ComicInfo / filename carries `Stillwater by
+        // Zdarsky & Pérez` (Amazon-scraped verbose form) but the
+        // catalog row is just `Stillwater`. Token-set jaccard would
+        // score 1/4 = 0.25 without the strip. The `" by ..."` strip
+        // in `normalize_title` collapses both sides to `stillwater`.
+        let s = Series {
+            id: 1,
+            cv_id: None,
+            metron_id: None,
+            title: "Stillwater".into(),
+            sort_title: "stillwater".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        };
+        let candidates = vec![candidate(s, vec![issue(10, 1, "12")])];
+        let parsed = ParsedFilename {
+            series_title: "Stillwater by Zdarsky & Pérez".into(),
+            number: "12".into(),
+            volume: None,
+            year: None,
+            title: None,
+            pattern_id: 4,
+        };
+        let r = match_file(None, Some(&parsed), &candidates);
+        assert_eq!(r.issue_id, Some(10));
     }
 
     #[test]
