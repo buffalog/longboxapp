@@ -648,6 +648,159 @@ async fn upsert_imported_clears_stale_comicinfo_cache() {
     assert_eq!(after.cached_at, None);
 }
 
+// ----- purge_absent_ghosts_for_issue (Phase B move cleanup) -----
+
+async fn flip_absent(pool: &SqlitePool, id: i64) {
+    sqlx::query!(r#"UPDATE files SET is_present = 0 WHERE id = ?"#, id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn purge_absent_ghosts_drops_absent_row_at_other_path() {
+    // The reproduction: scanner cataloged a file at `_unsorted/foo.cbr`
+    // (is_present flipped to false on a later scan after Phase B moved
+    // it), then Phase B writes the new row at the canonical location.
+    // The purge must drop the stale `_unsorted` row.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+
+    let ghost = file_repo::insert(
+        &pool,
+        new_file(
+            library_root_id,
+            "_unsorted/saga 1.cbr",
+            "owned",
+            Some(issue_id),
+        ),
+    )
+    .await
+    .unwrap();
+    flip_absent(&pool, ghost.id).await;
+
+    let kept = "Saga (2012)/Saga (2012) 001.cbz";
+    file_repo::upsert_imported(
+        &pool,
+        library_root_id,
+        kept,
+        _series_id,
+        issue_id,
+        "phase_b",
+        17_823_412,
+        now_offset(),
+    )
+    .await
+    .unwrap();
+
+    let purged = file_repo::purge_absent_ghosts_for_issue(
+        &pool,
+        library_root_id,
+        issue_id,
+        kept,
+    )
+    .await
+    .unwrap();
+    assert_eq!(purged, 1);
+    assert!(file_repo::find_by_id(&pool, ghost.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn purge_absent_ghosts_keeps_present_row_at_other_path() {
+    // Load-bearing guard: a legitimate second copy of the same issue
+    // (different format / edition still on disk) must NOT be purged.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+
+    let other_copy = file_repo::insert(
+        &pool,
+        new_file(
+            library_root_id,
+            "Saga (2012)/Saga (2012) 001 (alt).cbz",
+            "owned",
+            Some(issue_id),
+        ),
+    )
+    .await
+    .unwrap();
+    // is_present stays true — the second copy is still on disk.
+
+    let purged = file_repo::purge_absent_ghosts_for_issue(
+        &pool,
+        library_root_id,
+        issue_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+    )
+    .await
+    .unwrap();
+    assert_eq!(purged, 0);
+    assert!(file_repo::find_by_id(&pool, other_copy.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn purge_absent_ghosts_keeps_kept_path_row() {
+    // The row that was just upserted (matching `kept_path`) must never
+    // be purged, even if for some reason it were also marked absent.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+
+    let kept_path = "Saga (2012)/Saga (2012) 001.cbz";
+    let kept = file_repo::insert(
+        &pool,
+        new_file(library_root_id, kept_path, "owned", Some(issue_id)),
+    )
+    .await
+    .unwrap();
+    flip_absent(&pool, kept.id).await;
+
+    let purged = file_repo::purge_absent_ghosts_for_issue(
+        &pool,
+        library_root_id,
+        issue_id,
+        kept_path,
+    )
+    .await
+    .unwrap();
+    assert_eq!(purged, 0);
+    assert!(file_repo::find_by_id(&pool, kept.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn purge_absent_ghosts_scoped_to_library_root() {
+    // Another library root holding an absent row for the same issue
+    // must be left alone — different library_root_id = different scope.
+    let pool = fresh_pool().await;
+    let (library_root_id, _series_id, issue_id) = seed(&pool).await;
+    let other_root_id = library_root_repo::insert(
+        &pool,
+        NewLibraryRoot {
+            path: "/other".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let foreign = file_repo::insert(
+        &pool,
+        new_file(other_root_id, "_unsorted/saga 1.cbr", "owned", Some(issue_id)),
+    )
+    .await
+    .unwrap();
+    flip_absent(&pool, foreign.id).await;
+
+    let purged = file_repo::purge_absent_ghosts_for_issue(
+        &pool,
+        library_root_id, // local root
+        issue_id,
+        "Saga (2012)/Saga (2012) 001.cbz",
+    )
+    .await
+    .unwrap();
+    assert_eq!(purged, 0);
+    assert!(file_repo::find_by_id(&pool, foreign.id).await.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn upsert_imported_with_invalid_issue_id_errors() {
     let pool = fresh_pool().await;

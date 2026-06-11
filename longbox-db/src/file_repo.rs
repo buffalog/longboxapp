@@ -442,6 +442,44 @@ where
     }
 }
 
+/// Delete every row for `(library_root_id, issue_id)` whose `path_relative`
+/// is NOT `kept_path` and whose `is_present = 0`. Returns the purged count.
+///
+/// Called by Phase B immediately after [`upsert_imported`] writes the row
+/// for the canonical post-move location. Catches the case where the same
+/// file was previously cataloged at a different path inside the same
+/// library root (e.g. `_unsorted/<basename>`) and a subsequent scan
+/// flipped that row to `is_present = 0`. Without this purge the stale row
+/// reappears as a phantom `needs_review` entry on the next match cycle.
+///
+/// The `is_present = 0` guard is load-bearing: it prevents collateral
+/// damage to a legitimate second copy of the same issue that is still on
+/// disk (different format, different edition, etc.). Only rows the
+/// scanner has already confirmed are physically gone get purged.
+pub async fn purge_absent_ghosts_for_issue<'e, E>(
+    executor: E,
+    library_root_id: i64,
+    issue_id: i64,
+    kept_path: &str,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"DELETE FROM files
+           WHERE library_root_id = ?
+             AND issue_id = ?
+             AND path_relative != ?
+             AND is_present = 0"#,
+        library_root_id,
+        issue_id,
+        kept_path
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Mark `is_present = false` for every file in `library_root_id` whose
 /// `last_seen_at` is strictly less than `cutoff`. Returns the row count.
 /// Used by `Scanner::scan_full` after a full pass to flip missing files.

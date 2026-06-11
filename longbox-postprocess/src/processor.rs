@@ -614,6 +614,30 @@ async fn import_as_owned(
     )
     .await?;
 
+    // Ghost-row cleanup: drop any prior `(library_root_id, issue.id)` rows
+    // that point at a different path and are marked absent. Catches the
+    // `_unsorted/<basename>` shape — a file dropped into a watched
+    // sub-folder of the library, cataloged by the scanner, then moved
+    // here by Phase B — without which the absent row resurfaces as a
+    // duplicate `needs_review` on the next match sweep.
+    let ghosts = file_repo::purge_absent_ghosts_for_issue(
+        db,
+        library_root_id,
+        issue.id,
+        &path_relative,
+    )
+    .await?;
+    if ghosts > 0 {
+        tracing::info!(
+            target: "longbox_postprocess",
+            library_root_id,
+            issue_id = issue.id,
+            kept_path = %path_relative,
+            ghosts,
+            "phase_b.ghost_rows_purged"
+        );
+    }
+
     if pulled {
         // Multi-row by design: 2+ in-flight attempts for one issue (the
         // race the Step 3 brief calls out) all settle to `grabbed`.
