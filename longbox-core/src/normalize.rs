@@ -3,12 +3,30 @@
 //! text or filename-parsed series text. Both sides of the comparison live in
 //! the same normalized space.
 
-/// Lowercase, strip a single leading "the"/"a"/"an" article, drop punctuation
-/// except hyphens, collapse runs of whitespace.
+use unicode_normalization::UnicodeNormalization;
+
+/// NFC-normalize, lowercase, strip a single leading "the"/"a"/"an" article,
+/// strip a trailing `" by <author>"` author-attribution annotation, drop
+/// punctuation except hyphens, collapse runs of whitespace.
+///
+/// The NFC step folds decomposed combining marks (e.g. `e\u{301}`) into
+/// precomposed code points (`é`) so a filename pulled from macOS's HFS+
+/// NFD storage compares equal to a CV-sourced sort_title in NFC. Without
+/// this, `Stillwater by Zdarsky & Pérez 012.cbr` (NFD on disk) scored
+/// 0.0 against the catalog's `Stillwater` row.
+///
+/// The `" by ..."` strip handles Amazon-scraped ComicInfo and verbose
+/// scene names that suffix the series title with an author attribution
+/// (`Stillwater by Zdarsky & Pérez`). The catalog row is just
+/// `Stillwater`; without the strip the token-set Jaccard scores
+/// 1/4 = 0.25 and the file dead-ends as unmatched. Applied at both
+/// insert and match time so the invariant holds end-to-end.
 pub fn normalize_title(input: &str) -> String {
-    let lower = input.to_lowercase();
+    let nfc: String = input.nfc().collect();
+    let lower = nfc.to_lowercase();
     let stripped = strip_leading_article(&lower);
-    let cleaned = drop_punctuation(stripped);
+    let without_attribution = strip_author_attribution(stripped);
+    let cleaned = drop_punctuation(without_attribution);
     collapse_whitespace(&cleaned)
 }
 
@@ -19,6 +37,27 @@ fn strip_leading_article(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Trim a trailing `" by ..."` author-attribution suffix. We require at
+/// least one token before the `by` (so a series literally called `By Me`
+/// keeps its title) and the suffix runs to end-of-string. Common shapes:
+/// `Stillwater by Zdarsky & Pérez`, `Series by Author Name`.
+fn strip_author_attribution(s: &str) -> &str {
+    // Look for the LAST ` by ` — handles `Foo Bar by X` while leaving
+    // a hypothetical `Foo by Bar by X` mostly intact (the more
+    // aggressive cut would be the first occurrence, which we don't
+    // want).
+    let Some(idx) = s.rfind(" by ") else {
+        return s;
+    };
+    let head = &s[..idx];
+    // Require non-empty prefix to avoid stripping a one-word title.
+    if head.trim().is_empty() {
+        s
+    } else {
+        head
+    }
 }
 
 fn drop_punctuation(s: &str) -> String {
@@ -110,6 +149,41 @@ mod tests {
     fn handles_unicode_letters() {
         assert_eq!(normalize_title("Pokémon"), "pokémon");
         assert_eq!(normalize_title("Café"), "café");
+    }
+
+    #[test]
+    fn nfc_folds_decomposed_accents_to_precomposed() {
+        // Decomposed form: `é` as `e` + combining-acute (\u{0301}).
+        // Precomposed form: literal `é` (\u{00e9}).
+        // Both must produce the same normalized string so a filename
+        // pulled from macOS HFS+ (NFD) compares equal to a CV-sourced
+        // sort_title (NFC). Before this fix the live `Stillwater by
+        // Zdarsky & Pérez` files dead-ended as unmatched.
+        let decomposed = "Pe\u{0301}rez";
+        let precomposed = "Pérez";
+        assert_eq!(normalize_title(decomposed), normalize_title(precomposed));
+    }
+
+    #[test]
+    fn strips_trailing_by_author_attribution() {
+        // Amazon-scraped ComicInfo + verbose scene names tack on a
+        // `by <author>` suffix that the catalog row doesn't carry.
+        // Strip it so token-set similarity doesn't collapse to ~0.25.
+        assert_eq!(
+            normalize_title("Stillwater by Zdarsky & Pérez"),
+            "stillwater"
+        );
+        assert_eq!(
+            normalize_title("Some Series by Author Name"),
+            "some series"
+        );
+    }
+
+    #[test]
+    fn does_not_strip_by_when_it_is_the_whole_title() {
+        // A hypothetical one-word title `By` (or any leading-`by`
+        // edge case) must survive — `head.trim().is_empty()` guard.
+        assert_eq!(normalize_title("by"), "by");
     }
 
     #[test]

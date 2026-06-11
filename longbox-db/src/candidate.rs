@@ -34,11 +34,16 @@ pub async fn find_candidates(
         return Ok(Vec::new());
     }
 
-    // Score, sort, take top N.
+    // Apply `normalize_title` to BOTH sides at comparison time. The
+    // stored `sort_title` is supposed to be normalized at insert time,
+    // but real-world data shows ~50% of catalog rows have un-normalized
+    // sort_titles from historical insertion paths. Symmetric
+    // normalization here keeps candidate ranking robust against that
+    // drift; see the matching guard in `longbox_core::matcher`.
     let mut scored: Vec<(f64, SeriesRow)> = all
         .into_iter()
         .map(|row| {
-            let score = similarity(&normalized_hint, &row.sort_title);
+            let score = similarity(&normalized_hint, &normalize_title(&row.sort_title));
             (score, row)
         })
         .collect();

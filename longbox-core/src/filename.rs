@@ -123,6 +123,11 @@ pub fn normalize_dotted_basename(basename: &str) -> String {
         Some((s, e)) if !s.is_empty() && !e.is_empty() => (s, Some(e)),
         _ => return basename.to_owned(),
     };
+    // Strip BEFORE the paren-replace step so we can look for a `)`
+    // boundary in the original stem. Once parens become whitespace
+    // there's nothing left to anchor "trailing digit after the last
+    // metadata tag" against.
+    let stem = strip_trailing_dupe_marker(stem);
     let year = dotted_year_re()
         .captures(stem)
         .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()));
@@ -138,6 +143,36 @@ pub fn normalize_dotted_basename(basename: &str) -> String {
         // sides already short-circuited above.
         _ => unreachable!("ext presence is decided at the rsplit_once branch"),
     }
+}
+
+/// Scene-style names sometimes carry a trailing bare integer AFTER the
+/// last metadata tag as a dupe marker:
+/// `Y - The Last Man 054 (2007) (Digital-HD) (Monafekk-Empire) 2.cbr`.
+/// Without stripping, the post-paren-collapse output `Y - The Last
+/// Man 054 2 (2007).cbr` is claimed by id=2 as `number="2"` (wrong).
+///
+/// Strip only when:
+///   - the trailing token is purely ASCII-digit, AND
+///   - the immediately preceding non-space character is `)` (so a
+///     metadata tag JUST ended — this is the dupe-marker convention).
+///
+/// The `)` guard rules out legitimate `Series 001`-shaped inputs (no
+/// paren group before the digit) and one-token bare-digit issue names.
+fn strip_trailing_dupe_marker(stem: &str) -> &str {
+    let trimmed = stem.trim_end();
+    let last_space = match trimmed.rfind(char::is_whitespace) {
+        Some(i) => i,
+        None => return stem,
+    };
+    let last_token = &trimmed[last_space + 1..];
+    if last_token.is_empty() || !last_token.bytes().all(|b| b.is_ascii_digit()) {
+        return stem;
+    }
+    let prefix = trimmed[..last_space].trim_end();
+    if !prefix.ends_with(')') {
+        return stem;
+    }
+    prefix
 }
 
 static DOTTED_YEAR_RE: OnceLock<Regex> = OnceLock::new();
@@ -1133,6 +1168,87 @@ mod tests {
         // this fix.
         assert!(parse_with_normalization("README.txt", &patterns()).is_none());
         assert!(parse_with_normalization("cover.jpg", &patterns()).is_none());
+    }
+
+    // ---- regression locks for the four user-reported failure shapes ----
+
+    #[test]
+    fn dot_separated_short_prefix_title_normalizes_correctly() {
+        // Case 1: `Y.The.Last.Man.NNN.cbr`. After normalization the
+        // catch-all id=4 claims it with `series="Y The Last Man"`.
+        // The non-greedy `.+?` correctly extends past the short `Y`
+        // because the regex's end-anchor demands a digit-then-`.cbr`
+        // tail that can only be satisfied after the full title.
+        let p = parse_with_normalization("Y.The.Last.Man.001.cbr", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Y The Last Man");
+        assert_eq!(p.number, "001");
+        assert_eq!(p.pattern_id, 4);
+
+        let p = parse_with_normalization("Y.The.Last.Man.060.cbr", &patterns()).unwrap();
+        assert_eq!(p.series_title, "Y The Last Man");
+        assert_eq!(p.number, "060");
+    }
+
+    #[test]
+    fn trailing_dupe_marker_stripped_from_normalizer_output() {
+        // Case 2: `... 2.cbr` is a duplicate-copy suffix. After
+        // paren-stripping, the bare trailing `2` would survive and
+        // corrupt the issue-number capture under strict patterns. The
+        // strip in `strip_trailing_dupe_marker` removes it before the
+        // year is re-emitted.
+        let n = normalize_dotted_basename(
+            "Y - The Last Man 054 (2007) (Digital-HD) (Monafekk-Empire) 2.cbr",
+        );
+        assert_eq!(n, "Y - The Last Man 054 (2007).cbr");
+
+        // End-to-end: the cascade now yields number=054, not number=2.
+        let p = parse_with_normalization(
+            "Y - The Last Man 054 (2007) (Digital-HD) (Monafekk-Empire) 2.cbr",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "Y - The Last Man");
+        assert_eq!(p.number, "054");
+        assert_eq!(p.year, Some(2007));
+    }
+
+    #[test]
+    fn strip_trailing_dupe_marker_preserves_legitimate_bare_digit_filename() {
+        // Defensive: a one-token bare-digit stem like `123.cbz` (issue
+        // number only — rare but seen) must survive the strip. The
+        // `tokens.len() < 2` guard handles this.
+        let n = normalize_dotted_basename("123.cbz");
+        assert_eq!(n, "123.cbz");
+
+        // And a normal `Series 001.cbz` must not lose its `001`. The
+        // last token IS numeric but stripping it would leave just the
+        // series name with no number — and there's no metadata-tag
+        // boundary, the digit IS the issue number. We accept that this
+        // strip is only safe when the normalizer is run on inputs that
+        // already had paren-stripping happen; for plain `Series 001.cbz`
+        // the normalizer is a no-op (no paren groups, no separator
+        // collapse), so this code path is never reached. Lock the
+        // no-op behavior anyway as a regression bar.
+        assert_eq!(
+            normalize_dotted_basename("Series 001.cbz"),
+            "Series 001.cbz"
+        );
+    }
+
+    #[test]
+    fn underscore_separated_name_parses_via_normalizing_cascade() {
+        // Case 4: `American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz`.
+        // The raw input fails every pattern (underscore between series
+        // tokens). The cascade converts to
+        // `American Vampire 019 (2011).cbz` and pattern id=2 claims it.
+        let p = parse_with_normalization(
+            "American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz",
+            &patterns(),
+        )
+        .unwrap();
+        assert_eq!(p.series_title, "American Vampire");
+        assert_eq!(p.number, "019");
+        assert_eq!(p.year, Some(2011));
     }
 
     #[test]

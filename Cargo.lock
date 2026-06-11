@@ -1205,6 +1205,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "time",
+ "unicode-normalization",
 ]
 
 [[package]]
