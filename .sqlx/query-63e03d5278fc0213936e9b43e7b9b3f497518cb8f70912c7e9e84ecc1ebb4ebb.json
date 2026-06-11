@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  issue_id AS \"issue_id!: i64\", attempted_at AS \"attempted_at: _\",\n                  indexer_id, release_id, status, error_message,\n                  retry_count AS \"retry_count!: i64\", download_handle,\n                  unknown_polls AS \"unknown_polls!: i64\"\n           FROM pull_attempts\n           WHERE download_handle = ? AND status = 'submitted'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "attempted_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "indexer_id",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "release_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_count!: i64",
+        "ordinal": 8,
+        "type_info": "Int64"
+      },
+      {
+        "name": "download_handle",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "unknown_polls!: i64",
+        "ordinal": 10,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "63e03d5278fc0213936e9b43e7b9b3f497518cb8f70912c7e9e84ecc1ebb4ebb"
+}

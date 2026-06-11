@@ -3617,6 +3617,134 @@ async fn downloader_test_reports_a_bad_api_key() {
     assert_eq!(response_json(resp).await["ok"], false);
 }
 
+// -------- POST /downloader/notify (SAB failure hook) --------
+
+#[tokio::test]
+async fn notify_completed_is_noop() {
+    let app = build_test_app().await;
+    let (sid, iid) = seed_series_and_issue(&app, "Saga", "1").await;
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: sid,
+            issue_id: iid,
+            indexer_id: None,
+            release_id: Some("rel-1".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("SABnzbd_nzo_abc123".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/notify",
+            r#"{"nzo_id":"SABnzbd_nzo_abc123","status":"Completed","fail_msg":""}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The attempt stays in `submitted` — Phase B owns the success path.
+    let submitted = pull_attempt_repo::list_submitted(&app.state.db).await.unwrap();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].status, "submitted");
+}
+
+#[tokio::test]
+async fn notify_failed_marks_attempt_as_failed() {
+    let app = build_test_app().await;
+    let (sid, iid) = seed_series_and_issue(&app, "Saga", "2").await;
+    let attempt_id = pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: sid,
+            issue_id: iid,
+            indexer_id: None,
+            release_id: Some("rel-2".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("SABnzbd_nzo_xyz789".into()),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/notify",
+            r#"{"nzo_id":"SABnzbd_nzo_xyz789","status":"Failed","fail_msg":"par2 repair failed"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The attempt is no longer `submitted`.
+    let submitted = pull_attempt_repo::list_submitted(&app.state.db).await.unwrap();
+    assert!(submitted.is_empty(), "submitted set should be empty after failure notice");
+
+    // And the row carries the SAB-supplied fail_msg verbatim.
+    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid).await.unwrap();
+    let row = attempts.iter().find(|a| a.id == attempt_id).unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.error_message.as_deref(), Some("par2 repair failed"));
+}
+
+#[tokio::test]
+async fn notify_unknown_nzo_id_returns_ok_without_side_effect() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/notify",
+            r#"{"nzo_id":"SABnzbd_nzo_never_seen","status":"Failed","fail_msg":""}"#,
+        ))
+        .await;
+    // The endpoint must always 200 — SAB retries scripts that return
+    // error codes. An unknown nzo_id is the common case (attempts
+    // submitted before LongBox restarted, or by another instance).
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn notify_falls_back_to_status_string_when_fail_msg_is_blank() {
+    let app = build_test_app().await;
+    let (sid, iid) = seed_series_and_issue(&app, "Saga", "3").await;
+    pull_attempt_repo::insert(
+        &app.state.db,
+        NewPullAttempt {
+            series_id: sid,
+            issue_id: iid,
+            indexer_id: None,
+            release_id: Some("rel-3".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("SABnzbd_nzo_blank_msg".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/downloader/notify",
+            r#"{"nzo_id":"SABnzbd_nzo_blank_msg","status":"Failed"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid).await.unwrap();
+    let row = attempts.iter().find(|a| a.status == "failed").unwrap();
+    assert_eq!(row.error_message.as_deref(), Some("SABnzbd status: Failed"));
+}
+
 // -------- webhooks (Phase A.8 Step 5) --------
 
 #[tokio::test]
