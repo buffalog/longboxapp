@@ -56,7 +56,7 @@
       {
         "name": "b_owned_count!: i64",
         "ordinal": 10,
-        "type_info": "Int64"
+        "type_info": "Int"
       }
     ],
     "parameters": {
