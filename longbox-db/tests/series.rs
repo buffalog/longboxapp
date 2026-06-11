@@ -1,7 +1,10 @@
 mod common;
 
-use common::fresh_pool;
-use longbox_db::{series_repo, DbError, NewSeries, SeriesUpdate};
+use common::{fixed_ts, fresh_pool};
+use longbox_db::{
+    file_repo, issue_repo, library_root_repo, series_repo, DbError, NewFile, NewIssue,
+    NewLibraryRoot, NewSeries, SeriesUpdate,
+};
 
 fn walking_dead() -> NewSeries {
     NewSeries {
@@ -168,4 +171,123 @@ async fn null_cv_ids_are_independent_under_unique() {
     series_repo::insert(&pool, b).await.unwrap();
     let rows = series_repo::find_all(&pool).await.unwrap();
     assert_eq!(rows.len(), 2);
+}
+
+// ----- find_all_with_counts: solicited vs genuinely missing -----
+
+async fn seeded_issue(
+    pool: &sqlx::SqlitePool,
+    series_id: i64,
+    cv_issue_id: i64,
+    number: &str,
+    cover_date: Option<&str>,
+) -> i64 {
+    issue_repo::insert(
+        pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: Some(cv_issue_id),
+            metron_issue_id: None,
+            number: number.into(),
+            title: None,
+            cover_date: cover_date.map(|s| s.into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+async fn mark_owned(pool: &sqlx::SqlitePool, library_root_id: i64, issue_id: i64, path: &str) {
+    file_repo::insert(
+        pool,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id,
+            path_relative: path.into(),
+            size_bytes: 1024,
+            mtime: fixed_ts(),
+            last_scanned_at: fixed_ts(),
+            match_method: "phase_b".into(),
+            match_confidence: 1.0,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: fixed_ts(),
+            matched_at: Some(fixed_ts()),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn find_all_with_counts_splits_solicited_from_missing() {
+    // Setup: a series with 4 issues —
+    //   #1 owned, past cover_date         → not missing, not solicited
+    //   #2 missing, past cover_date       → missing, not solicited
+    //   #3 missing, future cover_date     → missing AND solicited
+    //   #4 missing, NULL cover_date       → missing, not solicited (guard)
+    //
+    // The UI uses `available = total - solicited = 3`, so this series
+    // reads 1/3 (orange, genuinely incomplete) rather than 1/4. If a
+    // user then matched #2, they would see 2/3 and #3 would still show
+    // as solicited.
+    let pool = fresh_pool().await;
+    let library_root_id = library_root_repo::insert(
+        &pool,
+        NewLibraryRoot {
+            path: "/comics".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let series_id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
+
+    let i1 = seeded_issue(&pool, series_id, 101, "1", Some("2020-01-01")).await;
+    let _i2 = seeded_issue(&pool, series_id, 102, "2", Some("2020-02-01")).await;
+    let _i3 = seeded_issue(&pool, series_id, 103, "3", Some("2099-12-01")).await;
+    let _i4 = seeded_issue(&pool, series_id, 104, "4", None).await;
+    mark_owned(&pool, library_root_id, i1, "TWD 1.cbz").await;
+
+    let counts = series_repo::find_all_with_counts(&pool).await.unwrap();
+    let row = counts.iter().find(|r| r.series.id == series_id).unwrap();
+    assert_eq!(row.total_count, 4);
+    assert_eq!(row.owned_count, 1);
+    assert_eq!(row.missing_count, 3);
+    assert_eq!(
+        row.solicited_count, 1,
+        "only the 2099 issue should count as solicited"
+    );
+}
+
+#[tokio::test]
+async fn find_all_with_counts_owned_solicited_does_not_inflate() {
+    // Edge case: a future-dated issue the user already owns (early
+    // digital drop, advance reader copy) must NOT count as solicited.
+    // The NOT EXISTS-owned guard is what enforces this.
+    let pool = fresh_pool().await;
+    let library_root_id = library_root_repo::insert(
+        &pool,
+        NewLibraryRoot {
+            path: "/comics".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let series_id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
+
+    let future_owned = seeded_issue(&pool, series_id, 201, "1", Some("2099-12-01")).await;
+    mark_owned(&pool, library_root_id, future_owned, "TWD-future.cbz").await;
+
+    let counts = series_repo::find_all_with_counts(&pool).await.unwrap();
+    let row = counts.iter().find(|r| r.series.id == series_id).unwrap();
+    assert_eq!(row.owned_count, 1);
+    assert_eq!(row.missing_count, 0);
+    assert_eq!(row.solicited_count, 0);
 }
