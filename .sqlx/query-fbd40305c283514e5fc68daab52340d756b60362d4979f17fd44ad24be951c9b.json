@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM files\n           WHERE library_root_id = ?\n             AND issue_id = ?\n             AND path_relative != ?\n             AND is_present = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fbd40305c283514e5fc68daab52340d756b60362d4979f17fd44ad24be951c9b"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files SET is_present = 0 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fceea693e72b90e134bfb4ce3e99aaf20a72b5d91cfa213a8c52906d37cf6c1a"
+}
