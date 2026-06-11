@@ -1315,6 +1315,7 @@ dependencies = [
  "longbox-db",
  "longbox-downloader",
  "longbox-newznab",
+ "longbox-postprocess",
  "longbox-webhooks",
  "pretty_assertions",
  "sqlx",
