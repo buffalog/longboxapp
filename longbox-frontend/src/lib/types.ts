@@ -38,6 +38,11 @@ export interface SeriesWithCounts extends Series {
   ignored_count: number;
   unmatched_count: number;
   missing_count: number;
+  /// Subset of `missing_count`: issues whose `cover_date` is today or
+  /// later. UI treats `available = total_count - solicited_count` as the
+  /// denominator so "owns everything that has shipped" reads as complete
+  /// rather than as a deficit.
+  solicited_count: number;
 }
 
 export interface Issue {

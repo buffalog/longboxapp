@@ -8,9 +8,16 @@
 
   let { series }: Props = $props();
 
+  // `available` excludes solicited/pre-release issues — owning everything
+  // that has actually shipped is "complete," even if a future issue is
+  // already in the catalog. Without this split the badge stays orange for
+  // every ongoing series.
+  const available = $derived(series.total_count - series.solicited_count);
+
   const badgeClass = $derived.by(() => {
     if (series.total_count === 0) return 'bg-slate-100 text-slate-600';
-    if (series.owned_count === series.total_count) return 'bg-status-owned/10 text-status-owned';
+    if (available > 0 && series.owned_count >= available)
+      return 'bg-status-owned/10 text-status-owned';
     if (series.owned_count === 0) return 'bg-status-unmatched/10 text-status-unmatched';
     return 'bg-status-needs_review/10 text-status-needs_review';
   });
@@ -41,7 +48,7 @@
         {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
       </span>
       <span class="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium {badgeClass}">
-        {series.owned_count}/{series.total_count}
+        {series.owned_count}/{available}{#if series.solicited_count > 0}<span class="text-slate-400"> · +{series.solicited_count}</span>{/if}
       </span>
     </div>
   </div>

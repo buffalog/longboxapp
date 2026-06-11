@@ -305,6 +305,11 @@ pub struct SeriesWithCounts {
     pub ignored_count: i64,
     pub unmatched_count: i64,
     pub missing_count: i64,
+    /// Subset of `missing_count`: issues with no present owned file whose
+    /// `cover_date` is today or later — i.e. solicited / pre-release. Lets
+    /// the UI treat "owns everything that has shipped" as a green complete
+    /// state rather than an orange deficit.
+    pub solicited_count: i64,
 }
 
 /// Like [`find_all`] but augments each row with the per-status issue
@@ -342,7 +347,17 @@ where
                    AND f2.status = 'owned'
                    AND f2.is_present = 1
                )
-               THEN i.id END) AS "missing_count!: i64"
+               THEN i.id END) AS "missing_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN NOT EXISTS (
+                 SELECT 1 FROM files f2
+                 WHERE f2.issue_id = i.id
+                   AND f2.status = 'owned'
+                   AND f2.is_present = 1
+               )
+               AND i.cover_date IS NOT NULL
+               AND i.cover_date >= date('now')
+               THEN i.id END) AS "solicited_count!: i64"
            FROM series s
            LEFT JOIN issues i ON i.series_id = s.id
            LEFT JOIN files f ON f.issue_id = i.id
@@ -374,6 +389,7 @@ where
             ignored_count: r.ignored_count,
             unmatched_count: r.unmatched_count,
             missing_count: r.missing_count,
+            solicited_count: r.solicited_count,
         })
         .collect())
 }
@@ -416,7 +432,17 @@ where
                    AND f2.status = 'owned'
                    AND f2.is_present = 1
                )
-               THEN i.id END) AS "missing_count!: i64"
+               THEN i.id END) AS "missing_count!: i64",
+             COUNT(DISTINCT CASE
+               WHEN NOT EXISTS (
+                 SELECT 1 FROM files f2
+                 WHERE f2.issue_id = i.id
+                   AND f2.status = 'owned'
+                   AND f2.is_present = 1
+               )
+               AND i.cover_date IS NOT NULL
+               AND i.cover_date >= date('now')
+               THEN i.id END) AS "solicited_count!: i64"
            FROM series s
            LEFT JOIN issues i ON i.series_id = s.id
            LEFT JOIN files f ON f.issue_id = i.id
@@ -450,6 +476,7 @@ where
             ignored_count: r.ignored_count,
             unmatched_count: r.unmatched_count,
             missing_count: r.missing_count,
+            solicited_count: r.solicited_count,
         })
         .collect())
 }
