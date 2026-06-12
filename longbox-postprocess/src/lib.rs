@@ -707,12 +707,7 @@ async fn consumer_task(
         .await
         {
             Ok(outcome) => {
-                // Imported is the only outcome that removes the source
-                // from /watch/. Skipped intentionally leaves the file
-                // in place (per Jeremy's directive — /watch/ is the
-                // holding pen), so the parent dir is still non-empty
-                // and we must NOT try to remove it.
-                if matches!(&outcome, processor::Outcome::Imported { .. }) {
+                if outcome_removes_source(&outcome) {
                     cleanup_empty_parent(&path, &canonical_watch_root);
                 }
                 apply_outcome_to_cache(&cache, &path, outcome);
@@ -731,6 +726,25 @@ async fn consumer_task(
         target: "longbox_postprocess",
         "phase_b.consumer_exited (channel closed)"
     );
+}
+
+/// Predicate: does this outcome leave the source file removed from
+/// the watch folder, such that the parent dir is now a candidate for
+/// empty-folder cleanup?
+///
+/// - `Imported` — moved into the library by the two-stage rewrite.
+/// - `Conflict` — `cleanup_conflict_source` deleted the dup source.
+///
+/// Skipped, RejectedTooSmall, and Failed all intentionally leave the
+/// file in place (the watch folder is the operator's holding pen for
+/// these — Jeremy's directive), so the parent is non-empty and we
+/// must not attempt to remove it. Pulled out of `consumer_task` so
+/// the gating contract is testable in isolation.
+fn outcome_removes_source(outcome: &processor::Outcome) -> bool {
+    matches!(
+        outcome,
+        processor::Outcome::Imported { .. } | processor::Outcome::Conflict { .. }
+    )
 }
 
 /// If a processed file lived in a subdirectory of the watch root
@@ -1165,6 +1179,64 @@ mod tests {
             vec![PathBuf::from("/x.cbz")],
         ))
         .is_empty());
+    }
+
+    #[test]
+    fn outcome_removes_source_classifies_each_variant() {
+        use crate::intervention::InterventionReason;
+        use processor::Outcome;
+        use std::path::PathBuf;
+
+        // Imported and Conflict both delete the source from /watch/ —
+        // the parent dir is a cleanup candidate.
+        assert!(outcome_removes_source(&Outcome::Imported {
+            target: PathBuf::from("/library/Saga (2012)/Saga (2012) 001.cbz"),
+            series_id: 1,
+            issue_id: 1,
+            file_id: 1,
+        }));
+        assert!(outcome_removes_source(&Outcome::Conflict {
+            target: PathBuf::from("/library/Saga (2012)/Saga (2012) 001.cbz"),
+            size: 1_024,
+        }));
+
+        // Skipped, RejectedTooSmall, and Failed leave the file in
+        // place. The directive is "watch folder is the holding pen";
+        // cleanup must NOT fire and try to remove the parent dir.
+        assert!(!outcome_removes_source(&Outcome::Skipped {
+            reason: "no catalog match".into(),
+        }));
+        assert!(!outcome_removes_source(&Outcome::RejectedTooSmall {
+            size: 5 * 1024 * 1024,
+            threshold_mb: 10,
+        }));
+        assert!(!outcome_removes_source(&Outcome::Failed {
+            reason: InterventionReason::Conflict,
+            target: PathBuf::from("/library/Saga (2012)/Saga (2012) 001.cbz"),
+            size: 1_024,
+        }));
+    }
+
+    #[test]
+    fn cleanup_empty_parent_fires_for_conflict_outcome() {
+        // Mirror of cleanup_empty_parent_removes_empty_job_subdir but
+        // named for the Conflict path so a future change that narrows
+        // `outcome_removes_source` back to Imported-only surfaces here
+        // as a failed regression bar in addition to the classifier
+        // test above. SAB shape: {watch}/{job}/{file}, source removed
+        // by `cleanup_conflict_source`, parent now empty.
+        let watch = TempDir::new().unwrap();
+        let watch_root = std::fs::canonicalize(watch.path()).unwrap();
+        let job_dir = watch.path().join("conflict-job-7");
+        std::fs::create_dir(&job_dir).unwrap();
+        let phantom_source = job_dir.join("dup 001.cbz");
+
+        cleanup_empty_parent(&phantom_source, &watch_root);
+
+        assert!(
+            !job_dir.exists(),
+            "empty job dir after Conflict cleanup must be deleted"
+        );
     }
 
     #[test]
