@@ -172,6 +172,20 @@ fn best_candidate_match<'a>(
                 let b_year = year_hint.is_some() && b.1.series.start_year == year_hint;
                 b_year.cmp(&a_year)
             })
+            // Prefer the candidate with more issues. When two series
+            // share a title and neither matches the year hint (common:
+            // NZB filenames carry the scan year, not the series
+            // start_year), the larger catalog entry is almost always
+            // the correct one — the smaller is typically a 1-issue
+            // stub from an earlier import that the user hasn't pruned.
+            // Live repro: "Sam and Twitch Case Files" had id=381 (2025,
+            // 1 issue) vs id=918 (2024, 24 issues); files with a 2026
+            // scan-year hint kept losing to the stub, sat in /watch/
+            // indefinitely.
+            .then_with(|| b.1.issues.len().cmp(&a.1.issues.len()))
+            // Lower id as the final determinism guarantee — only
+            // reached when title similarity, year-hint match, AND
+            // issue count are all equal.
             .then_with(|| a.1.series.id.cmp(&b.1.series.id))
     });
 
@@ -312,6 +326,74 @@ mod tests {
         };
         let r = match_file(Some(&ci), None, &candidates);
         assert_eq!(r.issue_id, Some(10), "lower-id wins when no year hint");
+    }
+
+    #[test]
+    fn tiebreak_prefers_more_issues_over_lower_id() {
+        // Live repro: "Sam and Twitch Case Files" had id=381
+        // (start_year=2025, 1 issue) and id=918 (start_year=2024, 24
+        // issues). Files arrived with a 2026 scan-year hint so neither
+        // matched on year. Pre-fix the lower id won and the
+        // 1-issue stub didn't have the file's issue number — files
+        // sat in /watch/ forever. Post-fix the larger catalog entry
+        // wins.
+        let small_id_few_issues = candidate(
+            series(381, "Sam and Twitch Case Files", Some(2025)),
+            vec![issue(10, 381, "1")],
+        );
+        let mut bigger_issues = Vec::new();
+        for n in 1..=24 {
+            bigger_issues.push(issue(100 + n, 918, &n.to_string()));
+        }
+        let large_id_many_issues =
+            candidate(series(918, "Sam and Twitch Case Files", Some(2024)), bigger_issues);
+        let candidates = vec![small_id_few_issues, large_id_many_issues];
+        let ci = ComicInfo {
+            series: Some("Sam and Twitch Case Files".into()),
+            number: Some("23".into()),
+            year: Some(2026), // matches neither start_year
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), None, &candidates);
+        // The 24-issue series carries #23; the 1-issue stub does
+        // not. Pre-fix this returned Unmatched (lower-id won,
+        // didn't have #23); post-fix issue_id is the catalog #23.
+        assert_eq!(r.issue_id, Some(100 + 23));
+        assert_eq!(r.method, MatchMethod::ComicInfoXml);
+    }
+
+    #[test]
+    fn tiebreak_year_still_beats_issue_count() {
+        // Year-hint match is a stronger signal than issue count — a
+        // 24-issue catalog entry must NOT win over the 1-issue entry
+        // when the year hint exactly matches the 1-issue entry's
+        // start_year. Issue-count tiebreak only kicks in when year
+        // hint doesn't discriminate.
+        let small_with_year_match = candidate(
+            series(381, "Sam and Twitch Case Files", Some(2025)),
+            vec![issue(10, 381, "1")],
+        );
+        let mut bigger_issues = Vec::new();
+        for n in 1..=24 {
+            bigger_issues.push(issue(100 + n, 918, &n.to_string()));
+        }
+        let large_without_year_match = candidate(
+            series(918, "Sam and Twitch Case Files", Some(2024)),
+            bigger_issues,
+        );
+        let candidates = vec![small_with_year_match, large_without_year_match];
+        let ci = ComicInfo {
+            series: Some("Sam and Twitch Case Files".into()),
+            number: Some("1".into()),
+            year: Some(2025), // matches start_year=2025 only
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), None, &candidates);
+        assert_eq!(
+            r.issue_id,
+            Some(10),
+            "year-hint match must outrank issue count"
+        );
     }
 
     #[test]
