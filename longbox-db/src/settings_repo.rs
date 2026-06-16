@@ -129,6 +129,28 @@ pub const KEY_PHASE_B_POLL_INTERVAL_SECONDS: &str = "phase_b_poll_interval_secon
 /// MB. Phase B reads per-file so tuning needs no restart.
 pub const KEY_MIN_FILE_SIZE_MB: &str = "min_file_size_mb";
 
+// -------- OPDS catalog access (longbox-opds) --------
+
+/// Master switch for the OPDS catalog. `'true'` / `'false'`; default
+/// `'false'` (set by the 20260615 migration). When false, every
+/// `/opds/v1/*` route returns 503 regardless of credentials. The auth
+/// middleware reads all four OPDS rows per request, so toggling this
+/// takes effect immediately with no restart.
+pub const KEY_OPDS_ENABLED: &str = "opds_enabled";
+
+/// OPDS Basic-auth username. Null/empty is treated the same as disabled
+/// (503: "not configured"). Set via the Settings UI's OPDS section.
+pub const KEY_OPDS_USERNAME: &str = "opds_username";
+
+/// bcrypt hash of the OPDS Basic-auth password. Set-only from the UI;
+/// never returned to the client.
+pub const KEY_OPDS_PASSWORD_HASH: &str = "opds_password_hash";
+
+/// OPDS Bearer API token (32-byte hex). Generated on first OPDS Settings
+/// save and regenerable from the UI. Accepted as an alternative to Basic
+/// auth on every endpoint.
+pub const KEY_OPDS_API_TOKEN: &str = "opds_api_token";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,

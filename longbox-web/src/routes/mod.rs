@@ -20,6 +20,7 @@ pub mod indexers;
 pub mod library_roots;
 pub mod missing;
 pub mod needs_attention;
+pub mod opds;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
@@ -65,6 +66,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .nest("/api", api)
+        .nest("/opds", opds::router(state.clone()))
         .fallback(crate::frontend::fallback_handler)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
