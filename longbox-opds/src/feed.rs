@@ -103,14 +103,23 @@ impl Link {
     }
 }
 
-/// An Atom `<entry>`. Navigation entries carry a `subsection` link to a
-/// sub-feed plus optional descriptive `content`; the richer acquisition
-/// entry shape is layered on in a later commit.
-#[derive(Debug, Clone)]
+/// An Atom `<entry>`.
+///
+/// Navigation entries carry a `subsection` link to a sub-feed plus an
+/// optional descriptive `content`. Acquisition entries (per issue) instead
+/// carry image + acquisition links, a `dc_issued` cover date, and a
+/// `summary`. All the descriptive fields are optional, so one struct serves
+/// both feed kinds; a field left `None` is simply not emitted.
+#[derive(Debug, Clone, Default)]
 pub struct Entry {
     pub id: String,
     pub title: String,
     pub updated: String,
+    /// `<dc:issued>` — issue cover date (acquisition entries).
+    pub dc_issued: Option<String>,
+    /// `<summary>` — issue summary (acquisition entries).
+    pub summary: Option<String>,
+    /// `<content type="text">` — descriptive blurb (navigation entries).
     pub content: Option<String>,
     pub links: Vec<Link>,
 }
@@ -179,6 +188,12 @@ impl Feed {
             let _ = writeln!(out, "    <updated>{}</updated>", esc(&entry.updated));
             for link in &entry.links {
                 write_link(&mut out, "    ", link);
+            }
+            if let Some(issued) = &entry.dc_issued {
+                let _ = writeln!(out, "    <dc:issued>{}</dc:issued>", esc(issued));
+            }
+            if let Some(summary) = &entry.summary {
+                let _ = writeln!(out, "    <summary>{}</summary>", esc(summary));
             }
             if let Some(content) = &entry.content {
                 let _ = writeln!(out, "    <content type=\"text\">{}</content>", esc(content));
@@ -291,6 +306,7 @@ mod tests {
                     "http://h/opds/v1/series/1",
                     ACQUISITION_TYPE,
                 )],
+                ..Default::default()
             }],
         }
     }
@@ -336,6 +352,47 @@ mod tests {
 
         // next link present.
         assert!(xml.contains(r#"rel="next""#));
+    }
+
+    #[test]
+    fn acquisition_entry_emits_dc_issued_and_summary() {
+        let feed = Feed {
+            id: "urn:longbox:series:1".into(),
+            title: "Saga".into(),
+            updated: "2026-06-15T00:00:00Z".into(),
+            kind: FeedKind::Acquisition,
+            links: vec![Link::new("self", "http://h/opds/v1/series/1", ACQUISITION_TYPE)],
+            pagination: Some(PageMeta {
+                total_results: 1,
+                items_per_page: 25,
+                start_index: 1,
+            }),
+            entries: vec![Entry {
+                id: "urn:longbox:issue:7".into(),
+                title: "Issue #1".into(),
+                updated: "2026-06-01T00:00:00Z".into(),
+                dc_issued: Some("2024-01-15".into()),
+                summary: Some("First & last".into()),
+                content: None,
+                links: vec![
+                    Link::new("http://opds-spec.org/image", "http://h/c/7", "image/jpeg"),
+                    Link::new(
+                        "http://opds-spec.org/acquisition",
+                        "http://h/d/7",
+                        "application/x-cbz",
+                    ),
+                ],
+            }],
+        };
+        let xml = feed.to_xml();
+        assert!(xml.contains("<dc:issued>2024-01-15</dc:issued>"));
+        assert!(xml.contains("<summary>First &amp; last</summary>"));
+        assert!(xml.contains(r#"rel="http://opds-spec.org/acquisition""#));
+        assert!(xml.contains(r#"type="application/x-cbz""#));
+        // dc:issued must precede summary (spec entry ordering).
+        let issued = xml.find("dc:issued").unwrap();
+        let summary = xml.find("<summary>").unwrap();
+        assert!(issued < summary);
     }
 
     #[test]
