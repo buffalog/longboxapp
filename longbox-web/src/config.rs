@@ -41,6 +41,13 @@ pub struct AppConfig {
     /// container) typically don't need it and the UI keeps a copy-only
     /// display. Source: `HOST_LIBRARY_PATH` env var.
     pub host_library_path: Option<String>,
+    /// Public base URL the OPDS catalog advertises in feed links and the
+    /// OpenSearch descriptor. OPDS readers connect from other devices, so
+    /// every href must be absolute and reachable from the reader — not a
+    /// container-internal address. Trailing slash stripped. Source:
+    /// `OPDS_BASE_URL` env var; defaults to the Tailscale hostname the
+    /// deployment is reached at.
+    pub opds_base_url: String,
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +121,12 @@ impl AppConfig {
         // re-trim the value on every call.
         let host_library_path = optional("HOST_LIBRARY_PATH").map(|p| normalize_path(&p));
 
+        // Public OPDS base URL. Normalized (trailing slash stripped) so
+        // href construction can unconditionally append `/opds/v1/...`.
+        let opds_base_url = optional("OPDS_BASE_URL")
+            .map(|u| normalize_path(&u))
+            .unwrap_or_else(|| "http://jap-mbp.tail21a9bb.ts.net:3000".to_owned());
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -128,6 +141,7 @@ impl AppConfig {
             pull_schedule_time,
             scan_schedule_time,
             host_library_path,
+            opds_base_url,
         })
     }
 }
