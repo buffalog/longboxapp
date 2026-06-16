@@ -52,6 +52,7 @@ COPY longbox-pull/ ./longbox-pull/
 COPY longbox-scan-scheduler/ ./longbox-scan-scheduler/
 COPY longbox-cv-enrichment/ ./longbox-cv-enrichment/
 COPY longbox-webhooks/ ./longbox-webhooks/
+COPY longbox-opds/ ./longbox-opds/
 COPY longbox-web/ ./longbox-web/
 
 # Replace any tracked frontend-dist placeholder with the freshly-built
