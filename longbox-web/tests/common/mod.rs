@@ -119,6 +119,7 @@ pub async fn build_test_app() -> TestApp {
         pull_schedule_time: time::macros::time!(05:00),
         scan_schedule_time: time::macros::time!(03:00),
         host_library_path: None,
+        opds_base_url: "http://opds.test".to_owned(),
     };
 
     // The pull + scan schedulers run in every test app; with their
@@ -202,4 +203,12 @@ pub async fn response_json(resp: axum::response::Response) -> serde_json::Value 
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[allow(dead_code)]
+pub async fn response_text(resp: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
 }

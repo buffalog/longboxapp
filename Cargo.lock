@@ -1355,6 +1355,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "hex",
+ "quick-xml 0.39.4",
  "rand 0.9.4",
  "subtle",
  "thiserror 2.0.18",
@@ -1450,6 +1451,7 @@ dependencies = [
  "longbox-scanner",
  "longbox-webhooks",
  "mime_guess",
+ "percent-encoding",
  "pretty_assertions",
  "rust-embed",
  "serde",
@@ -1862,6 +1864,15 @@ name = "quick-xml"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.39.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
 ]
