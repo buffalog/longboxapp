@@ -14,6 +14,24 @@ pub const ACQUISITION_TYPE: &str = "application/atom+xml;profile=opds-catalog;ki
 /// Items per page across every paginated list feed (spec-mandated).
 pub const ITEMS_PER_PAGE: u64 = 25;
 
+/// OPDS acquisition MIME type for a comic archive, by filename extension.
+/// `.cbz`/`.cbr`/`.cb7` map to their `application/x-cb*` types; anything
+/// else falls back to `application/octet-stream`. Shared by the acquisition
+/// feed's download link and the streaming endpoint so the advertised type
+/// and the served type always agree.
+pub fn archive_mime(filename: &str) -> &'static str {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".cbz") {
+        "application/x-cbz"
+    } else if lower.ends_with(".cbr") {
+        "application/x-cbr"
+    } else if lower.ends_with(".cb7") {
+        "application/x-cb7"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 /// Pagination arithmetic for a single list feed. `number` is the 1-based
 /// page; `new` clamps it (and `per_page`) to at least 1 so a `?page=0` or
 /// `?page=-1` from a client can never produce a negative SQL offset.
@@ -393,6 +411,15 @@ mod tests {
         let issued = xml.find("dc:issued").unwrap();
         let summary = xml.find("<summary>").unwrap();
         assert!(issued < summary);
+    }
+
+    #[test]
+    fn archive_mime_maps_extensions() {
+        assert_eq!(archive_mime("X 001.cbz"), "application/x-cbz");
+        assert_eq!(archive_mime("X 001.CBR"), "application/x-cbr"); // case-insensitive
+        assert_eq!(archive_mime("X 001.cb7"), "application/x-cb7");
+        assert_eq!(archive_mime("X 001.pdf"), "application/octet-stream");
+        assert_eq!(archive_mime("noext"), "application/octet-stream");
     }
 
     #[test]

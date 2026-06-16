@@ -45,6 +45,7 @@ time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"]
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "migrate"] }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.path_relative,\n                  f.size_bytes AS \"size_bytes!: i64\",\n                  lr.path AS root_path\n           FROM files f\n           JOIN library_roots lr ON lr.id = f.library_root_id\n           WHERE f.issue_id = ? AND f.is_present = 1\n           ORDER BY (f.status = 'owned') DESC, f.id\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "path_relative",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "size_bytes!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "root_path",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0966204f1a5db64f124db89bea6a3924c6159891300bc8c7866f2b7d1f22d9f4"
+}
