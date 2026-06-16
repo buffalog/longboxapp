@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use base64::Engine as _;
-use common::{build_test_app, TestApp};
+use common::build_test_app;
 use longbox_db::{issue_repo, series_repo, NewIssue, NewSeries};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -179,6 +179,23 @@ async fn cdn_failure_is_502() {
 
     let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn refuses_internal_cover_url_ssrf() {
+    let mut app = build_test_app().await;
+    configure_opds(&app.state.db).await;
+    // Turn the SSRF guard on (tests relax it by default for the loopback
+    // mock CDN); a cover_url pointing at a link-local host must then be
+    // refused before any outbound request — 404, never fetched.
+    app.set_allow_private_cover_hosts(false);
+    let issue = seed_issue(
+        &app.state.db,
+        Some("http://169.254.169.254/latest/meta-data"),
+    )
+    .await;
+    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

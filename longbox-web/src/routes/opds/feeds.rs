@@ -369,7 +369,7 @@ fn issue_entry(base: &str, issue: &OpdsIssue) -> Entry {
         links.push(Link::new(
             ACQUISITION_REL,
             abs(base, &format!("/opds/v1/issues/{}/download", issue.id)),
-            cbz_mime(filename),
+            longbox_opds::archive_mime(filename),
         ));
     }
 
@@ -381,20 +381,6 @@ fn issue_entry(base: &str, issue: &OpdsIssue) -> Entry {
         summary: issue.summary.clone().filter(|s| !s.is_empty()),
         content: None,
         links,
-    }
-}
-
-/// OPDS acquisition MIME type from a comic archive filename extension.
-fn cbz_mime(filename: &str) -> &'static str {
-    let lower = filename.to_ascii_lowercase();
-    if lower.ends_with(".cbz") {
-        "application/x-cbz"
-    } else if lower.ends_with(".cbr") {
-        "application/x-cbr"
-    } else if lower.ends_with(".cb7") {
-        "application/x-cb7"
-    } else {
-        "application/octet-stream"
     }
 }
 
