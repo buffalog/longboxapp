@@ -26,25 +26,24 @@ use longbox_opds::{AuthOutcome, OpdsAccess};
 
 use crate::state::AppState;
 
+mod feeds;
+
 /// Build the OPDS sub-router. Mounted at `/opds` by `build_router`; every
 /// route is guarded by [`require_auth`]. The state is baked into the auth
 /// middleware via `from_fn_with_state` (the route handlers receive it the
 /// usual way once `build_router` calls `.with_state`).
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/v1", get(root))
+        .route("/v1", get(feeds::root))
+        .route("/v1/series", get(feeds::series_list))
+        .route("/v1/publishers", get(feeds::publishers_list))
+        .route("/v1/publishers/:name/series", get(feeds::publisher_series))
         // INVARIANT: every OPDS route MUST be registered ABOVE this
         // `.layer()` call. In axum a layer only wraps the routes that
         // already exist when it is applied — any `.route()` chained AFTER
         // this line would be UNAUTHENTICATED. Later commits add feed,
         // cover, and download routes: add them above, never below.
         .layer(middleware::from_fn_with_state(state, require_auth))
-}
-
-/// Placeholder catalog root. Replaced by the real navigation feed in the
-/// feeds commit; for now it proves the route + auth wiring end-to-end.
-async fn root() -> Response {
-    (StatusCode::OK, "OPDS catalog root").into_response()
 }
 
 /// Per-request OPDS auth gate. Reads the four OPDS settings rows, then

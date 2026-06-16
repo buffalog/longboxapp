@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT publisher AS \"name!: String\", COUNT(*) AS \"series_count!: i64\"\n           FROM series\n           WHERE publisher IS NOT NULL AND publisher <> ''\n           GROUP BY publisher\n           ORDER BY publisher\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_count!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "c5fcfec390a031d532dd9d78205a500ab8afcd438cb614e038980433ca1a7119"
+}

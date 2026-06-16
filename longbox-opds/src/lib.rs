@@ -8,5 +8,9 @@
 //! here.
 
 pub mod auth;
+pub mod feed;
 
 pub use auth::{generate_api_token, hash_password, AuthOutcome, OpdsAccess, OpdsAuthError};
+pub use feed::{
+    Entry, Feed, FeedKind, Link, Page, PageMeta, ACQUISITION_TYPE, ITEMS_PER_PAGE, NAVIGATION_TYPE,
+};
