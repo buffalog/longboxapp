@@ -14,6 +14,7 @@
   import DownloaderSettings from '$lib/components/DownloaderSettings.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import IndexerSettings from '$lib/components/IndexerSettings.svelte';
+  import OpdsSettings from '$lib/components/OpdsSettings.svelte';
   import WebhookSettings from '$lib/components/WebhookSettings.svelte';
 
   let { data } = $props();
@@ -611,6 +612,8 @@
   <DownloaderSettings downloader={data.downloader} />
 
   <WebhookSettings webhooks={data.webhooks} />
+
+  <OpdsSettings opds={data.opds} />
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">About</h2>

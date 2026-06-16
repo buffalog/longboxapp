@@ -21,6 +21,7 @@ pub mod library_roots;
 pub mod missing;
 pub mod needs_attention;
 pub mod opds;
+pub mod opds_settings;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
@@ -50,6 +51,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(stats::router())
         .merge(library_roots::router())
         .merge(settings::router())
+        .merge(opds_settings::router())
         .merge(dashboard::router())
         .merge(missing::router())
         .merge(postprocess::router())
