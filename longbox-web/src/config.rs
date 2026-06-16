@@ -48,6 +48,11 @@ pub struct AppConfig {
     /// `OPDS_BASE_URL` env var; defaults to the Tailscale hostname the
     /// deployment is reached at.
     pub opds_base_url: String,
+    /// Directory the OPDS cover proxy caches fetched cover art in, as
+    /// `{issue_id}.jpg`. Lives inside the longbox-db Docker volume so it
+    /// survives restarts without a new mount. Source: `OPDS_COVERS_DIR`
+    /// env var; defaults to `/data/covers`.
+    pub opds_covers_dir: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -127,6 +132,10 @@ impl AppConfig {
             .map(|u| normalize_path(&u))
             .unwrap_or_else(|| "http://jap-mbp.tail21a9bb.ts.net:3000".to_owned());
 
+        let opds_covers_dir = optional("OPDS_COVERS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/data/covers"));
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -142,6 +151,7 @@ impl AppConfig {
             scan_schedule_time,
             host_library_path,
             opds_base_url,
+            opds_covers_dir,
         })
     }
 }
