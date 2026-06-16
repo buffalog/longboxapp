@@ -174,6 +174,45 @@ async fn series_feed_paginates_at_25() {
     assert!(!p2.contains(r#"rel="next""#));
 }
 
+const OPENSEARCH_TYPE: &str = "application/opensearchdescription+xml";
+
+#[tokio::test]
+async fn opensearch_descriptor_served() {
+    let app = build_test_app().await;
+    configure_opds(&app.state.db).await;
+    let resp = app.request(get("/opds/v1/opensearch.xml")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(content_type(&resp), OPENSEARCH_TYPE);
+    let xml = response_text(resp).await;
+    assert!(xml.contains("<ShortName>LongBox</ShortName>"));
+    assert!(xml.contains("template=\"http://opds.test/opds/v1/search?q={searchTerms}\""));
+}
+
+#[tokio::test]
+async fn root_advertises_search_descriptor() {
+    let app = build_test_app().await;
+    configure_opds(&app.state.db).await;
+    let xml = body_of(&app, "/opds/v1").await;
+    assert!(xml.contains(r#"rel="search""#));
+    assert!(xml.contains(r#"href="http://opds.test/opds/v1/opensearch.xml""#));
+}
+
+#[tokio::test]
+async fn opensearch_requires_auth() {
+    let app = build_test_app().await;
+    configure_opds(&app.state.db).await;
+    let resp = app
+        .request(
+            Request::builder()
+                .method("GET")
+                .uri("/opds/v1/opensearch.xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn feed_routes_require_auth() {
     let app = build_test_app().await;

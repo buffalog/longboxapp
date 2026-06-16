@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod feed;
+pub mod opensearch;
 
 pub use auth::{generate_api_token, hash_password, AuthOutcome, OpdsAccess, OpdsAuthError};
 pub use feed::{
