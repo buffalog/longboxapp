@@ -43,7 +43,7 @@ pub use publisher_filter_repo::{
 pub use pull_attempt_repo::{FailedPull, NewPullAttempt, PullAttemptRow};
 pub use pull_list_repo::{NewPullEntry, PullListRow, PullListWithSeries};
 pub use metron_calendar_cache_repo::{MetronCalendarCacheRow, NewMetronCalendarCacheEntry};
-pub use opds_repo::PublisherEntry;
+pub use opds_repo::{OpdsIssue, PublisherEntry};
 pub use release_cache_repo::{NewReleaseCacheEntry, ReleaseCacheRow};
 pub use webhook_config_repo::{NewWebhookConfig, WebhookConfigRow, WebhookConfigUpdate};
 
