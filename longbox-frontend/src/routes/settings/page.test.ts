@@ -62,7 +62,15 @@ function pageData(over: Partial<Settings> = {}) {
         publisherFilters: [],
         indexers: [],
         downloader: null,
-        webhooks: []
+        webhooks: [],
+        opds: {
+          enabled: false,
+          username: '',
+          has_password: false,
+          api_token: '',
+          base_url: 'http://localhost:3000',
+          catalog_url: 'http://localhost:3000/opds/v1'
+        }
       }
     }
   };
