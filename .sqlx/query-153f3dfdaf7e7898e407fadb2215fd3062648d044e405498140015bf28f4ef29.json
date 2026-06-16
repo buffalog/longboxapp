@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             i.id AS \"id!: i64\",\n             i.number,\n             i.title,\n             i.cover_date,\n             i.summary,\n             i.cover_url,\n             i.updated_at AS \"updated_at: time::PrimitiveDateTime\",\n             (SELECT f.path_relative FROM files f\n              WHERE f.issue_id = i.id AND f.is_present = 1\n              ORDER BY (f.status = 'owned') DESC, f.id\n              LIMIT 1) AS \"present_filename?: String\"\n           FROM issues i\n           WHERE i.series_id = ?\n           ORDER BY CAST(i.canonical_number AS REAL), i.canonical_number, i.id\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "number",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_date",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: time::PrimitiveDateTime",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "present_filename?: String",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "153f3dfdaf7e7898e407fadb2215fd3062648d044e405498140015bf28f4ef29"
+}

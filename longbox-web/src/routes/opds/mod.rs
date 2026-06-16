@@ -36,8 +36,10 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/v1", get(feeds::root))
         .route("/v1/series", get(feeds::series_list))
+        .route("/v1/series/:id", get(feeds::series_detail))
         .route("/v1/publishers", get(feeds::publishers_list))
         .route("/v1/publishers/:name/series", get(feeds::publisher_series))
+        .route("/v1/search", get(feeds::search))
         // INVARIANT: every OPDS route MUST be registered ABOVE this
         // `.layer()` call. In axum a layer only wraps the routes that
         // already exist when it is applied — any `.route()` chained AFTER
