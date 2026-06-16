@@ -214,6 +214,21 @@ async fn opensearch_requires_auth() {
 }
 
 #[tokio::test]
+async fn empty_base_url_emits_relative_hrefs() {
+    let mut app = build_test_app().await;
+    configure_opds(&app.state.db).await;
+    // The default OPDS_BASE_URL is empty → hrefs are path-only, resolving
+    // against whatever origin the reader fetched the feed from.
+    app.set_opds_base_url("");
+
+    let xml = body_of(&app, "/opds/v1").await;
+    assert!(xml.contains(r#"href="/opds/v1/series""#));
+    assert!(xml.contains(r#"href="/opds/v1/opensearch.xml""#));
+    // No accidental host prefix.
+    assert!(!xml.contains("href=\"http"));
+}
+
+#[tokio::test]
 async fn feed_routes_require_auth() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
