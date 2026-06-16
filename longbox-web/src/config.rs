@@ -42,11 +42,12 @@ pub struct AppConfig {
     /// display. Source: `HOST_LIBRARY_PATH` env var.
     pub host_library_path: Option<String>,
     /// Public base URL the OPDS catalog advertises in feed links and the
-    /// OpenSearch descriptor. OPDS readers connect from other devices, so
-    /// every href must be absolute and reachable from the reader — not a
-    /// container-internal address. Trailing slash stripped. Source:
-    /// `OPDS_BASE_URL` env var; defaults to the Tailscale hostname the
-    /// deployment is reached at.
+    /// OpenSearch descriptor. When set, hrefs are absolute and reachable
+    /// from the reader device (a LAN IP, Tailscale host, or domain — not a
+    /// container-internal address); trailing slash stripped. Empty by
+    /// default, in which case hrefs are emitted relative (path-only), which
+    /// resolves correctly when the reader reaches LongBox at the same
+    /// origin it fetched the feed from. Source: `OPDS_BASE_URL` env var.
     pub opds_base_url: String,
     /// Directory the OPDS cover proxy caches fetched cover art in, as
     /// `{issue_id}.jpg`. Lives inside the longbox-db Docker volume so it
@@ -134,9 +135,10 @@ impl AppConfig {
 
         // Public OPDS base URL. Normalized (trailing slash stripped) so
         // href construction can unconditionally append `/opds/v1/...`.
+        // Empty when unset → relative hrefs.
         let opds_base_url = optional("OPDS_BASE_URL")
             .map(|u| normalize_path(&u))
-            .unwrap_or_else(|| "http://jap-mbp.tail21a9bb.ts.net:3000".to_owned());
+            .unwrap_or_default();
 
         let opds_covers_dir = optional("OPDS_COVERS_DIR")
             .map(PathBuf::from)
