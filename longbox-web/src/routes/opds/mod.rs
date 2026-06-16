@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/v1/publishers", get(feeds::publishers_list))
         .route("/v1/publishers/:name/series", get(feeds::publisher_series))
         .route("/v1/search", get(feeds::search))
+        .route("/v1/opensearch.xml", get(feeds::opensearch))
         .route("/v1/covers/:issue_id", get(covers::cover))
         .route("/v1/issues/:id/download", get(download::download))
         // INVARIANT: every OPDS route MUST be registered ABOVE this

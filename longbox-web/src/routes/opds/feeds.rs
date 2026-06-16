@@ -68,6 +68,7 @@ pub async fn root(State(state): State<AppState>) -> Response {
         links: vec![
             self_link(base, "/opds/v1", FeedKind::Navigation),
             start_link(base),
+            search_descriptor_link(base),
         ],
         pagination: None,
         entries: vec![
@@ -294,6 +295,20 @@ pub async fn search(
     Ok(navigation_response(feed))
 }
 
+/// `GET /opds/v1/opensearch.xml` — the OpenSearch descriptor. Unpaginated,
+/// public-within-OPDS (still behind the auth layer).
+pub async fn opensearch(State(state): State<AppState>) -> Response {
+    let xml = longbox_opds::opensearch::descriptor(&state.config.opds_base_url);
+    (
+        [(
+            header::CONTENT_TYPE,
+            longbox_opds::opensearch::OPENSEARCH_DESCRIPTION_TYPE,
+        )],
+        xml,
+    )
+        .into_response()
+}
+
 // ---------- feed construction helpers ----------
 
 /// Build a navigation feed whose entries are series, each linking to its
@@ -391,6 +406,7 @@ fn search_links(base: &str, q_encoded: &str, page: Page) -> Vec<Link> {
     let mut links = vec![
         Link::new("self", href(page.number), NAVIGATION_TYPE),
         start_link(base),
+        search_descriptor_link(base),
         Link::new("up", abs(base, "/opds/v1"), NAVIGATION_TYPE),
     ];
     if page.has_prev() {
@@ -418,6 +434,7 @@ fn paginated_links(
             kind.mime(),
         ),
         start_link(base),
+        search_descriptor_link(base),
         Link::new("up", abs(base, up_path), NAVIGATION_TYPE),
     ];
     if page.has_prev() {
@@ -451,6 +468,16 @@ fn self_link(base: &str, path: &str, kind: FeedKind) -> Link {
 
 fn start_link(base: &str) -> Link {
     Link::new("start", abs(base, "/opds/v1"), NAVIGATION_TYPE)
+}
+
+/// `rel="search"` link to the OpenSearch descriptor, making search
+/// discoverable from any feed.
+fn search_descriptor_link(base: &str) -> Link {
+    Link::new(
+        "search",
+        abs(base, "/opds/v1/opensearch.xml"),
+        longbox_opds::opensearch::OPENSEARCH_DESCRIPTION_TYPE,
+    )
 }
 
 // ---------- response + formatting primitives ----------

@@ -236,7 +236,7 @@ fn write_link(out: &mut String, indent: &str, link: &Link) {
 /// XML-escape a string for use in element text or a double-quoted
 /// attribute. Conservatively escapes the full set `& < > " '` so the same
 /// function is safe in both positions.
-fn esc(input: &str) -> String {
+pub(crate) fn esc(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
