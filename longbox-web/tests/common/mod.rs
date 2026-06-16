@@ -27,6 +27,10 @@ pub struct TestApp {
     pub cv_server: MockServer,
     #[allow(dead_code)]
     pub library_dir: TempDir,
+    /// Temp directory backing `config.opds_covers_dir` so the OPDS cover
+    /// proxy's write-behind cache lands somewhere disposable.
+    #[allow(dead_code)]
+    pub covers_dir: TempDir,
     pub library_root_id: i64,
 }
 
@@ -79,6 +83,7 @@ pub async fn build_test_app() -> TestApp {
     let pool: Pool = longbox_db::open(":memory:").await.unwrap();
     let library_dir = TempDir::new().unwrap();
     let library_path = library_dir.path().to_string_lossy().to_string();
+    let covers_dir = TempDir::new().unwrap();
 
     let library_root_id = library_root_repo::insert(
         &pool,
@@ -120,6 +125,7 @@ pub async fn build_test_app() -> TestApp {
         scan_schedule_time: time::macros::time!(03:00),
         host_library_path: None,
         opds_base_url: "http://opds.test".to_owned(),
+        opds_covers_dir: covers_dir.path().to_path_buf(),
     };
 
     // The pull + scan schedulers run in every test app; with their
@@ -176,6 +182,7 @@ pub async fn build_test_app() -> TestApp {
         state,
         cv_server,
         library_dir,
+        covers_dir,
         library_root_id,
     }
 }
