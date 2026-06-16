@@ -25,16 +25,59 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 /// Shared, connection-pooled HTTP client for CDN fetches. Built once.
+/// Redirects are disabled: a cover URL must resolve directly, so an
+/// attacker-influenced `cover_url` can't 302-pivot into an internal host.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent("longbox-opds/1.0")
             .build()
             .expect("cover proxy HTTP client builds")
     })
+}
+
+/// SSRF guard for a stored `cover_url`. Always refuses anything that isn't
+/// an `http(s)` URL. Unless `allow_private` is set, also refuses literal
+/// loopback/private/link-local/unspecified IP hosts. Hostnames that
+/// *resolve* to private space are not caught here — combined with the
+/// no-redirect client that residual is narrow; full egress filtering
+/// belongs at the network layer. `allow_private` exists for deployments
+/// whose covers live on a private host (and for tests, whose mock CDN
+/// binds loopback).
+fn is_safe_cover_url(raw: &str, allow_private: bool) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if allow_private {
+        return true;
+    }
+    // host_str keeps IPv6 brackets (`[::1]`); strip them so a literal IP
+    // parses.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return false;
+        }
+        if let std::net::IpAddr::V4(v4) = ip {
+            if v4.is_private() || v4.is_link_local() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `GET /opds/v1/covers/{issue_id}`.
@@ -58,6 +101,15 @@ pub async fn cover(
             resource: "cover",
             id: issue_id.to_string(),
         })?;
+
+    // SSRF guard before any outbound request.
+    if !is_safe_cover_url(&cover_url, state.config.opds_allow_private_cover_hosts) {
+        tracing::warn!(issue_id, "OPDS cover: refused unsafe cover URL");
+        return Err(ApiError::NotFound {
+            resource: "cover",
+            id: issue_id.to_string(),
+        });
+    }
 
     // 3. Fetch from the CDN.
     let bytes = fetch_cover(&cover_url).await?;
@@ -127,4 +179,42 @@ fn jpeg_response(bytes: Vec<u8>) -> Response {
         bytes,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_cover_url;
+
+    #[test]
+    fn accepts_normal_cdn_urls() {
+        assert!(is_safe_cover_url("https://comicvine.gamespot.com/a/uploads/x.jpg", false));
+        assert!(is_safe_cover_url("http://cdn.example.com/x.jpg", false));
+        // Public IP literal is fine.
+        assert!(is_safe_cover_url("https://8.8.8.8/x.jpg", false));
+    }
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        assert!(!is_safe_cover_url("file:///etc/hosts", false));
+        assert!(!is_safe_cover_url("gopher://evil/x", false));
+        assert!(!is_safe_cover_url("not a url", false));
+        // Non-http schemes are refused even with allow_private.
+        assert!(!is_safe_cover_url("file:///etc/hosts", true));
+    }
+
+    #[test]
+    fn rejects_internal_ip_literals() {
+        assert!(!is_safe_cover_url("http://127.0.0.1/x.jpg", false)); // loopback
+        assert!(!is_safe_cover_url("http://169.254.169.254/latest/meta-data", false)); // link-local
+        assert!(!is_safe_cover_url("http://10.0.0.5/x.jpg", false)); // private
+        assert!(!is_safe_cover_url("http://192.168.1.1/x.jpg", false)); // private
+        assert!(!is_safe_cover_url("http://[::1]/x.jpg", false)); // v6 loopback
+        assert!(!is_safe_cover_url("http://0.0.0.0/x.jpg", false)); // unspecified
+    }
+
+    #[test]
+    fn allow_private_permits_loopback() {
+        assert!(is_safe_cover_url("http://127.0.0.1:8080/x.jpg", true));
+        assert!(is_safe_cover_url("http://[::1]/x.jpg", true));
+    }
 }

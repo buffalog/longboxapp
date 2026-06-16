@@ -56,6 +56,17 @@ impl TestApp {
         self.router = build_router(self.state.clone());
     }
 
+    /// Toggle the OPDS cover-proxy SSRF guard and rebuild the router.
+    /// The guard is relaxed by default in tests (the mock CDN binds
+    /// loopback); the SSRF test flips it on to exercise the refusal path.
+    #[allow(dead_code)]
+    pub fn set_allow_private_cover_hosts(&mut self, allow: bool) {
+        let mut config = (*self.state.config).clone();
+        config.opds_allow_private_cover_hosts = allow;
+        self.state.config = Arc::new(config);
+        self.router = build_router(self.state.clone());
+    }
+
     /// Wire up a Metron client backed by `server` and rebuild the
     /// router from the modified state. Subsequent requests route
     /// through the new client. Item A v2 piece-3 tests use this to
@@ -126,6 +137,9 @@ pub async fn build_test_app() -> TestApp {
         host_library_path: None,
         opds_base_url: "http://opds.test".to_owned(),
         opds_covers_dir: covers_dir.path().to_path_buf(),
+        // Tests' mock CDN binds loopback; allow it. The dedicated SSRF
+        // test drives `is_safe_cover_url` directly with the guard on.
+        opds_allow_private_cover_hosts: true,
     };
 
     // The pull + scan schedulers run in every test app; with their

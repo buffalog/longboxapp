@@ -53,6 +53,12 @@ pub struct AppConfig {
     /// survives restarts without a new mount. Source: `OPDS_COVERS_DIR`
     /// env var; defaults to `/data/covers`.
     pub opds_covers_dir: PathBuf,
+    /// When false (default), the OPDS cover proxy refuses to fetch
+    /// `cover_url`s whose host is a loopback/private/link-local IP literal
+    /// (an SSRF guard). Set true only when covers legitimately live on a
+    /// private host reachable from the container. Source:
+    /// `OPDS_ALLOW_PRIVATE_COVER_HOSTS` env var.
+    pub opds_allow_private_cover_hosts: bool,
 }
 
 #[derive(Debug, Error)]
@@ -136,6 +142,11 @@ impl AppConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/data/covers"));
 
+        let opds_allow_private_cover_hosts = match optional("OPDS_ALLOW_PRIVATE_COVER_HOSTS") {
+            Some(raw) => parse_bool("OPDS_ALLOW_PRIVATE_COVER_HOSTS", &raw)?,
+            None => false,
+        };
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -152,6 +163,7 @@ impl AppConfig {
             host_library_path,
             opds_base_url,
             opds_covers_dir,
+            opds_allow_private_cover_hosts,
         })
     }
 }

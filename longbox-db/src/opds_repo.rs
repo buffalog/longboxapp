@@ -159,6 +159,48 @@ where
     Ok(row.count)
 }
 
+/// A present file backing an issue, resolved for the OPDS download
+/// endpoint. The absolute path is `root_path` joined with `path_relative`;
+/// neither is ever exposed in feed XML.
+#[derive(Debug, Clone)]
+pub struct DownloadFile {
+    pub root_path: String,
+    pub path_relative: String,
+    pub size_bytes: i64,
+}
+
+/// Resolve the file to stream for an issue's download: a present file
+/// (preferring `owned`), joined to its library root for the absolute path.
+/// `None` when the issue has no present file — the same selection the
+/// acquisition feed uses to decide whether to show a download link, so the
+/// link and the download agree.
+pub async fn find_downloadable_file<'e, E>(
+    executor: E,
+    issue_id: i64,
+) -> Result<Option<DownloadFile>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT f.path_relative,
+                  f.size_bytes AS "size_bytes!: i64",
+                  lr.path AS root_path
+           FROM files f
+           JOIN library_roots lr ON lr.id = f.library_root_id
+           WHERE f.issue_id = ? AND f.is_present = 1
+           ORDER BY (f.status = 'owned') DESC, f.id
+           LIMIT 1"#,
+        issue_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|r| DownloadFile {
+        root_path: r.root_path,
+        path_relative: r.path_relative,
+        size_bytes: r.size_bytes,
+    }))
+}
+
 /// A page of issues for one series, ordered by issue number. Ordering uses
 /// the generated `canonical_number` cast to a real so "2" sorts before
 /// "10" and zero-padding is ignored; non-numeric numbers (e.g. "Annual 1")
