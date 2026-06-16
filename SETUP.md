@@ -194,6 +194,7 @@ services:
       METRON_API_PASSWORD: ${METRON_API_PASSWORD:-}
       DOWNLOAD_WATCH_PATH: ${DOWNLOAD_WATCH_PATH:-}
       HOST_LIBRARY_PATH: ${HOST_LIBRARY_PATH:-}
+      OPDS_BASE_URL: ${OPDS_BASE_URL:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
       interval: 30s
@@ -250,6 +251,11 @@ HOST_LIBRARY_PATH=/paste/your/library/path/here
 # OPTIONAL: Metron credentials for the release calendar.
 # METRON_API_USER=
 # METRON_API_PASSWORD=
+
+# OPTIONAL: Public URL reader devices use to reach the OPDS catalog.
+# Must be reachable from the device (a LAN IP, Tailscale host, or domain),
+# not localhost. See "Reading on devices with OPDS" below.
+# OPDS_BASE_URL=http://192.168.1.50:3000
 
 # OPTIONAL: Logging level (info, debug, warn, error)
 # LOG_LEVEL=info
@@ -472,6 +478,36 @@ METRON_API_PASSWORD=your_password
 ```
 
 Then restart the container: `docker compose down && docker compose up -d`
+
+### Reading on devices with OPDS
+
+LongBox can serve your library to OPDS comic readers — apps like Chunky,
+Panels, KyBook, or Cantook — so you can browse and download issues on a
+phone or tablet.
+
+1. In `.env`, set `OPDS_BASE_URL` to the address other devices reach
+   LongBox at (a LAN IP, a Tailscale hostname, or a domain) including the
+   port, then restart the container:
+
+   ```env
+   # The URL your reader devices use to reach LongBox. OPDS links are
+   # absolute, so this must be reachable from the device — not localhost.
+   OPDS_BASE_URL=http://192.168.1.50:3000
+   ```
+
+2. In the LongBox web UI, open **Settings → OPDS**, tick **Enabled**, set a
+   **username** and **password**, and **Save**. An API token is generated
+   on first save — some readers take a token instead of a password.
+
+3. In your reader app, add a new OPDS/catalog source. Paste the **Catalog
+   URL** shown in Settings (`{OPDS_BASE_URL}/opds/v1`) and enter the
+   username and password. Covers and downloads stream straight from
+   LongBox.
+
+The catalog is disabled by default and returns `503` until you enable it
+and set a username. Every request requires the credentials above — covers
+are cached under `/data/covers` inside the existing database volume, so no
+new mount is needed.
 
 ---
 
