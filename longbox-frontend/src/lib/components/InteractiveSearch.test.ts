@@ -4,7 +4,9 @@
 // (submit + close on success).
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { interactiveSearch, grabRelease } from '$lib/api/interactiveSearch';
+import { toast } from '$lib/stores/toast.svelte';
 import InteractiveSearch from './InteractiveSearch.svelte';
 
 vi.mock('$lib/api/interactiveSearch', () => ({
@@ -97,7 +99,7 @@ describe('InteractiveSearch modal', () => {
     await waitFor(() => screen.getByText('Saga 012 (2012) (digital).cbz'));
 
     const grabButtons = screen.getAllByRole('button', { name: /Grab/i });
-    await fireEvent.click(grabButtons[0]);
+    await fireEvent.click(grabButtons[0]!);
 
     await waitFor(() => {
       expect(grabRelease).toHaveBeenCalledWith({
@@ -115,9 +117,35 @@ describe('InteractiveSearch modal', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
     await waitFor(() => screen.getByText('Saga 012 (2012) (digital).cbz'));
-    await fireEvent.click(screen.getAllByRole('button', { name: /Grab/i })[0]);
+    await fireEvent.click(screen.getAllByRole('button', { name: /Grab/i })[0]!);
 
     await waitFor(() => expect(grabRelease).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('warns when the search request fails', async () => {
+    vi.mocked(interactiveSearch).mockRejectedValue(new ApiError(500, 'internal', 'boom'));
+    renderModal();
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith('boom'));
+  });
+
+  it('re-sorts the table when a column header is clicked', async () => {
+    vi.mocked(interactiveSearch).mockResolvedValue(SAMPLE);
+    renderModal();
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+    await waitFor(() => screen.getByText('Saga 012 (2012) (digital).cbz'));
+
+    // Default sort is confidence-desc → Saga (0.91) ahead of Batman (0.2).
+    const titlesOf = () =>
+      screen
+        .getAllByRole('row')
+        .slice(1)
+        .map((r) => r.textContent ?? '');
+    expect(titlesOf()[0]).toContain('Saga');
+
+    // Sort by Title ascending → Batman ahead of Saga.
+    await fireEvent.click(screen.getByRole('button', { name: /^Title/ }));
+    expect(titlesOf()[0]).toContain('Batman');
   });
 });

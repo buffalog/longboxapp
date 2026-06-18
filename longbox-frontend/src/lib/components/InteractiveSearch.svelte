@@ -156,7 +156,10 @@
         <thead class="sticky top-0 bg-slate-50 text-left text-xs text-slate-500">
           <tr>
             {#each [['title', 'Title'], ['indexer', 'Indexer'], ['size_bytes', 'Size'], ['age_days', 'Age'], ['confidence', 'Confidence']] as [key, label] (key)}
-              <th class="px-3 py-2 font-medium">
+              <th
+                class="px-3 py-2 font-medium"
+                aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+              >
                 <button
                   type="button"
                   class="inline-flex items-center gap-1 hover:text-slate-900"
