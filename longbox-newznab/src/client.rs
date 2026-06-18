@@ -90,8 +90,16 @@ async fn search_with(
     maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
     let url = build_url(indexer, search_term, maxage_override)?;
+    // `without_url()` strips the request URL from the reqwest error's
+    // Display — the newznab URL embeds `apikey=...`, and these messages
+    // reach both the engine's logs and (via interactive search) the client.
+    // The indexer name already gives the useful context.
     let resp = client.get(&url).send().await.map_err(|e| {
-        IndexerError::HttpFailure(format!("request to {} failed: {e}", indexer.name))
+        IndexerError::HttpFailure(format!(
+            "request to {} failed: {}",
+            indexer.name,
+            e.without_url()
+        ))
     })?;
     let status = resp.status();
     if !status.is_success() {
@@ -101,7 +109,11 @@ async fn search_with(
         )));
     }
     let body = resp.text().await.map_err(|e| {
-        IndexerError::HttpFailure(format!("reading body from {} failed: {e}", indexer.name))
+        IndexerError::HttpFailure(format!(
+            "reading body from {} failed: {}",
+            indexer.name,
+            e.without_url()
+        ))
     })?;
     parse_response(&body)
 }

@@ -13,7 +13,11 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use longbox_core::ParsingPattern;
-use longbox_db::{indexer_config_repo, issue_repo, parsing_pattern_repo, series_repo, Pool};
+use longbox_db::{
+    downloader_config_repo, indexer_config_repo, issue_repo, parsing_pattern_repo, series_repo,
+    DownloaderConfigRow, Pool,
+};
+use longbox_downloader::{connect, AnyDownloader, Downloader, DownloaderAuth, DownloaderConfig};
 use longbox_newznab::{score_release_title, search_all_indexers, IndexerConfig, IndexerId};
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +25,9 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/search/interactive", post(interactive_search))
+    Router::new()
+        .route("/search/interactive", post(interactive_search))
+        .route("/search/interactive/grab", post(grab))
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +121,77 @@ async fn interactive_search(
         .collect();
 
     Ok(Json(SearchResponse { results, errors }))
+}
+
+// ---------- grab ----------
+
+#[derive(Debug, Deserialize)]
+struct GrabRequest {
+    /// NZB URL from a search result. Round-tripped from the client per
+    /// spec; never logged (newznab URLs embed the indexer API key).
+    nzb_url: String,
+    /// Human-readable name shown in the downloader queue.
+    title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GrabResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `POST /api/search/interactive/grab` — submit an NZB to the configured
+/// downloader (SAB or NZBGet). No `pull_attempt`, no LongBox tracking — SAB
+/// handles it and Phase B picks it up on completion. Always 200; the body's
+/// `success` flag carries the outcome (matches the spec's contract).
+async fn grab(
+    State(state): State<AppState>,
+    Json(body): Json<GrabRequest>,
+) -> Result<Json<GrabResponse>, ApiError> {
+    let Some(row) = downloader_config_repo::get(&state.db).await? else {
+        return Ok(Json(GrabResponse {
+            success: false,
+            error: Some("No downloader is configured.".to_owned()),
+        }));
+    };
+
+    let downloader = build_downloader(row);
+    match downloader.submit(&body.nzb_url, &body.title).await {
+        Ok(_handle) => Ok(Json(GrabResponse {
+            success: true,
+            error: None,
+        })),
+        Err(err) => {
+            // Log the title only — never the nzb_url (carries the apikey).
+            tracing::warn!(
+                title = %body.title,
+                error = %err,
+                "interactive grab: downloader submit failed"
+            );
+            Ok(Json(GrabResponse {
+                success: false,
+                error: Some(err.to_string()),
+            }))
+        }
+    }
+}
+
+/// Build the configured downloader client. Mirrors the pull engine's
+/// private `build_downloader` (SAB → apikey auth, NZBGet → basic auth).
+fn build_downloader(row: DownloaderConfigRow) -> AnyDownloader {
+    let auth = match row.kind.as_str() {
+        "nzbget" => DownloaderAuth::Basic {
+            username: row.username.unwrap_or_default(),
+            password: row.secret,
+        },
+        _ => DownloaderAuth::ApiKey(row.secret),
+    };
+    connect(&DownloaderConfig {
+        base_url: row.base_url,
+        auth,
+        category: row.category,
+    })
 }
 
 /// Map enabled indexer rows into the newznab config type. Mirrors the pull
