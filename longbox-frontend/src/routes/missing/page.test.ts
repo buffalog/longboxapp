@@ -119,6 +119,21 @@ describe('missing page series grouping', () => {
     expect(screen.getByText(/1 missing/)).toBeInTheDocument();
   });
 
+  it('opens the Interactive Search modal from a missing-issue row', async () => {
+    render(
+      MissingPage,
+      pageData([
+        missingIssue({ issue_id: 7, number: '12', series_id: 1, series_title: 'Saga' })
+      ])
+    );
+    await fireEvent.click(
+      screen.getByRole('button', { name: /Interactive search for Saga #12/i })
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/Interactive Search — Saga #12/)).toBeInTheDocument()
+    );
+  });
+
   it('partitions solicited rows into a separate section and labels the global Search by actionable count', () => {
     render(
       MissingPage,

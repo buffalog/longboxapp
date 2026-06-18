@@ -476,6 +476,26 @@ pub fn filter_by_series_title(
     FilterOutcome { kept, mismatch }
 }
 
+/// Score a single release title against a requested series title (0.0–1.0).
+///
+/// The per-result confidence Interactive Search shows: reuses the exact
+/// parse → normalize → similarity that the pre-grab filter
+/// ([`filter_by_series_title`]) uses, just surfaced per-release instead of
+/// thresholded away. `None` when the title can't be parsed into a series
+/// segment at all — the caller renders that as zero confidence. Issue
+/// number and year are deliberately NOT part of the score (per the kickoff
+/// decision: confidence = series-title similarity).
+pub fn score_release_title(
+    release_title: &str,
+    requested_series_title: &str,
+    patterns: &[ParsingPattern],
+) -> Option<f64> {
+    let parsed = parse_release_title(release_title, patterns)?;
+    let requested_normalized = normalize_title(requested_series_title);
+    let parsed_normalized = normalize_title(&parsed.series_title);
+    Some(similarity(&requested_normalized, &parsed_normalized))
+}
+
 /// Infer archive format from a release title. Newznab has no
 /// structured format field; sniff the `.cbz` / `.cbr` substring.
 pub fn archive_format(title: &str) -> ArchiveFormat {
@@ -525,6 +545,19 @@ mod tests {
     use super::*;
     use longbox_core::filename::default_patterns;
     use time::macros::datetime;
+
+    #[test]
+    fn score_release_title_high_for_match_low_for_wrong_series() {
+        let patterns = default_patterns();
+        let good = score_release_title("Saga 012 (2012) (digital).cbz", "Saga", &patterns).unwrap();
+        assert!(good > 0.9, "correct series should score high, got {good}");
+        let bad = score_release_title("Batman 012 (2016).cbz", "Saga", &patterns).unwrap();
+        assert!(bad < 0.5, "wrong series should score low, got {bad}");
+        // Scene-format title (dotted, group suffix) still parses + scores.
+        let scene =
+            score_release_title("Saga.012.2012.digital.Zone-Empire", "Saga", &patterns).unwrap();
+        assert!(scene > 0.9, "scene-format should score high, got {scene}");
+    }
 
     fn release(title: &str, grabs: Option<i64>) -> Release {
         Release {

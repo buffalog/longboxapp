@@ -4,6 +4,7 @@
   import EmptyState from '$lib/components/EmptyState.svelte';
   import AlphaScrubber from '$lib/components/AlphaScrubber.svelte';
   import Button from '$lib/components/Button.svelte';
+  import InteractiveSearch from '$lib/components/InteractiveSearch.svelte';
   import { ApiError } from '$lib/api/client';
   import { searchAllMissing, type MissingIssue, type MissingSort } from '$lib/api/missing';
   import { searchSeriesNow } from '$lib/api/pull';
@@ -17,6 +18,15 @@
   // Map clone keyed by series id would also work; a plain Set is enough
   // since the button cares about presence, not metadata.
   let searchingSeries = $state<Set<number>>(new Set());
+
+  // Interactive Search modal — one instance, opened per missing-issue row.
+  let interactiveOpen = $state(false);
+  let interactiveRow = $state<MissingIssue | null>(null);
+
+  function openInteractiveSearch(m: MissingIssue): void {
+    interactiveRow = m;
+    interactiveOpen = true;
+  }
 
   function setSort(s: MissingSort): void {
     const url = new URL(window.location.href);
@@ -220,10 +230,10 @@
     {#if actionableRows.length > 0}
       <ul class="space-y-2">
         {#each actionableRows as m (m.issue_id)}
-          <li>
+          <li class="flex items-stretch gap-2">
             <a
               href={`/series/${m.series.id}`}
-              class="flex items-center gap-3 rounded-md border border-slate-200 bg-white p-2 hover:bg-slate-50"
+              class="flex min-w-0 flex-1 items-center gap-3 rounded-md border border-slate-200 bg-white p-2 hover:bg-slate-50"
             >
               <div class="size-12 flex-shrink-0 overflow-hidden rounded bg-slate-100">
                 {#if m.cover_url}
@@ -245,6 +255,15 @@
               </div>
               <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m.cover_date)}</span>
             </a>
+            <button
+              type="button"
+              onclick={() => openInteractiveSearch(m)}
+              aria-label={`Interactive search for ${m.series.title} #${m.number}`}
+              class="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <Search class="size-3" aria-hidden="true" />
+              Search…
+            </button>
           </li>
         {/each}
       </ul>
@@ -300,6 +319,15 @@
                   <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
                     {missingAge(m.cover_date)}
                   </span>
+                  <button
+                    type="button"
+                    onclick={() => openInteractiveSearch(m)}
+                    aria-label={`Interactive search for ${m.series.title} #${m.number}`}
+                    class="inline-flex flex-shrink-0 items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <Search class="size-3" aria-hidden="true" />
+                    Search…
+                  </button>
                 </li>
               {/each}
             </ul>
@@ -401,4 +429,15 @@
       {/if}
     </section>
   {/if}
+{/if}
+
+{#if interactiveRow}
+  <InteractiveSearch
+    open={interactiveOpen}
+    onClose={() => (interactiveOpen = false)}
+    seriesId={interactiveRow.series.id}
+    seriesTitle={interactiveRow.series.title}
+    issueId={interactiveRow.issue_id}
+    issueNumber={interactiveRow.number}
+  />
 {/if}

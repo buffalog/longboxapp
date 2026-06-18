@@ -10,9 +10,12 @@
      *  endpoint URL. Optional; omitted at callers that don't carry a
      *  single parent series (the button hides when absent). */
     seriesId?: number;
+    /** Forwarded to each IssueRow — opens the Interactive Search modal
+     *  for a Missing issue. */
+    onInteractiveSearch?: (issue: IssueWithFile) => void;
   }
 
-  let { issues, seriesId }: Props = $props();
+  let { issues, seriesId, onInteractiveSearch }: Props = $props();
 
   let gridRef: HTMLElement | null = $state(null);
 
@@ -77,7 +80,7 @@
     </thead>
     <tbody>
       {#each issues as issue (issue.id)}
-        <IssueRow {issue} {seriesId} />
+        <IssueRow {issue} {seriesId} {onInteractiveSearch} />
       {/each}
     </tbody>
   </table>

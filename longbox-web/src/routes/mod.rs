@@ -17,6 +17,7 @@ pub mod enrichment;
 pub mod files;
 pub mod health;
 pub mod indexers;
+pub mod interactive_search;
 pub mod library_roots;
 pub mod missing;
 pub mod needs_attention;
@@ -57,6 +58,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(postprocess::router())
         .merge(publishers::router())
         .merge(indexers::router())
+        .merge(interactive_search::router())
         .merge(downloader::router())
         .merge(webhooks::router())
         .merge(pull::router())

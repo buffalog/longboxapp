@@ -7,9 +7,12 @@
     title: string;
     onClose: () => void;
     children: Snippet;
+    /** Tailwind max-width class for the dialog. Defaults to a narrow
+     *  form width; wider surfaces (e.g. a results table) pass `max-w-4xl`. */
+    maxWidth?: string;
   }
 
-  let { open, title, onClose, children }: Props = $props();
+  let { open, title, onClose, children, maxWidth = 'max-w-lg' }: Props = $props();
 
   function handleKeydown(e: KeyboardEvent): void {
     if (e.key === 'Escape') onClose();
@@ -31,7 +34,7 @@
       aria-label="Close dialog"
       onclick={onClose}
     ></button>
-    <div class="relative w-full max-w-lg rounded-lg bg-white shadow-xl">
+    <div class="relative w-full {maxWidth} rounded-lg bg-white shadow-xl">
       <header class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
         <h2 id="modal-title" class="text-base font-semibold">{title}</h2>
         <button
