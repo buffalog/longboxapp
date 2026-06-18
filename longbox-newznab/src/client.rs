@@ -90,8 +90,16 @@ async fn search_with(
     maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
     let url = build_url(indexer, search_term, maxage_override)?;
+    // `without_url()` strips the request URL from the reqwest error's
+    // Display — the newznab URL embeds `apikey=...`, and these messages
+    // reach both the engine's logs and (via interactive search) the client.
+    // The indexer name already gives the useful context.
     let resp = client.get(&url).send().await.map_err(|e| {
-        IndexerError::HttpFailure(format!("request to {} failed: {e}", indexer.name))
+        IndexerError::HttpFailure(format!(
+            "request to {} failed: {}",
+            indexer.name,
+            e.without_url()
+        ))
     })?;
     let status = resp.status();
     if !status.is_success() {
@@ -101,7 +109,11 @@ async fn search_with(
         )));
     }
     let body = resp.text().await.map_err(|e| {
-        IndexerError::HttpFailure(format!("reading body from {} failed: {e}", indexer.name))
+        IndexerError::HttpFailure(format!(
+            "reading body from {} failed: {}",
+            indexer.name,
+            e.without_url()
+        ))
     })?;
     parse_response(&body)
 }
@@ -394,6 +406,68 @@ pub async fn find_release_excluding_filtered(
     Ok(FindOutcome::NoMatch)
 }
 
+/// Every release an interactive search turned up, each tagged with its
+/// source indexer, plus per-indexer failures.
+///
+/// Unlike [`find_release_excluding_filtered`], this applies NO
+/// series/threshold filtering and NO best-selection — the user reviews the
+/// full pool and picks. A search where some indexers fail and others return
+/// nothing is still a successful (possibly empty) outcome, never an error:
+/// partial results alongside inline per-indexer errors are the whole point.
+#[derive(Debug, Default)]
+pub struct SearchAllOutcome {
+    pub results: Vec<(IndexerId, Release)>,
+    pub errors: Vec<(IndexerId, IndexerError)>,
+}
+
+/// Fan a single verbatim query out to every indexer in parallel and return
+/// ALL releases — no series filter, no threshold, no selection. Backs
+/// `POST /api/search/interactive`.
+///
+/// The query is searched exactly as given (the client pre-normalizes); no
+/// padded/unpadded variation. Each indexer's `maxage` is widened for
+/// back-catalog issues via [`effective_maxage_days`] from the issue's
+/// `cover_date`, so an old issue's NZBs aren't server-side filtered — the
+/// same fix the engine path uses.
+pub async fn search_all_indexers(
+    indexers: &[IndexerConfig],
+    query: &str,
+    cover_date: Option<&str>,
+) -> SearchAllOutcome {
+    if indexers.is_empty() {
+        return SearchAllOutcome::default();
+    }
+
+    let client = http_client();
+    let per_indexer: Vec<Result<Vec<Release>, IndexerError>> = futures::future::join_all(
+        indexers.iter().map(|idx| {
+            let effective_maxage =
+                crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
+            search_with(&client, idx, query, Some(effective_maxage))
+        }),
+    )
+    .await;
+
+    let mut outcome = SearchAllOutcome::default();
+    for (idx, result) in indexers.iter().zip(per_indexer) {
+        match result {
+            Ok(releases) => outcome
+                .results
+                .extend(releases.into_iter().map(|r| (idx.id, r))),
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_newznab",
+                    indexer = %idx.name,
+                    error = %e,
+                    "interactive search: indexer query failed"
+                );
+                outcome.errors.push((idx.id, e));
+            }
+        }
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +674,44 @@ mod tests {
         assert_eq!(diag.total_results, 2);
         assert_eq!(diag.parseable_count, 2);
         assert!(diag.best_similarity.unwrap() < 0.5);
+    }
+
+    /// Interactive fan-out: every release from a working indexer comes back
+    /// tagged with its id (no filtering/selection), an unreachable indexer
+    /// surfaces as an inline error, and the two coexist (partial results).
+    #[tokio::test]
+    async fn search_all_indexers_returns_partial_results_with_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("q", "Wolverine 5"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(TWO_ITEM_RSS))
+            .mount(&server)
+            .await;
+        let mut ok = cfg(server.uri());
+        ok.id = IndexerId(1);
+        let mut dead = cfg("http://127.0.0.1:1".into());
+        dead.id = IndexerId(2);
+
+        let outcome = search_all_indexers(&[ok, dead], "Wolverine 5", None).await;
+
+        // Both releases from the working indexer, unfiltered + unselected.
+        assert_eq!(outcome.results.len(), 2);
+        assert!(outcome.results.iter().all(|(id, _)| *id == IndexerId(1)));
+        let guids: Vec<&str> = outcome
+            .results
+            .iter()
+            .map(|(_, r)| r.guid.as_str())
+            .collect();
+        assert!(guids.contains(&"abc-123") && guids.contains(&"def-456"));
+        // The unreachable indexer is an inline error, not a hard failure.
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(outcome.errors[0].0, IndexerId(2));
+    }
+
+    #[tokio::test]
+    async fn search_all_indexers_empty_when_no_indexers() {
+        let outcome = search_all_indexers(&[], "anything", None).await;
+        assert!(outcome.results.is_empty() && outcome.errors.is_empty());
     }
 }

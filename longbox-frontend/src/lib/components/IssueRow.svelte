@@ -25,9 +25,13 @@
      *  needs-attention listing); when absent, the Search button is
      *  hidden. */
     seriesId?: number;
+    /** When provided, a Missing row shows an "Interactive search" button
+     *  (distinct from the auto-grab Search button above) that calls back
+     *  with the issue so the parent can open the search modal. */
+    onInteractiveSearch?: (issue: IssueWithFile) => void;
   }
 
-  let { issue, seriesId }: Props = $props();
+  let { issue, seriesId, onInteractiveSearch }: Props = $props();
 
   // Per-row Search debounce — 15 s, same trade-off as the per-series
   // Search-now button on the pull list page. The backend's in-flight
@@ -68,6 +72,10 @@
   // Needs-review / Ignored / Unmatched belong to other workflows.
   // seriesId is required to construct the API URL; without it, hide.
   const showSearchButton = $derived(seriesId !== undefined && status === 'missing');
+
+  // Interactive search is offered on the same Missing rows, independently
+  // of the auto-grab button, when the parent wired a callback.
+  const showInteractiveButton = $derived(onInteractiveSearch !== undefined && status === 'missing');
 
   async function handleSearchNow(): Promise<void> {
     if (searching || seriesId === undefined) return;
@@ -189,6 +197,17 @@
         >
           <Search class="size-3" aria-hidden="true" />
           Search
+        </button>
+      {/if}
+      {#if showInteractiveButton}
+        <button
+          type="button"
+          onclick={() => onInteractiveSearch?.(issue)}
+          aria-label={`Interactive search for issue ${issue.number}`}
+          class="inline-flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <Search class="size-3" aria-hidden="true" />
+          Search…
         </button>
       {/if}
     </div>

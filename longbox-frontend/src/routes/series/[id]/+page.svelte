@@ -10,13 +10,23 @@
   import Button from '$lib/components/Button.svelte';
   import CvSearchInput from '$lib/components/CvSearchInput.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
+  import InteractiveSearch from '$lib/components/InteractiveSearch.svelte';
   import IssueGrid from '$lib/components/IssueGrid.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import PullListToggle from '$lib/components/PullListToggle.svelte';
   import SeriesHeader from '$lib/components/SeriesHeader.svelte';
-  import type { SeriesSearchResult } from '$lib/types';
+  import type { IssueWithFile, SeriesSearchResult } from '$lib/types';
 
   let { data } = $props();
+
+  // Interactive Search modal — one instance, opened per missing-issue row.
+  let interactiveOpen = $state(false);
+  let interactiveIssue = $state<IssueWithFile | null>(null);
+
+  function openInteractiveSearch(issue: IssueWithFile): void {
+    interactiveIssue = issue;
+    interactiveOpen = true;
+  }
 
   let refreshing = $state(false);
   let deleting = $state(false);
@@ -380,7 +390,11 @@
 <section class="mt-6">
   <h2 class="mb-2 text-lg font-semibold">Issues ({totalCount})</h2>
   {#if data.series.issues.length > 0}
-    <IssueGrid issues={data.series.issues} seriesId={data.series.id} />
+    <IssueGrid
+      issues={data.series.issues}
+      seriesId={data.series.id}
+      onInteractiveSearch={openInteractiveSearch}
+    />
   {:else if data.series.cv_id}
     <p class="text-sm text-slate-500">
       No issues recorded yet for this series. Hit Refresh to fetch from ComicVine.
@@ -392,6 +406,17 @@
     </p>
   {/if}
 </section>
+
+{#if interactiveIssue}
+  <InteractiveSearch
+    open={interactiveOpen}
+    onClose={() => (interactiveOpen = false)}
+    seriesId={data.series.id}
+    seriesTitle={data.series.title}
+    issueId={interactiveIssue.id}
+    issueNumber={interactiveIssue.number}
+  />
+{/if}
 
 <section class="mt-8 flex justify-end">
   <Button

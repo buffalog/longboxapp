@@ -133,3 +133,22 @@ describe('IssueRow Search button', () => {
     );
   });
 });
+
+describe('IssueRow Interactive search button', () => {
+  it('shows on a Missing row when onInteractiveSearch is provided and calls back', async () => {
+    const onInteractiveSearch = vi.fn();
+    render(IssueRow, {
+      props: { issue: issue({ file: null }), seriesId: 42, onInteractiveSearch }
+    });
+    const btn = screen.getByRole('button', { name: /Interactive search for issue 4/i });
+    await fireEvent.click(btn);
+    expect(onInteractiveSearch).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }));
+  });
+
+  it('is absent when no onInteractiveSearch callback is wired', () => {
+    renderRow({ issue: issue({ file: null }), seriesId: 42 });
+    expect(
+      screen.queryByRole('button', { name: /Interactive search for issue/i })
+    ).not.toBeInTheDocument();
+  });
+});
