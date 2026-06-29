@@ -1,10 +1,14 @@
-//! OPDS settings admin API: /api/opds/settings (commit 7).
+//! OPDS settings admin API: /api/opds/settings.
+//!
+//! NOTE: this exercises the legacy single-credential admin surface, which is
+//! replaced by per-user account management in a later commit. The catalog
+//! auth no longer reads these settings rows, so these tests cover only the
+//! endpoint's own mechanics.
 
 mod common;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use base64::Engine as _;
+use axum::http::{Request, StatusCode};
 use common::{build_test_app, json_request, response_json, TestApp};
 
 async fn put(app: &TestApp, body: serde_json::Value) -> serde_json::Value {
@@ -58,47 +62,6 @@ async fn first_save_generates_token_and_hashes_password() {
     let token = s["api_token"].as_str().unwrap();
     assert_eq!(token.len(), 64);
     assert!(s.get("password_hash").is_none());
-}
-
-#[tokio::test]
-async fn configured_settings_actually_authorize_the_catalog() {
-    let app = build_test_app().await;
-    put(
-        &app,
-        serde_json::json!({ "enabled": true, "username": "reader", "password": "hunter2" }),
-    )
-    .await;
-
-    // Basic auth with the configured creds now reaches the catalog.
-    let encoded = base64::engine::general_purpose::STANDARD.encode("reader:hunter2");
-    let resp = app
-        .request(
-            Request::builder()
-                .method("GET")
-                .uri("/opds/v1")
-                .header(header::AUTHORIZATION, format!("Basic {encoded}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // And the generated bearer token works too.
-    let token = get_settings(&app).await["api_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let resp = app
-        .request(
-            Request::builder()
-                .method("GET")
-                .uri("/opds/v1")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

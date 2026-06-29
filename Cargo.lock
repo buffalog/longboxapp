@@ -1357,7 +1357,6 @@ dependencies = [
  "hex",
  "quick-xml 0.39.4",
  "rand 0.9.4",
- "subtle",
  "thiserror 2.0.18",
 ]
 

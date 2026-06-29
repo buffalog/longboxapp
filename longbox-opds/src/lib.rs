@@ -11,7 +11,10 @@ pub mod auth;
 pub mod feed;
 pub mod opensearch;
 
-pub use auth::{generate_api_token, hash_password, AuthOutcome, OpdsAccess, OpdsAuthError};
+pub use auth::{
+    dummy_verify, generate_api_token, hash_password, parse_basic, verify_password, OpdsAuthError,
+    REALM,
+};
 pub use feed::{
     archive_mime, Entry, Feed, FeedKind, Link, Page, PageMeta, ACQUISITION_TYPE, ITEMS_PER_PAGE,
     NAVIGATION_TYPE,
