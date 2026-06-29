@@ -601,13 +601,43 @@ where
                       AS "awaiting_first_download!: bool",
                   s.auto_tidy_due_at AS "auto_tidy_due_at: _"
            FROM series s
-           WHERE NOT EXISTS (
+           WHERE s.tidy_exempt = 0
+             AND NOT EXISTS (
                SELECT 1 FROM files f
                JOIN issues i ON f.issue_id = i.id
                WHERE i.series_id = s.id
                  AND f.status IN ('owned', 'needs_review', 'unmatched')
                  AND f.is_present = 1
            )
+           ORDER BY s.sort_title COLLATE NOCASE"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// The "Kept series" set: phantoms the user explicitly exempted from
+/// tidy via [`keep_phantom_series`] (`tidy_exempt = 1`). The complement
+/// of [`list_phantoms`] on the exemption flag — same shape, so the UI
+/// can render it with the same row component. These are file-less by
+/// definition (a kept series that regains files just stays exempt and
+/// invisible to tidy, which is fine). Library Tidy renders this in its
+/// own collapsed section with an "Un-keep" action.
+pub async fn list_kept_series<'e, E>(executor: E) -> Result<Vec<PhantomSeries>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        PhantomSeries,
+        r#"SELECT s.id AS "id!: i64", s.title, s.sort_title,
+                  s.start_year, s.publisher, s.cover_url,
+                  s.last_matched_count AS "last_matched_count!: i64",
+                  (EXISTS (SELECT 1 FROM pull_list pl WHERE pl.series_id = s.id)
+                   OR EXISTS (SELECT 1 FROM pull_attempts pa WHERE pa.series_id = s.id))
+                      AS "awaiting_first_download!: bool",
+                  s.auto_tidy_due_at AS "auto_tidy_due_at: _"
+           FROM series s
+           WHERE s.tidy_exempt = 1
            ORDER BY s.sort_title COLLATE NOCASE"#
     )
     .fetch_all(executor)
@@ -686,7 +716,8 @@ where
 /// needs_review/unmatched so a series sitting at sub-threshold
 /// confidence (real files on disk, just not promoted) is never tidied
 /// away. Run once per full scan, after the mark-missing pass and
-/// `refresh_last_matched_counts`.
+/// `refresh_last_matched_counts`. Tidy-exempt series (kept by the user)
+/// are skipped entirely — their counter stays at the 0 that Keep set.
 pub async fn tick_empty_scan_counters<'e, E>(executor: E) -> Result<()>
 where
     E: SqliteExecutor<'e>,
@@ -704,7 +735,8 @@ where
                    WHERE i.series_id = series.id
                      AND f.status IN ('owned', 'needs_review', 'unmatched')
                      AND f.is_present = 1
-               ) THEN NULL ELSE auto_tidy_due_at END"#
+               ) THEN NULL ELSE auto_tidy_due_at END
+           WHERE tidy_exempt = 0"#
     )
     .execute(executor)
     .await?;
@@ -732,6 +764,7 @@ where
     let result = sqlx::query!(
         r#"UPDATE series SET auto_tidy_due_at = ?
            WHERE auto_tidy_due_at IS NULL
+             AND tidy_exempt = 0
              AND consecutive_empty_scans >= ?
              AND NOT EXISTS (
                  SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id
@@ -1243,9 +1276,14 @@ where
 
 /// "Keep" a phantom: clear every auto-tidy signal in one shot —
 /// `last_matched_count` to 0 (demotes a transition phantom to
-/// steady-state), `consecutive_empty_scans` to 0, and `auto_tidy_due_at`
-/// to NULL (cancels a scheduled removal). The user has reviewed the
-/// series and decided it stays. `NotFound` for an unknown id.
+/// steady-state), `consecutive_empty_scans` to 0, `auto_tidy_due_at`
+/// to NULL (cancels a scheduled removal) — and set `tidy_exempt = 1`,
+/// the durable flag that makes the decision stick. Resetting the
+/// counters alone never held: the next scan ticked them right back up.
+/// With `tidy_exempt = 1` the tick skips the series, auto-tidy never
+/// marks it, and it leaves the phantom list entirely. The user has
+/// reviewed the series and decided it stays. `NotFound` for an unknown
+/// id. [`unkeep_phantom_series`] reverses it.
 pub async fn keep_phantom_series<'e, E>(executor: E, series_id: i64) -> Result<()>
 where
     E: SqliteExecutor<'e>,
@@ -1254,7 +1292,34 @@ where
         r#"UPDATE series
            SET last_matched_count = 0,
                consecutive_empty_scans = 0,
-               auto_tidy_due_at = NULL
+               auto_tidy_due_at = NULL,
+               tidy_exempt = 1
+           WHERE id = ?"#,
+        series_id
+    )
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
+
+/// Reverse a [`keep_phantom_series`]: clear `tidy_exempt` so the series
+/// is re-evaluated normally. Counters are also reset to 0 so it returns
+/// as a steady-state phantom rather than re-appearing pre-marked — the
+/// scanner will only re-schedule it for removal after it accrues a fresh
+/// run of empty scans. `NotFound` for an unknown id.
+pub async fn unkeep_phantom_series<'e, E>(executor: E, series_id: i64) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET last_matched_count = 0,
+               consecutive_empty_scans = 0,
+               auto_tidy_due_at = NULL,
+               tidy_exempt = 0
            WHERE id = ?"#,
         series_id
     )

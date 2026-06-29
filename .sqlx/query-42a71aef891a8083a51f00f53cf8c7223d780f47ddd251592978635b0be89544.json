@@ -61,37 +61,37 @@
       {
         "name": "total_count!: i64",
         "ordinal": 11,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "owned_count!: i64",
         "ordinal": 12,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "needs_review_count!: i64",
         "ordinal": 13,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "ignored_count!: i64",
         "ordinal": 14,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "unmatched_count!: i64",
         "ordinal": 15,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "missing_count!: i64",
         "ordinal": 16,
-        "type_info": "Int"
+        "type_info": "Null"
       },
       {
         "name": "solicited_count!: i64",
         "ordinal": 17,
-        "type_info": "Int"
+        "type_info": "Null"
       }
     ],
     "parameters": {
