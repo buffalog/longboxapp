@@ -198,6 +198,8 @@ pub async fn build_test_app() -> TestApp {
         scan_scheduler,
         enrichment,
         start_time: time::OffsetDateTime::now_utc(),
+        cv_resolve_gate: Arc::new(tokio::sync::Semaphore::new(3)),
+        subscribe_status: Arc::new(RwLock::new(longbox_web::SubscribeStatus::default())),
     };
 
     let router = build_router(state.clone());

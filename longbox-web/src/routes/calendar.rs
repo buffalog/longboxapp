@@ -27,7 +27,7 @@ use time::{OffsetDateTime, PrimitiveDateTime};
 
 use crate::error::ApiError;
 use crate::routes::series::{add_or_get_from_cv, spawn_auto_rematch};
-use crate::state::AppState;
+use crate::state::{AppState, SubscribeOutcome};
 
 /// How long a cached CV release-calendar payload stays fresh. A user
 /// query inside this window is served from `cv_release_cache`; past it
@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
         .route("/releases/calendar", get(calendar))
         .route("/releases/calendar/pull", post(add_to_pull_list))
         .route("/releases/calendar/pull/bulk", post(add_to_pull_list_bulk))
+        .route("/releases/calendar/pull/status", get(subscribe_status))
         .route("/releases/of-note", get(releases_of_note))
         .route("/releases/this-weeks-pulls", get(this_weeks_pulls))
 }
@@ -257,83 +258,220 @@ async fn try_add_one(state: &AppState, cv_volume_id: i64) -> Result<(i64, &'stat
 /// Compound "add to pull list": resolve the request to a cv_volume_id
 /// (CV path direct, Metron path via [`resolve_cv_id_via_metron`]), then
 /// subscribe via the shared [`try_add_one`]. Idempotent — a volume
-/// already subscribed is a clean no-op `200`. When the request used
-/// `metron_series_id`, the resolved `series_id` is backfilled with the
-/// metron_id cross-reference on a best-effort basis (warn-on-failure,
-/// never propagates to the response).
+/// already subscribed is a clean no-op `200`. Single-item add is
+/// synchronous (one item never stampedes the CV burst); the bulk path
+/// is the one that defers not-yet-local items to the background.
 async fn add_to_pull_list(
     State(state): State<AppState>,
     Json(body): Json<AddToPullBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (cv_volume_id, metron_origin) = resolve_subscription_target(&state, &body).await?;
-    let (series_id, _status) = try_add_one(&state, cv_volume_id).await?;
-    if let Some(metron_series_id) = metron_origin {
-        backfill_metron_id(&state, series_id, metron_series_id).await;
-    }
+    let (series_id, _status) = resolve_and_subscribe(&state, &body).await?;
     Ok(Json(serde_json::json!({ "series_id": series_id })))
 }
 
-/// Bulk "add to pull list" — one [`try_add_one`] per item,
-/// non-transactional: a per-item failure (CV rate limit, unknown
-/// volume, network, Metron series with no cv_id, etc.) is captured as
-/// a `failed` result and never aborts the batch. Each result carries
-/// the 3-way `status` the UI tallies into one "N added, M already on
-/// pull list, K failed" toast.
+/// Resolve a request to a cv_volume_id and subscribe it, firing the
+/// best-effort `metron_id` backfill on the Metron path. The shared core
+/// of the single add and of each background resolution in the bulk path.
+/// May perform a ComicVine fetch when the volume isn't local yet — so
+/// callers that must stay fast (the bulk handler) run it off the request
+/// thread, behind [`AppState::cv_resolve_gate`].
+async fn resolve_and_subscribe(
+    state: &AppState,
+    body: &AddToPullBody,
+) -> Result<(i64, &'static str), ApiError> {
+    let (cv_volume_id, metron_origin) = resolve_subscription_target(state, body).await?;
+    let (series_id, status) = try_add_one(state, cv_volume_id).await?;
+    if let Some(metron_series_id) = metron_origin {
+        backfill_metron_id(state, series_id, metron_series_id).await;
+    }
+    Ok((series_id, status))
+}
+
+/// Bulk "add to pull list". Splits the batch by cost so the request
+/// returns fast and never fails silently:
+///
+/// - **Already-local volumes** (a `cv_volume_id` that maps to a tracked
+///   series) subscribe *synchronously* — no ComicVine touch, sub-second
+///   for the common case. Result status is the real `added` /
+///   `already_on_list`.
+/// - **Not-yet-local volumes and all Metron-path items** need a network
+///   resolve (CV `fetch_volume` + `fetch_issues`, and/or a Metron
+///   series-detail call). They come back `resolving` and are finished by
+///   a background resolver; the frontend polls
+///   `GET /releases/calendar/pull/status` for the terminal outcome.
+/// - **Malformed items** (`cv_volume_id <= 0`, or neither id present)
+///   fail synchronously with a reason.
+///
+/// Why the split: the prior version ran every item through
+/// `buffer_unordered(10)`, firing up to 10 concurrent CV fetches into a
+/// 5-token-burst / 1-per-20s / 60s-max-wait limiter. The burst emptied
+/// instantly; the rest waited 20-60s (the stall) or exceeded 60s and
+/// returned `CvError::RateLimited` as a silent `failed`. A brand-new
+/// series needs two tokens, doubling the worst case to ~2 minutes. The
+/// concurrency WAS the bug. The background resolver drains items
+/// *sequentially* through [`AppState::cv_resolve_gate`] (one permit),
+/// which never trips `max_wait`, killing both the silent failures and the
+/// self-perpetuating retry (a RateLimited item is never cached, so it
+/// re-fetches forever).
 async fn add_to_pull_list_bulk(
     State(state): State<AppState>,
     Json(body): Json<BulkAddBody>,
 ) -> Result<Json<BulkAddResponse>, ApiError> {
-    // Per-item failures (CV rate limit, unknown volume, Metron series
-    // with no cv_id, etc.) are captured as `failed` results and never
-    // abort the batch. Resolution + insert run concurrently — the
-    // dominant cost is the Metron API call inside
-    // `resolve_cv_id_via_metron`, so overlapping them is the win. Cap
-    // matches the prior-art `buffer_unordered(20)` calendar hydration
-    // path lower-bounded to be polite to CV's per-key rate limit.
-    let results: Vec<BulkAddResult> = stream::iter(body.items)
-        .map(|item| {
-            let state = state.clone();
-            async move {
-                let resolution = resolve_subscription_target(&state, &item).await;
-                match resolution {
-                    Ok((cv_volume_id, metron_origin)) => {
-                        match try_add_one(&state, cv_volume_id).await {
-                            Ok((series_id, status)) => {
-                                if let Some(metron_series_id) = metron_origin {
-                                    backfill_metron_id(&state, series_id, metron_series_id).await;
-                                }
-                                BulkAddResult {
-                                    cv_volume_id: Some(cv_volume_id),
-                                    metron_series_id: metron_origin,
-                                    status,
-                                    series_id: Some(series_id),
-                                    error: None,
-                                }
-                            }
-                            Err(e) => BulkAddResult {
-                                cv_volume_id: Some(cv_volume_id),
-                                metron_series_id: metron_origin,
-                                status: "failed",
-                                series_id: None,
-                                error: Some(e.to_string()),
-                            },
-                        }
-                    }
+    // Drop terminal leftovers from earlier batches so the in-memory status
+    // map stays bounded (read-once pruning in the status endpoint handles
+    // the rest under normal polling).
+    state
+        .subscribe_status
+        .write()
+        .await
+        .items
+        .retain(|_, o| !o.is_terminal());
+
+    let mut results = Vec::with_capacity(body.items.len());
+    for item in body.items {
+        // Synchronous fast path: a cv_volume_id already tracked locally
+        // subscribes with no network call. Also catches malformed input.
+        if let Some(cv) = item.cv_volume_id {
+            if cv <= 0 {
+                results.push(BulkAddResult {
+                    cv_volume_id: Some(cv),
+                    metron_series_id: None,
+                    status: "failed",
+                    series_id: None,
+                    error: Some("cv_volume_id must be > 0".into()),
+                });
+                continue;
+            }
+            if series_repo::find_by_cv_id(&state.db, cv).await?.is_some() {
+                // Local: try_add_one re-reads find_by_cv_id (cheap) and
+                // subscribes; no CV fetch happens.
+                results.push(match try_add_one(&state, cv).await {
+                    Ok((series_id, status)) => BulkAddResult {
+                        cv_volume_id: Some(cv),
+                        metron_series_id: None,
+                        status,
+                        series_id: Some(series_id),
+                        error: None,
+                    },
                     Err(e) => BulkAddResult {
-                        cv_volume_id: item.cv_volume_id,
-                        metron_series_id: item.metron_series_id,
+                        cv_volume_id: Some(cv),
+                        metron_series_id: None,
                         status: "failed",
                         series_id: None,
                         error: Some(e.to_string()),
                     },
-                }
+                });
+                continue;
             }
-        })
-        .buffer_unordered(10)
-        .collect()
-        .await;
+        } else if item.metron_series_id.is_none() {
+            results.push(BulkAddResult {
+                cv_volume_id: None,
+                metron_series_id: None,
+                status: "failed",
+                series_id: None,
+                error: Some(
+                    "exactly one of `cv_volume_id` or `metron_series_id` is required".into(),
+                ),
+            });
+            continue;
+        }
+
+        // Background path: not-yet-local CV volume, or any Metron item.
+        let key = item_key(&item);
+        let cv_echo = item.cv_volume_id;
+        let metron_echo = item.metron_series_id;
+        mark_resolving(&state, &key).await;
+        spawn_background_resolve(state.clone(), item, key);
+        results.push(BulkAddResult {
+            cv_volume_id: cv_echo,
+            metron_series_id: metron_echo,
+            status: "resolving",
+            series_id: None,
+            error: None,
+        });
+    }
 
     Ok(Json(BulkAddResponse { results }))
+}
+
+/// The frontend row discriminator for an add request — `cv:{id}` or
+/// `metron:{id}`, matching the key the calendar UI builds, so a
+/// background outcome correlates back to the right row. Only called on
+/// the background path, where at least one id is present.
+fn item_key(item: &AddToPullBody) -> String {
+    match (item.cv_volume_id, item.metron_series_id) {
+        (Some(cv), _) => format!("cv:{cv}"),
+        (None, Some(m)) => format!("metron:{m}"),
+        // Unreachable on the background path (malformed items fail
+        // synchronously upstream); a stable fallback beats a panic.
+        (None, None) => "invalid".to_string(),
+    }
+}
+
+/// Mark a key `resolving` before its background task starts, so a status
+/// poll that races ahead of the task still sees the in-flight state.
+async fn mark_resolving(state: &AppState, key: &str) {
+    state.subscribe_status.write().await.items.insert(
+        key.to_string(),
+        SubscribeOutcome {
+            status: "resolving".to_string(),
+            series_id: None,
+            error: None,
+        },
+    );
+}
+
+/// Resolve + subscribe one deferred item off the request thread, behind
+/// the [`AppState::cv_resolve_gate`] so CV fetches stay strictly
+/// sequential. The terminal outcome is written to `subscribe_status`
+/// under `key`; a failure is logged at warn (server-side surface) AND
+/// recorded with its reason (UI surface), never silently dropped.
+fn spawn_background_resolve(state: AppState, item: AddToPullBody, key: String) {
+    tokio::spawn(async move {
+        let _permit = state
+            .cv_resolve_gate
+            .acquire()
+            .await
+            .expect("cv_resolve_gate is never closed");
+        let outcome = match resolve_and_subscribe(&state, &item).await {
+            Ok((series_id, status)) => SubscribeOutcome {
+                status: status.to_string(),
+                series_id: Some(series_id),
+                error: None,
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "longbox_web",
+                    key = %key,
+                    error = %e,
+                    "pull-list background resolve failed"
+                );
+                SubscribeOutcome {
+                    status: "failed".to_string(),
+                    series_id: None,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+        state
+            .subscribe_status
+            .write()
+            .await
+            .items
+            .insert(key, outcome);
+    });
+}
+
+/// Poll endpoint for background pull-list resolutions. Returns the
+/// current `{ items: { key: {status, series_id, error} } }` snapshot and
+/// prunes the terminal entries it returns (read-once) — bounded growth
+/// for a single-user app. The frontend polls until its `resolving` keys
+/// have all gone terminal.
+async fn subscribe_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut store = state.subscribe_status.write().await;
+    let snapshot = serde_json::json!({ "items": store.items });
+    store.items.retain(|_, o| !o.is_terminal());
+    Json(snapshot)
 }
 
 /// Item A v2 Option C: resolve a request's identity to a CV volume id,

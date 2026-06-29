@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::config::AppConfig;
 
@@ -58,6 +59,51 @@ pub struct AppState {
     /// timestamp we can serialize/compare; durations come from
     /// arithmetic, not the type.
     pub start_time: time::OffsetDateTime,
+    /// Bounds background pull-list resolutions that need a ComicVine
+    /// fetch (not-yet-local volumes added from the Release Calendar) to a
+    /// few at a time, so a bulk add never stampedes the rate limiter's
+    /// burst and trips `max_wait_for_slot` (the silent-`RateLimited`
+    /// partial-failure bug the old 10-wide fan-out caused). Set to 3 in
+    /// `bootstrap` — low enough to stay under the burst ceiling, high
+    /// enough that a light add isn't head-of-line-blocked behind a
+    /// back-catalog giant mid-fetch. ponytail: a fixed small bound, not
+    /// adaptive; revisit only if CV's limits or the cap change.
+    pub cv_resolve_gate: Arc<Semaphore>,
+    /// Live outcomes of those background resolutions, keyed by the
+    /// frontend row discriminator (`cv:{id}` / `metron:{id}`). The
+    /// calendar polls `GET /api/releases/calendar/pull/status` after a
+    /// bulk add; terminal entries are pruned read-once. ponytail:
+    /// in-memory + single-user read-once semantics — lost on restart,
+    /// which is fine for a transient UX cue, not a durable record.
+    pub subscribe_status: Arc<RwLock<SubscribeStatus>>,
+}
+
+/// One background pull-list resolution's current state. `status` is
+/// `resolving` until the background task lands a terminal `added` /
+/// `already_on_list` / `failed`. `series_id` and `error` are populated
+/// on the terminal write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeOutcome {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SubscribeOutcome {
+    /// Whether this outcome is terminal (anything other than `resolving`).
+    pub fn is_terminal(&self) -> bool {
+        self.status != "resolving"
+    }
+}
+
+/// In-memory map of in-flight + recently-terminal background pull-list
+/// resolutions, keyed by the frontend row discriminator. Serializes to a
+/// JSON object under `items` for the status poll.
+#[derive(Debug, Default, Serialize)]
+pub struct SubscribeStatus {
+    pub items: HashMap<String, SubscribeOutcome>,
 }
 
 /// In-memory mid-scan status. The "current" pill in the UI reads from
