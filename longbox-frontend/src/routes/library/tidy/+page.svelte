@@ -18,6 +18,7 @@
     convertFolders,
     dismissFolders,
     keepPhantom,
+    unkeepPhantom,
     mergeDuplicates,
     type DiscoveredFolder,
     type DuplicatePair,
@@ -42,6 +43,10 @@
   // The transition subsection is a $derived view of this list, NOT a
   // separately tracked list — see the $derived block below.
   let phantoms = $state<PhantomSeries[]>([...data.phantoms.all_zero_owned]);
+  // The "Kept series" set — phantoms exempted from tidy. Held as its own
+  // list (the API filters them out of `phantoms`); Keep/Un-keep splice a
+  // row between the two lists locally, no refetch.
+  let kept = $state<PhantomSeries[]>([...data.kept]);
   let untracked = $state<DiscoveredFolder[]>([...data.untracked]);
   // Mutable copy of the enrichment review queue so a successful pick
   // can be removed locally without a refetch — same pattern as
@@ -147,14 +152,34 @@
   function handleKeep(seriesId: number): Promise<void> {
     return run(async () => {
       await keepPhantom(seriesId);
-      // Clear both signals locally — last_matched_count -> 0 and
-      // auto_tidy_due_at -> null — mirroring what the endpoint does. The
-      // $derived partition slides the row out of "Recently lost files"
-      // or "Scheduled for automatic removal" into its resting bucket.
-      phantoms = phantoms.map((p) =>
-        p.id === seriesId ? { ...p, last_matched_count: 0, auto_tidy_due_at: null } : p
-      );
-      toast.success('Kept this series.');
+      // Keep is now durable: the series leaves the phantom list entirely
+      // and moves into "Kept series". Mirror that locally — splice the
+      // row out of `phantoms` and into `kept`, with its signals cleared
+      // to match what the endpoint wrote.
+      const row = phantoms.find((p) => p.id === seriesId);
+      phantoms = phantoms.filter((p) => p.id !== seriesId);
+      phantomSel.discard(seriesId);
+      if (row) {
+        kept = [...kept, { ...row, last_matched_count: 0, auto_tidy_due_at: null }].sort((a, b) =>
+          a.sort_title.localeCompare(b.sort_title)
+        );
+      }
+      toast.success('Kept this series. It won’t be tidied.');
+    });
+  }
+
+  function handleUnkeep(seriesId: number): Promise<void> {
+    return run(async () => {
+      await unkeepPhantom(seriesId);
+      // Reverse of Keep: the series returns to the phantom list. It lands
+      // in the steady-state bucket (signals already at 0/null) and the
+      // scanner re-evaluates it from scratch on the next scan.
+      const row = kept.find((p) => p.id === seriesId);
+      kept = kept.filter((p) => p.id !== seriesId);
+      if (row) {
+        phantoms = [...phantoms, row].sort((a, b) => a.sort_title.localeCompare(b.sort_title));
+      }
+      toast.success('No longer keeping this series.');
     });
   }
 
@@ -533,7 +558,7 @@
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}
 
-{#if phantoms.length === 0 && untracked.length === 0 && enrichmentQueue.length === 0 && duplicates.length === 0}
+{#if phantoms.length === 0 && kept.length === 0 && untracked.length === 0 && enrichmentQueue.length === 0 && duplicates.length === 0}
   <EmptyState
     icon={Sparkles}
     title="Your library is tidy"
@@ -974,6 +999,50 @@
         {/each}
       </ul>
     </section>
+  {/if}
+
+  <!-- ====================== Kept series ======================= -->
+  <!-- Collapsed by default — low-traffic management surface for the
+       series the user has exempted from tidy. Native <details> does the
+       collapse; no JS state needed. -->
+  {#if kept.length > 0}
+    <details class="mt-8 rounded-lg border border-slate-200 bg-white">
+      <summary class="cursor-pointer select-none px-4 py-3 text-lg font-semibold">
+        Kept series
+        <span class="ml-1 text-sm font-normal text-slate-500">({kept.length})</span>
+      </summary>
+      <div class="border-t border-slate-100 px-4 py-3">
+        <p class="mb-3 text-xs text-slate-500">
+          These series are exempt from Library Tidy — they won't be flagged as phantoms or
+          auto-removed, even with no files on disk. Un-keep one to let LongBox evaluate it
+          normally again.
+        </p>
+        <ul class="space-y-2">
+          {#each kept as p (p.id)}
+            <li class="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+              {@render coverThumb(p.cover_url)}
+              <div class="min-w-0 flex-1">
+                <div class="truncate font-medium" title={p.title}>
+                  {p.title}{#if p.start_year}
+                    <span class="text-slate-500">({p.start_year})</span>{/if}
+                </div>
+                {#if p.publisher}
+                  <div class="truncate text-xs text-slate-500">{p.publisher}</div>
+                {/if}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={() => handleUnkeep(p.id)}
+                disabled={busy}
+              >
+                Un-keep
+              </Button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    </details>
   {/if}
 {/if}
 

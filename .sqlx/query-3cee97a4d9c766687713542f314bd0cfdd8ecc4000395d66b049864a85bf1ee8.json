@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET auto_tidy_due_at = ?\n           WHERE auto_tidy_due_at IS NULL\n             AND tidy_exempt = 0\n             AND consecutive_empty_scans >= ?\n             AND NOT EXISTS (\n                 SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id\n                 WHERE i.series_id = series.id\n                   AND f.status IN ('owned', 'needs_review', 'unmatched')\n                   AND f.is_present = 1\n             )\n             AND NOT EXISTS (\n                 SELECT 1 FROM pull_list pl WHERE pl.series_id = series.id\n             )\n             AND NOT EXISTS (\n                 SELECT 1 FROM pull_attempts pa WHERE pa.series_id = series.id\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3cee97a4d9c766687713542f314bd0cfdd8ecc4000395d66b049864a85bf1ee8"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET last_matched_count = 0,\n               consecutive_empty_scans = 0,\n               auto_tidy_due_at = NULL,\n               tidy_exempt = 1\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fc363e4b25a276013f75692a0596cf61426fe047f41b3e9363befc8fe2d35f26"
+}

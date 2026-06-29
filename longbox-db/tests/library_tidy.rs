@@ -601,14 +601,122 @@ async fn keep_phantom_series_clears_every_auto_tidy_signal() {
 
     assert_eq!(empty_scan_counter(&pool, sid).await, 0);
     assert_eq!(due_at(&pool, sid).await, None);
-    let row = series_repo::list_phantoms(&pool)
+
+    // The whole point of the fix: a kept series leaves the phantom list
+    // entirely (durable `tidy_exempt = 1`) and surfaces in the kept list.
+    assert!(
+        !series_repo::list_phantoms(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.id == sid),
+        "a kept series must not appear in list_phantoms"
+    );
+    let kept = series_repo::list_kept_series(&pool)
         .await
         .unwrap()
         .into_iter()
         .find(|p| p.id == sid)
-        .expect("still a phantom");
-    assert_eq!(row.last_matched_count, 0);
-    assert!(row.auto_tidy_due_at.is_none());
+        .expect("kept series shows in list_kept_series");
+    assert_eq!(kept.last_matched_count, 0);
+    assert!(kept.auto_tidy_due_at.is_none());
+}
+
+#[tokio::test]
+async fn kept_series_does_not_tick_empty_scan_counter() {
+    // Root cause of the original bug: keeping reset the counter, then the
+    // next scan ticked it right back up and the series re-marked. With
+    // the exemption flag the tick must skip the series entirely — the
+    // counter stays at 0 no matter how many empty scans run.
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Exempt").await;
+
+    series_repo::keep_phantom_series(&pool, sid).await.unwrap();
+    for _ in 0..5 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    assert_eq!(
+        empty_scan_counter(&pool, sid).await,
+        0,
+        "a tidy-exempt series must never tick its empty-scan counter"
+    );
+}
+
+#[tokio::test]
+async fn kept_series_is_not_marked_for_auto_tidy() {
+    // Even if the counter were somehow past the threshold, the exemption
+    // guard in mark_for_auto_tidy must refuse to schedule a kept series.
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Exempt").await;
+    let due = fixed_ts();
+
+    // Accrue empty scans first, then keep — proves the guard, not just a
+    // zeroed counter, is what stops the mark.
+    for _ in 0..5 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    series_repo::keep_phantom_series(&pool, sid).await.unwrap();
+    // Force the counter back above threshold to defeat the zeroing path.
+    sqlx::query("UPDATE series SET consecutive_empty_scans = 9 WHERE id = ?")
+        .bind(sid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        0,
+        "a tidy-exempt series must never be marked for removal"
+    );
+    assert_eq!(due_at(&pool, sid).await, None);
+}
+
+#[tokio::test]
+async fn unkeep_phantom_series_restores_normal_behavior() {
+    let pool = fresh_pool().await;
+    let sid = insert_series(&pool, "Reconsidered").await;
+    let due = fixed_ts();
+
+    series_repo::keep_phantom_series(&pool, sid).await.unwrap();
+    series_repo::unkeep_phantom_series(&pool, sid).await.unwrap();
+
+    // Back in the phantom list, gone from the kept list.
+    assert!(
+        series_repo::list_phantoms(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.id == sid),
+        "an un-kept series returns to the phantom list"
+    );
+    assert!(
+        !series_repo::list_kept_series(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.id == sid),
+    );
+
+    // And the scanner re-evaluates it normally: ticks resume, and once
+    // past the threshold it can be marked again.
+    for _ in 0..3 {
+        series_repo::tick_empty_scan_counters(&pool).await.unwrap();
+    }
+    assert_eq!(empty_scan_counter(&pool, sid).await, 3);
+    assert_eq!(
+        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        1,
+        "an un-kept series is schedulable again after fresh empty scans"
+    );
+}
+
+#[tokio::test]
+async fn unkeep_phantom_series_unknown_is_not_found() {
+    let pool = fresh_pool().await;
+    let err = series_repo::unkeep_phantom_series(&pool, 4242)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::NotFound));
 }
 
 #[tokio::test]

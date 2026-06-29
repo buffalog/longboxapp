@@ -121,10 +121,22 @@ export function bulkDeletePhantoms(seriesIds: number[]): Promise<BulkDeleteResul
   });
 }
 
-/** "Keep" a transition phantom — reset `last_matched_count` to 0,
- *  demoting it from the transition surface to the steady-state list. */
+/** "Keep" a phantom — sets the durable `tidy_exempt` flag. The series
+ *  leaves the phantom list entirely and the scanner never re-marks it;
+ *  it now appears in the "Kept series" list instead. */
 export function keepPhantom(seriesId: number): Promise<{ kept: number }> {
   return apiFetch(`/reconcile/phantom/${seriesId}/keep`, { method: 'POST' });
+}
+
+/** Reverse a Keep — clears `tidy_exempt`. The series returns to the
+ *  phantom list and is re-evaluated normally on the next scan. */
+export function unkeepPhantom(seriesId: number): Promise<{ unkept: number }> {
+  return apiFetch(`/reconcile/phantom/${seriesId}/keep`, { method: 'DELETE' });
+}
+
+/** The "Kept series" list — phantoms exempted from tidy via `keepPhantom`. */
+export function listKeptPhantoms(): Promise<PhantomSeries[]> {
+  return apiFetch('/reconcile/phantoms/kept');
 }
 
 /** Per-folder outcome of a bulk shallow-convert.

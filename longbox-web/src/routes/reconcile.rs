@@ -32,12 +32,16 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/reconcile/phantoms", get(phantoms))
+        .route("/reconcile/phantoms/kept", get(kept_phantoms))
         .route("/reconcile/untracked", get(untracked))
         .route("/reconcile/counts", get(counts))
         .route("/reconcile/add", post(add))
         .route("/reconcile/dismiss", post(dismiss))
         .route("/reconcile/phantom/:series_id", delete(delete_phantom))
-        .route("/reconcile/phantom/:series_id/keep", post(keep_phantom))
+        .route(
+            "/reconcile/phantom/:series_id/keep",
+            post(keep_phantom).delete(unkeep_phantom),
+        )
         .route("/reconcile/phantoms/bulk", post(bulk_delete_phantoms))
         .route("/reconcile/convert", post(convert))
         .route("/library/tidy/duplicates", get(duplicates))
@@ -161,6 +165,15 @@ async fn phantoms(State(state): State<AppState>) -> Result<Json<PhantomsResponse
     }))
 }
 
+/// The "Kept series" surface: phantoms the user explicitly exempted from
+/// tidy. Filtered out of `phantoms` above, listed here so the UI can
+/// render its own collapsed section with an "Un-keep" action.
+async fn kept_phantoms(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PhantomSeries>>, ApiError> {
+    Ok(Json(series_repo::list_kept_series(&state.db).await?))
+}
+
 /// Non-dismissed discovered folders — the untracked working set.
 async fn untracked(
     State(state): State<AppState>,
@@ -259,11 +272,11 @@ async fn delete_phantom(
     Ok(Json(serde_json::json!({ "deleted": series_id })))
 }
 
-/// "Keep" a phantom: clear every auto-tidy signal — `last_matched_count`
-/// to 0 (demotes a transition phantom to steady-state),
-/// `consecutive_empty_scans` to 0, and `auto_tidy_due_at` to NULL
-/// (cancels a scheduled automatic removal). The user has reviewed the
-/// series and decided it stays — the same action serves the "recently
+/// "Keep" a phantom: set the durable `tidy_exempt` flag (and clear the
+/// auto-tidy signals). The series leaves the phantom list entirely and
+/// the scanner never re-marks it — it moves to the "Kept series" surface,
+/// reversible via `DELETE` (`unkeep_phantom`). The user has reviewed the
+/// series and decided it stays; the same action serves the "recently
 /// lost files" and "scheduled for removal" tidy surfaces. 404 for an
 /// unknown series; the explicit existence check gives a clean `series`
 /// 404 rather than the generic `row` one `keep_phantom_series`'s own
@@ -283,6 +296,26 @@ async fn keep_phantom(
     }
     series_repo::keep_phantom_series(&state.db, series_id).await?;
     Ok(Json(serde_json::json!({ "kept": series_id })))
+}
+
+/// Reverse a "Keep": clear the tidy exemption so the scanner
+/// re-evaluates the series normally. 404 for an unknown series (same
+/// explicit existence check as `keep_phantom`, for a clean `series` 404).
+async fn unkeep_phantom(
+    State(state): State<AppState>,
+    Path(series_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if series_repo::find_by_id(&state.db, series_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: series_id.to_string(),
+        });
+    }
+    series_repo::unkeep_phantom_series(&state.db, series_id).await?;
+    Ok(Json(serde_json::json!({ "unkept": series_id })))
 }
 
 /// Best-effort bulk phantom delete. Each id routes through the shared

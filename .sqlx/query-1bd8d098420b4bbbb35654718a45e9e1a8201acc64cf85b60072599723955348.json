@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET\n               consecutive_empty_scans = CASE WHEN EXISTS (\n                   SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id\n                   WHERE i.series_id = series.id\n                     AND f.status IN ('owned', 'needs_review', 'unmatched')\n                     AND f.is_present = 1\n               ) THEN 0 ELSE consecutive_empty_scans + 1 END,\n               auto_tidy_due_at = CASE WHEN EXISTS (\n                   SELECT 1 FROM files f JOIN issues i ON f.issue_id = i.id\n                   WHERE i.series_id = series.id\n                     AND f.status IN ('owned', 'needs_review', 'unmatched')\n                     AND f.is_present = 1\n               ) THEN NULL ELSE auto_tidy_due_at END\n           WHERE tidy_exempt = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "1bd8d098420b4bbbb35654718a45e9e1a8201acc64cf85b60072599723955348"
+}
