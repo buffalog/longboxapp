@@ -76,3 +76,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
         .with_state(state)
 }
+
+/// OPDS-only router for the dedicated listener (port 8096). Serves
+/// `/opds/v1/*` (auth-gated, same middleware as the main app) and nothing
+/// else — the default fallback 404s every other path, so this surface
+/// exposes no admin API. Shares the same [`AppState`] as the main app.
+pub fn build_opds_router(state: AppState) -> Router {
+    Router::new()
+        .nest("/opds", opds::router(state.clone()))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}

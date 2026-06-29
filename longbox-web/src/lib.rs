@@ -16,5 +16,5 @@ pub mod tracing_setup;
 pub use bootstrap::{run as bootstrap_run, BootstrapError};
 pub use config::{AppConfig, ConfigError};
 pub use error::{ApiError, FieldError};
-pub use routes::build_router;
+pub use routes::{build_opds_router, build_router};
 pub use state::{AppState, CurrentScan, ScanKind, ScanStatus};
