@@ -66,17 +66,6 @@ pub fn hash_password(password: &str) -> Result<String, OpdsAuthError> {
     bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| OpdsAuthError::Hash(e.to_string()))
 }
 
-/// Generate a fresh API token: 32 random bytes, hex-encoded (64 chars).
-///
-/// DEPRECATED: the legacy single-credential admin surface still calls this;
-/// it is removed when that surface is replaced by per-user account management.
-pub fn generate_api_token() -> String {
-    use rand::RngCore as _;
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
