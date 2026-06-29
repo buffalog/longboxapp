@@ -7,12 +7,13 @@
 //! `GET /opds/v1` matches the `/v1` route exactly, sidestepping axum's
 //! nested-root trailing-slash gotcha).
 //!
-//! Every route is wrapped by [`require_auth`], which loads the four OPDS
-//! `settings` rows on each request (so the enable toggle and credential
-//! changes take effect with no restart) and maps the result to:
-//!   - `503` — OPDS disabled or no username configured,
+//! Every route is wrapped by [`require_auth`], which on each request checks
+//! the global `opds_enabled` toggle and authenticates HTTP Basic credentials
+//! against the per-user `opds_users` table (so the toggle and account changes
+//! take effect with no restart):
+//!   - `503` — OPDS disabled,
 //!   - `401` + `WWW-Authenticate: Basic realm="LongBox"` — missing/bad creds,
-//!   - passthrough — Basic or Bearer credentials accepted.
+//!   - passthrough — a valid enabled account's Basic credentials.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -21,8 +22,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use longbox_db::settings_repo;
-use longbox_opds::{AuthOutcome, OpdsAccess};
+use longbox_db::{opds_users_repo, settings_repo};
 
 use crate::state::AppState;
 
@@ -53,31 +53,61 @@ pub fn router(state: AppState) -> Router<AppState> {
         .layer(middleware::from_fn_with_state(state, require_auth))
 }
 
-/// Per-request OPDS auth gate. Reads the four OPDS settings rows, then
-/// delegates the actual decision to the pure [`OpdsAccess::authorize`].
+/// Per-request OPDS auth gate. Checks the global `opds_enabled` toggle, then
+/// authenticates HTTP Basic credentials against the `opds_users` table.
 async fn require_auth(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
-    let access = match load_access(&state).await {
-        Ok(access) => access,
+    // 1. Global toggle. Off → 503 regardless of credentials.
+    match settings_repo::get_or_default(&state.db, settings_repo::KEY_OPDS_ENABLED, false).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OPDS access is disabled. Enable it in LongBox Settings.",
+            )
+                .into_response()
+        }
         Err(err) => {
-            tracing::error!(error = %err, "failed to load OPDS access settings");
+            tracing::error!(error = %err, "failed to read opds_enabled");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    // 2. Parse HTTP Basic credentials (the only accepted scheme).
+    let Some((username, password)) = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(longbox_opds::parse_basic)
+    else {
+        return unauthorized();
+    };
+
+    // 3. Look up the enabled account, verify bcrypt. On the not-found path,
+    //    burn an equivalent bcrypt cycle so timing doesn't leak which
+    //    usernames exist.
+    let user = match opds_users_repo::find_enabled_for_auth(&state.db, &username).await {
+        Ok(user) => user,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to look up OPDS user");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-
-    let authorization = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-
-    match access.authorize(authorization) {
-        AuthOutcome::Authorized => next.run(req).await,
-        AuthOutcome::Unconfigured => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OPDS access is not configured. Enable OPDS and set a username in LongBox Settings.",
-        )
-            .into_response(),
-        AuthOutcome::Unauthorized => unauthorized(),
+    let authorized = match &user {
+        Some(u) => longbox_opds::verify_password(&password, &u.password_hash),
+        None => longbox_opds::dummy_verify(&password),
+    };
+    if !authorized {
+        return unauthorized();
     }
+
+    // 4. Success — stamp last_seen (best-effort; a failure here must not
+    //    sink an otherwise-valid request) and pass through.
+    if let Some(u) = user {
+        if let Err(err) = opds_users_repo::touch_last_seen(&state.db, u.id).await {
+            tracing::warn!(error = %err, user_id = u.id, "failed to update OPDS last_seen_at");
+        }
+    }
+    next.run(req).await
 }
 
 /// `401` with the Basic-auth challenge OPDS readers expect.
@@ -88,29 +118,4 @@ fn unauthorized() -> Response {
         HeaderValue::from_static("Basic realm=\"LongBox\""),
     );
     response
-}
-
-/// Load the OPDS access settings into the pure [`OpdsAccess`] verifier.
-/// Empty stored values (the migration seeds username/hash/token as `''`)
-/// collapse to `None` so the verifier treats them as absent.
-async fn load_access(state: &AppState) -> Result<OpdsAccess, longbox_db::DbError> {
-    let enabled: bool =
-        settings_repo::get_or_default(&state.db, settings_repo::KEY_OPDS_ENABLED, false).await?;
-    let username = non_empty(settings_repo::get(&state.db, settings_repo::KEY_OPDS_USERNAME).await?);
-    let password_hash =
-        non_empty(settings_repo::get(&state.db, settings_repo::KEY_OPDS_PASSWORD_HASH).await?);
-    let api_token =
-        non_empty(settings_repo::get(&state.db, settings_repo::KEY_OPDS_API_TOKEN).await?);
-
-    Ok(OpdsAccess {
-        enabled,
-        username,
-        password_hash,
-        api_token,
-    })
-}
-
-/// `Some(value)` only when it has non-whitespace content; otherwise `None`.
-fn non_empty(value: Option<String>) -> Option<String> {
-    value.filter(|s| !s.trim().is_empty())
 }

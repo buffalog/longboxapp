@@ -23,6 +23,7 @@ pub mod missing;
 pub mod needs_attention;
 pub mod opds;
 pub mod opds_settings;
+pub mod opds_users;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
@@ -53,6 +54,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(library_roots::router())
         .merge(settings::router())
         .merge(opds_settings::router())
+        .merge(opds_users::router())
         .merge(dashboard::router())
         .merge(missing::router())
         .merge(postprocess::router())
@@ -74,5 +76,16 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(crate::frontend::fallback_handler)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .with_state(state)
+}
+
+/// OPDS-only router for the dedicated listener (port 8096). Serves
+/// `/opds/v1/*` (auth-gated, same middleware as the main app) and nothing
+/// else — the default fallback 404s every other path, so this surface
+/// exposes no admin API. Shares the same [`AppState`] as the main app.
+pub fn build_opds_router(state: AppState) -> Router {
+    Router::new()
+        .nest("/opds", opds::router(state.clone()))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

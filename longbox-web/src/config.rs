@@ -60,6 +60,11 @@ pub struct AppConfig {
     /// private host reachable from the container. Source:
     /// `OPDS_ALLOW_PRIVATE_COVER_HOSTS` env var.
     pub opds_allow_private_cover_hosts: bool,
+    /// TCP port for the dedicated OPDS-only listener, bound on `0.0.0.0`
+    /// alongside the main app. It serves `/opds/v1/*` only (404 for anything
+    /// else) so a reader can be pointed at a port with no admin surface.
+    /// Source: `OPDS_PORT` env var; defaults to 8096.
+    pub opds_port: u16,
 }
 
 #[derive(Debug, Error)]
@@ -149,6 +154,15 @@ impl AppConfig {
             None => false,
         };
 
+        let opds_port = match optional("OPDS_PORT") {
+            Some(raw) => raw.parse::<u16>().map_err(|_| ConfigError::InvalidValue {
+                var: "OPDS_PORT",
+                value: raw,
+                reason: "expected a TCP port number (1-65535)".into(),
+            })?,
+            None => 8096,
+        };
+
         Ok(Self {
             comicvine_api_key,
             library_root_path: normalize_path(&library_root_path),
@@ -166,6 +180,7 @@ impl AppConfig {
             opds_base_url,
             opds_covers_dir,
             opds_allow_private_cover_hosts,
+            opds_port,
         })
     }
 }

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO opds_users (username, password_hash)\n           VALUES (?, ?)\n           RETURNING id AS \"id!: i64\", username,\n                     enabled AS \"enabled!: bool\",\n                     created_at AS \"created_at!: String\",\n                     last_seen_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "username",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_seen_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5b3c0a65e0963fe6f22f8a09e45c5e7895b789086fe1d867b0101471ec938b9f"
+}
