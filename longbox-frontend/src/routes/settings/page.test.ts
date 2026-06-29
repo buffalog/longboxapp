@@ -65,12 +65,10 @@ function pageData(over: Partial<Settings> = {}) {
         webhooks: [],
         opds: {
           enabled: false,
-          username: '',
-          has_password: false,
-          api_token: '',
-          base_url: 'http://localhost:3000',
-          catalog_url: 'http://localhost:3000/opds/v1'
-        }
+          opds_port: 8096,
+          base_url: 'http://localhost:3000'
+        },
+        opdsUsers: []
       }
     }
   };
