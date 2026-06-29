@@ -6815,6 +6815,112 @@ async fn calendar_bulk_add_returns_per_volume_status() {
     );
 }
 
+/// Poll `GET /api/releases/calendar/pull/status` until `key` reaches a
+/// terminal status or the attempt budget runs out. Returns the terminal
+/// outcome object. Drives the current-thread runtime so the spawned
+/// background resolver makes progress between polls.
+async fn poll_subscribe_status(
+    app: &common::TestApp,
+    key: &str,
+    max_attempts: u32,
+) -> serde_json::Value {
+    for _ in 0..max_attempts {
+        let body = response_json(
+            app.request(empty_request("GET", "/api/releases/calendar/pull/status"))
+                .await,
+        )
+        .await;
+        if let Some(entry) = body["items"].get(key) {
+            let status = entry["status"].as_str().unwrap_or("");
+            if status != "resolving" {
+                return entry.clone();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("`{key}` never reached a terminal status within {max_attempts} polls");
+}
+
+#[tokio::test]
+async fn calendar_bulk_add_backgrounds_a_not_yet_local_volume() {
+    let app = build_test_app().await;
+    // 2127 is NOT in the local catalog, so subscribing it requires a CV
+    // fetch. That fetch must NOT happen synchronously in the request —
+    // the item comes back `resolving` and a background task finishes it.
+    mount_cv_volume(&app, 2127, "The Walking Dead").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull/bulk",
+            r#"{"items":[{"cv_volume_id":2127}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["status"], "resolving",
+        "a not-yet-local volume must be deferred, not resolved in-request"
+    );
+    // The synchronous response has not created the series yet.
+    assert!(
+        series_repo::find_by_cv_id(&app.state.db, 2127)
+            .await
+            .unwrap()
+            .is_none(),
+        "series must not exist until the background resolver runs"
+    );
+
+    // Background resolver finishes it: status flips to `added` and the
+    // series is created + subscribed.
+    let outcome = poll_subscribe_status(&app, "cv:2127", 100).await;
+    assert_eq!(outcome["status"], "added");
+    let series = series_repo::find_by_cv_id(&app.state.db, 2127)
+        .await
+        .unwrap()
+        .expect("background resolver created the series");
+    assert_eq!(outcome["series_id"].as_i64(), Some(series.id));
+    assert!(
+        pull_list_repo::get(&app.state.db, series.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "background resolver subscribed the series"
+    );
+}
+
+#[tokio::test]
+async fn calendar_bulk_add_surfaces_background_failure_in_status() {
+    let app = build_test_app().await;
+    // 4040 is not local AND the CV volume fetch 404s — the background
+    // resolver must record a terminal `failed` outcome with a reason,
+    // not silently drop it.
+    Mock::given(method("GET"))
+        .and(path("/volume/4050-4040/"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull/bulk",
+            r#"{"items":[{"cv_volume_id":4040}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["results"][0]["status"], "resolving");
+
+    let outcome = poll_subscribe_status(&app, "cv:4040", 100).await;
+    assert_eq!(outcome["status"], "failed");
+    assert!(
+        outcome["error"].is_string(),
+        "a background failure must carry a reason"
+    );
+}
+
 // -------- releases of note (A.8 Step 9) --------
 
 /// Mount a ComicVine `/issues/` response for ANY query. The of-note

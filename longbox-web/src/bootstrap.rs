@@ -221,6 +221,14 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         scan_scheduler,
         enrichment,
         start_time: time::OffsetDateTime::now_utc(),
+        // 3 permits: background pull-list CV resolutions run at most 3
+        // at a time — the cure for the rate-limiter stampede (the old
+        // 10-wide fan-out) while still letting a light add slip past a
+        // back-catalog giant mid-fetch. Under the calendar client's
+        // burst=5 / 60s-max-wait, 3 concurrent (≈6 token requests) stays
+        // below the RateLimited threshold, so it won't reintroduce the bug.
+        cv_resolve_gate: Arc::new(tokio::sync::Semaphore::new(3)),
+        subscribe_status: Arc::new(RwLock::new(crate::state::SubscribeStatus::default())),
     })
 }
 

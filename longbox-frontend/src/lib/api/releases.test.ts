@@ -4,6 +4,7 @@ import {
   bulkAddCalendarVolumesToPullList,
   getReleaseCalendar,
   getReleasesOfNote,
+  getSubscribeStatus,
   getThisWeeksPulls
 } from './releases';
 
@@ -67,6 +68,16 @@ describe('releases api', () => {
     expect(JSON.parse(opts?.body as string)).toEqual({
       items: [{ cv_volume_id: 11 }, { metron_series_id: 22 }]
     });
+  });
+
+  it('getSubscribeStatus GETs /api/releases/calendar/pull/status', async () => {
+    const fetchSpy = mockJson({
+      items: { 'cv:2127': { status: 'added', series_id: 7 } }
+    });
+    const out = await getSubscribeStatus();
+    expect(fetchSpy.mock.calls[0]![0]).toBe('/api/releases/calendar/pull/status');
+    expect(out.items['cv:2127']!.status).toBe('added');
+    expect(out.items['cv:2127']!.series_id).toBe(7);
   });
 
   it('getReleasesOfNote GETs /api/releases/of-note', async () => {

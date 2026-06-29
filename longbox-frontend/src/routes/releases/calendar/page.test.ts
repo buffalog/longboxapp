@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   bulkAddCalendarVolumesToPullList,
   getReleaseCalendar,
+  getSubscribeStatus,
   type CalendarRow
 } from '$lib/api/releases';
 import CalendarPage from './+page.svelte';
@@ -13,7 +14,8 @@ import CalendarPage from './+page.svelte';
 vi.mock('$lib/api/releases', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/releases')>()),
   getReleaseCalendar: vi.fn(),
-  bulkAddCalendarVolumesToPullList: vi.fn()
+  bulkAddCalendarVolumesToPullList: vi.fn(),
+  getSubscribeStatus: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -104,6 +106,77 @@ describe('release calendar page', () => {
     await waitFor(() =>
       expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
     );
+  });
+
+  it('defers a resolving volume, then flips its row when the background resolver finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      // The server defers the not-yet-local volume: status `resolving`.
+      vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+        results: [{ cv_volume_id: 100, metron_series_id: null, status: 'resolving' }]
+      });
+      // First poll: still resolving. Second: terminal `added`.
+      vi.mocked(getSubscribeStatus)
+        .mockResolvedValueOnce({ items: { 'cv:100': { status: 'resolving' } } })
+        .mockResolvedValueOnce({ items: { 'cv:100': { status: 'added', series_id: 7 } } });
+
+      render(
+        CalendarPage,
+        pageData([calRow({ cv_volume_id: 100, volume_name: 'Saga', on_pull_list: false })])
+      );
+
+      await fireEvent.click(
+        screen.getByRole('checkbox', { name: 'Select all addable volumes' })
+      );
+      await fireEvent.click(
+        screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+      );
+
+      // Row is NOT flipped yet — the resolver hasn't run.
+      await vi.waitFor(() =>
+        expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalled()
+      );
+      expect(screen.queryByText('On pull list', { selector: 'span' })).toBeNull();
+
+      // Drive the background poll loop to completion.
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(getSubscribeStatus).toHaveBeenCalled();
+      expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs a background resolve failure to the console', async () => {
+    vi.useFakeTimers();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+        results: [{ cv_volume_id: 404, metron_series_id: null, status: 'resolving' }]
+      });
+      vi.mocked(getSubscribeStatus).mockResolvedValue({
+        items: { 'cv:404': { status: 'failed', error: 'volume not found' } }
+      });
+
+      render(
+        CalendarPage,
+        pageData([calRow({ cv_volume_id: 404, volume_name: 'Ghost', on_pull_list: false })])
+      );
+      await fireEvent.click(
+        screen.getByRole('checkbox', { name: 'Select all addable volumes' })
+      );
+      await fireEvent.click(
+        screen.getByRole('button', { name: 'Add 1 selected to pull list' })
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('volume not found'));
+    } finally {
+      errSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('bulk-adds a Metron-only row via metron_series_id', async () => {

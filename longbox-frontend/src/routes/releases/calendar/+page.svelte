@@ -7,6 +7,7 @@
   import {
     bulkAddCalendarVolumesToPullList,
     getReleaseCalendar,
+    getSubscribeStatus,
     type CalendarRow,
     type SubscribeTarget
   } from '$lib/api/releases';
@@ -147,6 +148,46 @@
     void loadRange();
   }
 
+  // Background-resolution poll cadence. The server caps CV resolution at
+  // ~1 item / 20s, so a tight poll is wasteful; 2s feels live without
+  // hammering the status endpoint. The attempt ceiling (~5 min) stops a
+  // genuinely stuck resolution from polling forever. ponytail: a fixed
+  // ceiling, not backoff — fine for a single-user UI cue.
+  const SUBSCRIBE_POLL_INTERVAL_MS = 2000;
+  const SUBSCRIBE_POLL_MAX_ATTEMPTS = 150;
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  // The `cv:{id}` / `metron:{id}` key for a bulk result — the same
+  // discriminator `rowKey` builds, so outcomes correlate back to rows.
+  function resultKey(r: {
+    cv_volume_id: number | null;
+    metron_series_id: number | null;
+  }): string | null {
+    if (r.cv_volume_id != null) return `cv:${r.cv_volume_id}`;
+    if (r.metron_series_id != null) return `metron:${r.metron_series_id}`;
+    return null;
+  }
+
+  // Flip every row whose key is in `seriesByKey` to on_pull_list — a
+  // volume/series can span several issue rows in one week.
+  function markRowsSubscribed(seriesByKey: Map<string, number>): void {
+    if (seriesByKey.size === 0) return;
+    rows = rows.map((r) => {
+      const k = rowKey(r);
+      if (k === null) return r;
+      const sid = seriesByKey.get(k);
+      return sid != null ? { ...r, series_id: sid, on_pull_list: true } : r;
+    });
+  }
+
+  // Failures surface both ways: a console line for inspection (the spec's
+  // minimum) and the toast tally the caller assembles.
+  function logSubscribeFailure(key: string | null, err?: string): void {
+    console.error(
+      `Pull-list add failed for ${key ?? 'unknown volume'}: ${err ?? 'unknown error'}`
+    );
+  }
+
   async function bulkAdd(): Promise<void> {
     const keys = [...sel.selected];
     const items = keys
@@ -159,36 +200,94 @@
       const { results } = await bulkAddCalendarVolumesToPullList(items);
       const added = results.filter((r) => r.status === 'added').length;
       const already = results.filter((r) => r.status === 'already_on_list').length;
-      const failed = results.filter((r) => r.status === 'failed').length;
-      // Flip every resolved row to on_pull_list (a volume/series can
-      // span several rows); series_id rides along where the API gave one.
-      // Each result echoes back whichever id was sent — index by the
-      // same discriminator string the selection used.
+      const syncFailures = results.filter((r) => r.status === 'failed');
+
+      // Flip rows for the synchronous added/already results.
       const seriesByKey = new Map<string, number>();
       for (const r of results) {
         if (r.series_id == null) continue;
-        if (r.cv_volume_id != null) seriesByKey.set(`cv:${r.cv_volume_id}`, r.series_id);
-        else if (r.metron_series_id != null)
-          seriesByKey.set(`metron:${r.metron_series_id}`, r.series_id);
+        if (r.status !== 'added' && r.status !== 'already_on_list') continue;
+        const k = resultKey(r);
+        if (k) seriesByKey.set(k, r.series_id);
       }
-      rows = rows.map((r) => {
-        const k = rowKey(r);
-        if (k === null) return r;
-        const sid = seriesByKey.get(k);
-        return sid != null ? { ...r, series_id: sid, on_pull_list: true } : r;
-      });
+      markRowsSubscribed(seriesByKey);
+
+      for (const r of syncFailures) logSubscribeFailure(resultKey(r), r.error);
+
+      // Items the server deferred to its background resolver.
+      const pending = new Set(
+        results
+          .filter((r) => r.status === 'resolving')
+          .map(resultKey)
+          .filter((k): k is string => k !== null)
+      );
+
       sel.clear();
+
+      // Immediate toast — honest about what's still resolving.
       const parts = [`${added} added`];
       if (already > 0) parts.push(`${already} already on pull list`);
-      if (failed > 0) parts.push(`${failed} failed`);
-      const msg = `${parts.join(', ')}.`;
-      if (failed > 0) toast.warning(msg);
+      if (pending.size > 0) parts.push(`${pending.size} resolving`);
+      if (syncFailures.length > 0) parts.push(`${syncFailures.length} failed`);
+      const msg = parts.join(', ') + (pending.size > 0 ? '…' : '.');
+      if (syncFailures.length > 0) toast.warning(msg);
       else toast.success(msg);
+
+      // Track background resolutions without blocking the handler — the
+      // UI unlocks as soon as `finally` clears bulkBusy.
+      if (pending.size > 0) void trackResolving(pending);
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     } finally {
       bulkBusy = false;
     }
+  }
+
+  // Poll the background resolver until every `pending` key goes terminal
+  // (or the attempt ceiling hits), flipping rows and logging failures as
+  // outcomes land, then emit one follow-up toast summarizing the batch.
+  async function trackResolving(pending: Set<string>): Promise<void> {
+    let resolved = 0;
+    let failed = 0;
+    for (
+      let attempt = 0;
+      attempt < SUBSCRIBE_POLL_MAX_ATTEMPTS && pending.size > 0;
+      attempt++
+    ) {
+      await sleep(SUBSCRIBE_POLL_INTERVAL_MS);
+      let items: Record<string, { status: string; series_id?: number; error?: string }>;
+      try {
+        ({ items } = await getSubscribeStatus());
+      } catch {
+        continue; // transient; keep polling
+      }
+      const newlySubscribed = new Map<string, number>();
+      for (const key of [...pending]) {
+        const outcome = items[key];
+        if (!outcome || outcome.status === 'resolving') continue;
+        pending.delete(key);
+        if (outcome.status === 'added' || outcome.status === 'already_on_list') {
+          resolved++;
+          if (outcome.series_id != null) newlySubscribed.set(key, outcome.series_id);
+        } else {
+          failed++;
+          logSubscribeFailure(key, outcome.error);
+        }
+      }
+      markRowsSubscribed(newlySubscribed);
+    }
+    // Anything still pending after the ceiling is reported, not hidden.
+    for (const key of pending) {
+      failed++;
+      logSubscribeFailure(key, 'still resolving after timeout');
+    }
+    if (resolved === 0 && failed === 0) return;
+    const parts: string[] = [];
+    if (resolved > 0) parts.push(`${resolved} resolved`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    const msg = `${parts.join(', ')}.`;
+    if (failed > 0) toast.warning(msg);
+    else toast.success(msg);
   }
 
   const busy = $derived(loading || refreshing);

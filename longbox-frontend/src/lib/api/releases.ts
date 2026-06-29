@@ -71,19 +71,27 @@ export function addCalendarVolumeToPullList(
   });
 }
 
+/** Terminal status of a subscribe attempt, plus `resolving` for an item
+ *  the server deferred to its background resolver (a not-yet-local volume
+ *  whose ComicVine fetch would otherwise block the request). */
+export type SubscribeStatus = 'added' | 'already_on_list' | 'resolving' | 'failed';
+
 /** Per-volume outcome of a bulk add-to-pull-list. Echoes back whichever
  *  of `cv_volume_id` / `metron_series_id` the caller sent so the toast
- *  can correlate results to rows. */
+ *  can correlate results to rows. `resolving` items finish asynchronously
+ *  — poll {@link getSubscribeStatus} for their terminal outcome. */
 export interface BulkAddResult {
   cv_volume_id: number | null;
   metron_series_id: number | null;
-  status: 'added' | 'already_on_list' | 'failed';
+  status: SubscribeStatus;
   series_id?: number;
   error?: string;
 }
 
-/** Bulk "add to pull list" — non-transactional; one result per item,
- *  each with a 3-way status the caller tallies into a single toast. */
+/** Bulk "add to pull list" — non-transactional; one result per item.
+ *  Already-local volumes return a terminal status synchronously;
+ *  not-yet-local volumes and Metron items return `resolving` and finish
+ *  in the background. */
 export function bulkAddCalendarVolumesToPullList(
   items: SubscribeTarget[]
 ): Promise<{ results: BulkAddResult[] }> {
@@ -91,6 +99,25 @@ export function bulkAddCalendarVolumesToPullList(
     method: 'POST',
     body: JSON.stringify({ items })
   });
+}
+
+/** One background resolution's current state, as returned by the status
+ *  poll. `status` is `resolving` until the resolver lands a terminal
+ *  outcome. */
+export interface SubscribeOutcome {
+  status: SubscribeStatus;
+  series_id?: number;
+  error?: string;
+}
+
+/** Poll the background pull-list resolver. Keys are the same row
+ *  discriminator the page builds (`cv:{id}` / `metron:{id}`). The server
+ *  prunes terminal entries once returned (read-once), so a caller should
+ *  treat the first non-`resolving` reading of a key as final. */
+export function getSubscribeStatus(): Promise<{
+  items: Record<string, SubscribeOutcome>;
+}> {
+  return apiFetch('/releases/calendar/pull/status');
 }
 
 /** One "release of note" — a volume on sale this ship-week whose name
