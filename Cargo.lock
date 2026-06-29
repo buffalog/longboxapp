@@ -1354,10 +1354,7 @@ version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "bcrypt",
- "hex",
  "quick-xml 0.39.4",
- "rand 0.9.4",
- "subtle",
  "thiserror 2.0.18",
 ]
 

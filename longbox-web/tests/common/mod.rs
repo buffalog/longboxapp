@@ -150,6 +150,7 @@ pub async fn build_test_app() -> TestApp {
         // Tests' mock CDN binds loopback; allow it. The dedicated SSRF
         // test drives `is_safe_cover_url` directly with the guard on.
         opds_allow_private_cover_hosts: true,
+        opds_port: 8096,
     };
 
     // The pull + scan schedulers run in every test app; with their

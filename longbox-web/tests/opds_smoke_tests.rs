@@ -14,7 +14,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const USER: &str = "reader";
-const PASS: &str = "s3cret";
+const PASS: &str = "s3cretpass";
 const COVER_BYTES: &[u8] = b"\xFF\xD8\xFFsmoke-cover";
 const FILE_BYTES: &[u8] = b"PK\x03\x04smoke-cbz-payload";
 
@@ -72,19 +72,26 @@ async fn full_catalog_walkthrough() {
         .mount(&cdn)
         .await;
 
-    // 2. Configure OPDS through the real admin API (not direct DB writes).
+    // 2. Configure OPDS through the real admin API (not direct DB writes):
+    //    flip the global toggle, then create a user account.
     let configured = response_json(
         app.request(json_request(
             "PUT",
             "/api/opds/settings",
-            serde_json::json!({ "enabled": true, "username": USER, "password": PASS }).to_string(),
+            serde_json::json!({ "enabled": true }).to_string(),
         ))
         .await,
     )
     .await;
     assert_eq!(configured["enabled"], true);
-    let token = configured["api_token"].as_str().unwrap().to_owned();
-    assert_eq!(token.len(), 64);
+    let created = app
+        .request(json_request(
+            "POST",
+            "/api/opds/users",
+            serde_json::json!({ "username": USER, "password": PASS }).to_string(),
+        ))
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
 
     // 3. Seed a realistic series → issue → present file, with a cover.
     let series_id = series_repo::insert(
@@ -207,20 +214,7 @@ async fn full_catalog_walkthrough() {
     let descriptor = get_ok_text(&app, "/opds/v1/opensearch.xml", "opensearchdescription").await;
     assert!(descriptor.contains("<ShortName>LongBox</ShortName>"));
 
-    // 10. The bearer token issued at configure-time also works.
-    let bearer = app
-        .request(
-            Request::builder()
-                .method("GET")
-                .uri("/opds/v1")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(bearer.status(), StatusCode::OK);
-
-    // 11. Unauthenticated access is refused.
+    // 10. Unauthenticated access is refused.
     let anon = app
         .request(
             Request::builder()

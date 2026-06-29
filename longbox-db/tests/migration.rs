@@ -27,6 +27,7 @@ async fn migration_creates_all_tables() {
             "issues".to_string(),
             "library_roots".to_string(),
             "metron_calendar_cache".to_string(),
+            "opds_users".to_string(),
             "parsing_patterns".to_string(),
             "publisher_filters".to_string(),
             "pull_attempts".to_string(),

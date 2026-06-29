@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE opds_users SET enabled = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "42e1c6a36c6b2aaec43ac58a985ce70ed41e345b06b136568223cfbc75edd0a2"
+}

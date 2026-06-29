@@ -14,14 +14,9 @@ const PASSWORD: &str = "hunter2";
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    s::set(db, s::KEY_OPDS_USERNAME, USERNAME).await.unwrap();
-    s::set(
-        db,
-        s::KEY_OPDS_PASSWORD_HASH,
-        &longbox_opds::hash_password(PASSWORD).unwrap(),
-    )
-    .await
-    .unwrap();
+    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
+        .await
+        .unwrap();
 }
 
 fn now_pdt() -> time::PrimitiveDateTime {

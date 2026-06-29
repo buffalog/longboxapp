@@ -20,14 +20,9 @@ const IMG: &[u8] = b"\xFF\xD8\xFF\xE0fake-jpeg-bytes";
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    s::set(db, s::KEY_OPDS_USERNAME, USERNAME).await.unwrap();
-    s::set(
-        db,
-        s::KEY_OPDS_PASSWORD_HASH,
-        &longbox_opds::hash_password(PASSWORD).unwrap(),
-    )
-    .await
-    .unwrap();
+    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
+        .await
+        .unwrap();
 }
 
 async fn seed_issue(db: &longbox_db::Pool, cover_url: Option<&str>) -> i64 {

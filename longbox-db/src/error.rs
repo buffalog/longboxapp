@@ -73,6 +73,7 @@ fn parse_unique_violation(msg: &str) -> Option<&'static str> {
         "indexer_configs.name" => "indexer_name",
         "webhook_configs.name" => "webhook_name",
         "pull_list.series_id" => "pull_list_series_id",
+        "opds_users.username" => "opds_username",
         _ => return None,
     })
 }

@@ -1,34 +1,62 @@
 import { apiFetch } from './client';
 
-/** OPDS catalog access settings. The password hash never leaves the
- *  server — only `has_password` reflects whether one is stored. The API
- *  token IS returned so it can be copied into a reader app. */
+/** Global OPDS settings. Per-user credentials live in {@link OpdsUser};
+ *  this is just the master toggle plus the info needed to render a copyable
+ *  catalog URL. */
 export interface Opds {
   enabled: boolean;
-  username: string;
-  has_password: boolean;
-  api_token: string;
+  /** Dedicated OPDS listener port (default 8096). */
+  opds_port: number;
+  /** Configured public base URL (`OPDS_BASE_URL`), or empty. When set it's
+   *  the authoritative catalog origin; otherwise the UI composes the URL
+   *  from the browser's host + `opds_port`. */
   base_url: string;
-  /** The catalog root URL to hand to a reader (a copyable link). */
-  catalog_url: string;
 }
 
-/** Save payload. Omit a field to leave it unchanged; a blank `password`
- *  keeps the stored one (set-only). */
-export interface OpdsInput {
+/** One OPDS account. The password hash never leaves the server. */
+export interface OpdsUser {
+  id: number;
+  username: string;
+  enabled: boolean;
+  /** "YYYY-MM-DD HH:MM:SS" UTC. */
+  created_at: string;
+  /** Last successful auth, or null if never used. */
+  last_seen_at: string | null;
+}
+
+export interface OpdsSettingsInput {
   enabled?: boolean;
-  username?: string;
-  password?: string;
+}
+
+export interface CreateOpdsUserInput {
+  username: string;
+  password: string;
 }
 
 export function getOpds(): Promise<Opds> {
   return apiFetch('/opds/settings');
 }
 
-export function saveOpds(input: OpdsInput): Promise<Opds> {
+export function saveOpds(input: OpdsSettingsInput): Promise<Opds> {
   return apiFetch('/opds/settings', { method: 'PUT', body: JSON.stringify(input) });
 }
 
-export function regenerateOpdsToken(): Promise<Opds> {
-  return apiFetch('/opds/settings/regenerate-token', { method: 'POST' });
+export function listOpdsUsers(): Promise<OpdsUser[]> {
+  return apiFetch('/opds/users');
+}
+
+export function createOpdsUser(input: CreateOpdsUserInput): Promise<OpdsUser> {
+  return apiFetch('/opds/users', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function enableOpdsUser(id: number): Promise<{ id: number; enabled: boolean }> {
+  return apiFetch(`/opds/users/${id}/enable`, { method: 'POST' });
+}
+
+export function disableOpdsUser(id: number): Promise<{ id: number; enabled: boolean }> {
+  return apiFetch(`/opds/users/${id}/disable`, { method: 'POST' });
+}
+
+export function deleteOpdsUser(id: number): Promise<{ deleted: number }> {
+  return apiFetch(`/opds/users/${id}`, { method: 'DELETE' });
 }

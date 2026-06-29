@@ -613,7 +613,7 @@
 
   <WebhookSettings webhooks={data.webhooks} />
 
-  <OpdsSettings opds={data.opds} />
+  <OpdsSettings opds={data.opds} users={data.opdsUsers} />
 
   <section class="rounded-lg border border-slate-200 bg-white p-4">
     <h2 class="mb-2 text-base font-semibold">About</h2>
