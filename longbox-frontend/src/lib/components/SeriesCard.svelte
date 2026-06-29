@@ -8,18 +8,41 @@
 
   let { series }: Props = $props();
 
-  // `available` excludes solicited/pre-release issues — owning everything
-  // that has actually shipped is "complete," even if a future issue is
-  // already in the catalog. Without this split the badge stays orange for
-  // every ongoing series.
+  // Issue-status taxonomy, all derived (nothing is stored on the issue):
+  //   Available = owned_count
+  //   Solicited = solicited_count       (cover_date in the future; +N, blue)
+  //   Released  = available = total - solicited   (issues that should exist)
+  //   Missing   = available - owned      (released but not owned; red)
+  // `available` is the badge denominator so owning everything *shipped*
+  // reads as fine even while a future issue sits in the catalog.
+  //
+  // Caveat: "solicited" keys off `cover_date`, not the on-sale
+  // `store_date` (which isn't persisted per issue). Comic cover dates run
+  // ~1–2 months ahead of on-sale, so the solicited/released boundary is
+  // approximate. Fixing it means storing store_date — a CV-cache change,
+  // out of scope here.
   const available = $derived(series.total_count - series.solicited_count);
+  const solicited = $derived(series.solicited_count);
+  // `finished` is the Metron Completed|Cancelled signal. Absent until the
+  // enrichment lands (GH #7) → falsy → the purple branch never fires yet,
+  // but it's wired so the badge needs no change when the flag arrives.
+  const finished = $derived(series.finished ?? false);
 
-  const badgeClass = $derived.by(() => {
-    if (series.total_count === 0) return 'bg-slate-100 text-slate-600';
-    if (available > 0 && series.owned_count >= available)
-      return 'bg-status-owned/10 text-status-owned';
-    if (series.owned_count === 0) return 'bg-status-unmatched/10 text-status-unmatched';
-    return 'bg-status-needs_review/10 text-status-needs_review';
+  // Colour of the X/Y fraction. `null` when there are no released issues
+  // to count (the fraction is suppressed and only +N shows).
+  const fractionClass = $derived.by(() => {
+    if (available <= 0) return null;
+    if (series.owned_count >= available) {
+      // Own everything that's shipped. Purple only when the run is
+      // confirmed over AND nothing is upcoming — the complete-collection
+      // celebration; otherwise neutral (more could still ship).
+      return finished && solicited === 0
+        ? 'bg-status-complete/10 text-status-complete'
+        : 'bg-slate-100 text-slate-600';
+    }
+    // A released issue is genuinely missing — the only "something's wrong"
+    // state. Red regardless of how many (partial or none owned).
+    return 'bg-status-unmatched/10 text-status-unmatched';
   });
 </script>
 
@@ -47,8 +70,24 @@
       <span class="truncate">
         {series.start_year ?? '—'}{series.publisher ? ` · ${series.publisher}` : ''}
       </span>
-      <span class="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium {badgeClass}">
-        {series.owned_count}/{available}{#if series.solicited_count > 0}<span class="text-slate-400"> · +{series.solicited_count}</span>{/if}
+      <span class="flex flex-shrink-0 items-center gap-1">
+        {#if available > 0}
+          <span
+            data-testid="badge-fraction"
+            class="rounded-full px-2 py-0.5 text-xs font-medium {fractionClass}"
+          >{series.owned_count}/{available}</span>
+        {:else if series.total_count === 0}
+          <span
+            data-testid="badge-empty"
+            class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600"
+          >0/0</span>
+        {/if}
+        {#if solicited > 0}
+          <span
+            data-testid="badge-solicited"
+            class="rounded-full bg-status-solicited/10 px-2 py-0.5 text-xs font-medium text-status-solicited"
+          >+{solicited}</span>
+        {/if}
       </span>
     </div>
   </div>

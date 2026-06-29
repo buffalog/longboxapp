@@ -295,6 +295,23 @@ where
 
 /// Series row plus the per-status issue counts the web layer's series list
 /// surface needs. Single JOIN'd query — no N+1.
+///
+/// Issue-status taxonomy (all **derived** — there is no `status` column on
+/// `issues`; an issue's state is computed from its files + `cover_date`):
+///   - **Available** = `owned_count`            (has an owned, present file)
+///   - **Solicited** = `solicited_count`        (no owned file AND
+///                                               `cover_date >= today` — future)
+///   - **Missing**   = `(total - solicited) - owned`  (released but not owned;
+///                                               a derived render-time state)
+/// The series-card badge denominator is `available = total - solicited`.
+/// "Solicited" keys off `cover_date` (the only date stored per issue), not
+/// the on-sale `store_date` — see `SeriesCard.svelte` for the caveat.
+///
+/// There is no "finished/ended" signal here yet: ComicVine carries none,
+/// and the Metron `status` (Completed | Cancelled) that would unlock the
+/// card's purple "complete collection" state is not yet fetched/stored —
+/// see GH #7. The badge wires the purple branch but gates it on a
+/// `finished` flag that stays false until that lands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesWithCounts {
     #[serde(flatten)]
