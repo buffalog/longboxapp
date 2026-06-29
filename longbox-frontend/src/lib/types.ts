@@ -43,6 +43,11 @@ export interface SeriesWithCounts extends Series {
   /// denominator so "owns everything that has shipped" reads as complete
   /// rather than as a deficit.
   solicited_count: number;
+  /// Whether the run is marked finished (Metron `status` = Completed |
+  /// Cancelled). Drives the purple "complete collection" badge. Optional
+  /// and absent until the Metron finished-state enrichment lands (GH #7);
+  /// undefined reads as false, so the purple branch never fires yet.
+  finished?: boolean;
 }
 
 export interface Issue {
