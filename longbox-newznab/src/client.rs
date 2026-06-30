@@ -354,6 +354,7 @@ pub async fn find_release_excluding_filtered(
                     similarity_threshold,
                     exclusion_keywords,
                     min_size_bytes,
+                    issue,
                 );
                 for release in &outcome.kept {
                     guid_to_indexer.insert(release.guid.clone(), indexer.id);

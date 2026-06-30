@@ -18,6 +18,7 @@
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
+use longbox_core::issue::IssueNumber;
 use longbox_core::similarity::similarity;
 use longbox_core::{normalize_title, parse_filename, ParsedFilename, ParsingPattern};
 use regex::Regex;
@@ -378,6 +379,7 @@ pub fn filter_by_series_title(
     threshold: f64,
     exclusion_keywords: &[String],
     min_size_bytes: Option<i64>,
+    requested_issue: &str,
 ) -> FilterOutcome {
     // Pre-grab size floor. Drop releases whose reported size is below
     // the configured Phase B threshold so we never even submit them to
@@ -456,6 +458,15 @@ pub fn filter_by_series_title(
 
         if score < threshold {
             continue; // series-mismatch — diagnostic-worthy
+        }
+
+        // Issue-number gate (exact, zero-pad tolerant). Load-bearing for the
+        // relaxed query rungs (colon-split / alias / title-only) which return
+        // the whole series — without this an off-issue release could be
+        // grabbed. `IssueNumber::matches` treats "5" == "005" == "5" but
+        // distinguishes "5AU"/"Annual 5".
+        if !IssueNumber::new(requested_issue).matches(&IssueNumber::new(parsed.number.clone())) {
+            continue;
         }
 
         // Year gate — silent reject on disagreement, pass on absence.
@@ -682,6 +693,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             Some(10 * 1024 * 1024),
+            "2",
         );
         assert_eq!(outcome.kept.len(), 1);
         assert_eq!(outcome.kept[0].title, "Saga 002 (2012) (digital).cbz");
@@ -711,6 +723,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty(), "kept should be empty");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -736,6 +749,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -758,6 +772,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -778,6 +793,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD, // 0.75
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
         let diag = outcome.mismatch.unwrap();
@@ -803,6 +819,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert_eq!(outcome.kept.len(), 1, "subtitle variant should pass");
     }
@@ -822,6 +839,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -848,6 +866,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
         );
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -869,6 +888,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("all-unparseable → mismatch");
@@ -897,6 +917,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         let diag = outcome.mismatch.expect("mismatch expected");
         assert_eq!(diag.total_results, 2);
@@ -933,6 +954,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -964,6 +986,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty(), "excluded release must be dropped");
         assert!(
@@ -999,6 +1022,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
+            "1",
         );
         assert!(
             outcome.kept.is_empty(),
@@ -1026,6 +1050,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1054,6 +1079,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Trade Paperback".into()],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none(), "exclusion must be silent");
@@ -1072,6 +1098,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Hardcover".into()],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1090,6 +1117,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Omnibus".into()],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1532,16 +1560,14 @@ mod tests {
     #[test]
     fn filter_keeps_bracketed_releases_for_matching_series() {
         let patterns = default_patterns();
-        let pool = vec![
-            release(
-                "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
-                Some(20),
-            ),
-            release(
-                "Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]",
-                Some(15),
-            ),
-        ];
+        // Single-issue pool: NZB bracketed-tag format must parse + pass
+        // the series-similarity and issue-number gates. (The two-release
+        // variant was collapsed here when the issue-number gate was added
+        // in Task 3 — filter_by_series_title is per-issue, not series-wide.)
+        let pool = vec![release(
+            "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
+            Some(20),
+        )];
         let outcome = filter_by_series_title(
             pool,
             &patterns,
@@ -1550,11 +1576,12 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "7",
         );
         assert_eq!(
             outcome.kept.len(),
-            2,
-            "both bracketed releases must survive the filter; got {} (mismatch={:?})",
+            1,
+            "bracketed release must survive the filter; got {} (mismatch={:?})",
             outcome.kept.len(),
             outcome.mismatch
         );
@@ -1626,6 +1653,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -1656,6 +1684,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -1675,6 +1704,7 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1719,5 +1749,26 @@ mod tests {
         let score = score_release_title("Spider.Man.005.2023.digital.X-Empire", "Spider-Man", &patterns)
             .unwrap();
         assert!(score >= 0.9, "hyphen variants should match high, got {score}");
+    }
+
+    #[test]
+    fn issue_number_gate_drops_wrong_issue() {
+        let patterns = default_patterns();
+        let pool = vec![
+            release("Saga 005 (2012) (digital).cbz", Some(10)),
+            release("Saga 012 (2012) (digital).cbz", Some(10)),
+        ];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Saga",
+            None,        // requested_year
+            0.75,        // threshold
+            &[],         // exclusion_keywords
+            None,        // min_size_bytes
+            "5",         // requested_issue (NEW, last arg) — "5" matches "005"
+        );
+        assert_eq!(outcome.kept.len(), 1);
+        assert_eq!(outcome.kept[0].title, "Saga 005 (2012) (digital).cbz");
     }
 }
