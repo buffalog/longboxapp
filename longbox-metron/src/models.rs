@@ -105,6 +105,12 @@ pub(crate) struct MetronSeriesDetailRow {
     pub publisher: Option<MetronPublisher>,
     /// CV's volume-level id (the same shape as our `series.cv_id`).
     pub cv_id: Option<i64>,
+    /// Run status — `Completed | Cancelled | Ongoing | Hiatus` (added to
+    /// the Metron Series model June 2024). Optional/defaulted so older
+    /// records or a schema change can't break deserialization. Projected
+    /// to the `finished` flag via [`super::projection::finished_from_status`].
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// One row from `GET /api/series/?cv_id={id}` — the reverse-mapping

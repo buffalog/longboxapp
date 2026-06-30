@@ -13,9 +13,9 @@ export default {
           needs_review: '#d97706', // amber-600
           unmatched: '#dc2626', // red-600
           ignored: '#6b7280', // gray-500
-          missing: '#9333ea', // purple-600 — an issue that should exist but isn't owned
+          incomplete: '#9333ea', // purple-600 — issue level: you're missing issues from this series
           solicited: '#0284c7', // sky-600 — informational, not a problem state
-          complete: '#9333ea' // purple-600 — a finished run, fully owned (series-card celebration)
+          finished: '#9333ea' // purple-600 — card level: finished run, complete collection
         }
       }
     }

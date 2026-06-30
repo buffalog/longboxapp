@@ -175,7 +175,7 @@
       href="/missing"
       class="rounded-lg border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
     >
-      <div class="text-xs uppercase text-status-missing">Missing</div>
+      <div class="text-xs uppercase text-status-incomplete">Missing</div>
       <div class="text-2xl font-semibold">{stats.missing_issues}</div>
     </a>
     <a
@@ -233,7 +233,7 @@
       >
         <div class="flex items-baseline justify-between gap-3">
           <div class="text-sm">
-            <span class="font-semibold text-status-missing">{stats.missing_issues}</span>
+            <span class="font-semibold text-status-incomplete">{stats.missing_issues}</span>
             issue{stats.missing_issues === 1 ? '' : 's'} missing across
             <span class="font-semibold">{stats.series_with_missing}</span>
             series
