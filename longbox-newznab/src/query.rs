@@ -19,11 +19,15 @@ pub fn normalize_query(s: &str) -> String {
 }
 
 /// Title variants for the relaxation ladder, most-specific first:
-/// 1. the full title (as given), 2. the substring AFTER the first colon,
-/// 3. the substring BEFORE the first colon. Colon-less titles yield just
-/// `[full]`. Variants are returned RAW (not query-normalized) so callers can
-/// reuse them as match-side aliases if desired; `build_search_term` /
-/// `build_url` normalize at send time. Empty/whitespace splits are dropped.
+///
+/// 1. the full title (as given)
+/// 2. the substring AFTER the first colon
+/// 3. the substring BEFORE the first colon
+///
+/// Colon-less titles yield just `[full]`. Variants are returned RAW (not
+/// query-normalized) so callers can reuse them as match-side aliases if
+/// desired; `build_search_term` / `build_url` normalize at send time.
+/// Empty/whitespace splits are dropped.
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut out = vec![title.to_string()];
     if let Some(idx) = title.find(':') {
@@ -37,6 +41,32 @@ pub fn title_variants(title: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The ordered list of `q` search terms to try for an issue, most-specific
+/// first, stopping at the first that returns hits (the caller does the
+/// stopping). Order: full title (padded, unpadded) → each colon-split variant
+/// (padded, unpadded) → each alias (padded, unpadded) → title-only (no issue).
+/// De-duplicated, preserving first occurrence. The title-only rung relies on
+/// the downstream exact issue-number gate to avoid wrong-issue grabs.
+pub fn search_ladder(series: &str, issue: &str, aliases: &[String]) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut push = |t: String| {
+        if !t.trim().is_empty() && !terms.contains(&t) {
+            terms.push(t);
+        }
+    };
+    for variant in title_variants(series) {
+        push(build_search_term(&variant, issue, true));
+        push(build_search_term(&variant, issue, false));
+    }
+    for alias in aliases {
+        push(build_search_term(alias, issue, true));
+        push(build_search_term(alias, issue, false));
+    }
+    // title-only recall rung (no issue token); gated downstream by issue match.
+    push(normalize_query(series));
+    terms
 }
 
 /// One-year slack added to an issue's age when computing the dynamic
@@ -247,6 +277,21 @@ mod tests {
     #[test]
     fn title_variants_no_colon_is_single() {
         assert_eq!(title_variants("Saga"), vec!["Saga"]);
+    }
+
+    #[test]
+    fn search_ladder_orders_specific_to_general() {
+        let ladder = search_ladder(
+            "FBP: Federal Bureau of Physics",
+            "1",
+            &["Collider".to_string()],
+        );
+        // full padded first, title-only last.
+        assert_eq!(ladder.first().unwrap(), "fbp federal bureau of physics 001");
+        assert_eq!(ladder.last().unwrap(), "fbp federal bureau of physics");
+        // colon-split + alias rungs present.
+        assert!(ladder.contains(&"federal bureau of physics 001".to_string()));
+        assert!(ladder.contains(&"collider 001".to_string()));
     }
 
     #[test]

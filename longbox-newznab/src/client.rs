@@ -7,7 +7,7 @@ use longbox_core::ParsingPattern;
 
 use crate::error::{IndexerError, NewznabError};
 use crate::parse::parse_response;
-use crate::query::{build_search_term, build_url};
+use crate::query::{build_url, search_ladder};
 use crate::select::{filter_by_series_title, select_best, MismatchDiagnostic};
 use crate::types::{IndexerConfig, IndexerId, Release};
 
@@ -118,44 +118,44 @@ async fn search_with(
     parse_response(&body)
 }
 
-/// Search one indexer with the two-variation strategy: zero-padded
-/// issue first, then unpadded on zero hits. A variation-1 failure is
-/// the indexer's failure (propagated). A variation-2 failure *after* a
-/// clean (empty) variation-1 is best-effort — logged, swallowed,
-/// empty returned.
+/// Search one indexer by walking the relaxation ladder, stopping at the first
+/// rung that returns a non-empty result. First-rung failure propagates as the
+/// indexer's failure; later-rung failures are best-effort (logged, continue).
 async fn search_one_indexer(
     client: &reqwest::Client,
     indexer: &IndexerConfig,
     series: &str,
     issue: &str,
+    aliases: &[String],
     maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
-    // No `year` parameter: it does not belong in the q-term (see
-    // `build_search_term` for the full rationale). It is still used
-    // downstream for similarity-filter ranking — that lives in the
-    // callers, which keep year in their own scope.
-    let padded = build_search_term(series, issue, true);
-    let first = search_with(client, indexer, &padded, maxage_override).await?;
-    if !first.is_empty() {
-        return Ok(first);
-    }
-
-    let unpadded = build_search_term(series, issue, false);
-    if unpadded == padded {
-        // Non-numeric issue — both variations identical, no retry.
-        return Ok(first);
-    }
-    match search_with(client, indexer, &unpadded, maxage_override).await {
-        Ok(second) => Ok(second),
-        Err(e) => {
-            tracing::debug!(
-                target: "longbox_newznab",
-                indexer = %indexer.name,
-                error = %e,
-                "variation-2 retry failed; variation-1 already returned cleanly"
-            );
-            Ok(first)
+    let ladder = search_ladder(series, issue, aliases);
+    let mut last_err: Option<IndexerError> = None;
+    for (i, term) in ladder.iter().enumerate() {
+        match search_with(client, indexer, term, maxage_override).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => {}
+            Err(e) => {
+                // First rung's failure is the indexer's failure — propagate so
+                // the caller can attribute it. Later rungs are best-effort
+                // (a clean earlier empty already proved reachability).
+                if i == 0 {
+                    return Err(e);
+                }
+                tracing::debug!(
+                    target: "longbox_newznab",
+                    indexer = %indexer.name,
+                    term = %term,
+                    error = %e,
+                    "ladder rung failed; continuing"
+                );
+                last_err = Some(e);
+            }
         }
+    }
+    match last_err {
+        Some(e) if ladder.len() == 1 => Err(e),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -223,7 +223,7 @@ pub async fn find_release_excluding(
     for indexer in ordered {
         let effective_maxage =
             crate::query::effective_maxage_days(i64::from(indexer.maxage_days), cover_date);
-        match search_one_indexer(&client, indexer, series, issue, Some(effective_maxage)).await {
+        match search_one_indexer(&client, indexer, series, issue, &[], Some(effective_maxage)).await {
             Ok(results) => {
                 let kept: Vec<Release> = results
                     .into_iter()
@@ -328,7 +328,7 @@ pub async fn find_release_excluding_filtered(
                 .map(|idx| {
                     let effective_maxage =
                         crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
-                    search_one_indexer(&client, idx, series, issue, Some(effective_maxage))
+                    search_one_indexer(&client, idx, series, issue, aliases, Some(effective_maxage))
                 }),
         )
         .await;
