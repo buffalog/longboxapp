@@ -371,6 +371,11 @@ fn match_normalize(input: &str) -> String {
 /// and over-filtering wrong on `None` would over-reject. See the Bug 3
 /// deferred derivative for the eventual single-candidate fallback
 /// tightening.
+#[allow(clippy::too_many_arguments)] // every arg is a real per-grab filter
+                                     // input threaded from the engine; bundling
+                                     // into a struct is indirection without a
+                                     // callsite that benefits (mirrors the
+                                     // same choice on find_release_excluding_filtered).
 pub fn filter_by_series_title(
     releases: Vec<Release>,
     patterns: &[ParsingPattern],
@@ -432,6 +437,9 @@ pub fn filter_by_series_title(
     };
     let total_results = releases.len();
 
+    // Loop-invariant: parse the requested issue once, reuse per release.
+    let requested_issue_number = IssueNumber::new(requested_issue);
+
     let mut kept: Vec<Release> = Vec::new();
     let mut parseable_count = 0usize;
     let mut best_similarity: Option<f64> = None;
@@ -465,7 +473,7 @@ pub fn filter_by_series_title(
         // the whole series — without this an off-issue release could be
         // grabbed. `IssueNumber::matches` treats "5" == "005" == "5" but
         // distinguishes "5AU"/"Annual 5".
-        if !IssueNumber::new(requested_issue).matches(&IssueNumber::new(parsed.number.clone())) {
+        if !requested_issue_number.matches(&IssueNumber::new(parsed.number.clone())) {
             continue;
         }
 
