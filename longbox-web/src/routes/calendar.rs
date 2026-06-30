@@ -270,19 +270,23 @@ async fn add_to_pull_list(
 }
 
 /// Resolve a request to a cv_volume_id and subscribe it, firing the
-/// best-effort `metron_id` backfill on the Metron path. The shared core
-/// of the single add and of each background resolution in the bulk path.
-/// May perform a ComicVine fetch when the volume isn't local yet — so
-/// callers that must stay fast (the bulk handler) run it off the request
-/// thread, behind [`AppState::cv_resolve_gate`].
+/// best-effort `metron_id` + `finished` backfill on the Metron path. The
+/// shared core of the single add and of each background resolution in the
+/// bulk path. May perform a ComicVine fetch when the volume isn't local
+/// yet — so callers that must stay fast (the bulk handler) run it off the
+/// request thread, behind [`AppState::cv_resolve_gate`].
 async fn resolve_and_subscribe(
     state: &AppState,
     body: &AddToPullBody,
 ) -> Result<(i64, &'static str), ApiError> {
-    let (cv_volume_id, metron_origin) = resolve_subscription_target(state, body).await?;
+    let (cv_volume_id, metron_origin, finished) = resolve_subscription_target(state, body).await?;
     let (series_id, status) = try_add_one(state, cv_volume_id).await?;
     if let Some(metron_series_id) = metron_origin {
-        backfill_metron_id(state, series_id, metron_series_id).await;
+        // We fetched the Metron series detail to resolve this — persist its
+        // `finished` flag (GH #7) alongside the metron_id cross-reference,
+        // for free (no extra API call). `finished` is None on a tier-1
+        // cache hit (no detail was fetched) → metron_id only.
+        backfill_metron_fields(state, series_id, metron_series_id, finished).await;
     }
     Ok((series_id, status))
 }
@@ -476,19 +480,21 @@ async fn subscribe_status(State(state): State<AppState>) -> Json<serde_json::Val
 
 /// Item A v2 Option C: resolve a request's identity to a CV volume id,
 /// taking the catalog-first cache path before any Metron API call.
-/// Returns `(cv_volume_id, metron_origin)` — `metron_origin` is the
-/// `metron_series_id` from the request when that path was used, so the
-/// caller can fire the lazy backfill after a successful subscription.
+/// Returns `(cv_volume_id, metron_origin, finished)` — `metron_origin` is
+/// the `metron_series_id` when the Metron path was used (so the caller can
+/// fire the lazy backfill after a successful subscription), and `finished`
+/// is the run's finished-state (GH #7), `Some` only when a Metron detail
+/// fetch actually happened.
 async fn resolve_subscription_target(
     state: &AppState,
     body: &AddToPullBody,
-) -> Result<(i64, Option<i64>), ApiError> {
+) -> Result<(i64, Option<i64>, Option<bool>), ApiError> {
     match (body.cv_volume_id, body.metron_series_id) {
         // Both present: cv_volume_id wins (faster path, no Metron round trip).
-        (Some(cv), _) => Ok((cv, None)),
+        (Some(cv), _) => Ok((cv, None, None)),
         (None, Some(metron_series_id)) => {
-            let cv = resolve_cv_id_via_metron(state, metron_series_id).await?;
-            Ok((cv, Some(metron_series_id)))
+            let (cv, finished) = resolve_cv_id_via_metron(state, metron_series_id).await?;
+            Ok((cv, Some(metron_series_id), finished))
         }
         (None, None) => Err(ApiError::BadRequest {
             message: "exactly one of `cv_volume_id` or `metron_series_id` is required".into(),
@@ -511,15 +517,19 @@ async fn resolve_subscription_target(
 ///     return 422 with the user-facing fallback message — coverage
 ///     is good but not 100%, and the user-actionable message handles
 ///     the miss case gracefully.
+///
+/// Returns `(cv_id, finished)` — `finished` is `Some` only on tier 2
+/// (we read the Metron detail's `status`), `None` on a tier-1 cache hit
+/// where no detail was fetched.
 async fn resolve_cv_id_via_metron(
     state: &AppState,
     metron_series_id: i64,
-) -> Result<i64, ApiError> {
+) -> Result<(i64, Option<bool>), ApiError> {
     // ---- Tier 1: catalog-first cache ----
     let metron_id_str = metron_series_id.to_string();
     if let Some(series) = series_repo::find_by_metron_id(&state.db, &metron_id_str).await? {
         if let Some(cv_id) = series.cv_id {
-            return Ok(cv_id);
+            return Ok((cv_id, None));
         }
     }
 
@@ -531,17 +541,25 @@ async fn resolve_cv_id_via_metron(
         });
     };
     let detail = client.fetch_series_detail(metron_series_id).await?;
-    detail.cv_id.ok_or_else(|| ApiError::Unprocessable {
+    let finished = detail.finished;
+    let cv_id = detail.cv_id.ok_or_else(|| ApiError::Unprocessable {
         code: "metron_series_not_in_cv",
         message: "This series isn't yet indexed by ComicVine — try again after the next release cycle.".into(),
-    })
+    })?;
+    Ok((cv_id, Some(finished)))
 }
 
-/// Lazy backfill of `series.metron_id` after a successful Metron-path
-/// subscription. **Non-critical** — the subscription has already
-/// committed by the time this runs. Failures (concurrent write, series
-/// deleted, DB hiccup) log at warn and never propagate to the response.
-async fn backfill_metron_id(state: &AppState, series_id: i64, metron_series_id: i64) {
+/// Lazy backfill of `series.metron_id` (+ `finished` when known) after a
+/// successful Metron-path subscription. **Non-critical** — the
+/// subscription has already committed by the time this runs. Failures
+/// (concurrent write, series deleted, DB hiccup) log at warn and never
+/// propagate to the response.
+async fn backfill_metron_fields(
+    state: &AppState,
+    series_id: i64,
+    metron_series_id: i64,
+    finished: Option<bool>,
+) {
     let metron_id_str = metron_series_id.to_string();
     match series_repo::set_metron_id(&state.db, series_id, &metron_id_str).await {
         Ok(0) => {
@@ -564,6 +582,20 @@ async fn backfill_metron_id(state: &AppState, series_id: i64, metron_series_id: 
                 metron_series_id,
                 error = %e,
                 "metron_id backfill: write failed (non-critical)"
+            );
+        }
+    }
+
+    // Persist `finished` only when a Metron detail was actually fetched
+    // (tier-2) AND it says the run is over — never flip a series back to
+    // not-finished from a cache-hit None. Best-effort, same as above.
+    if finished == Some(true) {
+        if let Err(e) = series_repo::set_finished(&state.db, series_id, true).await {
+            tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                error = %e,
+                "finished backfill: write failed (non-critical)"
             );
         }
     }

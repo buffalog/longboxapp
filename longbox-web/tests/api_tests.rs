@@ -6489,6 +6489,139 @@ async fn subscribe_via_metron_series_id_resolves_cv_id_and_writes_back() {
     drop(metron_server);
 }
 
+/// GH #7 — subscribing via Metron persists the run's finished-state from
+/// the detail's `status` field, for free (no extra call). `Completed`
+/// (and `Cancelled`) → `series.finished = true`, surfaced on the
+/// SeriesWithCounts list that drives the purple complete-collection badge.
+#[tokio::test]
+async fn subscribe_via_metron_persists_finished_when_status_completed() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    let existing = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(8101),
+            metron_id: None,
+            title: "Finished Run".into(),
+            sort_title: "finished run".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let detail = serde_json::json!({
+        "id": 7001, "name": "Finished Run", "volume": 1,
+        "year_began": 2020, "year_end": 2022,
+        "publisher": {"id": 1, "name": "Image"},
+        "cv_id": 8101, "issue_count": 12, "status": "Completed"
+    })
+    .to_string();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/series/7001/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(detail))
+        .mount(&metron_server)
+        .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull",
+            r#"{"metron_series_id":7001}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let list = response_json(app.request(empty_request("GET", "/api/series")).await).await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"].as_i64() == Some(existing.id))
+        .unwrap();
+    assert_eq!(row["finished"], true, "Completed status → finished=true");
+}
+
+/// GH #7 — the on-demand backfill: `POST /api/series/enrich-finished`
+/// sweeps metron-linked, not-yet-finished series, flips Completed |
+/// Cancelled to finished, leaves Ongoing alone, and reports series with
+/// no metron_id as `skipped`.
+#[tokio::test]
+async fn enrich_finished_flips_completed_leaves_ongoing_and_counts_skipped() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    let db = app.state.db.clone();
+    let seed = |cv: i64, metron: Option<&'static str>, title: &'static str| NewSeries {
+        cv_id: Some(cv),
+        metron_id: metron.map(|m| m.to_string()),
+        title: title.into(),
+        sort_title: title.to_lowercase(),
+        start_year: None,
+        publisher: None,
+        description: None,
+        cover_url: None,
+    };
+    // Completed → finished; Ongoing → stays false; no metron_id → skipped.
+    let a = series_repo::insert(&db, seed(1, Some("111"), "Alpha")).await.unwrap();
+    let b = series_repo::insert(&db, seed(2, Some("222"), "Bravo")).await.unwrap();
+    let _c = series_repo::insert(&db, seed(3, None, "Charlie")).await.unwrap();
+
+    let detail = |id: i64, status: &str| {
+        serde_json::json!({
+            "id": id, "name": "X", "volume": 1, "year_began": 2000,
+            "year_end": null, "cv_id": id, "issue_count": 1, "status": status
+        })
+        .to_string()
+    };
+    for (mid, status) in [(111_i64, "Completed"), (222, "Ongoing")] {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!("/series/{mid}/")))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(detail(mid, status)))
+            .mount(&metron_server)
+            .await;
+    }
+
+    let resp = app
+        .request(empty_request("POST", "/api/series/enrich-finished"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["checked"], 2);
+    assert_eq!(body["updated"], 1);
+    assert_eq!(body["skipped"], 1);
+
+    let list = response_json(app.request(empty_request("GET", "/api/series")).await).await;
+    let finished = |id: i64| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"].as_i64() == Some(id))
+            .unwrap()["finished"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(finished(a.id), "Completed series flipped to finished");
+    assert!(!finished(b.id), "Ongoing series stays not-finished");
+}
+
+/// GH #7 — enrichment is Metron-optional: with no client configured the
+/// endpoint returns a clean 503, never panics.
+#[tokio::test]
+async fn enrich_finished_returns_503_when_metron_not_configured() {
+    let app = build_test_app().await; // metron: None by default
+    let resp = app
+        .request(empty_request("POST", "/api/series/enrich-finished"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 /// When Metron returns the series detail but cv_id is None (the series
 /// isn't yet indexed by CV), surface a clean 422 with the
 /// user-actionable fallback message.

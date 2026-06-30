@@ -238,6 +238,60 @@ where
     Ok(result.rows_affected())
 }
 
+/// Set `series.finished` (Metron Completed | Cancelled → true). Returns
+/// rows-affected; 0 means the series row no longer exists. Idempotent —
+/// safe to re-run with the same value.
+pub async fn set_finished<'e, E>(executor: E, series_id: i64, finished: bool) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET finished = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        finished,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// The finished-state enrichment work-list (GH #7): series that have a
+/// `metron_id` but aren't yet marked finished. Returns `(series_id,
+/// metron_id)`. Re-running the enrichment is cheap because already-
+/// finished series drop out of this set.
+pub async fn list_metron_linked_unfinished<'e, E>(executor: E) -> Result<Vec<(i64, String)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", metron_id AS "metron_id!: String"
+           FROM series
+           WHERE metron_id IS NOT NULL AND finished = 0
+           ORDER BY id"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.metron_id)).collect())
+}
+
+/// Count of catalog series with no `metron_id` — these can't be enriched
+/// for finished-state (the enrichment endpoint reports it as `skipped`,
+/// the coverage gap the spec accepts: CV-only series stay non-purple
+/// until their `metron_id` is backfilled).
+pub async fn count_without_metron_id<'e, E>(executor: E) -> Result<i64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM series WHERE metron_id IS NULL"#
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(row.n)
+}
+
 /// Persist the descriptive volume detail (`publisher`, `description`,
 /// `cover_url`) from a fetched `CvVolumeDetail` onto an existing
 /// series row. Separate from [`set_cv_id`] on purpose: the latter
@@ -327,6 +381,11 @@ pub struct SeriesWithCounts {
     /// the UI treat "owns everything that has shipped" as a green complete
     /// state rather than an orange deficit.
     pub solicited_count: i64,
+    /// Whether the run is marked finished (Metron `status` = Completed |
+    /// Cancelled). Drives the purple complete-collection badge. Always
+    /// false for CV-only series and until the finished-state enrichment
+    /// runs — populated only via the Metron detail path (GH #7).
+    pub finished: bool,
 }
 
 /// Like [`find_all`] but augments each row with the per-status issue
@@ -344,6 +403,7 @@ where
              s.publisher, s.description, s.cover_url,
              s.created_at AS "created_at: time::PrimitiveDateTime",
              s.updated_at AS "updated_at: time::PrimitiveDateTime",
+             s.finished AS "finished!: bool",
              COUNT(DISTINCT i.id) AS "total_count!: i64",
              COUNT(DISTINCT CASE
                WHEN f.status = 'owned' AND f.is_present = 1
@@ -407,6 +467,7 @@ where
             unmatched_count: r.unmatched_count,
             missing_count: r.missing_count,
             solicited_count: r.solicited_count,
+            finished: r.finished,
         })
         .collect())
 }
@@ -429,6 +490,7 @@ where
              s.publisher, s.description, s.cover_url,
              s.created_at AS "created_at: time::PrimitiveDateTime",
              s.updated_at AS "updated_at: time::PrimitiveDateTime",
+             s.finished AS "finished!: bool",
              COUNT(DISTINCT i.id) AS "total_count!: i64",
              COUNT(DISTINCT CASE
                WHEN f.status = 'owned' AND f.is_present = 1
@@ -494,6 +556,7 @@ where
             unmatched_count: r.unmatched_count,
             missing_count: r.missing_count,
             solicited_count: r.solicited_count,
+            finished: r.finished,
         })
         .collect())
 }

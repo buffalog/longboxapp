@@ -8,6 +8,7 @@ use longbox_db::{
     downloader_config_repo, indexer_config_repo, issue_repo, library_root_repo, series_repo,
     settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
 };
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -17,6 +18,9 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/series", post(add).get(list))
+        // Static segment — registered alongside `/series/:id`; axum's
+        // matcher prefers the literal over the param, so no shadowing.
+        .route("/series/enrich-finished", post(enrich_finished))
         .route("/series/:id", get(detail).delete(remove))
         .route("/series/:id/refresh", post(refresh))
         .route("/series/:id/cv-id", patch(set_cv_id))
@@ -28,6 +32,86 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct AddSeriesBody {
     cv_id: i64,
+}
+
+/// Summary of a finished-state enrichment run.
+/// - `checked`: series fetched from Metron (had a `metron_id`, weren't
+///   finished yet).
+/// - `updated`: of those, how many Metron reported Completed | Cancelled
+///   and were flipped to `finished = true`.
+/// - `skipped`: catalog series with NO `metron_id` — can't be enriched
+///   here. The accepted coverage gap (GH #7): CV-only series stay
+///   non-finished until their metron_id is backfilled.
+#[derive(Debug, Serialize)]
+struct EnrichFinishedResponse {
+    checked: usize,
+    updated: usize,
+    skipped: i64,
+}
+
+/// `POST /api/series/enrich-finished` — one-time, re-runnable backfill of
+/// `series.finished` from Metron's series `status`. Sweeps catalog series
+/// that have a `metron_id` but aren't finished yet, fetches each one's
+/// Metron series detail, and flips `finished` for Completed | Cancelled.
+///
+/// Every Metron call goes through the shared `MetronClient` rate limiter
+/// (never bypassed); concurrency is capped at 2 because Metron's limits
+/// are stricter than CV's. Per-series failures (fetch error, bad
+/// metron_id, write hiccup) are logged and skipped — they never abort the
+/// sweep. Metron-optional: returns `503 metron_not_configured` when no
+/// client is configured. Idempotent: finished series leave the work-list.
+async fn enrich_finished(
+    State(state): State<AppState>,
+) -> Result<Json<EnrichFinishedResponse>, ApiError> {
+    let Some(client) = state.metron.clone() else {
+        return Err(ApiError::ServiceUnavailable {
+            code: "metron_not_configured",
+            message: "Metron integration is not configured.".into(),
+        });
+    };
+
+    let worklist = series_repo::list_metron_linked_unfinished(&state.db).await?;
+    let skipped = series_repo::count_without_metron_id(&state.db).await?;
+    let checked = worklist.len();
+
+    let updated: usize = stream::iter(worklist)
+        .map(|(series_id, metron_id)| {
+            let db = state.db.clone();
+            let client = client.clone();
+            async move {
+                let Ok(mid) = metron_id.parse::<i64>() else {
+                    warn!(target: "longbox_web", series_id, metron_id, "enrich-finished: non-numeric metron_id, skipped");
+                    return 0usize;
+                };
+                match client.fetch_series_detail(mid).await {
+                    // Completed | Cancelled → finished.
+                    Ok(detail) if detail.finished => {
+                        match series_repo::set_finished(&db, series_id, true).await {
+                            Ok(_) => 1,
+                            Err(e) => {
+                                warn!(target: "longbox_web", series_id, error = %e, "enrich-finished: set_finished failed");
+                                0
+                            }
+                        }
+                    }
+                    // Ongoing | Hiatus → leave finished = false.
+                    Ok(_) => 0,
+                    Err(e) => {
+                        warn!(target: "longbox_web", series_id, mid, error = %e, "enrich-finished: metron fetch failed");
+                        0
+                    }
+                }
+            }
+        })
+        .buffer_unordered(2)
+        .fold(0usize, |acc, n| async move { acc + n })
+        .await;
+
+    Ok(Json(EnrichFinishedResponse {
+        checked,
+        updated,
+        skipped,
+    }))
 }
 
 // SeriesListItem is now sourced directly from `longbox_db::SeriesWithCounts`,
