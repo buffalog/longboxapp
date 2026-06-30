@@ -63,7 +63,7 @@
       case 'solicited':
         return { Icon: Clock, color: 'text-status-solicited', label: 'Solicited' };
       case 'missing':
-        return { Icon: Circle, color: 'text-status-missing', label: 'Missing' };
+        return { Icon: Circle, color: 'text-status-incomplete', label: 'Missing' };
     }
   });
 

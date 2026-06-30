@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET finished = ?, updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "158141e1d18feaa72a4bec5fa7dcfb5f3f2ddfbefb861d3389125bed39520f81"
+}

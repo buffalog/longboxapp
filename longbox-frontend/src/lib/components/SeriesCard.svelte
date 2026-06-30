@@ -23,10 +23,10 @@
   // out of scope here.
   const available = $derived(series.total_count - series.solicited_count);
   const solicited = $derived(series.solicited_count);
-  // `finished` is the Metron Completed|Cancelled signal. Absent until the
-  // enrichment lands (GH #7) → falsy → the purple branch never fires yet,
-  // but it's wired so the badge needs no change when the flag arrives.
-  const finished = $derived(series.finished ?? false);
+  // `finished` is the Metron Completed|Cancelled signal (GH #7). Always
+  // present now (column NOT NULL DEFAULT false); false until enrichment
+  // populates it, so the purple branch only fires on an affirmative flag.
+  const finished = $derived(series.finished);
 
   // Colour of the X/Y fraction. `null` when there are no released issues
   // to count (the fraction is suppressed and only +N shows).
@@ -37,7 +37,7 @@
       // confirmed over AND nothing is upcoming — the complete-collection
       // celebration; otherwise neutral (more could still ship).
       return finished && solicited === 0
-        ? 'bg-status-complete/10 text-status-complete'
+        ? 'bg-status-finished/10 text-status-finished'
         : 'bg-slate-100 text-slate-600';
     }
     // A released issue is genuinely missing — the only "something's wrong"

@@ -58,6 +58,9 @@ pub struct MetronSeriesDetail {
     pub publisher: Option<String>,
     /// CV's volume-level id (matches our `series.cv_id` column).
     pub cv_id: Option<i64>,
+    /// Whether the run is over (Metron `status` = Completed | Cancelled).
+    /// Drives `series.finished` / the purple complete-collection badge.
+    pub finished: bool,
 }
 
 /// One row from the `?cv_id=` lookup used to map LongBox's CV-keyed
@@ -119,6 +122,7 @@ pub(crate) fn project_calendar_item_from_detail(raw: MetronIssueDetailRow) -> Me
 }
 
 pub(crate) fn project_series_detail(raw: MetronSeriesDetailRow) -> MetronSeriesDetail {
+    let finished = finished_from_status(raw.status.as_deref());
     MetronSeriesDetail {
         metron_series_id: raw.id,
         name: raw.name,
@@ -127,6 +131,7 @@ pub(crate) fn project_series_detail(raw: MetronSeriesDetailRow) -> MetronSeriesD
         year_end: raw.year_end,
         publisher: raw.publisher.map(|p| p.name),
         cv_id: raw.cv_id,
+        finished,
     }
 }
 
@@ -138,5 +143,29 @@ pub(crate) fn project_series_ref(raw: MetronSeriesListRow) -> MetronSeriesRef {
         year_end: raw.year_end,
         volume: raw.volume,
         issue_count: raw.issue_count,
+    }
+}
+
+/// Map Metron's series `status` string to our `finished` flag. Metron's
+/// vocabulary (verified live) is `Completed | Cancelled | Ongoing |
+/// Hiatus`; the first two mean "nothing more is coming" → finished. Any
+/// unknown or absent value is treated as not-finished (conservative — we
+/// only ever flip the badge to "complete" on an affirmative signal).
+pub(crate) fn finished_from_status(status: Option<&str>) -> bool {
+    matches!(status, Some("Completed") | Some("Cancelled"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_only_for_completed_or_cancelled() {
+        assert!(finished_from_status(Some("Completed")));
+        assert!(finished_from_status(Some("Cancelled")));
+        assert!(!finished_from_status(Some("Ongoing")));
+        assert!(!finished_from_status(Some("Hiatus")));
+        assert!(!finished_from_status(None));
+        assert!(!finished_from_status(Some("Complete"))); // wrong tense; Metron uses "Completed"
     }
 }

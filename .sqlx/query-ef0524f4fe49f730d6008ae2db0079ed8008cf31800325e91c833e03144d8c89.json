@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", metron_id AS \"metron_id!: String\"\n           FROM series\n           WHERE metron_id IS NOT NULL AND finished = 0\n           ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "metron_id!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "ef0524f4fe49f730d6008ae2db0079ed8008cf31800325e91c833e03144d8c89"
+}

@@ -27,6 +27,7 @@ function series(over: Partial<SeriesWithCounts> = {}): SeriesWithCounts {
     unmatched_count: 0,
     missing_count: 0,
     solicited_count: 0,
+    finished: false,
     ...over
   };
 }
@@ -99,7 +100,7 @@ describe('SeriesCard badge', () => {
     const f = fraction(container)!;
     expect(f.textContent).toMatch(/10\/10/);
     expect(f.className).toContain('text-slate-600');
-    expect(f.className).not.toContain('status-complete');
+    expect(f.className).not.toContain('status-finished');
     expect(solicited(container)!.textContent).toMatch(/\+1/);
   });
 
@@ -117,7 +118,7 @@ describe('SeriesCard badge', () => {
     });
     const f = fraction(container)!;
     expect(f.textContent).toMatch(/12\/12/);
-    expect(f.className).toContain('status-complete');
+    expect(f.className).toContain('status-finished');
     expect(solicited(container)).toBeNull();
   });
 
@@ -146,7 +147,7 @@ describe('SeriesCard badge', () => {
     });
     const f = fraction(container)!;
     expect(f.textContent).toMatch(/5\/5/);
-    expect(f.className).not.toContain('status-complete');
+    expect(f.className).not.toContain('status-finished');
     expect(f.className).toContain('text-slate-600');
   });
 
