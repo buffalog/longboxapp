@@ -1560,14 +1560,19 @@ mod tests {
     #[test]
     fn filter_keeps_bracketed_releases_for_matching_series() {
         let patterns = default_patterns();
-        // Single-issue pool: NZB bracketed-tag format must parse + pass
-        // the series-similarity and issue-number gates. (The two-release
-        // variant was collapsed here when the issue-number gate was added
-        // in Task 3 — filter_by_series_title is per-issue, not series-wide.)
-        let pool = vec![release(
-            "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
-            Some(20),
-        )];
+        // Both bracketed NZB formats (space-separated and dot-separated)
+        // for the SAME issue must survive the filter. Both are issue 007
+        // so the per-issue gate (Task 3) passes each.
+        let pool = vec![
+            release(
+                "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
+                Some(20),
+            ),
+            release(
+                "Absolute.Green.Lantern.007 [2026] [Webrip] [The Last Kryptonian-DCP]",
+                Some(15),
+            ),
+        ];
         let outcome = filter_by_series_title(
             pool,
             &patterns,
@@ -1580,8 +1585,8 @@ mod tests {
         );
         assert_eq!(
             outcome.kept.len(),
-            1,
-            "bracketed release must survive the filter; got {} (mismatch={:?})",
+            2,
+            "both bracketed releases must survive the filter; got {} (mismatch={:?})",
             outcome.kept.len(),
             outcome.mismatch
         );
