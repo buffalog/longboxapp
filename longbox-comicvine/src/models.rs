@@ -75,6 +75,8 @@ pub(crate) struct CvVolumeFull {
     #[serde(default)]
     pub image: Option<CvImage>,
     pub site_detail_url: String,
+    #[serde(default)]
+    pub aliases: Option<String>,
 }
 
 /// Full issue detail from `/issues/` results — both the
