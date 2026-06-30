@@ -15,10 +15,9 @@
 /// Multi-word publishers are listed token-by-token (e.g. "dark", "horse").
 /// Keep entries lowercase — matching happens in normalized (lowercased) space.
 const PUBLISHER_TOKENS: &[&str] = &[
-    "marvel", "dc", "image", "vertigo", "darkhorse", "dark", "horse",
-    "boom", "idw", "dynamite", "valiant", "titan", "oni", "madcave", "mad",
-    "cave", "vault", "aftershock", "ablaze", "ec", "archie", "dstlry",
-    "skybound", "wildstorm", "milestone", "blackmask",
+    "marvel", "dc", "image", "vertigo", "darkhorse", "madcave", "boom",
+    "idw", "dynamite", "aftershock", "ablaze", "ec", "dstlry", "skybound",
+    "wildstorm", "milestone", "blackmask",
 ];
 
 /// Remove leading/trailing publisher tokens from a normalized,
@@ -27,6 +26,15 @@ const PUBLISHER_TOKENS: &[&str] = &[
 /// scene names put the imprint at the front, occasionally the back.
 /// Never strips the last remaining token (so a title that IS just a
 /// publisher word can't normalize to empty).
+///
+/// SAFETY BOUND: edge-stripping a token that is also a legitimate title word
+/// is self-cancelling for the primary match (it's stripped from BOTH the
+/// requested title and the release title), but it CAN collide two distinct
+/// series whose stripped forms coincide. That residual false-positive is
+/// bounded by the downstream exact issue-number gate and year gate in
+/// `filter_by_series_title`. Do not reuse this helper in a matching context
+/// that lacks those gates, and keep the token list to unambiguous
+/// publisher/imprint names (no bare common-word halves of multi-word imprints).
 pub fn strip_publisher_tokens(normalized: &str) -> String {
     let mut tokens: Vec<&str> = normalized.split_whitespace().collect();
     // strip from front
