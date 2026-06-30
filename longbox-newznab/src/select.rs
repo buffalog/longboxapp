@@ -1695,6 +1695,23 @@ mod tests {
     }
 
     #[test]
+    fn short_publisher_prefixed_title_requires_match_normalize() {
+        // Guards match_normalize: "Image-Saga" vs "Saga" scores 0 Jaccard and
+        // ~0.4 Levenshtein with plain normalize_title (fails < 0.75). Only the
+        // hyphen-split + edge publisher-strip ("image-saga" -> "image saga" ->
+        // strip "image" -> "saga") makes it match. Revert match_normalize to
+        // `normalize_title(input)` and this test fails — that's the point.
+        let patterns = default_patterns();
+        let score = score_release_title(
+            "Image-Saga.005.2012.digital.Zone-Empire",
+            "Saga",
+            &patterns,
+        )
+        .unwrap();
+        assert!(score >= 0.75, "short publisher-prefixed should match, got {score}");
+    }
+
+    #[test]
     fn hyphen_variants_score_equal() {
         let patterns = default_patterns();
         // "Spider.Man" (scene dotted) vs catalog "Spider-Man": hyphen split makes
