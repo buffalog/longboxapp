@@ -28,6 +28,8 @@ pub struct CvVolumeDetail {
     pub description: Option<String>,
     pub cover_url: Option<String>,
     pub site_detail_url: String,
+    /// CV's newline-separated alternate titles (e.g. "Collider" for FBP).
+    pub aliases: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,7 @@ pub(crate) fn project_volume(item: CvVolumeFull) -> CvVolumeDetail {
         description: item.description,
         cover_url: extract_cover(item.image),
         site_detail_url: item.site_detail_url,
+        aliases: item.aliases,
     }
 }
 
@@ -273,10 +276,33 @@ mod tests {
             description: Some("<p>Galaxy-spanning epic.</p>".into()),
             image: None,
             site_detail_url: "https://cv/volume/4050-18166/".into(),
+            aliases: None,
         };
         let projected = project_volume(v);
         assert_eq!(projected.site_detail_url, "https://cv/volume/4050-18166/");
         assert!(projected.cover_url.is_none());
         assert_eq!(projected.start_year, Some(2012));
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use crate::models::CvVolumeFull;
+
+    #[test]
+    fn project_volume_carries_aliases() {
+        let raw = CvVolumeFull {
+            id: 42,
+            name: "FBP: Federal Bureau of Physics".into(),
+            start_year: Some("2013".into()),
+            publisher: None,
+            description: None,
+            image: None,
+            site_detail_url: "https://x".into(),
+            aliases: Some("Collider\nCollider Comics".into()),
+        };
+        let detail = project_volume(raw);
+        assert_eq!(detail.aliases.as_deref(), Some("Collider\nCollider Comics"));
     }
 }

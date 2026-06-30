@@ -20,6 +20,7 @@
 mod client;
 mod error;
 mod parse;
+mod publisher;
 mod query;
 mod select;
 mod types;

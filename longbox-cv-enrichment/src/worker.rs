@@ -466,6 +466,7 @@ async fn refresh_one(
         volume.publisher.as_deref(),
         volume.description.as_deref(),
         volume.cover_url.as_deref(),
+        volume.aliases.as_deref(),
     )
     .await
     {
@@ -724,6 +725,7 @@ async fn commit_merge(
         volume.publisher.as_deref(),
         volume.description.as_deref(),
         volume.cover_url.as_deref(),
+        volume.aliases.as_deref(),
     )
     .await?;
 

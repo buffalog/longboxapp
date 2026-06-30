@@ -18,6 +18,7 @@
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
+use longbox_core::issue::IssueNumber;
 use longbox_core::similarity::similarity;
 use longbox_core::{normalize_title, parse_filename, ParsedFilename, ParsingPattern};
 use regex::Regex;
@@ -343,6 +344,21 @@ impl MismatchDiagnostic {
     }
 }
 
+/// Normalize a title for similarity comparison: run the shared
+/// `normalize_title` (lowercase, punctuation→space except hyphen, article
+/// strip), THEN split hyphens to spaces and strip edge publisher/imprint
+/// tokens. Hyphen-splitting makes "spider-man" / "spider man" / "vertigo-fbp"
+/// tokenize identically on both sides (the query and match layers must agree
+/// on hyphen as a separator); publisher-strip removes an unrequested imprint
+/// token so it can't dilute the token-set Jaccard score. Kept local to the
+/// newznab matcher — `normalize_title` itself must keep hyphens for
+/// `sort_title` identity, so we layer the extra steps here only.
+fn match_normalize(input: &str) -> String {
+    let base = normalize_title(input).replace('-', " ");
+    let collapsed: String = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::publisher::strip_publisher_tokens(&collapsed)
+}
+
 /// Pre-grab correctness filter. Drops releases whose year disagrees with
 /// the requested year (silent — different volume, retry next sweep), then
 /// drops releases whose series segment scores below `threshold` against
@@ -355,6 +371,11 @@ impl MismatchDiagnostic {
 /// and over-filtering wrong on `None` would over-reject. See the Bug 3
 /// deferred derivative for the eventual single-candidate fallback
 /// tightening.
+#[allow(clippy::too_many_arguments)] // every arg is a real per-grab filter
+                                     // input threaded from the engine; bundling
+                                     // into a struct is indirection without a
+                                     // callsite that benefits (mirrors the
+                                     // same choice on find_release_excluding_filtered).
 pub fn filter_by_series_title(
     releases: Vec<Release>,
     patterns: &[ParsingPattern],
@@ -363,6 +384,8 @@ pub fn filter_by_series_title(
     threshold: f64,
     exclusion_keywords: &[String],
     min_size_bytes: Option<i64>,
+    requested_issue: &str,
+    aliases: &[String],
 ) -> FilterOutcome {
     // Pre-grab size floor. Drop releases whose reported size is below
     // the configured Phase B threshold so we never even submit them to
@@ -381,7 +404,30 @@ pub fn filter_by_series_title(
         releases
     };
 
-    let requested_normalized = normalize_title(requested_series_title);
+    // All titles a release may legitimately match: the primary plus any known
+    // alias (e.g. CV's "Collider" for FBP). A release scores against the BEST
+    // of these — alias-titled scene releases otherwise fail similarity against
+    // the primary title even after the alias query surfaced them.
+    let candidate_titles: Vec<String> = std::iter::once(requested_series_title)
+        .chain(aliases.iter().map(String::as_str))
+        .map(match_normalize)
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // Normalized alias tokens, stripped from a release's parsed title before
+    // re-scoring. An alias-EMBEDDED release ("Federal Bureau of Physics
+    // Collider") scores below threshold against both the primary AND the bare
+    // alias; removing the alias tokens leaves "federal bureau of physics",
+    // which then matches the primary candidate.
+    let alias_tokens: std::collections::HashSet<String> = aliases
+        .iter()
+        .flat_map(|a| {
+            match_normalize(a)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     // Pre-filter excluded releases BEFORE counting total_results. An
     // excluded release must NOT contribute to total_results,
@@ -415,6 +461,9 @@ pub fn filter_by_series_title(
     };
     let total_results = releases.len();
 
+    // Loop-invariant: parse the requested issue once, reuse per release.
+    let requested_issue_number = IssueNumber::new(requested_issue);
+
     let mut kept: Vec<Release> = Vec::new();
     let mut parseable_count = 0usize;
     let mut best_similarity: Option<f64> = None;
@@ -431,8 +480,24 @@ pub fn filter_by_series_title(
         // rejection" case (best ≥ threshold but kept is empty → silent);
         // skipping the score for year-rejected releases would lose that
         // signal and wrongly mark a year-mismatch as a series-mismatch.
-        let parsed_normalized = normalize_title(&parsed.series_title);
-        let score = similarity(&requested_normalized, &parsed_normalized);
+        let parsed_normalized = match_normalize(&parsed.series_title);
+        // Equals `parsed_normalized` when there are no aliases (alias_tokens
+        // empty -> nothing filtered), so with aliases = &[] this whole path is
+        // behaviorally a no-op vs the prior single-form scoring.
+        let parsed_dealiased: String = parsed_normalized
+            .split_whitespace()
+            .filter(|t| !alias_tokens.contains(*t))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let score = candidate_titles
+            .iter()
+            .flat_map(|cand| {
+                [
+                    similarity(cand, &parsed_normalized),
+                    similarity(cand, &parsed_dealiased),
+                ]
+            })
+            .fold(0.0_f64, f64::max);
 
         if best_similarity.map_or(true, |b| score > b) {
             best_similarity = Some(score);
@@ -441,6 +506,15 @@ pub fn filter_by_series_title(
 
         if score < threshold {
             continue; // series-mismatch — diagnostic-worthy
+        }
+
+        // Issue-number gate (exact, zero-pad tolerant). Load-bearing for the
+        // relaxed query rungs (colon-split / alias / title-only) which return
+        // the whole series — without this an off-issue release could be
+        // grabbed. `IssueNumber::matches` treats "5" == "005" == "5" but
+        // distinguishes "5AU"/"Annual 5".
+        if !requested_issue_number.matches(&IssueNumber::new(parsed.number.clone())) {
+            continue;
         }
 
         // Year gate — silent reject on disagreement, pass on absence.
@@ -491,8 +565,8 @@ pub fn score_release_title(
     patterns: &[ParsingPattern],
 ) -> Option<f64> {
     let parsed = parse_release_title(release_title, patterns)?;
-    let requested_normalized = normalize_title(requested_series_title);
-    let parsed_normalized = normalize_title(&parsed.series_title);
+    let requested_normalized = match_normalize(requested_series_title);
+    let parsed_normalized = match_normalize(&parsed.series_title);
     Some(similarity(&requested_normalized, &parsed_normalized))
 }
 
@@ -667,6 +741,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             Some(10 * 1024 * 1024),
+            "2",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert_eq!(outcome.kept[0].title, "Saga 002 (2012) (digital).cbz");
@@ -696,6 +772,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "kept should be empty");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -721,6 +799,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -743,6 +823,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -763,6 +845,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD, // 0.75
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
         let diag = outcome.mismatch.unwrap();
@@ -788,6 +872,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1, "subtitle variant should pass");
     }
@@ -807,6 +893,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -833,6 +921,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -854,6 +944,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("all-unparseable → mismatch");
@@ -882,6 +974,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         let diag = outcome.mismatch.expect("mismatch expected");
         assert_eq!(diag.total_results, 2);
@@ -918,6 +1012,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "5",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -949,6 +1045,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "excluded release must be dropped");
         assert!(
@@ -984,6 +1082,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
+            "1",
+            &[],
         );
         assert!(
             outcome.kept.is_empty(),
@@ -1011,6 +1111,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1039,6 +1141,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Trade Paperback".into()],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none(), "exclusion must be silent");
@@ -1057,6 +1161,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Hardcover".into()],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1075,6 +1181,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Omnibus".into()],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1517,13 +1625,16 @@ mod tests {
     #[test]
     fn filter_keeps_bracketed_releases_for_matching_series() {
         let patterns = default_patterns();
+        // Both bracketed NZB formats (space-separated and dot-separated)
+        // for the SAME issue must survive the filter. Both are issue 007
+        // so the per-issue gate (Task 3) passes each.
         let pool = vec![
             release(
                 "Absolute Green Lantern 007 [2025] [digital-mobile] [Son of Ultron-Empire]",
                 Some(20),
             ),
             release(
-                "Absolute.Green.Lantern.008 [2026] [Webrip] [The Last Kryptonian-DCP]",
+                "Absolute.Green.Lantern.007 [2026] [Webrip] [The Last Kryptonian-DCP]",
                 Some(15),
             ),
         ];
@@ -1535,6 +1646,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "7",
+            &[],
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1611,6 +1724,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -1641,6 +1756,8 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -1660,8 +1777,147 @@ mod tests {
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
+            "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
+    }
+
+    #[test]
+    fn publisher_prefixed_release_still_matches() {
+        let patterns = default_patterns();
+        // Hyphen-joined imprint prefix ("Vertigo-Fbp") that previously diluted
+        // Jaccard below 0.75 now scores high after match-normalize.
+        let score = score_release_title(
+            "Vertigo-Fbp.Federal.Bureau.Of.Physics.005.2013.digital.Zone-Empire",
+            "FBP: Federal Bureau of Physics",
+            &patterns,
+        )
+        .unwrap();
+        assert!(score >= 0.75, "publisher-prefixed should match, got {score}");
+    }
+
+    #[test]
+    fn short_publisher_prefixed_title_requires_match_normalize() {
+        // Guards match_normalize: "Image-Saga" vs "Saga" scores 0 Jaccard and
+        // ~0.4 Levenshtein with plain normalize_title (fails < 0.75). Only the
+        // hyphen-split + edge publisher-strip ("image-saga" -> "image saga" ->
+        // strip "image" -> "saga") makes it match. Revert match_normalize to
+        // `normalize_title(input)` and this test fails — that's the point.
+        let patterns = default_patterns();
+        let score = score_release_title(
+            "Image-Saga.005.2012.digital.Zone-Empire",
+            "Saga",
+            &patterns,
+        )
+        .unwrap();
+        assert!(score >= 0.75, "short publisher-prefixed should match, got {score}");
+    }
+
+    #[test]
+    fn hyphen_variants_score_equal() {
+        let patterns = default_patterns();
+        // "Spider.Man" (scene dotted) vs catalog "Spider-Man": hyphen split makes
+        // them token-equal instead of {spider-man} vs {spider, man}.
+        let score = score_release_title("Spider.Man.005.2023.digital.X-Empire", "Spider-Man", &patterns)
+            .unwrap();
+        assert!(score >= 0.9, "hyphen variants should match high, got {score}");
+    }
+
+    #[test]
+    fn alias_only_titled_release_matches() {
+        let patterns = default_patterns();
+        // FBP's original title was "Collider"; a scene release that pre-dates
+        // the rename uses the alias as its release title. Against the primary
+        // title "FBP: Federal Bureau of Physics" it scores ~0.10 (way below
+        // threshold). With the alias "Collider" supplied, it scores 1.0.
+        let pool = vec![release(
+            "Collider.001.2013.digital.Zone-Empire",
+            Some(10),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "FBP: Federal Bureau of Physics",
+            None,
+            0.75,
+            &[],
+            None,
+            "1",
+            &["Collider".to_string()],
+        );
+        assert_eq!(outcome.kept.len(), 1, "alias release should be kept");
+    }
+
+    #[test]
+    fn alias_embedded_in_full_title_release_matches() {
+        let patterns = default_patterns();
+        // Problem-2: the release title carries BOTH the full name and the
+        // alias ("Federal Bureau of Physics Collider"). It scores ~0.67 vs the
+        // primary and ~0.2 vs the bare alias — both below threshold. Stripping
+        // the alias token "collider" leaves "federal bureau of physics", which
+        // matches the primary candidate.
+        let pool = vec![release(
+            "Federal.Bureau.of.Physics.Collider.001.2013.digital.Zone-Empire",
+            Some(10),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "FBP: Federal Bureau of Physics",
+            None,
+            0.75,
+            &[],
+            None,
+            "1",
+            &["Collider".to_string()],
+        );
+        assert_eq!(outcome.kept.len(), 1, "alias-embedded release should be kept");
+    }
+
+    #[test]
+    fn generic_alias_does_not_manufacture_false_positive() {
+        // Safety bound: a generic alias ("Comics") is stripped from every release,
+        // but a wrong-series release only matches if what REMAINS resembles the
+        // primary. "Batman Comics 005" - "comics" -> "batman", which is nothing
+        // like "Saga" -> still rejected. This is the bound the issue/year gates
+        // also backstop; the strip alone cannot collapse unrelated series.
+        let patterns = default_patterns();
+        let pool = vec![release("Batman.Comics.005.2016.digital.Zone-Empire", Some(10))];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Saga",
+            None,
+            0.75,
+            &[],
+            None,
+            "5",
+            &["Comics".to_string()],   // generic alias
+        );
+        assert_eq!(outcome.kept.len(), 0, "generic alias must not cause a false match");
+    }
+
+    #[test]
+    fn issue_number_gate_drops_wrong_issue() {
+        let patterns = default_patterns();
+        let pool = vec![
+            release("Saga 005 (2012) (digital).cbz", Some(10)),
+            release("Saga 012 (2012) (digital).cbz", Some(10)),
+        ];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Saga",
+            None,        // requested_year
+            0.75,        // threshold
+            &[],         // exclusion_keywords
+            None,        // min_size_bytes
+            "5",         // requested_issue (NEW, last arg) — "5" matches "005"
+            &[],
+        );
+        assert_eq!(outcome.kept.len(), 1);
+        assert_eq!(outcome.kept[0].title, "Saga 005 (2012) (digital).cbz");
     }
 }

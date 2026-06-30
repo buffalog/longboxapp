@@ -504,6 +504,7 @@ async fn attempt_pull_for_candidate(
         .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
         .count() as i64;
 
+    let aliases = series_repo::get_aliases(db, series.id).await?;
     match longbox_newznab::find_release_excluding_filtered(
         indexers,
         &series.title,
@@ -515,6 +516,7 @@ async fn attempt_pull_for_candidate(
         exclusion_keywords,
         issue.cover_date.as_deref(),
         min_size_bytes,
+        &aliases,
     )
     .await
     {
