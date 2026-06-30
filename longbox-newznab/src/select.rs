@@ -343,6 +343,21 @@ impl MismatchDiagnostic {
     }
 }
 
+/// Normalize a title for similarity comparison: run the shared
+/// `normalize_title` (lowercase, punctuation→space except hyphen, article
+/// strip), THEN split hyphens to spaces and strip edge publisher/imprint
+/// tokens. Hyphen-splitting makes "spider-man" / "spider man" / "vertigo-fbp"
+/// tokenize identically on both sides (the query and match layers must agree
+/// on hyphen as a separator); publisher-strip removes an unrequested imprint
+/// token so it can't dilute the token-set Jaccard score. Kept local to the
+/// newznab matcher — `normalize_title` itself must keep hyphens for
+/// `sort_title` identity, so we layer the extra steps here only.
+fn match_normalize(input: &str) -> String {
+    let base = normalize_title(input).replace('-', " ");
+    let collapsed: String = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::publisher::strip_publisher_tokens(&collapsed)
+}
+
 /// Pre-grab correctness filter. Drops releases whose year disagrees with
 /// the requested year (silent — different volume, retry next sweep), then
 /// drops releases whose series segment scores below `threshold` against
@@ -381,7 +396,7 @@ pub fn filter_by_series_title(
         releases
     };
 
-    let requested_normalized = normalize_title(requested_series_title);
+    let requested_normalized = match_normalize(requested_series_title);
 
     // Pre-filter excluded releases BEFORE counting total_results. An
     // excluded release must NOT contribute to total_results,
@@ -431,7 +446,7 @@ pub fn filter_by_series_title(
         // rejection" case (best ≥ threshold but kept is empty → silent);
         // skipping the score for year-rejected releases would lose that
         // signal and wrongly mark a year-mismatch as a series-mismatch.
-        let parsed_normalized = normalize_title(&parsed.series_title);
+        let parsed_normalized = match_normalize(&parsed.series_title);
         let score = similarity(&requested_normalized, &parsed_normalized);
 
         if best_similarity.map_or(true, |b| score > b) {
@@ -491,8 +506,8 @@ pub fn score_release_title(
     patterns: &[ParsingPattern],
 ) -> Option<f64> {
     let parsed = parse_release_title(release_title, patterns)?;
-    let requested_normalized = normalize_title(requested_series_title);
-    let parsed_normalized = normalize_title(&parsed.series_title);
+    let requested_normalized = match_normalize(requested_series_title);
+    let parsed_normalized = match_normalize(&parsed.series_title);
     Some(similarity(&requested_normalized, &parsed_normalized))
 }
 
@@ -1663,5 +1678,29 @@ mod tests {
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
+    }
+
+    #[test]
+    fn publisher_prefixed_release_still_matches() {
+        let patterns = default_patterns();
+        // Hyphen-joined imprint prefix ("Vertigo-Fbp") that previously diluted
+        // Jaccard below 0.75 now scores high after match-normalize.
+        let score = score_release_title(
+            "Vertigo-Fbp.Federal.Bureau.Of.Physics.005.2013.digital.Zone-Empire",
+            "FBP: Federal Bureau of Physics",
+            &patterns,
+        )
+        .unwrap();
+        assert!(score >= 0.75, "publisher-prefixed should match, got {score}");
+    }
+
+    #[test]
+    fn hyphen_variants_score_equal() {
+        let patterns = default_patterns();
+        // "Spider.Man" (scene dotted) vs catalog "Spider-Man": hyphen split makes
+        // them token-equal instead of {spider-man} vs {spider, man}.
+        let score = score_release_title("Spider.Man.005.2023.digital.X-Empire", "Spider-Man", &patterns)
+            .unwrap();
+        assert!(score >= 0.9, "hyphen variants should match high, got {score}");
     }
 }
