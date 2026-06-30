@@ -3,6 +3,42 @@
 use crate::error::IndexerError;
 use crate::types::IndexerConfig;
 
+/// Aggressively normalize a title into a Newznab `q` term. Indexers
+/// AND-tokenize `q` and Prowlarr forwards it verbatim (no CleanTitle), so
+/// every punctuation char that a scene release name omits is a recall cut.
+/// Lowercase, map ALL non-alphanumeric (colon, hyphen, dot, paren, slash,
+/// ampersand…) to space, collapse whitespace. Hyphen→space here is the
+/// query-side half of the hyphen agreement (`select::match_normalize` is the
+/// match-side half).
+pub fn normalize_query(s: &str) -> String {
+    let lowered: String = s
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect();
+    lowered.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Title variants for the relaxation ladder, most-specific first:
+/// 1. the full title (as given), 2. the substring AFTER the first colon,
+/// 3. the substring BEFORE the first colon. Colon-less titles yield just
+/// `[full]`. Variants are returned RAW (not query-normalized) so callers can
+/// reuse them as match-side aliases if desired; `build_search_term` /
+/// `build_url` normalize at send time. Empty/whitespace splits are dropped.
+pub fn title_variants(title: &str) -> Vec<String> {
+    let mut out = vec![title.to_string()];
+    if let Some(idx) = title.find(':') {
+        let after = title[idx + 1..].trim();
+        let before = title[..idx].trim();
+        if !after.is_empty() {
+            out.push(after.to_string());
+        }
+        if !before.is_empty() {
+            out.push(before.to_string());
+        }
+    }
+    out
+}
+
 /// One-year slack added to an issue's age when computing the dynamic
 /// maxage floor. Covers (a) digital releases posted ahead of the
 /// printed cover date, and (b) a generous indexer clock-skew buffer.
@@ -35,15 +71,17 @@ const RESULT_LIMIT: u32 = 100;
 /// downstream (`filter_by_series_title`); it just doesn't belong in
 /// the indexer text query.
 pub fn build_search_term(series: &str, issue: &str, padded: bool) -> String {
+    let series_q = normalize_query(series);
     let issue_part = if padded {
         match issue.parse::<u32>() {
             Ok(n) => format!("{n:03}"),
-            Err(_) => issue.to_string(),
+            Err(_) => normalize_query(issue),
         }
     } else {
-        issue.to_string()
+        normalize_query(issue)
     };
-    format!("{series} {issue_part}")
+    // ponytail: trim_end drops trailing space when issue_part is empty (e.g. "½" normalizes to "").
+    format!("{series_q} {issue_part}").trim_end().to_string()
 }
 
 /// Compute the effective `maxage` (in days) for a search against an
@@ -138,28 +176,30 @@ mod tests {
 
     #[test]
     fn padded_zero_pads_numeric_issues() {
-        assert_eq!(build_search_term("Wolverine", "5", true), "Wolverine 005");
-        assert_eq!(build_search_term("Saga", "12", true), "Saga 012");
-        assert_eq!(build_search_term("X", "100", true), "X 100");
+        assert_eq!(build_search_term("Wolverine", "5", true), "wolverine 005");
+        assert_eq!(build_search_term("Saga", "12", true), "saga 012");
+        assert_eq!(build_search_term("X", "100", true), "x 100");
     }
 
     #[test]
     fn unpadded_leaves_issue_as_is() {
-        assert_eq!(build_search_term("Wolverine", "5", false), "Wolverine 5");
-        assert_eq!(build_search_term("Saga", "12", false), "Saga 12");
+        assert_eq!(build_search_term("Wolverine", "5", false), "wolverine 5");
+        assert_eq!(build_search_term("Saga", "12", false), "saga 12");
     }
 
     #[test]
     fn non_numeric_issues_pass_through_both_variations() {
         assert_eq!(
             build_search_term("Bone", "Annual 1", true),
-            "Bone Annual 1"
+            "bone annual 1"
         );
         assert_eq!(
             build_search_term("Bone", "Annual 1", false),
-            "Bone Annual 1"
+            "bone annual 1"
         );
-        assert_eq!(build_search_term("Promethea", "½", true), "Promethea ½");
+        // "½" is Unicode No (Number, other) — Rust's is_alphanumeric() returns true for it,
+        // so it passes through normalize_query unchanged.
+        assert_eq!(build_search_term("Promethea", "½", true), "promethea ½");
     }
 
     #[test]
@@ -174,12 +214,39 @@ mod tests {
         // variations stay year-free.
         assert_eq!(
             build_search_term("Beneath the Trees Where Nobody Sees", "5", true),
-            "Beneath the Trees Where Nobody Sees 005"
+            "beneath the trees where nobody sees 005"
         );
         assert_eq!(
             build_search_term("Beneath the Trees Where Nobody Sees", "5", false),
-            "Beneath the Trees Where Nobody Sees 5"
+            "beneath the trees where nobody sees 5"
         );
+    }
+
+    #[test]
+    fn search_term_is_query_normalized() {
+        // Colon and mixed case in series title both collapse: "FBP: Federal…"
+        // → "fbp federal bureau of physics". Numeric issue pads normally.
+        assert_eq!(
+            build_search_term("FBP: Federal Bureau of Physics", "5", true),
+            "fbp federal bureau of physics 005"
+        );
+    }
+
+    #[test]
+    fn title_variants_yields_full_then_colon_splits() {
+        assert_eq!(
+            title_variants("FBP: Federal Bureau of Physics"),
+            vec![
+                "FBP: Federal Bureau of Physics",
+                "Federal Bureau of Physics",
+                "FBP"
+            ]
+        );
+    }
+
+    #[test]
+    fn title_variants_no_colon_is_single() {
+        assert_eq!(title_variants("Saga"), vec!["Saga"]);
     }
 
     #[test]
