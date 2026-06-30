@@ -130,7 +130,6 @@ async fn search_one_indexer(
     maxage_override: Option<i64>,
 ) -> Result<Vec<Release>, IndexerError> {
     let ladder = search_ladder(series, issue, aliases);
-    let mut last_err: Option<IndexerError> = None;
     for (i, term) in ladder.iter().enumerate() {
         match search_with(client, indexer, term, maxage_override).await {
             Ok(results) if !results.is_empty() => return Ok(results),
@@ -149,14 +148,10 @@ async fn search_one_indexer(
                     error = %e,
                     "ladder rung failed; continuing"
                 );
-                last_err = Some(e);
             }
         }
     }
-    match last_err {
-        Some(e) if ladder.len() == 1 => Err(e),
-        _ => Ok(Vec::new()),
-    }
+    Ok(Vec::new())
 }
 
 /// Find the best release for an issue across a list of indexers.
