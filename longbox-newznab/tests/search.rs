@@ -143,18 +143,18 @@ async fn find_release_respects_priority_order() {
 
 #[tokio::test]
 async fn find_release_retries_unpadded_when_padded_is_empty() {
-    // Padded query "Wolverine 005" → zero results; unpadded
-    // "Wolverine 5" → a hit. The variation retry must kick in.
+    // Padded query "wolverine 005" → zero results; unpadded
+    // "wolverine 5" → a hit. The variation retry must kick in.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("q", "Wolverine 005"))
+        .and(query_param("q", "wolverine 005"))
         .respond_with(ResponseTemplate::new(200).set_body_string(empty_rss()))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("q", "Wolverine 5"))
+        .and(query_param("q", "wolverine 5"))
         .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
             "Wolverine 5 unpadded.cbz",
             "u1",
