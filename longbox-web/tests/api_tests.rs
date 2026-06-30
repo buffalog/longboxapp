@@ -4816,14 +4816,16 @@ async fn reconcile_keep_phantom_resets_last_matched_count() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(response_json(resp).await["kept"], sid);
 
-    // Reset to 0 -> still zero-owned, but no longer a transition phantom.
+    // keep_phantom_series sets tidy_exempt=1, which removes the series from
+    // list_phantoms entirely (moves it to list_kept_series). Neither bucket
+    // should contain the series after keep.
     let body = response_json(
         app.request(empty_request("GET", "/api/reconcile/phantoms"))
             .await,
     )
     .await;
     assert_eq!(body["with_transition"].as_array().unwrap().len(), 0);
-    assert_eq!(body["all_zero_owned"].as_array().unwrap().len(), 1);
+    assert_eq!(body["all_zero_owned"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
