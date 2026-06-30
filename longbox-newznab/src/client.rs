@@ -300,6 +300,7 @@ pub async fn find_release_excluding_filtered(
     exclusion_keywords: &[String],
     cover_date: Option<&str>,
     min_size_bytes: Option<i64>,
+    aliases: &[String],
 ) -> Result<FindOutcome, NewznabError> {
     if indexers.is_empty() {
         return Ok(FindOutcome::NoMatch);
@@ -355,6 +356,7 @@ pub async fn find_release_excluding_filtered(
                     exclusion_keywords,
                     min_size_bytes,
                     issue,
+                    aliases,
                 );
                 for release in &outcome.kept {
                     guid_to_indexer.insert(release.guid.clone(), indexer.id);
@@ -619,6 +621,7 @@ mod tests {
             &[],
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -665,6 +668,7 @@ mod tests {
             &[],
             None,
             None,
+            &[],
         )
         .await
         .unwrap();

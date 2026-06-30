@@ -385,6 +385,7 @@ pub fn filter_by_series_title(
     exclusion_keywords: &[String],
     min_size_bytes: Option<i64>,
     requested_issue: &str,
+    aliases: &[String],
 ) -> FilterOutcome {
     // Pre-grab size floor. Drop releases whose reported size is below
     // the configured Phase B threshold so we never even submit them to
@@ -403,7 +404,15 @@ pub fn filter_by_series_title(
         releases
     };
 
-    let requested_normalized = match_normalize(requested_series_title);
+    // All titles a release may legitimately match: the primary plus any known
+    // alias (e.g. CV's "Collider" for FBP). A release scores against the BEST
+    // of these — alias-titled scene releases otherwise fail similarity against
+    // the primary title even after the alias query surfaced them.
+    let candidate_titles: Vec<String> = std::iter::once(requested_series_title)
+        .chain(aliases.iter().map(String::as_str))
+        .map(match_normalize)
+        .filter(|t| !t.is_empty())
+        .collect();
 
     // Pre-filter excluded releases BEFORE counting total_results. An
     // excluded release must NOT contribute to total_results,
@@ -457,7 +466,10 @@ pub fn filter_by_series_title(
         // skipping the score for year-rejected releases would lose that
         // signal and wrongly mark a year-mismatch as a series-mismatch.
         let parsed_normalized = match_normalize(&parsed.series_title);
-        let score = similarity(&requested_normalized, &parsed_normalized);
+        let score = candidate_titles
+            .iter()
+            .map(|cand| similarity(cand, &parsed_normalized))
+            .fold(0.0_f64, f64::max);
 
         if best_similarity.map_or(true, |b| score > b) {
             best_similarity = Some(score);
@@ -702,6 +714,7 @@ mod tests {
             &[],
             Some(10 * 1024 * 1024),
             "2",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert_eq!(outcome.kept[0].title, "Saga 002 (2012) (digital).cbz");
@@ -732,6 +745,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "kept should be empty");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -758,6 +772,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -781,6 +796,7 @@ mod tests {
             &[],
             None,
             "5",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -802,6 +818,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
         let diag = outcome.mismatch.unwrap();
@@ -828,6 +845,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1, "subtitle variant should pass");
     }
@@ -848,6 +866,7 @@ mod tests {
             &[],
             None,
             "5",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -875,6 +894,7 @@ mod tests {
             &[],
             None,
             "5",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -897,6 +917,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         let diag = outcome.mismatch.expect("all-unparseable → mismatch");
@@ -926,6 +947,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         let diag = outcome.mismatch.expect("mismatch expected");
         assert_eq!(diag.total_results, 2);
@@ -963,6 +985,7 @@ mod tests {
             &[],
             None,
             "5",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(
@@ -995,6 +1018,7 @@ mod tests {
             &["Infinity Comic".into()],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "excluded release must be dropped");
         assert!(
@@ -1031,6 +1055,7 @@ mod tests {
             &["Infinity Comic".into()],
             None,
             "1",
+            &[],
         );
         assert!(
             outcome.kept.is_empty(),
@@ -1059,6 +1084,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1088,6 +1114,7 @@ mod tests {
             &["Trade Paperback".into()],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none(), "exclusion must be silent");
@@ -1107,6 +1134,7 @@ mod tests {
             &["Hardcover".into()],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1126,6 +1154,7 @@ mod tests {
             &["Omnibus".into()],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1590,6 +1619,7 @@ mod tests {
             &[],
             None,
             "7",
+            &[],
         );
         assert_eq!(
             outcome.kept.len(),
@@ -1667,6 +1697,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
@@ -1698,6 +1729,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert!(outcome.mismatch.is_none());
@@ -1718,6 +1750,7 @@ mod tests {
             &[],
             None,
             "1",
+            &[],
         );
         assert!(outcome.kept.is_empty());
         assert!(outcome.mismatch.is_none());
@@ -1765,6 +1798,31 @@ mod tests {
     }
 
     #[test]
+    fn alias_titled_release_matches_when_alias_supplied() {
+        let patterns = default_patterns();
+        // FBP's original title was "Collider"; a scene release that pre-dates
+        // the rename uses the alias as its release title. Against the primary
+        // title "FBP: Federal Bureau of Physics" it scores ~0.10 (way below
+        // threshold). With the alias "Collider" supplied, it scores 1.0.
+        let pool = vec![release(
+            "Collider.001.2013.digital.Zone-Empire",
+            Some(10),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "FBP: Federal Bureau of Physics",
+            None,
+            0.75,
+            &[],
+            None,
+            "1",
+            &["Collider".to_string()],
+        );
+        assert_eq!(outcome.kept.len(), 1, "alias release should be kept");
+    }
+
+    #[test]
     fn issue_number_gate_drops_wrong_issue() {
         let patterns = default_patterns();
         let pool = vec![
@@ -1780,6 +1838,7 @@ mod tests {
             &[],         // exclusion_keywords
             None,        // min_size_bytes
             "5",         // requested_issue (NEW, last arg) — "5" matches "005"
+            &[],
         );
         assert_eq!(outcome.kept.len(), 1);
         assert_eq!(outcome.kept[0].title, "Saga 005 (2012) (digital).cbz");
