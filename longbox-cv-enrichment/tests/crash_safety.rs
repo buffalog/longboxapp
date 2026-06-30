@@ -198,6 +198,7 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
         Some("Image Comics"),
         Some("A sweeping space-fantasy saga."),
         Some("https://cv/cover.jpg"),
+        None,
     )
     .await
     .unwrap();
@@ -299,6 +300,7 @@ async fn committed_enrichment_is_durable() {
         Some("Image Comics"),
         Some("A sweeping space-fantasy saga."),
         Some("https://cv/cover.jpg"),
+        None,
     )
     .await
     .unwrap();
@@ -390,6 +392,7 @@ async fn update_series_volume_detail_writes_all_three_fields() {
         Some("Image Comics"),
         Some("Space fantasy."),
         Some("https://cv/saga-cover.jpg"),
+        None,
     )
     .await
     .unwrap();
@@ -424,6 +427,7 @@ async fn volume_refresh_candidates_excludes_shallow_and_publisher_populated() {
         &pool,
         already_done,
         Some("Some Publisher"),
+        None,
         None,
         None,
     )

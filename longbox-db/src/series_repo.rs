@@ -311,23 +311,54 @@ pub async fn update_series_volume_detail<'e, E>(
     publisher: Option<&str>,
     description: Option<&str>,
     cover_url: Option<&str>,
+    aliases: Option<&str>,
 ) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {
     let result = sqlx::query!(
         r#"UPDATE series
-           SET publisher = ?, description = ?, cover_url = ?,
+           SET publisher = ?, description = ?, cover_url = ?, aliases = ?,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = ?"#,
         publisher,
         description,
         cover_url,
+        aliases,
         series_id,
     )
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Minimum alias length (chars) we'll feed the search/match path. CV aliases
+/// are arbitrary user data; a 1-2 char or empty alias is junk that, once it
+/// reaches the alias-token strip in `filter_by_series_title`, could erode a
+/// legitimate token and manufacture a false match. Drop them at the source —
+/// the match-layer issue/year gates only narrow that window, they don't close
+/// it. A real generic-but-longer alias colliding remains theoretically
+/// possible and is bounded by those gates; widen this floor only if a real
+/// false positive surfaces (deterministic-list philosophy: extend on evidence).
+const MIN_ALIAS_LEN: usize = 3;
+
+/// Read a series' aliases as a split, trimmed, sanitized list. CV stores them
+/// newline-separated; `None`/empty column → empty vec. Entries shorter than
+/// `MIN_ALIAS_LEN` are dropped (junk guard, see above). Used only by the pull
+/// search path (kept off `SeriesRow` to avoid widening every series SELECT).
+pub async fn get_aliases<'e, E>(executor: E, series_id: i64) -> Result<Vec<String>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(r#"SELECT aliases FROM series WHERE id = ?"#, series_id)
+        .fetch_optional(executor)
+        .await?;
+    let raw = row.and_then(|r| r.aliases).unwrap_or_default();
+    Ok(raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.chars().count() >= MIN_ALIAS_LEN)
+        .collect())
 }
 
 pub async fn find_by_metron_id<'e, E>(executor: E, metron_id: &str) -> Result<Option<SeriesRow>>
