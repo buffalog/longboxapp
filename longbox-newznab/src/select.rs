@@ -481,6 +481,9 @@ pub fn filter_by_series_title(
         // skipping the score for year-rejected releases would lose that
         // signal and wrongly mark a year-mismatch as a series-mismatch.
         let parsed_normalized = match_normalize(&parsed.series_title);
+        // Equals `parsed_normalized` when there are no aliases (alias_tokens
+        // empty -> nothing filtered), so with aliases = &[] this whole path is
+        // behaviorally a no-op vs the prior single-form scoring.
         let parsed_dealiased: String = parsed_normalized
             .split_whitespace()
             .filter(|t| !alias_tokens.contains(*t))
@@ -1871,6 +1874,29 @@ mod tests {
             &["Collider".to_string()],
         );
         assert_eq!(outcome.kept.len(), 1, "alias-embedded release should be kept");
+    }
+
+    #[test]
+    fn generic_alias_does_not_manufacture_false_positive() {
+        // Safety bound: a generic alias ("Comics") is stripped from every release,
+        // but a wrong-series release only matches if what REMAINS resembles the
+        // primary. "Batman Comics 005" - "comics" -> "batman", which is nothing
+        // like "Saga" -> still rejected. This is the bound the issue/year gates
+        // also backstop; the strip alone cannot collapse unrelated series.
+        let patterns = default_patterns();
+        let pool = vec![release("Batman.Comics.005.2016.digital.Zone-Empire", Some(10))];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "Saga",
+            None,
+            0.75,
+            &[],
+            None,
+            "5",
+            &["Comics".to_string()],   // generic alias
+        );
+        assert_eq!(outcome.kept.len(), 0, "generic alias must not cause a false match");
     }
 
     #[test]
