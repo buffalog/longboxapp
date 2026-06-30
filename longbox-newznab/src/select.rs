@@ -414,6 +414,21 @@ pub fn filter_by_series_title(
         .filter(|t| !t.is_empty())
         .collect();
 
+    // Normalized alias tokens, stripped from a release's parsed title before
+    // re-scoring. An alias-EMBEDDED release ("Federal Bureau of Physics
+    // Collider") scores below threshold against both the primary AND the bare
+    // alias; removing the alias tokens leaves "federal bureau of physics",
+    // which then matches the primary candidate.
+    let alias_tokens: std::collections::HashSet<String> = aliases
+        .iter()
+        .flat_map(|a| {
+            match_normalize(a)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     // Pre-filter excluded releases BEFORE counting total_results. An
     // excluded release must NOT contribute to total_results,
     // parseable_count, or best_similarity — those signals drive the
@@ -466,9 +481,19 @@ pub fn filter_by_series_title(
         // skipping the score for year-rejected releases would lose that
         // signal and wrongly mark a year-mismatch as a series-mismatch.
         let parsed_normalized = match_normalize(&parsed.series_title);
+        let parsed_dealiased: String = parsed_normalized
+            .split_whitespace()
+            .filter(|t| !alias_tokens.contains(*t))
+            .collect::<Vec<_>>()
+            .join(" ");
         let score = candidate_titles
             .iter()
-            .map(|cand| similarity(cand, &parsed_normalized))
+            .flat_map(|cand| {
+                [
+                    similarity(cand, &parsed_normalized),
+                    similarity(cand, &parsed_dealiased),
+                ]
+            })
             .fold(0.0_f64, f64::max);
 
         if best_similarity.map_or(true, |b| score > b) {
@@ -1798,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_titled_release_matches_when_alias_supplied() {
+    fn alias_only_titled_release_matches() {
         let patterns = default_patterns();
         // FBP's original title was "Collider"; a scene release that pre-dates
         // the rename uses the alias as its release title. Against the primary
@@ -1820,6 +1845,32 @@ mod tests {
             &["Collider".to_string()],
         );
         assert_eq!(outcome.kept.len(), 1, "alias release should be kept");
+    }
+
+    #[test]
+    fn alias_embedded_in_full_title_release_matches() {
+        let patterns = default_patterns();
+        // Problem-2: the release title carries BOTH the full name and the
+        // alias ("Federal Bureau of Physics Collider"). It scores ~0.67 vs the
+        // primary and ~0.2 vs the bare alias — both below threshold. Stripping
+        // the alias token "collider" leaves "federal bureau of physics", which
+        // matches the primary candidate.
+        let pool = vec![release(
+            "Federal.Bureau.of.Physics.Collider.001.2013.digital.Zone-Empire",
+            Some(10),
+        )];
+        let outcome = filter_by_series_title(
+            pool,
+            &patterns,
+            "FBP: Federal Bureau of Physics",
+            None,
+            0.75,
+            &[],
+            None,
+            "1",
+            &["Collider".to_string()],
+        );
+        assert_eq!(outcome.kept.len(), 1, "alias-embedded release should be kept");
     }
 
     #[test]

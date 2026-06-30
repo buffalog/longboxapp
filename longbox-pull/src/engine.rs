@@ -515,6 +515,7 @@ async fn attempt_pull_for_candidate(
         exclusion_keywords,
         issue.cover_date.as_deref(),
         min_size_bytes,
+        &[], // TODO(Task 10): pass real series aliases via series_repo::get_aliases
     )
     .await
     {
