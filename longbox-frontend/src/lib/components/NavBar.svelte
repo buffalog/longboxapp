@@ -34,6 +34,7 @@
         { href: '/releases/pull-list', label: 'Pull list' }
       ]
     },
+    { kind: 'link', href: '/creators', label: 'Creators' },
     { kind: 'link', href: '/add', label: 'Add' },
     { kind: 'link', href: '/settings', label: 'Settings' }
   ];
