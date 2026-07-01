@@ -344,4 +344,18 @@ async fn cv_person_id_of_returns_person_id_or_none() {
         creator_repo::cv_person_id_of(&pool, 999999).await.unwrap(),
         None
     );
+    // Existing creator whose cv_person_id is NULL also yields None (distinct
+    // from the unknown-creator case above, both collapse to None).
+    let null_creator: i64 = sqlx::query_scalar(
+        "INSERT INTO creators (name, cv_person_id) VALUES ('No CV Person', NULL) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        creator_repo::cv_person_id_of(&pool, null_creator)
+            .await
+            .unwrap(),
+        None
+    );
 }
