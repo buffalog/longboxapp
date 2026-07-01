@@ -90,6 +90,34 @@ struct DiscoveredVolume {
     series_id: Option<i64>,
 }
 
+/// Foreign-market reprint collection-line markers (lowercase substrings).
+/// These are unambiguous foreign imprint lines (Panini España and similar) —
+/// no English comic title contains them, so filtering on them is
+/// zero-false-positive. Deterministic and extendable: add a marker when a real
+/// foreign-reprint miss surfaces. Bare translated titles with no line marker
+/// (e.g. "Doctor Extraño") have no safe signal here and are intentionally NOT
+/// caught — those need publisher-level filtering (a deferred enrichment
+/// follow-up), not a fragile language/accent heuristic.
+const FOREIGN_COLLECTION_MARKERS: &[&str] = &[
+    "100% marvel",
+    "panini",
+    "biblioteca marvel",
+    "coleccionable",
+    "grandes eventos marvel",
+    "clásicos marvel",
+    "clasicos marvel",
+    "marvel deluxe",
+    "marvel gold",
+    "marvel must-have",
+    "marvel imposible",
+];
+
+/// True when a volume name is a foreign-market reprint collection line.
+fn is_foreign_reprint(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    FOREIGN_COLLECTION_MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// Pure join+sort: map each CV volume credit to owned/not-owned against the
 /// catalog's `(series_id, cv_id)` pairs, then sort by name case-insensitively.
 fn build_discovery(
@@ -102,6 +130,7 @@ fn build_discovery(
         .collect();
     let mut out: Vec<DiscoveredVolume> = credits
         .into_iter()
+        .filter(|c| !is_foreign_reprint(&c.name))
         .map(|c| DiscoveredVolume {
             series_id: owned.get(&c.cv_volume_id).copied(),
             cv_volume_id: c.cv_volume_id,
@@ -163,5 +192,37 @@ mod discover_tests {
         );
         // case-insensitive sort put lowercase "avengers" before "Deadly Class"
         assert_eq!(out[0].cv_volume_id, 7084);
+    }
+
+    #[test]
+    fn is_foreign_reprint_matches_markers_not_english_titles() {
+        // Foreign collection lines -> filtered.
+        assert!(is_foreign_reprint("100% Marvel. Caballero Luna"));
+        assert!(is_foreign_reprint("Biblioteca Marvel: Spiderman"));
+        assert!(is_foreign_reprint("Coleccionable Los Vengadores"));
+        assert!(is_foreign_reprint("Marvel Deluxe. Lobezno"));
+        // Real English titles from the live data -> NOT filtered (zero false positives).
+        assert!(!is_foreign_reprint("Batman by Tom King Omnibus"));
+        assert!(!is_foreign_reprint("Marvel Comics Presents"));
+        assert!(!is_foreign_reprint("Action Comics"));
+        assert!(!is_foreign_reprint("All-Star Batman"));
+        assert!(!is_foreign_reprint("The Amazing Spider-Man"));
+    }
+
+    #[test]
+    fn build_discovery_drops_foreign_reprints() {
+        let credits = vec![
+            CvVolumeCredit {
+                cv_volume_id: 1,
+                name: "Avengers".into(),
+            },
+            CvVolumeCredit {
+                cv_volume_id: 2,
+                name: "100% Marvel. Los Vengadores".into(),
+            },
+        ];
+        let out = build_discovery(credits, &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "Avengers"); // the foreign reprint was dropped
     }
 }
