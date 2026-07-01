@@ -1606,3 +1606,19 @@ where
     }
     Ok(())
 }
+
+/// `(local series id, cv_id)` for every catalog series that has a CV volume
+/// id. Discovery joins a creator's `volume_credits` against this to split
+/// in-library vs not, and to link owned volumes to their local series row.
+pub async fn existing_cv_id_pairs<'e, E>(executor: E) -> Result<Vec<(i64, i64)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", cv_id AS "cv_id!: i64"
+           FROM series WHERE cv_id IS NOT NULL"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.cv_id)).collect())
+}

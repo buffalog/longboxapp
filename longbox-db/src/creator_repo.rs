@@ -255,6 +255,21 @@ pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail
     }))
 }
 
+/// The CV person id for a creator. `None` when the creator doesn't exist OR
+/// has no `cv_person_id` — both mean "no discovery possible" to the caller.
+pub async fn cv_person_id_of<'e, E>(executor: E, creator_id: i64) -> Result<Option<i64>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT cv_person_id FROM creators WHERE id = ?"#,
+        creator_id,
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.and_then(|r| r.cv_person_id))
+}
+
 /// Paginated in-library issues for a creator, optional role + series filters.
 /// Page is 1-based; page size 50; ordered by cover_date ASC.
 pub async fn creator_issues<'e, E>(

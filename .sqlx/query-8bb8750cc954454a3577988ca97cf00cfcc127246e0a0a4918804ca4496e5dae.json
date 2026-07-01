@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cv_person_id FROM creators WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "cv_person_id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "8bb8750cc954454a3577988ca97cf00cfcc127246e0a0a4918804ca4496e5dae"
+}
