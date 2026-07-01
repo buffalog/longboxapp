@@ -7725,3 +7725,55 @@ async fn needs_attention_clear_all_deletes_every_failure_class_attempt() {
         .unwrap();
     assert_eq!(remaining, 1);
 }
+
+// -------- creators --------
+
+#[tokio::test]
+async fn creators_search_returns_seeded_creator() {
+    let app = build_test_app().await;
+    let (_, iid) = seed_series_and_issue(&app, "Sandman", "1").await;
+
+    // file: owned + present so search_creators' EXISTS sub-query fires
+    longbox_db::file_repo::insert(
+        &app.state.db,
+        longbox_db::NewFile {
+            issue_id: Some(iid),
+            library_root_id: app.library_root_id,
+            path_relative: "Sandman (1989)/Sandman 001.cbz".into(),
+            size_bytes: 1,
+            mtime: time::macros::datetime!(2024-01-01 0:00),
+            last_scanned_at: time::macros::datetime!(2024-01-01 0:00),
+            match_method: "filename".into(),
+            match_confidence: 0.99,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: time::macros::datetime!(2024-01-01 0:00),
+            matched_at: Some(time::macros::datetime!(2024-01-01 0:00)),
+        },
+    )
+    .await
+    .unwrap();
+
+    longbox_db::creator_repo::insert_issue_credits(
+        &app.state.db,
+        iid,
+        &[longbox_comicvine::CvPersonCredit {
+            cv_person_id: 9999,
+            name: "Neil Gaiman".into(),
+            role: "writer".into(),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let resp = app
+        .request(empty_request("GET", "/api/creators/search?q=Gaiman"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "Neil Gaiman");
+}
