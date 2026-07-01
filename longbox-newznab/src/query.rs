@@ -362,7 +362,7 @@ mod tests {
         let n = effective_maxage_days(1500, Some(&date));
         // 20 years ≈ 7300 days + 365 slack = ~7665.
         assert!(
-            n >= 7300 + 365 - 1 && n <= 7300 + 365 + 366,
+            (7300 + 365 - 1..=7300 + 365 + 366).contains(&n),
             "expected ~7665, got {n}"
         );
     }
