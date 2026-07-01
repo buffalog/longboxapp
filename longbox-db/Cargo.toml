@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 longbox-core = { path = "../longbox-core" }
+longbox-comicvine = { path = "../longbox-comicvine" }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "time"] }
 thiserror = "1"
 time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }

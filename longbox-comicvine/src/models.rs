@@ -79,6 +79,26 @@ pub(crate) struct CvVolumeFull {
     pub aliases: Option<String>,
 }
 
+/// One entry of an issue's `person_credits` array, from
+/// `/issue/4000-<id>/?field_list=id,person_credits`. CV packs multiple
+/// roles for one person into a single comma-delimited `role` string.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvCreditRaw {
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+/// The `results` object of a per-issue credits fetch. Only the fields
+/// requested via `field_list`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvIssueCreditsRaw {
+    #[serde(default)]
+    pub person_credits: Vec<CvCreditRaw>,
+}
+
 /// Full issue detail from `/issues/` results — both the
 /// `filter=volume:<id>` (per-volume) and `filter=store_date:<from>|<to>`
 /// (release-calendar) queries deserialize into this.

@@ -35,6 +35,7 @@
 //! next-slot latency — they do not queue behind background tokens.
 
 pub mod background;
+pub mod credits_resolver;
 pub mod config;
 pub mod outcome;
 pub mod worker;

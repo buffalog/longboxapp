@@ -7,10 +7,11 @@ use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::error::{excerpt, CvError};
-use crate::models::{CvIssueFull, CvResponse, CvVolumeFull, CvVolumeSearchItem};
+use crate::models::{CvIssueFull, CvIssueCreditsRaw, CvResponse, CvVolumeFull, CvVolumeSearchItem};
 use crate::projection::{
-    project_calendar_item, project_issue, project_search_item, project_volume, CvCalendarItem,
-    CvIssueDetail, CvVolumeDetail, SeriesSearchResult,
+    project_calendar_item, project_issue, project_issue_credits, project_search_item,
+    project_volume, CvCalendarItem, CvIssueDetail, CvPersonCredit, CvVolumeDetail,
+    SeriesSearchResult,
 };
 use crate::rate_limit::CvRateLimiter;
 
@@ -202,6 +203,19 @@ impl ComicVineClient {
         let envelope = parse_envelope::<CvVolumeFull>(&body)?;
         let volume = unwrap_envelope_results(envelope, &body)?;
         Ok(project_volume(volume))
+    }
+
+    #[instrument(target = "longbox_comicvine", skip(self))]
+    pub async fn fetch_issue_credits(
+        &self,
+        cv_issue_id: i64,
+    ) -> Result<Vec<CvPersonCredit>, CvError> {
+        let path = format!("issue/4000-{cv_issue_id}/");
+        let url = self.build_url(&path, &[("field_list", "id,person_credits")])?;
+        let body = self.execute_with_retry(url).await?;
+        let envelope = parse_envelope::<CvIssueCreditsRaw>(&body)?;
+        let raw = unwrap_envelope_results(envelope, &body)?;
+        Ok(project_issue_credits(raw))
     }
 
     #[instrument(target = "longbox_comicvine", skip(self))]
