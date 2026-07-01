@@ -31,3 +31,13 @@ export function getCreatorIssues(
   const qs = p.toString();
   return apiFetch(`/creators/${id}/issues${qs ? `?${qs}` : ''}`);
 }
+
+export interface DiscoveredVolume {
+  cv_volume_id: number;
+  name: string;
+  series_id: number | null; // non-null => already in the library
+}
+
+export function getCreatorDiscovery(id: number): Promise<DiscoveredVolume[]> {
+  return apiFetch(`/creators/${id}/discover`);
+}
