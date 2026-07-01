@@ -7867,3 +7867,23 @@ async fn creators_detail_missing_id_returns_404() {
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn creators_discover_empty_when_no_cv_person_id() {
+    let app = build_test_app().await;
+    // Insert a creator with NULL cv_person_id directly (no ingestion needed).
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO creators (name, cv_person_id) VALUES ('Nobody', NULL) RETURNING id",
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+    let resp = app
+        .request(empty_request(
+            "GET",
+            &format!("/api/creators/{cid}/discover"),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await.as_array().unwrap().len(), 0);
+}

@@ -314,6 +314,24 @@ async fn aliases_round_trip() {
 }
 
 #[tokio::test]
+async fn existing_cv_id_pairs_returns_id_and_cv_id() {
+    let pool = fresh_pool().await;
+    let s = series_repo::insert(&pool, walking_dead()).await.unwrap(); // cv_id 12345
+                                                                       // a series with no cv_id must be excluded
+    series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: None,
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+    let pairs = series_repo::existing_cv_id_pairs(&pool).await.unwrap();
+    assert_eq!(pairs, vec![(s.id, 12345)]);
+}
+
+#[tokio::test]
 async fn get_aliases_drops_short_junk_entries() {
     let pool = fresh_pool().await;
     let id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;

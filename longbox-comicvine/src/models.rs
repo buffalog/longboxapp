@@ -99,6 +99,22 @@ pub(crate) struct CvIssueCreditsRaw {
     pub person_credits: Vec<CvCreditRaw>,
 }
 
+/// One entry of a person's `volume_credits` — a series they're credited on.
+/// From `/person/4040-<id>/?field_list=volume_credits`. Only id+name used.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvVolumeCreditRaw {
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The `results` object of a person volume-credits fetch (field_list-limited).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvPersonVolumeCreditsRaw {
+    #[serde(default)]
+    pub volume_credits: Vec<CvVolumeCreditRaw>,
+}
+
 /// Full issue detail from `/issues/` results — both the
 /// `filter=volume:<id>` (per-volume) and `filter=store_date:<from>|<to>`
 /// (release-calendar) queries deserialize into this.
