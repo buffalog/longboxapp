@@ -110,6 +110,9 @@ const FOREIGN_COLLECTION_MARKERS: &[&str] = &[
     "marvel gold",
     "marvel must-have",
     "marvel imposible",
+    // Accented "héroes" (Panini España line) — the accent means this can't
+    // match the US unaccented "Marvel Heroes", so it stays zero-false-positive.
+    "marvel héroes",
 ];
 
 /// True when a volume name is a foreign-market reprint collection line.
@@ -201,12 +204,15 @@ mod discover_tests {
         assert!(is_foreign_reprint("Biblioteca Marvel: Spiderman"));
         assert!(is_foreign_reprint("Coleccionable Los Vengadores"));
         assert!(is_foreign_reprint("Marvel Deluxe. Lobezno"));
-        // Real English titles from the live data -> NOT filtered (zero false positives).
+        assert!(is_foreign_reprint("Marvel Héroes: Lobezno")); // accented Panini line
+                                                               // Real English titles from the live data -> NOT filtered (zero false positives).
         assert!(!is_foreign_reprint("Batman by Tom King Omnibus"));
         assert!(!is_foreign_reprint("Marvel Comics Presents"));
         assert!(!is_foreign_reprint("Action Comics"));
         assert!(!is_foreign_reprint("All-Star Batman"));
         assert!(!is_foreign_reprint("The Amazing Spider-Man"));
+        // Unaccented US "Marvel Heroes" must NOT match (only the accented line).
+        assert!(!is_foreign_reprint("Marvel Heroes"));
     }
 
     #[test]
