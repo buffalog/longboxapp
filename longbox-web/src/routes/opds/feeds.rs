@@ -222,9 +222,13 @@ pub async fn series_detail(
 
     let total = opds_repo::count_series_issues(&state.db, id).await? as u64;
     let page = Page::new(query.number(), ITEMS_PER_PAGE, total);
-    let issues =
-        opds_repo::list_series_issues_page(&state.db, id, page.limit() as i64, page.offset() as i64)
-            .await?;
+    let issues = opds_repo::list_series_issues_page(
+        &state.db,
+        id,
+        page.limit() as i64,
+        page.offset() as i64,
+    )
+    .await?;
 
     let base = &state.config.opds_base_url;
     let title = match series.start_year {
@@ -410,7 +414,11 @@ fn search_links(base: &str, q_encoded: &str, page: Page) -> Vec<Link> {
         Link::new("up", abs(base, "/opds/v1"), NAVIGATION_TYPE),
     ];
     if page.has_prev() {
-        links.push(Link::new("previous", href(page.number - 1), NAVIGATION_TYPE));
+        links.push(Link::new(
+            "previous",
+            href(page.number - 1),
+            NAVIGATION_TYPE,
+        ));
     }
     if page.has_next() {
         links.push(Link::new("next", href(page.number + 1), NAVIGATION_TYPE));
@@ -420,19 +428,9 @@ fn search_links(base: &str, q_encoded: &str, page: Page) -> Vec<Link> {
 
 /// `self` + `start` + `up` + conditional `next`/`previous` links for a
 /// paginated feed.
-fn paginated_links(
-    base: &str,
-    path: &str,
-    page: Page,
-    up_path: &str,
-    kind: FeedKind,
-) -> Vec<Link> {
+fn paginated_links(base: &str, path: &str, page: Page, up_path: &str, kind: FeedKind) -> Vec<Link> {
     let mut links = vec![
-        Link::new(
-            "self",
-            page_href(base, path, page.number),
-            kind.mime(),
-        ),
+        Link::new("self", page_href(base, path, page.number), kind.mime()),
         start_link(base),
         search_descriptor_link(base),
         Link::new("up", abs(base, up_path), NAVIGATION_TYPE),

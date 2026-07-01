@@ -63,8 +63,7 @@ pub const KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_KNOWN: &str =
     "cv_enrichment_title_threshold_year_known";
 pub const KEY_CV_ENRICHMENT_TITLE_THRESHOLD_YEAR_UNKNOWN: &str =
     "cv_enrichment_title_threshold_year_unknown";
-pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_KNOWN: &str =
-    "cv_enrichment_count_window_year_known";
+pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_KNOWN: &str = "cv_enrichment_count_window_year_known";
 pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_UNKNOWN: &str =
     "cv_enrichment_count_window_year_unknown";
 pub const KEY_CV_ENRICHMENT_DOMINANT_GAP: &str = "cv_enrichment_dominant_gap";

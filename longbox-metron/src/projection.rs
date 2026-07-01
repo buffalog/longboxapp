@@ -8,8 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{MetronIssueDetailRow, MetronIssueListRow, MetronSeriesDetailRow,
-    MetronSeriesListRow};
+use crate::models::{
+    MetronIssueDetailRow, MetronIssueListRow, MetronSeriesDetailRow, MetronSeriesListRow,
+};
 
 /// One forward-calendar entry from Metron's `store_date_range_*` query.
 /// The shape mirrors `longbox-comicvine::CvCalendarItem` plus Metron-

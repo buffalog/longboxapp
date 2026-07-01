@@ -297,12 +297,20 @@ async fn aliases_round_trip() {
     let pool = fresh_pool().await;
     let id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
     series_repo::update_series_volume_detail(
-        &pool, id, None, None, None, Some("Collider\nCollider Comics"),
+        &pool,
+        id,
+        None,
+        None,
+        None,
+        Some("Collider\nCollider Comics"),
     )
     .await
     .unwrap();
     let aliases = series_repo::get_aliases(&pool, id).await.unwrap();
-    assert_eq!(aliases, vec!["Collider".to_string(), "Collider Comics".to_string()]);
+    assert_eq!(
+        aliases,
+        vec!["Collider".to_string(), "Collider Comics".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -311,10 +319,18 @@ async fn get_aliases_drops_short_junk_entries() {
     let id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
     // Mix of a real alias, an empty line, and 1-2 char junk.
     series_repo::update_series_volume_detail(
-        &pool, id, None, None, None, Some("Collider\n\nA\nXY\nReal Name"),
+        &pool,
+        id,
+        None,
+        None,
+        None,
+        Some("Collider\n\nA\nXY\nReal Name"),
     )
     .await
     .unwrap();
     let aliases = series_repo::get_aliases(&pool, id).await.unwrap();
-    assert_eq!(aliases, vec!["Collider".to_string(), "Real Name".to_string()]);
+    assert_eq!(
+        aliases,
+        vec!["Collider".to_string(), "Real Name".to_string()]
+    );
 }

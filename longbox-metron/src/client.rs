@@ -207,10 +207,13 @@ impl MetronClient {
     // -------- internals --------
 
     fn build_url(&self, path: &str, params: &[(&str, &str)]) -> Result<Url, MetronError> {
-        let mut url = self.base_url.join(path).map_err(|e| MetronError::Malformed {
-            message: format!("could not build URL: {e}"),
-            raw_excerpt: None,
-        })?;
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|e| MetronError::Malformed {
+                message: format!("could not build URL: {e}"),
+                raw_excerpt: None,
+            })?;
         if !params.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (k, v) in params {

@@ -64,11 +64,7 @@ impl EnrichmentHandle {
 /// assertion (see [`assert_schema`]) before doing any other work;
 /// if assertion fails, the worker refuses to start, logs at ERROR,
 /// and the returned handle's `request_run` will be a no-op.
-pub fn spawn(
-    db: Pool,
-    inner_cv: Arc<ComicVineClient>,
-    library_root: PathBuf,
-) -> EnrichmentHandle {
+pub fn spawn(db: Pool, inner_cv: Arc<ComicVineClient>, library_root: PathBuf) -> EnrichmentHandle {
     let running = Arc::new(AtomicBool::new(false));
     let (trigger, rx) = mpsc::channel::<()>(1);
     let handle = EnrichmentHandle {
@@ -282,8 +278,7 @@ async fn worker_loop(
         }
 
         running.store(true, Ordering::SeqCst);
-        let attempts_this_cycle =
-            run_cycle(&db, &bg, &config, &library_root, candidates).await;
+        let attempts_this_cycle = run_cycle(&db, &bg, &config, &library_root, candidates).await;
         running.store(false, Ordering::SeqCst);
 
         tracing::info!(
@@ -754,8 +749,7 @@ async fn commit_merge(
     // matched-and-updated by number now have cv_issue_id set and
     // correctly drop out of the cv_issue_id IS NULL filter. Pre-
     // upsert it would count every synthesized row as orphan.
-    let orphan_numbers =
-        series_repo::list_orphan_synthesized_numbers(&mut *tx, series_id).await?;
+    let orphan_numbers = series_repo::list_orphan_synthesized_numbers(&mut *tx, series_id).await?;
 
     // (d) Classify outcome.
     let outcome = if orphan_numbers.is_empty() {
@@ -823,8 +817,8 @@ async fn try_write_cover_image(db: &Pool, library_root: &Path, series_id: i64) {
 
     // The folder()-only consumer ignores the issue number; "0" is a
     // throwaway placeholder that satisfies LibraryPath::new's signature.
-    let folder_rel = LibraryPath::new(&series.title, series.start_year.map(|y| y as i32), "0")
-        .folder();
+    let folder_rel =
+        LibraryPath::new(&series.title, series.start_year.map(|y| y as i32), "0").folder();
     let folder = library_root.join(&folder_rel);
     let target = folder.join("folder.jpg");
 

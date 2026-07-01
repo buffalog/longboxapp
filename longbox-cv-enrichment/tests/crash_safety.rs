@@ -26,18 +26,25 @@ async fn set_cv_id_race_returns_zero_rows_when_already_linked() {
     let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1"]).await;
 
     // First writer wins.
-    let first = series_repo::set_cv_id(&pool, series_id, 1234).await.unwrap();
+    let first = series_repo::set_cv_id(&pool, series_id, 1234)
+        .await
+        .unwrap();
     assert_eq!(first, 1);
 
     // Second writer (different cv_id) — predicate refuses.
-    let second = series_repo::set_cv_id(&pool, series_id, 5678).await.unwrap();
+    let second = series_repo::set_cv_id(&pool, series_id, 5678)
+        .await
+        .unwrap();
     assert_eq!(
         second, 0,
         "race-guard must refuse the second writer (cv_id is already set)"
     );
 
     // First writer's cv_id stands.
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(s.cv_id, Some(1234));
 }
 
@@ -98,16 +105,14 @@ async fn collision_disabled_records_explicit_outcome_with_timestamp() {
     let pool = fresh_pool().await;
     let series_id = seed_shallow_series_with_issues(&pool, "Sex", None, &["1"]).await;
 
-    series_repo::record_enrichment_outcome(
-        &pool,
-        series_id,
-        "collision_disabled",
-        None,
-    )
-    .await
-    .unwrap();
+    series_repo::record_enrichment_outcome(&pool, series_id, "collision_disabled", None)
+        .await
+        .unwrap();
 
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(s.cv_id.is_none(), "still shallow");
     // Re-fetch the row with the enrichment columns visible. They're
     // not in SeriesRow today, so query directly.
@@ -120,7 +125,10 @@ async fn collision_disabled_records_explicit_outcome_with_timestamp() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(row.ts.is_some(), "attempt timestamp must be set — proves the pre-filter recorded explicitly");
+    assert!(
+        row.ts.is_some(),
+        "attempt timestamp must be set — proves the pre-filter recorded explicitly"
+    );
     assert_eq!(
         row.outcome.as_deref(),
         Some("collision_disabled"),
@@ -138,13 +146,15 @@ async fn collision_disabled_records_explicit_outcome_with_timestamp() {
 #[tokio::test]
 async fn cancelled_pre_fetch_leaves_series_shallow_no_outcome_recorded() {
     let pool = fresh_pool().await;
-    let series_id =
-        seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
+    let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
 
     // Simulate worker exiting before phase 1 runs to completion.
     // No outcome write, no transaction.
 
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(s.cv_id.is_none());
     let row = sqlx::query!(
         r#"SELECT last_enrichment_attempt_at AS "ts: time::PrimitiveDateTime",
@@ -173,8 +183,7 @@ async fn cancelled_pre_fetch_leaves_series_shallow_no_outcome_recorded() {
 #[tokio::test]
 async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
     let pool = fresh_pool().await;
-    let series_id =
-        seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
+    let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
 
     // Pre-state snapshot.
     let pre_issues = issue_repo::list_by_series(&pool, series_id).await.unwrap();
@@ -184,7 +193,9 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
     // Open transaction, do the worker's phase-2 writes.
     let mut tx = pool.begin().await.unwrap();
 
-    let promoted = series_repo::set_cv_id(&mut *tx, series_id, 9999).await.unwrap();
+    let promoted = series_repo::set_cv_id(&mut *tx, series_id, 9999)
+        .await
+        .unwrap();
     assert_eq!(promoted, 1, "set_cv_id succeeded inside tx");
 
     // 6c.5: the merge also persists publisher / description /
@@ -227,7 +238,10 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
     tx.rollback().await.unwrap();
 
     // (1) series.cv_id rolled back.
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         s.cv_id.is_none(),
         "set_cv_id rolled back — series stays shallow"
@@ -257,10 +271,7 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
         row.ts.is_none(),
         "outcome timestamp must roll back with the rest of the transaction"
     );
-    assert!(
-        row.outcome.is_none(),
-        "outcome string must roll back too"
-    );
+    assert!(row.outcome.is_none(), "outcome string must roll back too");
 
     // (4) 6c.5: publisher / description / cover_url rolled back too.
     // The three descriptive fields must be NULL — if any survives
@@ -286,11 +297,12 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
 #[tokio::test]
 async fn committed_enrichment_is_durable() {
     let pool = fresh_pool().await;
-    let series_id =
-        seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
+    let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1", "2"]).await;
 
     let mut tx = pool.begin().await.unwrap();
-    series_repo::set_cv_id(&mut *tx, series_id, 12345).await.unwrap();
+    series_repo::set_cv_id(&mut *tx, series_id, 12345)
+        .await
+        .unwrap();
     // 6c.5: persist the descriptive volume detail inside the same
     // transaction. Asserted below to verify the three fields land
     // durably alongside cv_id and the per-issue upserts.
@@ -327,11 +339,17 @@ async fn committed_enrichment_is_durable() {
     tx.commit().await.unwrap();
 
     // Re-acquire (simulates fresh connection / process restart).
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(s.cv_id, Some(12345));
     // 6c.5: all three descriptive fields land durably.
     assert_eq!(s.publisher.as_deref(), Some("Image Comics"));
-    assert_eq!(s.description.as_deref(), Some("A sweeping space-fantasy saga."));
+    assert_eq!(
+        s.description.as_deref(),
+        Some("A sweeping space-fantasy saga.")
+    );
     assert_eq!(s.cover_url.as_deref(), Some("https://cv/cover.jpg"));
     let issues = issue_repo::list_by_series(&pool, series_id).await.unwrap();
     let cv_ids: HashSet<Option<i64>> = issues.iter().map(|i| i.cv_issue_id).collect();
@@ -368,8 +386,10 @@ async fn shallow_query_marks_collision_flag_correctly() {
     .await
     .unwrap();
 
-    let by_id: std::collections::HashMap<i64, bool> =
-        candidates.iter().map(|c| (c.series_id, c.catalog_title_collision)).collect();
+    let by_id: std::collections::HashMap<i64, bool> = candidates
+        .iter()
+        .map(|c| (c.series_id, c.catalog_title_collision))
+        .collect();
     assert_eq!(by_id.get(&a), Some(&true), "Sex (a) flagged collision");
     assert_eq!(by_id.get(&b), Some(&true), "Sex (b) flagged collision");
     assert_eq!(by_id.get(&c), Some(&false), "Invincible NOT flagged");
@@ -384,7 +404,9 @@ async fn shallow_query_marks_collision_flag_correctly() {
 async fn update_series_volume_detail_writes_all_three_fields() {
     let pool = fresh_pool().await;
     let series_id = seed_shallow_series_with_issues(&pool, "Saga", Some(2012), &["1"]).await;
-    series_repo::set_cv_id(&pool, series_id, 46568).await.unwrap();
+    series_repo::set_cv_id(&pool, series_id, 46568)
+        .await
+        .unwrap();
 
     let rows = series_repo::update_series_volume_detail(
         &pool,
@@ -398,7 +420,10 @@ async fn update_series_volume_detail_writes_all_three_fields() {
     .unwrap();
     assert_eq!(rows, 1, "exactly one series row updated");
 
-    let s = series_repo::find_by_id(&pool, series_id).await.unwrap().unwrap();
+    let s = series_repo::find_by_id(&pool, series_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(s.publisher.as_deref(), Some("Image Comics"));
     assert_eq!(s.description.as_deref(), Some("Space fantasy."));
     assert_eq!(s.cover_url.as_deref(), Some("https://cv/saga-cover.jpg"));
@@ -417,12 +442,16 @@ async fn volume_refresh_candidates_excludes_shallow_and_publisher_populated() {
     // (b) CV-linked, publisher NULL — IS a refresh candidate.
     let needs_refresh =
         seed_shallow_series_with_issues(&pool, "Needs Refresh", Some(2020), &["1"]).await;
-    series_repo::set_cv_id(&pool, needs_refresh, 1111).await.unwrap();
+    series_repo::set_cv_id(&pool, needs_refresh, 1111)
+        .await
+        .unwrap();
 
     // (c) CV-linked, publisher populated — must NOT appear.
     let already_done =
         seed_shallow_series_with_issues(&pool, "Already Done", Some(2021), &["1"]).await;
-    series_repo::set_cv_id(&pool, already_done, 2222).await.unwrap();
+    series_repo::set_cv_id(&pool, already_done, 2222)
+        .await
+        .unwrap();
     series_repo::update_series_volume_detail(
         &pool,
         already_done,
@@ -434,7 +463,9 @@ async fn volume_refresh_candidates_excludes_shallow_and_publisher_populated() {
     .await
     .unwrap();
 
-    let candidates = series_repo::list_volume_refresh_candidates(&pool).await.unwrap();
+    let candidates = series_repo::list_volume_refresh_candidates(&pool)
+        .await
+        .unwrap();
     let ids: HashSet<i64> = candidates.iter().map(|c| c.series_id).collect();
     assert!(
         ids.contains(&needs_refresh),
@@ -495,15 +526,9 @@ async fn cv_volume_cache_list_pending_excludes_fetched_rows() {
         .unwrap();
 
     // Fill 222 with a real publisher.
-    cv_volume_cache_repo::mark_fetched(
-        &pool,
-        222,
-        Some("Image Comics"),
-        Some("desc"),
-        Some(2012),
-    )
-    .await
-    .unwrap();
+    cv_volume_cache_repo::mark_fetched(&pool, 222, Some("Image Comics"), Some("desc"), Some(2012))
+        .await
+        .unwrap();
 
     // Fill 333 with a NULL publisher (CV returned no publisher data).
     // fetched_at MUST still be set — otherwise the worker re-attempts
@@ -550,7 +575,10 @@ async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
     .unwrap();
     assert_eq!(rows, 1);
 
-    let row = cv_volume_cache_repo::find_by_id(&pool, 42).await.unwrap().unwrap();
+    let row = cv_volume_cache_repo::find_by_id(&pool, 42)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.publisher.as_deref(), Some("Dark Horse"));
     assert_eq!(row.description.as_deref(), Some("Long description."));
     assert_eq!(row.start_year, Some(2024));

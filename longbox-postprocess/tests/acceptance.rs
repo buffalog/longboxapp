@@ -348,8 +348,8 @@ async fn six_file_acceptance_smoke() {
         .join("Saga (2012)")
         .join("Saga (2012) 001.cbz");
     let cbz_bytes = std::fs::read(&imported_cbz).expect("imported CBZ must exist");
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(cbz_bytes)).expect("imported CBZ must be a valid ZIP");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(cbz_bytes))
+        .expect("imported CBZ must be a valid ZIP");
     let entry_names: Vec<String> = (0..archive.len())
         .map(|i| archive.by_index(i).unwrap().name().to_owned())
         .collect();

@@ -14,7 +14,9 @@ const HASH_B: &str = "$2b$12$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 #[tokio::test]
 async fn create_then_list_roundtrips() {
     let pool = fresh_pool().await;
-    let created = opds_users_repo::create(&pool, "Judd", HASH_A).await.unwrap();
+    let created = opds_users_repo::create(&pool, "Judd", HASH_A)
+        .await
+        .unwrap();
     assert_eq!(created.username, "Judd");
     assert!(created.enabled);
     assert!(created.last_seen_at.is_none());
@@ -43,12 +45,19 @@ async fn list_is_ordered_case_insensitively() {
 #[tokio::test]
 async fn duplicate_username_is_a_unique_violation_case_insensitive() {
     let pool = fresh_pool().await;
-    opds_users_repo::create(&pool, "Reader", HASH_A).await.unwrap();
+    opds_users_repo::create(&pool, "Reader", HASH_A)
+        .await
+        .unwrap();
     let err = opds_users_repo::create(&pool, "reader", HASH_B)
         .await
         .unwrap_err();
     assert!(
-        matches!(err, DbError::UniqueViolation { field: "opds_username" }),
+        matches!(
+            err,
+            DbError::UniqueViolation {
+                field: "opds_username"
+            }
+        ),
         "got {err:?}"
     );
 }
@@ -56,7 +65,9 @@ async fn duplicate_username_is_a_unique_violation_case_insensitive() {
 #[tokio::test]
 async fn find_enabled_for_auth_respects_the_enabled_flag() {
     let pool = fresh_pool().await;
-    let u = opds_users_repo::create(&pool, "reader", HASH_A).await.unwrap();
+    let u = opds_users_repo::create(&pool, "reader", HASH_A)
+        .await
+        .unwrap();
 
     // Enabled + case-insensitive lookup returns the hash.
     let found = opds_users_repo::find_enabled_for_auth(&pool, "READER")
@@ -67,7 +78,9 @@ async fn find_enabled_for_auth_respects_the_enabled_flag() {
     assert_eq!(found.password_hash, HASH_A);
 
     // Disabled → invisible to the auth path.
-    opds_users_repo::set_enabled(&pool, u.id, false).await.unwrap();
+    opds_users_repo::set_enabled(&pool, u.id, false)
+        .await
+        .unwrap();
     assert!(opds_users_repo::find_enabled_for_auth(&pool, "reader")
         .await
         .unwrap()
@@ -84,7 +97,9 @@ async fn find_enabled_for_auth_respects_the_enabled_flag() {
 async fn set_enabled_and_delete_report_not_found() {
     let pool = fresh_pool().await;
     assert!(matches!(
-        opds_users_repo::set_enabled(&pool, 999, false).await.unwrap_err(),
+        opds_users_repo::set_enabled(&pool, 999, false)
+            .await
+            .unwrap_err(),
         DbError::NotFound
     ));
     assert!(matches!(
@@ -92,7 +107,9 @@ async fn set_enabled_and_delete_report_not_found() {
         DbError::NotFound
     ));
 
-    let u = opds_users_repo::create(&pool, "temp", HASH_A).await.unwrap();
+    let u = opds_users_repo::create(&pool, "temp", HASH_A)
+        .await
+        .unwrap();
     opds_users_repo::delete(&pool, u.id).await.unwrap();
     assert!(opds_users_repo::list(&pool).await.unwrap().is_empty());
 }
@@ -100,7 +117,9 @@ async fn set_enabled_and_delete_report_not_found() {
 #[tokio::test]
 async fn touch_last_seen_sets_the_timestamp() {
     let pool = fresh_pool().await;
-    let u = opds_users_repo::create(&pool, "reader", HASH_A).await.unwrap();
+    let u = opds_users_repo::create(&pool, "reader", HASH_A)
+        .await
+        .unwrap();
     assert!(u.last_seen_at.is_none());
 
     opds_users_repo::touch_last_seen(&pool, u.id).await.unwrap();
@@ -146,12 +165,10 @@ async fn migration_carries_over_an_existing_credential() {
     }
 
     // Run the migration verbatim.
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260628010000_opds_users.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/20260628010000_opds_users.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // The credential moved over, enabled.
     let user = opds_users_repo::find_enabled_for_auth(&pool, "jeremy")
@@ -197,12 +214,10 @@ async fn migration_skips_an_unconfigured_credential() {
             .await
             .unwrap();
     }
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260628010000_opds_users.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/20260628010000_opds_users.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM opds_users")
         .fetch_one(&pool)

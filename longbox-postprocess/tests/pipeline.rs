@@ -199,7 +199,10 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
     // Skipped file stays in /watch/ untouched (per Jeremy's directive
     // — the watch folder is the holding pen, not _unsorted/).
     assert!(!owned.exists(), "matched source must move out of watch");
-    assert!(!conflict_source.exists(), "conflict source must be auto-removed");
+    assert!(
+        !conflict_source.exists(),
+        "conflict source must be auto-removed"
+    );
     assert!(
         mystery.exists(),
         "Skipped source must stay in /watch/ — no _unsorted/ parking lot"
@@ -254,9 +257,16 @@ async fn imports_owned_via_dot_separated_nzb_style_basename() {
         .join("Saga.001.(2012).(Digital).(Empire).cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     match outcome {
         Outcome::Imported {
             series_id,
@@ -264,7 +274,10 @@ async fn imports_owned_via_dot_separated_nzb_style_basename() {
             target,
             ..
         } => {
-            assert_eq!(series_id, f.series_id, "must attribute to the seeded series");
+            assert_eq!(
+                series_id, f.series_id,
+                "must attribute to the seeded series"
+            );
             assert_eq!(issue_id, f.issue_id, "must attribute to issue #1");
             // Target lands at the canonical path — the dot-separated
             // source is moved into the convention-driven library
@@ -446,9 +459,16 @@ async fn imports_owned_via_filename_match() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
 
     let target = match outcome {
         Outcome::Imported {
@@ -512,9 +532,16 @@ async fn imports_owned_cbr_converting_to_cbz() {
     let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
     filetime::set_file_mtime(&source, filetime::FileTime::from_system_time(earlier)).ok();
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
 
     let target = match outcome {
         Outcome::Imported { target, .. } => target,
@@ -553,9 +580,16 @@ async fn overwrites_existing_comicinfo_in_source() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, Some(stale_xml));
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     let target = match outcome {
         Outcome::Imported { target, .. } => target,
         other => panic!("expected Imported, got {other:?}"),
@@ -618,7 +652,10 @@ async fn sweep_now_honors_live_match_confidence_threshold_from_settings() {
         "DB threshold (0.10) must let the filename-match through; \
          summary={summary:?}"
     );
-    assert!(!source.exists(), "matched source must have moved out of /watch/");
+    assert!(
+        !source.exists(),
+        "matched source must have moved out of /watch/"
+    );
 }
 
 #[tokio::test]
@@ -667,10 +704,7 @@ async fn rejects_files_below_min_size_threshold_and_leaves_them_in_watch() {
     )
     .await
     .unwrap();
-    assert!(
-        row.is_none(),
-        "rejected files must not create catalog rows"
-    );
+    assert!(row.is_none(), "rejected files must not create catalog rows");
 }
 
 #[tokio::test]
@@ -713,9 +747,16 @@ async fn unmatched_file_stays_in_watch_folder() {
     let source = f._watch.path().join("Totally Unknown 042.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     let reason = match outcome {
         Outcome::Skipped { reason } => reason,
         other => panic!("expected Skipped, got {other:?}"),
@@ -746,7 +787,10 @@ async fn unmatched_file_stays_in_watch_folder() {
     )
     .await
     .unwrap();
-    assert!(row.is_none(), "no DB row should exist for an unmatched watch-folder file");
+    assert!(
+        row.is_none(),
+        "no DB row should exist for an unmatched watch-folder file"
+    );
 }
 
 #[tokio::test]
@@ -824,25 +868,16 @@ async fn sub_threshold_match_skipped_when_no_pull_attempt_exists() {
 
     // No pull_attempt row inserted.
 
-    let outcome = processor::process_one(
-        &source,
-        f.library.path(),
-        f.library_root_id,
-        &f.db,
-        0.99,
-        0,
-    )
-    .await
-    .unwrap();
+    let outcome =
+        processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, 0.99, 0)
+            .await
+            .unwrap();
 
     assert!(
         matches!(outcome, Outcome::Skipped { .. }),
         "sub-threshold match without pull_attempt history must stay Skipped; got {outcome:?}"
     );
-    assert!(
-        source.exists(),
-        "Skipped file must stay in /watch/"
-    );
+    assert!(source.exists(), "Skipped file must stay in /watch/");
 }
 
 #[tokio::test]
@@ -864,9 +899,16 @@ async fn conflict_cleans_source_and_preserves_target() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     match outcome {
         Outcome::Conflict { target, .. } => assert_eq!(target, existing_target),
         other => panic!("expected Conflict, got {other:?}"),
@@ -905,9 +947,16 @@ async fn conflict_cleanup_skips_when_source_is_target() {
     write_cbz(&at_target, None);
     let bytes_before = std::fs::read(&at_target).unwrap();
 
-    let outcome = processor::process_one(&at_target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &at_target,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     assert!(matches!(outcome, Outcome::Conflict { .. }));
     assert!(
         at_target.exists(),
@@ -930,9 +979,16 @@ async fn idempotent_reprocessing() {
 
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
-    let first = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let first = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     let target = match first {
         Outcome::Imported { target, .. } => target,
         _ => panic!(),
@@ -941,9 +997,16 @@ async fn idempotent_reprocessing() {
     // Reprocess the target itself: it already lives in the library
     // and has a catalog row. process_one should detect the conflict
     // (target exists at its own path).
-    let outcome2 = processor::process_one(&target, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome2 = processor::process_one(
+        &target,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
     // Already-at-target reprocessing surfaces as Conflict (the target
     // path is the source path, so target.exists() is true). The
     // important property: no destructive change.
@@ -969,9 +1032,16 @@ async fn rewrite_failure_surfaces_as_outcome_failed() {
     let source = f._watch.path().join("Saga 001.cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(&source, f.library.path(), f.library_root_id, &f.db, longbox_core::DEFAULT_MATCH_THRESHOLD, 0)
-        .await
-        .unwrap();
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
 
     match outcome {
         Outcome::Failed {

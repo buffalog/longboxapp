@@ -189,10 +189,7 @@ mod tests {
     fn strips_trailing_by_attribution_with_comma_or_and() {
         // Comma-separated and ` and ` author lists are the other
         // multi-author hallmarks the strip recognizes.
-        assert_eq!(
-            normalize_title("Foo by Author One, Author Two"),
-            "foo"
-        );
+        assert_eq!(normalize_title("Foo by Author One, Author Two"), "foo");
         assert_eq!(
             normalize_title("Bar by Brian K Vaughan and Pia Guerra"),
             "bar"

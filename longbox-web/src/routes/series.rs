@@ -3,12 +3,12 @@ use std::path::{Path as StdPath, PathBuf};
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use futures::stream::{self, StreamExt};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
     downloader_config_repo, indexer_config_repo, issue_repo, library_root_repo, series_repo,
     settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
 };
-use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -225,8 +225,7 @@ async fn add(
     // indexers) so a freshly-added series during a paused-pull-engine
     // period doesn't claim "searching N issues" when it actually
     // isn't.
-    let pull_search_queued =
-        spawn_auto_pull_search(&state, inserted.id, &inserted.title).await?;
+    let pull_search_queued = spawn_auto_pull_search(&state, inserted.id, &inserted.title).await?;
 
     Ok(Json(AddSeriesResponse {
         series: inserted,
@@ -956,10 +955,7 @@ pub(crate) async fn delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), 
 /// bug that surfaced as a 409 when the frontend's modal sent the flag
 /// after confirmation. Callers MUST verify existence first when 404 is
 /// the desired outcome for a missing id.
-pub(crate) async fn delete_series_row(
-    db: &longbox_db::Pool,
-    id: i64,
-) -> Result<(), ApiError> {
+pub(crate) async fn delete_series_row(db: &longbox_db::Pool, id: i64) -> Result<(), ApiError> {
     sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)
         .execute(db)
         .await
@@ -981,10 +977,7 @@ pub(crate) async fn delete_series_row(
 ///
 /// The caller is responsible for kicking off a rescan after this
 /// returns so the now-`needs_review` files find their real home.
-pub(crate) async fn force_delete_series(
-    db: &longbox_db::Pool,
-    id: i64,
-) -> Result<(), ApiError> {
+pub(crate) async fn force_delete_series(db: &longbox_db::Pool, id: i64) -> Result<(), ApiError> {
     if series_repo::find_by_id(db, id).await?.is_none() {
         return Err(ApiError::NotFound {
             resource: "series",
@@ -1175,9 +1168,7 @@ fn derive_db_backup_path(database_url: &str) -> Option<PathBuf> {
 ///
 /// Returns the path written to so the caller can log it; `Ok(None)`
 /// when the DB URL has no on-disk path (in-memory tests, mostly).
-async fn snapshot_db_for_destructive_op(
-    state: &AppState,
-) -> Result<Option<PathBuf>, ApiError> {
+async fn snapshot_db_for_destructive_op(state: &AppState) -> Result<Option<PathBuf>, ApiError> {
     let Some(backup_path) = derive_db_backup_path(&state.config.database_url) else {
         return Ok(None);
     };
@@ -1199,10 +1190,7 @@ async fn snapshot_db_for_destructive_op(
     let path_str = backup_path
         .to_str()
         .ok_or_else(|| ApiError::Internal {
-            message: format!(
-                "backup path is not valid UTF-8: {}",
-                backup_path.display()
-            ),
+            message: format!("backup path is not valid UTF-8: {}", backup_path.display()),
             source: anyhow::anyhow!("non-UTF-8 backup path"),
         })?
         .replace('\'', "''");
@@ -1234,12 +1222,14 @@ async fn remove(
     // For delete_files we need to read the series row (for title +
     // start_year) BEFORE the DB delete cascades it away.
     let to_remove = if q.delete_files {
-        Some(series_repo::find_by_id(&state.db, id).await?.ok_or(
-            ApiError::NotFound {
-                resource: "series",
-                id: id.to_string(),
-            },
-        )?)
+        Some(
+            series_repo::find_by_id(&state.db, id)
+                .await?
+                .ok_or(ApiError::NotFound {
+                    resource: "series",
+                    id: id.to_string(),
+                })?,
+        )
     } else {
         None
     };
@@ -1306,10 +1296,7 @@ async fn remove(
                     "removing series folder from disk"
                 );
                 std::fs::remove_dir_all(&safe_path).map_err(|e| ApiError::Internal {
-                    message: format!(
-                        "remove_dir_all({}) failed: {e}",
-                        safe_path.display()
-                    ),
+                    message: format!("remove_dir_all({}) failed: {e}", safe_path.display()),
                     source: anyhow::anyhow!(e),
                 })?;
                 folder_deleted = Some(safe_path.display().to_string());
