@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO creators (cv_person_id, name) VALUES (?, ?)\n           ON CONFLICT(cv_person_id) DO UPDATE SET name = excluded.name\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8e20341cbdd720ae06a1321d2989f9e4b5da25422090c4361122eba91feb1fa1"
+}

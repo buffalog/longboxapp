@@ -178,6 +178,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         Arc::clone(&cv_arc),
         std::path::PathBuf::from(&configured),
     );
+    longbox_cv_enrichment::credits_resolver::spawn_credits_resolver(db.clone(), Arc::clone(&cv_arc));
 
     // 11. Metron client (Item A v2). Kill switch is the construction
     //     gate: `metron_enabled = false` (the migration default) skips

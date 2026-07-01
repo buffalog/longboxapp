@@ -7,7 +7,7 @@ use thiserror::Error;
 /// - `Network` / `Timeout` → 504
 /// - `Malformed` → 502
 /// - `Auth` → 500 (config issue surfaced to logs, not the user)
-/// - `NotFound` → 404 (only `fetch_volume` produces this)
+/// - `NotFound` → 404 (`fetch_volume` + `fetch_issue_credits`)
 /// - `Http { status: 5xx }` → 502 with the status echoed
 #[derive(Debug, Error)]
 pub enum CvError {

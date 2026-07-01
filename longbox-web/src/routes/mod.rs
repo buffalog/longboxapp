@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 pub mod admin;
 pub mod calendar;
+pub mod creators;
 pub mod cv_search;
 pub mod dashboard;
 pub mod downloader;
@@ -46,6 +47,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let api = Router::new()
         .merge(health::router())
+        .merge(creators::router())
         .merge(cv_search::router())
         .merge(series::router())
         .merge(files::router())

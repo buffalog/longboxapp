@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.id AS \"id!: i64\", c.name AS \"name!\", c.cv_person_id,\n                  COUNT(DISTINCT i.series_id) AS \"series_count!: i64\",\n                  COUNT(DISTINCT i.id)        AS \"issue_count!: i64\"\n           FROM creators c\n           JOIN issue_credits ic ON ic.creator_id = c.id\n           JOIN issues i         ON i.id = ic.issue_id\n           WHERE c.name LIKE ? COLLATE NOCASE\n             AND EXISTS (SELECT 1 FROM files f\n                         WHERE f.issue_id = i.id AND f.status='owned' AND f.is_present=1)\n           GROUP BY c.id\n           -- ORDER BY repeats the aggregate: the sqlx type-cast alias\n           -- (\"issue_count!: i64\") isn't a plain column name, so it can't be\n           -- referenced in ORDER BY.\n           ORDER BY COUNT(DISTINCT i.id) DESC\n           LIMIT 20",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "cv_person_id",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_count!: i64",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "issue_count!: i64",
+        "ordinal": 4,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "bb86a2c87fc59b1fa0358ba3f3f334bbbaa2526b8e9a54b6c620f09f3e0fd1cd"
+}

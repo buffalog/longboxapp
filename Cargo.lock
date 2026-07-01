@@ -1291,6 +1291,7 @@ dependencies = [
 name = "longbox-db"
 version = "2.1.0"
 dependencies = [
+ "longbox-comicvine",
  "longbox-core",
  "serde",
  "sqlx",

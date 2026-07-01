@@ -18,12 +18,14 @@ async fn migration_creates_all_tables() {
     assert_eq!(
         names,
         vec![
+            "creators".to_string(),
             "cv_release_cache".to_string(),
             "cv_volume_cache".to_string(),
             "discovered_folders".to_string(),
             "downloader_config".to_string(),
             "files".to_string(),
             "indexer_configs".to_string(),
+            "issue_credits".to_string(),
             "issues".to_string(),
             "library_roots".to_string(),
             "metron_calendar_cache".to_string(),
@@ -58,6 +60,9 @@ async fn migration_creates_all_indexes() {
     assert!(names.contains(&"idx_files_issue".to_string()));
     assert!(names.contains(&"idx_files_status".to_string()));
     assert!(names.contains(&"idx_files_match_method".to_string()));
+    assert!(names.contains(&"idx_creators_name".to_string()));
+    assert!(names.contains(&"idx_issue_credits_creator".to_string()));
+    assert!(names.contains(&"idx_issue_credits_issue".to_string()));
 }
 
 #[tokio::test]
