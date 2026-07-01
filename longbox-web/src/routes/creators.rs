@@ -24,7 +24,7 @@ async fn search_handler(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<CreatorSearchRow>>, ApiError> {
     let q = params.q.trim();
-    if q.len() < 2 {
+    if q.chars().count() < 2 {
         return Err(ApiError::BadRequest {
             message: "query parameter `q` must be at least 2 characters".into(),
         });

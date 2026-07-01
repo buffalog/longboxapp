@@ -164,6 +164,9 @@ where
              AND EXISTS (SELECT 1 FROM files f
                          WHERE f.issue_id = i.id AND f.status='owned' AND f.is_present=1)
            GROUP BY c.id
+           -- ORDER BY repeats the aggregate: the sqlx type-cast alias
+           -- ("issue_count!: i64") isn't a plain column name, so it can't be
+           -- referenced in ORDER BY.
            ORDER BY COUNT(DISTINCT i.id) DESC
            LIMIT 20"#,
         like,
@@ -182,7 +185,11 @@ where
         .collect())
 }
 
-/// Creator detail: name + role facet + series list (owned issues only).
+/// Returns `Some` for ANY existing creator row (the base lookup is not
+/// ownership-gated); `roles` and `series` are owned-issues-only, so a creator
+/// that currently owns nothing returns `Some` with empty facets. `search`
+/// surfaces only creators with an owned issue, so this asymmetry (invisible in
+/// search, empty-but-present on direct fetch) is intentional.
 pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail>> {
     let base = sqlx::query!(
         r#"SELECT id AS "id!: i64", name AS "name!", cv_person_id FROM creators WHERE id = ?"#,
@@ -199,7 +206,11 @@ pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail
            FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id
            WHERE ic.creator_id = ?
              AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)
-           GROUP BY ic.role ORDER BY COUNT(DISTINCT ic.issue_id) DESC"#,
+           GROUP BY ic.role
+           -- ORDER BY repeats the aggregate: the sqlx type-cast alias
+           -- ("count!: i64") isn't a plain column name, so it can't be
+           -- referenced in ORDER BY.
+           ORDER BY COUNT(DISTINCT ic.issue_id) DESC"#,
         id
     )
     .fetch_all(pool)
@@ -217,7 +228,11 @@ pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail
            FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id
            WHERE ic.creator_id = ?
              AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)
-           GROUP BY s.id ORDER BY COUNT(DISTINCT i.id) DESC"#,
+           GROUP BY s.id
+           -- ORDER BY repeats the aggregate: the sqlx type-cast alias
+           -- ("issue_count!: i64") isn't a plain column name, so it can't be
+           -- referenced in ORDER BY.
+           ORDER BY COUNT(DISTINCT i.id) DESC"#,
         id
     )
     .fetch_all(pool)
