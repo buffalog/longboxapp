@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{CvImage, CvIssueFull, CvPublisher, CvVolumeFull, CvVolumeSearchItem};
+use crate::models::{CvImage, CvIssueFull, CvIssueCreditsRaw, CvPublisher, CvVolumeFull, CvVolumeSearchItem};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesSearchResult {
@@ -56,6 +56,34 @@ pub struct CvCalendarItem {
     pub volume_name: String,
     pub cover_url: Option<String>,
     pub site_detail_url: String,
+}
+
+/// One atomic person+role credit on an issue (CV's comma-delimited role
+/// strings are exploded into one of these per role). `cv_person_id` is the
+/// CV person resource id used to dedupe creators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvPersonCredit {
+    pub cv_person_id: i64,
+    pub name: String,
+    pub role: String,
+}
+
+/// Explode a raw per-issue credits payload into atomic `CvPersonCredit`
+/// rows: split each comma-delimited `role` string, trim + lowercase each
+/// role, drop empties. One output entry per person+atomic-role; a person's
+/// order and CV's order are preserved.
+pub(crate) fn project_issue_credits(raw: CvIssueCreditsRaw) -> Vec<CvPersonCredit> {
+    let mut out = Vec::new();
+    for c in raw.person_credits {
+        for role in c.role.split(',') {
+            let role = role.trim().to_lowercase();
+            if role.is_empty() {
+                continue;
+            }
+            out.push(CvPersonCredit { cv_person_id: c.id, name: c.name.clone(), role });
+        }
+    }
+    out
 }
 
 pub(crate) fn project_search_item(item: CvVolumeSearchItem) -> SeriesSearchResult {
@@ -282,6 +310,32 @@ mod tests {
         assert_eq!(projected.site_detail_url, "https://cv/volume/4050-18166/");
         assert!(projected.cover_url.is_none());
         assert_eq!(projected.start_year, Some(2012));
+    }
+}
+
+#[cfg(test)]
+mod credit_tests {
+    use super::*;
+    use crate::models::{CvCreditRaw, CvIssueCreditsRaw};
+
+    #[test]
+    fn splits_comma_delimited_roles_into_atomic_lowercase_rows() {
+        // CV packs multi-role people into one comma-delimited `role` string.
+        let raw = CvIssueCreditsRaw {
+            id: 42,
+            person_credits: vec![
+                CvCreditRaw { id: 97470, name: "Bob Quinn".into(), role: "artist, colorist, cover".into() },
+                CvCreditRaw { id: 130355, name: "Ethan S. Parker".into(), role: "Writer".into() },
+                CvCreditRaw { id: 1, name: "Blank".into(), role: "  ".into() }, // whitespace-only -> dropped
+            ],
+        };
+        let out = project_issue_credits(raw);
+        assert_eq!(out, vec![
+            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "artist".into() },
+            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "colorist".into() },
+            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "cover".into() },
+            CvPersonCredit { cv_person_id: 130355, name: "Ethan S. Parker".into(), role: "writer".into() },
+        ]);
     }
 }
 
