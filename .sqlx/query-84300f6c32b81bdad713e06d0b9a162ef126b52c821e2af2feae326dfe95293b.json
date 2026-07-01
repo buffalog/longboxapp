@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"issue_id!: i64\", s.title AS \"series_name!\",\n                  i.number AS \"issue_number!\", i.cover_date, i.cover_url, ic.role AS \"role!\"\n           FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id\n           WHERE ic.creator_id = ?\n             AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)\n             AND (? IS NULL OR ic.role = ?)\n             AND (? IS NULL OR i.series_id = ?)\n           ORDER BY i.cover_date ASC\n           LIMIT 50 OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "issue_number!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_date",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "role!",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "84300f6c32b81bdad713e06d0b9a162ef126b52c821e2af2feae326dfe95293b"
+}

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.id AS \"id!: i64\", c.name AS \"name!\", c.cv_person_id,\n                  COUNT(DISTINCT i.series_id) AS \"series_count!: i64\",\n                  COUNT(DISTINCT i.id)        AS \"issue_count!: i64\"\n           FROM creators c\n           JOIN issue_credits ic ON ic.creator_id = c.id\n           JOIN issues i         ON i.id = ic.issue_id\n           WHERE c.name LIKE ? COLLATE NOCASE\n             AND EXISTS (SELECT 1 FROM files f\n                         WHERE f.issue_id = i.id AND f.status='owned' AND f.is_present=1)\n           GROUP BY c.id\n           ORDER BY COUNT(DISTINCT i.id) DESC\n           LIMIT 20",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "cv_person_id",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_count!: i64",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "issue_count!: i64",
+        "ordinal": 4,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "fe8f091dc778845f887f1d31549e46e16a3ddfad79dcda4b61fa16f655e6968e"
+}

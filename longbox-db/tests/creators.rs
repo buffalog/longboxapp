@@ -251,3 +251,50 @@ async fn insert_empty_credits_marks_fetched_with_no_rows() {
         .unwrap();
     assert!(fetched, "empty credits (CV NotFound case) must still mark the issue done");
 }
+
+#[tokio::test]
+async fn search_and_detail_count_owned_only() {
+    let pool = fresh_pool().await;
+    let i1 = seed_owned_issue(&pool, 3001).await; // series cv 30010
+    let i2 = seed_owned_issue(&pool, 3002).await; // series cv 30020
+    let remender = vec![CvPersonCredit {
+        cv_person_id: 55,
+        name: "Rick Remender".into(),
+        role: "writer".into(),
+    }];
+    creator_repo::insert_issue_credits(&pool, i1, &remender)
+        .await
+        .unwrap();
+    creator_repo::insert_issue_credits(&pool, i2, &remender)
+        .await
+        .unwrap();
+
+    let hits = creator_repo::search_creators(&pool, "remender").await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "Rick Remender");
+    assert_eq!(hits[0].issue_count, 2);
+    assert_eq!(hits[0].series_count, 2);
+
+    let detail = creator_repo::creator_detail(&pool, hits[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail.roles,
+        vec![creator_repo::RoleCount {
+            role: "writer".into(),
+            count: 2
+        }]
+    );
+    assert_eq!(detail.series.len(), 2);
+
+    let issues = creator_repo::creator_issues(&pool, hits[0].id, None, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(issues.len(), 2);
+    // role filter
+    let none = creator_repo::creator_issues(&pool, hits[0].id, Some("artist"), None, 1)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
