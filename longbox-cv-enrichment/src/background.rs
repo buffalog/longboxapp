@@ -27,7 +27,7 @@ use governor::clock::DefaultClock;
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
-use longbox_comicvine::{ComicVineClient, CvError, CvIssueDetail, CvVolumeDetail, SeriesSearchResult};
+use longbox_comicvine::{ComicVineClient, CvError, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult};
 
 type BackgroundLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
@@ -81,6 +81,16 @@ impl BackgroundCvClient {
     pub async fn fetch_issues(&self, cv_volume_id: i64) -> Result<Vec<CvIssueDetail>, CvError> {
         self.background_gate.until_ready().await;
         self.inner.fetch_issues(cv_volume_id).await
+    }
+
+    /// Background `fetch_issue_credits`. Acquires the background gate,
+    /// then delegates.
+    pub async fn fetch_issue_credits(
+        &self,
+        cv_issue_id: i64,
+    ) -> Result<Vec<CvPersonCredit>, CvError> {
+        self.background_gate.until_ready().await;
+        self.inner.fetch_issue_credits(cv_issue_id).await
     }
 }
 
