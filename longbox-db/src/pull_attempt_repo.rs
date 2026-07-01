@@ -189,11 +189,10 @@ pub async fn delete_all_failed<'e, E>(executor: E) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {
-    let result = sqlx::query!(
-        r#"DELETE FROM pull_attempts WHERE status IN ('failed', 'mismatched')"#
-    )
-    .execute(executor)
-    .await?;
+    let result =
+        sqlx::query!(r#"DELETE FROM pull_attempts WHERE status IN ('failed', 'mismatched')"#)
+            .execute(executor)
+            .await?;
     Ok(result.rows_affected())
 }
 
@@ -201,10 +200,7 @@ where
 /// stale-UI / double-click delete on an already-gone row. Only the
 /// fields the dismiss flow needs (series_id, issue_id) are extracted —
 /// callers chasing the full row should use [`list_for_issue`].
-pub async fn find_series_issue_by_id<'e, E>(
-    executor: E,
-    id: i64,
-) -> Result<Option<(i64, i64)>>
+pub async fn find_series_issue_by_id<'e, E>(executor: E, id: i64) -> Result<Option<(i64, i64)>>
 where
     E: SqliteExecutor<'e>,
 {

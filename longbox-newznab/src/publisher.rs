@@ -15,9 +15,23 @@
 /// Multi-word publishers are listed token-by-token (e.g. "dark", "horse").
 /// Keep entries lowercase — matching happens in normalized (lowercased) space.
 const PUBLISHER_TOKENS: &[&str] = &[
-    "marvel", "dc", "image", "vertigo", "darkhorse", "madcave", "boom",
-    "idw", "dynamite", "aftershock", "ablaze", "ec", "dstlry", "skybound",
-    "wildstorm", "milestone", "blackmask",
+    "marvel",
+    "dc",
+    "image",
+    "vertigo",
+    "darkhorse",
+    "madcave",
+    "boom",
+    "idw",
+    "dynamite",
+    "aftershock",
+    "ablaze",
+    "ec",
+    "dstlry",
+    "skybound",
+    "wildstorm",
+    "milestone",
+    "blackmask",
 ];
 
 /// Remove leading/trailing publisher tokens from a normalized,
@@ -64,7 +78,10 @@ mod tests {
     fn strips_leading_publisher_from_catalog_title() {
         // "DC K.O." normalized is "dc k o"; "EC Cruel Universe" -> "ec cruel universe".
         assert_eq!(strip_publisher_tokens("dc k o"), "k o");
-        assert_eq!(strip_publisher_tokens("ec cruel universe"), "cruel universe");
+        assert_eq!(
+            strip_publisher_tokens("ec cruel universe"),
+            "cruel universe"
+        );
     }
 
     #[test]

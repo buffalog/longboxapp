@@ -303,10 +303,7 @@ async fn upsert_with_cv_fields_preserves_row_id_on_existing_match() {
     assert_eq!(after_upsert.cv_issue_id, Some(5005));
     assert_eq!(after_upsert.title.as_deref(), Some("CV title for #5"));
     assert_eq!(after_upsert.cover_date.as_deref(), Some("2024-01-15"));
-    assert_eq!(
-        after_upsert.summary.as_deref(),
-        Some("CV summary for #5")
-    );
+    assert_eq!(after_upsert.summary.as_deref(), Some("CV summary for #5"));
 }
 
 #[tokio::test]
@@ -442,10 +439,7 @@ async fn upsert_with_cv_fields_handles_fractional_issue_number() {
     .await
     .unwrap();
     assert_eq!(after.id, row.id);
-    assert_eq!(
-        after.title.as_deref(),
-        Some("Promethea Half — refreshed")
-    );
+    assert_eq!(after.title.as_deref(), Some("Promethea Half — refreshed"));
 }
 
 // -------- Bug 4: canonical_number unique index --------
@@ -602,8 +596,14 @@ async fn upsert_with_cv_fields_disagreement_coexists_no_silent_collapse() {
         .unwrap()
         .expect("½ row must still exist");
     assert_eq!(half_after.number, "½");
-    assert!(half_after.cv_issue_id.is_none(), "½ row's cv_issue_id must NOT be clobbered");
-    assert!(half_after.title.is_none(), "½ row's title must NOT be overwritten");
+    assert!(
+        half_after.cv_issue_id.is_none(),
+        "½ row's cv_issue_id must NOT be clobbered"
+    );
+    assert!(
+        half_after.title.is_none(),
+        "½ row's title must NOT be overwritten"
+    );
 
     // The attached file still resolves to the ½ row, not the CV row.
     let file_check = sqlx::query!(

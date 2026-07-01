@@ -7,7 +7,7 @@ use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::error::{excerpt, CvError};
-use crate::models::{CvIssueFull, CvIssueCreditsRaw, CvResponse, CvVolumeFull, CvVolumeSearchItem};
+use crate::models::{CvIssueCreditsRaw, CvIssueFull, CvResponse, CvVolumeFull, CvVolumeSearchItem};
 use crate::projection::{
     project_calendar_item, project_issue, project_issue_credits, project_search_item,
     project_volume, CvCalendarItem, CvIssueDetail, CvPersonCredit, CvVolumeDetail,
@@ -109,12 +109,11 @@ impl CallCounter {
     fn snapshot(&self, limit_per_hour: u32) -> CvRateLimitSnapshot {
         let now = Self::now_unix_secs();
         let start = self.window_started_at.load(Ordering::Acquire);
-        let (count, window_started_at_unix) =
-            if start == 0 || now - start >= Self::WINDOW_SECS {
-                (0, now)
-            } else {
-                (self.count.load(Ordering::Acquire), start)
-            };
+        let (count, window_started_at_unix) = if start == 0 || now - start >= Self::WINDOW_SECS {
+            (0, now)
+        } else {
+            (self.count.load(Ordering::Acquire), start)
+        };
         CvRateLimitSnapshot {
             count,
             limit_per_hour,

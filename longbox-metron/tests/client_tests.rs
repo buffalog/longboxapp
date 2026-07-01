@@ -84,7 +84,11 @@ async fn fetch_issues_happy_path_single_page() {
     assert_eq!(first.series_name, "Absolute Green Lantern");
     assert_eq!(first.series_year_began, 2025);
     assert_eq!(first.store_date.as_deref(), Some("2026-06-03"));
-    assert!(first.cover_url.as_deref().unwrap().contains("static.metron"));
+    assert!(first
+        .cover_url
+        .as_deref()
+        .unwrap()
+        .contains("static.metron"));
     // Critical: list endpoint doesn't carry publisher / series_id / foc.
     assert!(first.publisher.is_none());
     assert!(first.metron_series_id.is_none());
@@ -215,7 +219,11 @@ async fn fetch_issue_detail_carries_publisher_and_series_id_and_foc() {
     assert_eq!(item.publisher.as_deref(), Some("DC Comics"));
     assert_eq!(item.foc_date.as_deref(), Some("2026-05-11"));
     assert!(item.cv_issue_id.is_none(), "forward issue has no CV id yet");
-    assert!(item.site_detail_url.as_deref().unwrap().contains("metron.cloud"));
+    assert!(item
+        .site_detail_url
+        .as_deref()
+        .unwrap()
+        .contains("metron.cloud"));
 }
 
 #[tokio::test]
@@ -390,7 +398,9 @@ async fn http_429_retries_once_then_returns_rate_limited() {
         .await
         .unwrap_err();
     match err {
-        MetronError::RateLimited { retry_after_seconds } => {
+        MetronError::RateLimited {
+            retry_after_seconds,
+        } => {
             assert_eq!(retry_after_seconds, 1);
         }
         other => panic!("expected RateLimited, got {other:?}"),
@@ -412,7 +422,10 @@ async fn malformed_json_response_returns_malformed_error() {
         .await
         .unwrap_err();
     match err {
-        MetronError::Malformed { message, raw_excerpt } => {
+        MetronError::Malformed {
+            message,
+            raw_excerpt,
+        } => {
             assert!(message.contains("JSON parse error"), "msg={message}");
             assert!(raw_excerpt.unwrap().contains("not json"));
         }
@@ -431,9 +444,8 @@ async fn requests_carry_basic_auth_header() {
         .and(path("/issue/"))
         .and(wiremock::matchers::header_exists("authorization"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{"count":0,"next":null,"previous":null,"results":[]}"#,
-            ),
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"count":0,"next":null,"previous":null,"results":[]}"#),
         )
         .mount(&server)
         .await;

@@ -693,16 +693,14 @@ async fn purge_absent_ghosts_drops_absent_row_at_other_path() {
     .await
     .unwrap();
 
-    let purged = file_repo::purge_absent_ghosts_for_issue(
-        &pool,
-        library_root_id,
-        issue_id,
-        kept,
-    )
-    .await
-    .unwrap();
+    let purged = file_repo::purge_absent_ghosts_for_issue(&pool, library_root_id, issue_id, kept)
+        .await
+        .unwrap();
     assert_eq!(purged, 1);
-    assert!(file_repo::find_by_id(&pool, ghost.id).await.unwrap().is_none());
+    assert!(file_repo::find_by_id(&pool, ghost.id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -734,7 +732,10 @@ async fn purge_absent_ghosts_keeps_present_row_at_other_path() {
     .await
     .unwrap();
     assert_eq!(purged, 0);
-    assert!(file_repo::find_by_id(&pool, other_copy.id).await.unwrap().is_some());
+    assert!(file_repo::find_by_id(&pool, other_copy.id)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -753,16 +754,15 @@ async fn purge_absent_ghosts_keeps_kept_path_row() {
     .unwrap();
     flip_absent(&pool, kept.id).await;
 
-    let purged = file_repo::purge_absent_ghosts_for_issue(
-        &pool,
-        library_root_id,
-        issue_id,
-        kept_path,
-    )
-    .await
-    .unwrap();
+    let purged =
+        file_repo::purge_absent_ghosts_for_issue(&pool, library_root_id, issue_id, kept_path)
+            .await
+            .unwrap();
     assert_eq!(purged, 0);
-    assert!(file_repo::find_by_id(&pool, kept.id).await.unwrap().is_some());
+    assert!(file_repo::find_by_id(&pool, kept.id)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -783,7 +783,12 @@ async fn purge_absent_ghosts_scoped_to_library_root() {
 
     let foreign = file_repo::insert(
         &pool,
-        new_file(other_root_id, "_unsorted/saga 1.cbr", "owned", Some(issue_id)),
+        new_file(
+            other_root_id,
+            "_unsorted/saga 1.cbr",
+            "owned",
+            Some(issue_id),
+        ),
     )
     .await
     .unwrap();
@@ -798,7 +803,10 @@ async fn purge_absent_ghosts_scoped_to_library_root() {
     .await
     .unwrap();
     assert_eq!(purged, 0);
-    assert!(file_repo::find_by_id(&pool, foreign.id).await.unwrap().is_some());
+    assert!(file_repo::find_by_id(&pool, foreign.id)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

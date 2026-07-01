@@ -129,10 +129,7 @@ where
 /// → `sweep_single_issue`) has its own load-bearing in-flight
 /// guard, so handing it an already-in-flight issue is a no-op
 /// rather than a duplicate submit.
-pub async fn list_missing_for_series<'e, E>(
-    executor: E,
-    series_id: i64,
-) -> Result<Vec<IssueRow>>
+pub async fn list_missing_for_series<'e, E>(executor: E, series_id: i64) -> Result<Vec<IssueRow>>
 where
     E: SqliteExecutor<'e>,
 {

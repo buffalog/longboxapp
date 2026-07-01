@@ -198,9 +198,7 @@ struct SearchAllMissingResponse {
 /// will produce a sustained burst of indexer hits. Same fanout pattern
 /// the per-series endpoint has had since A.8 — this just scales it to
 /// the whole catalog.
-async fn search_all_missing(
-    State(state): State<AppState>,
-) -> Result<Response, ApiError> {
+async fn search_all_missing(State(state): State<AppState>) -> Result<Response, ApiError> {
     // Same "missing" predicate as routes/missing.rs and stats.rs — no
     // owned, present file matches this issue. We only need
     // (series_id, issue_id, cover_date); skip the join with the

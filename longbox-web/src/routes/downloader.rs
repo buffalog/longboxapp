@@ -213,8 +213,7 @@ async fn notify(State(state): State<AppState>, Json(body): Json<NotifyBody>) -> 
         return StatusCode::OK;
     }
 
-    let attempt = match pull_attempt_repo::find_submitted_by_handle(&state.db, &body.nzo_id).await
-    {
+    let attempt = match pull_attempt_repo::find_submitted_by_handle(&state.db, &body.nzo_id).await {
         Ok(Some(a)) => a,
         Ok(None) => {
             tracing::debug!(
@@ -242,9 +241,7 @@ async fn notify(State(state): State<AppState>, Json(body): Json<NotifyBody>) -> 
         body.fail_msg.clone()
     };
 
-    if let Err(e) =
-        pull_attempt_repo::record_failure(&state.db, attempt.id, &error_message).await
-    {
+    if let Err(e) = pull_attempt_repo::record_failure(&state.db, attempt.id, &error_message).await {
         tracing::warn!(
             target: "longbox_web",
             attempt_id = attempt.id,

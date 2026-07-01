@@ -673,10 +673,7 @@ async fn preflight_passes_on_populated_library_root() {
     let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
     // A populated dir + empty catalog is a happy case — preflight
     // passes, scan runs end-to-end (every file lands as unmatched).
-    let report = scanner_for(pool)
-        .scan_full(library_root_id)
-        .await
-        .unwrap();
+    let report = scanner_for(pool).scan_full(library_root_id).await.unwrap();
     assert!(report.files_seen > 0);
 }
 
@@ -740,9 +737,7 @@ async fn scan_full_skipped_when_library_root_empty_preserves_all_invariants() {
 
     // Invariant 2: no scan_run row recorded — the scan didn't happen
     // as far as the catalog is concerned.
-    let runs = scan_run_repo::list_recent(&pool, 10, &[])
-        .await
-        .unwrap();
+    let runs = scan_run_repo::list_recent(&pool, 10, &[]).await.unwrap();
     assert_eq!(
         runs.len(),
         0,
@@ -849,7 +844,10 @@ async fn rescan_unmatched_reads_live_match_threshold() {
         .unwrap();
     scanner.scan_full(library_root_id).await.unwrap();
     let path = "Walking Dead (2003)/Walking Dead 001 (2003).cbz";
-    assert_eq!(find_file(&pool, library_root_id, path).await.status, "needs_review");
+    assert_eq!(
+        find_file(&pool, library_root_id, path).await.status,
+        "needs_review"
+    );
 
     // The user drops the threshold, runs a rescan-unmatched (NOT a full
     // scan). The rescan must consult the live row and promote.
@@ -882,8 +880,6 @@ async fn rescan_unmatched_skipped_when_library_root_empty() {
         matches!(err, ScanError::PreflightFailed { .. }),
         "expected PreflightFailed, got {err:?}"
     );
-    let runs = scan_run_repo::list_recent(&pool, 10, &[])
-        .await
-        .unwrap();
+    let runs = scan_run_repo::list_recent(&pool, 10, &[]).await.unwrap();
     assert_eq!(runs.len(), 0, "rescan_unmatched must not record a scan_run");
 }

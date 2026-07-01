@@ -4,7 +4,9 @@
 mod common;
 
 use common::{build_fixture_library, fresh_pool, seed_library_root, seed_walking_dead, write_cbz};
-use longbox_db::{discovered_folders_repo, pull_list_repo, series_repo, NewPullEntry, PhantomSeries};
+use longbox_db::{
+    discovered_folders_repo, pull_list_repo, series_repo, NewPullEntry, PhantomSeries,
+};
 use longbox_scanner::{Scanner, ScannerConfig};
 use tempfile::TempDir;
 

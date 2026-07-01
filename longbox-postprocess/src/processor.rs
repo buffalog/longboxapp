@@ -105,9 +105,7 @@ pub async fn process_one(
     // and the scene-stripped filename may be ambiguous; the folder
     // is the user's authoritative signal because it mirrors the
     // search query LongBox itself just issued.
-    if let Some(folder_issue_id) =
-        try_folder_match(source, db, &patterns, owned_threshold).await?
-    {
+    if let Some(folder_issue_id) = try_folder_match(source, db, &patterns, owned_threshold).await? {
         let outcome = import_as_owned(
             source,
             folder_issue_id,
@@ -384,8 +382,7 @@ async fn try_folder_match(
     // shape, not provenance. Same trick the newznab pull engine
     // uses for indexer-returned search-result titles.
     let synthetic = format!("{folder_name}.cbz");
-    let Some(folder_parse) =
-        longbox_core::parse_filename_with_normalization(&synthetic, patterns)
+    let Some(folder_parse) = longbox_core::parse_filename_with_normalization(&synthetic, patterns)
     else {
         return Ok(None);
     };
@@ -620,13 +617,9 @@ async fn import_as_owned(
     // sub-folder of the library, cataloged by the scanner, then moved
     // here by Phase B — without which the absent row resurfaces as a
     // duplicate `needs_review` on the next match sweep.
-    let ghosts = file_repo::purge_absent_ghosts_for_issue(
-        db,
-        library_root_id,
-        issue.id,
-        &path_relative,
-    )
-    .await?;
+    let ghosts =
+        file_repo::purge_absent_ghosts_for_issue(db, library_root_id, issue.id, &path_relative)
+            .await?;
     if ghosts > 0 {
         tracing::info!(
             target: "longbox_postprocess",

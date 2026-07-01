@@ -22,12 +22,14 @@ pub mod similarity;
 pub use comicinfo::{extract_cv_issue_id_from_url, extract_metron_issue_id_from_url, ComicInfo};
 pub use comicinfo_writer::{ComicInfoMetadata, CoverDate};
 pub use error::{CoreError, Result};
-pub use metroninfo_writer::MetronInfoMetadata;
 pub use file::{classify_status, FileStatus, LocalFile, MatchMethod};
-pub use filename::{normalize_dotted_basename, parse_with_normalization, ParsedFilename, ParsingPattern};
+pub use filename::{
+    normalize_dotted_basename, parse_with_normalization, ParsedFilename, ParsingPattern,
+};
 pub use issue::{Issue, IssueNumber};
 pub use library_path::LibraryPath;
 pub use matcher::{match_file, Candidate, MatchResult};
+pub use metroninfo_writer::MetronInfoMetadata;
 pub use normalize::normalize_title;
 pub use series::Series;
 

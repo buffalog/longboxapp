@@ -134,7 +134,7 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
     creator_repo::insert_issue_credits(&pool, already, &[])
         .await
         .unwrap(); // fetched -> excluded
-    // owned but NO cv_issue_id -> excluded
+                   // owned but NO cv_issue_id -> excluded
     let sid = series_repo::insert(
         &pool,
         NewSeries {
@@ -167,9 +167,14 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
     .await
     .unwrap()
     .id;
-    let root = library_root_repo::insert(&pool, NewLibraryRoot { path: "/nocv".into() })
-        .await
-        .unwrap();
+    let root = library_root_repo::insert(
+        &pool,
+        NewLibraryRoot {
+            path: "/nocv".into(),
+        },
+    )
+    .await
+    .unwrap();
     file_repo::insert(
         &pool,
         NewFile {
@@ -226,9 +231,15 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
     .unwrap();
     // No file inserted for this issue — no owned file means the EXISTS predicate fails.
 
-    let work = creator_repo::list_issues_needing_credits(&pool, 50).await.unwrap();
+    let work = creator_repo::list_issues_needing_credits(&pool, 50)
+        .await
+        .unwrap();
     let ids: Vec<i64> = work.iter().map(|w| w.issue_id).collect();
-    assert_eq!(ids, vec![owned], "only the owned, cv-keyed, unfetched issue");
+    assert_eq!(
+        ids,
+        vec![owned],
+        "only the owned, cv-keyed, unfetched issue"
+    );
     assert_eq!(work[0].cv_issue_id, 2001);
 }
 
@@ -249,7 +260,10 @@ async fn insert_empty_credits_marks_fetched_with_no_rows() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(fetched, "empty credits (CV NotFound case) must still mark the issue done");
+    assert!(
+        fetched,
+        "empty credits (CV NotFound case) must still mark the issue done"
+    );
 }
 
 #[tokio::test]
@@ -269,7 +283,9 @@ async fn search_and_detail_count_owned_only() {
         .await
         .unwrap();
 
-    let hits = creator_repo::search_creators(&pool, "remender").await.unwrap();
+    let hits = creator_repo::search_creators(&pool, "remender")
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].name, "Rick Remender");
     assert_eq!(hits[0].issue_count, 2);

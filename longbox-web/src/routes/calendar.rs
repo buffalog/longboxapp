@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::stream::{self, StreamExt};
 use longbox_comicvine::CvCalendarItem;
 use longbox_core::normalize_title;
-use futures::stream::{self, StreamExt};
 use longbox_db::{
     cv_volume_cache_repo, metron_calendar_cache_repo, pull_list_repo, release_cache_repo,
     series_repo, settings_repo, NewPullEntry, NewReleaseCacheEntry,
@@ -192,11 +192,13 @@ async fn calendar(
 
     // UTC today, matching current_ship_week() below.
     let today_utc = OffsetDateTime::now_utc().date();
-    let from_date =
-        time::Date::parse(&q.from, &time::format_description::well_known::Iso8601::DATE)
-            .map_err(|_| ApiError::BadRequest {
-                message: "`from` must be a valid YYYY-MM-DD date".into(),
-            })?;
+    let from_date = time::Date::parse(
+        &q.from,
+        &time::format_description::well_known::Iso8601::DATE,
+    )
+    .map_err(|_| ApiError::BadRequest {
+        message: "`from` must be a valid YYYY-MM-DD date".into(),
+    })?;
 
     if from_date > today_utc {
         // Forward-week path (Item A v2).
@@ -544,7 +546,9 @@ async fn resolve_cv_id_via_metron(
     let finished = detail.finished;
     let cv_id = detail.cv_id.ok_or_else(|| ApiError::Unprocessable {
         code: "metron_series_not_in_cv",
-        message: "This series isn't yet indexed by ComicVine — try again after the next release cycle.".into(),
+        message:
+            "This series isn't yet indexed by ComicVine — try again after the next release cycle."
+                .into(),
     })?;
     Ok((cv_id, Some(finished)))
 }
@@ -777,11 +781,12 @@ async fn enrich(
     // cv_volume_id -> publisher, for every row in cv_volume_cache.
     // Rows queued but not yet filled carry publisher = None and read
     // through to "Unknown Publisher" client-side.
-    let cache_pub: HashMap<i64, Option<String>> = cv_volume_cache_repo::list_all_publishers(&state.db)
-        .await?
-        .into_iter()
-        .map(|e| (e.cv_volume_id, e.publisher))
-        .collect();
+    let cache_pub: HashMap<i64, Option<String>> =
+        cv_volume_cache_repo::list_all_publishers(&state.db)
+            .await?
+            .into_iter()
+            .map(|e| (e.cv_volume_id, e.publisher))
+            .collect();
     let on_list: HashSet<i64> = pull_list_repo::list_all(&state.db)
         .await?
         .into_iter()
@@ -875,12 +880,8 @@ async fn load_metron_calendar(
     from: &str,
     to: &str,
 ) -> Result<Vec<CalendarRow>, ApiError> {
-    let ttl_hours: i64 = settings_repo::get_or_default(
-        &state.db,
-        "metron_calendar_cache_ttl_hours",
-        24,
-    )
-    .await?;
+    let ttl_hours: i64 =
+        settings_repo::get_or_default(&state.db, "metron_calendar_cache_ttl_hours", 24).await?;
 
     // Cache lookup — fast path for repeat loads inside the TTL window.
     if let Some(row) = metron_calendar_cache_repo::get(&state.db, from, to).await? {

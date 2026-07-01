@@ -37,6 +37,9 @@ pub use file_repo::{FileRow, FileUpdate, NewFile};
 pub use indexer_config_repo::{IndexerConfigRow, IndexerConfigUpdate, NewIndexerConfig};
 pub use issue_repo::{IssueRow, IssueUpdate, NewIssue};
 pub use library_root_repo::{LibraryRootRow, NewLibraryRoot};
+pub use metron_calendar_cache_repo::{MetronCalendarCacheRow, NewMetronCalendarCacheEntry};
+pub use opds_repo::{DownloadFile, OpdsIssue, PublisherEntry};
+pub use opds_users_repo::{OpdsUserAuth, OpdsUserRow};
 pub use parsing_pattern_repo::{NewParsingPattern, ParsingPatternRow};
 pub use pool::open;
 pub use publisher_filter_repo::{
@@ -44,9 +47,6 @@ pub use publisher_filter_repo::{
 };
 pub use pull_attempt_repo::{FailedPull, NewPullAttempt, PullAttemptRow};
 pub use pull_list_repo::{NewPullEntry, PullListRow, PullListWithSeries};
-pub use metron_calendar_cache_repo::{MetronCalendarCacheRow, NewMetronCalendarCacheEntry};
-pub use opds_repo::{DownloadFile, OpdsIssue, PublisherEntry};
-pub use opds_users_repo::{OpdsUserAuth, OpdsUserRow};
 pub use release_cache_repo::{NewReleaseCacheEntry, ReleaseCacheRow};
 pub use webhook_config_repo::{NewWebhookConfig, WebhookConfigRow, WebhookConfigUpdate};
 

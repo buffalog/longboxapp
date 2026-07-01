@@ -61,12 +61,9 @@ impl EnrichmentConfig {
         let dominant_gap: f64 =
             settings_repo::get_or_default(db, settings_repo::KEY_CV_ENRICHMENT_DOMINANT_GAP, 0.20)
                 .await?;
-        let cooldown_days: i64 = settings_repo::get_or_default(
-            db,
-            settings_repo::KEY_CV_ENRICHMENT_COOLDOWN_DAYS,
-            7,
-        )
-        .await?;
+        let cooldown_days: i64 =
+            settings_repo::get_or_default(db, settings_repo::KEY_CV_ENRICHMENT_COOLDOWN_DAYS, 7)
+                .await?;
         let request_interval_seconds: u64 = settings_repo::get_or_default(
             db,
             settings_repo::KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS,
@@ -80,12 +77,8 @@ impl EnrichmentConfig {
         // worker runs against a fresh deploy. The toggle is
         // separate from the keys above so 6c.3 can flip it
         // independently of tuning thresholds.
-        let first_run_sample_mode: bool = settings_repo::get_or_default(
-            db,
-            "cv_enrichment_first_run_sample_mode",
-            true,
-        )
-        .await?;
+        let first_run_sample_mode: bool =
+            settings_repo::get_or_default(db, "cv_enrichment_first_run_sample_mode", true).await?;
         let first_run_easy_quota: i64 =
             settings_repo::get_or_default(db, "cv_enrichment_first_run_easy_quota", 10).await?;
         let first_run_discipline_quota: i64 =

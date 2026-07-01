@@ -20,9 +20,13 @@ async fn configure_opds(db: &longbox_db::Pool) {
     settings_repo::set(db, settings_repo::KEY_OPDS_ENABLED, "true")
         .await
         .unwrap();
-    opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
-        .await
-        .unwrap();
+    opds_users_repo::create(
+        db,
+        USERNAME,
+        &longbox_opds::hash_password(PASSWORD).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 fn get_opds(auth: Option<&str>) -> Request<Body> {
@@ -42,7 +46,9 @@ fn basic(user: &str, pass: &str) -> String {
 async fn disabled_by_default_returns_503() {
     let app = build_test_app().await;
     // Migration seeds opds_enabled='false'; no configuration done.
-    let resp = app.request(get_opds(Some(&basic(USERNAME, PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic(USERNAME, PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -54,7 +60,9 @@ async fn enabled_with_no_users_returns_401() {
         .unwrap();
     // Enabled but no accounts exist: a credentialed request is unauthorized,
     // not 503 (the toggle is the only 503 gate now).
-    let resp = app.request(get_opds(Some(&basic(USERNAME, PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic(USERNAME, PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -80,7 +88,9 @@ async fn correct_basic_credentials_pass_and_stamp_last_seen() {
         .last_seen_at
         .is_none());
 
-    let resp = app.request(get_opds(Some(&basic(USERNAME, PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic(USERNAME, PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // A successful auth stamps last_seen_at.
@@ -93,7 +103,9 @@ async fn correct_basic_credentials_pass_and_stamp_last_seen() {
 async fn username_is_case_insensitive() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
-    let resp = app.request(get_opds(Some(&basic("READER", PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic("READER", PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -117,7 +129,9 @@ async fn wrong_password_returns_401() {
 async fn unknown_username_returns_401() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
-    let resp = app.request(get_opds(Some(&basic("intruder", PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic("intruder", PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -129,6 +143,8 @@ async fn disabled_account_returns_401() {
     opds_users_repo::set_enabled(&app.state.db, id, false)
         .await
         .unwrap();
-    let resp = app.request(get_opds(Some(&basic(USERNAME, PASSWORD)))).await;
+    let resp = app
+        .request(get_opds(Some(&basic(USERNAME, PASSWORD))))
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

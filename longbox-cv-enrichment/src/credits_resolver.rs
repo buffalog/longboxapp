@@ -81,13 +81,28 @@ mod tests {
     #[test]
     fn is_terminal_classifies_correctly() {
         assert!(is_terminal(&CvError::NotFound));
-        assert!(is_terminal(&CvError::Http { status: 404, body: String::new() }));
-        assert!(is_terminal(&CvError::Http { status: 400, body: String::new() }));
-        assert!(is_terminal(&CvError::Malformed { message: "bad".into(), raw_excerpt: None }));
+        assert!(is_terminal(&CvError::Http {
+            status: 404,
+            body: String::new()
+        }));
+        assert!(is_terminal(&CvError::Http {
+            status: 400,
+            body: String::new()
+        }));
+        assert!(is_terminal(&CvError::Malformed {
+            message: "bad".into(),
+            raw_excerpt: None
+        }));
         // 429 is rate-limit — transient, not terminal.
-        assert!(!is_terminal(&CvError::Http { status: 429, body: String::new() }));
+        assert!(!is_terminal(&CvError::Http {
+            status: 429,
+            body: String::new()
+        }));
         // 5xx — transient.
-        assert!(!is_terminal(&CvError::Http { status: 500, body: String::new() }));
+        assert!(!is_terminal(&CvError::Http {
+            status: 500,
+            body: String::new()
+        }));
         // Timeout — transient.
         assert!(!is_terminal(&CvError::Timeout));
     }

@@ -123,13 +123,15 @@ pub async fn cover(
 /// Fetch the cover bytes from the CDN, mapping transport/status failures to
 /// a 502.
 async fn fetch_cover(url: &str) -> Result<Vec<u8>, ApiError> {
-    let resp = http_client().get(url).send().await.map_err(|err| {
-        ApiError::Upstream {
+    let resp = http_client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| ApiError::Upstream {
             service: "cover_cdn",
             status: 502,
             message: format!("cover fetch failed: {err}"),
-        }
-    })?;
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -187,7 +189,10 @@ mod tests {
 
     #[test]
     fn accepts_normal_cdn_urls() {
-        assert!(is_safe_cover_url("https://comicvine.gamespot.com/a/uploads/x.jpg", false));
+        assert!(is_safe_cover_url(
+            "https://comicvine.gamespot.com/a/uploads/x.jpg",
+            false
+        ));
         assert!(is_safe_cover_url("http://cdn.example.com/x.jpg", false));
         // Public IP literal is fine.
         assert!(is_safe_cover_url("https://8.8.8.8/x.jpg", false));
@@ -205,7 +210,10 @@ mod tests {
     #[test]
     fn rejects_internal_ip_literals() {
         assert!(!is_safe_cover_url("http://127.0.0.1/x.jpg", false)); // loopback
-        assert!(!is_safe_cover_url("http://169.254.169.254/latest/meta-data", false)); // link-local
+        assert!(!is_safe_cover_url(
+            "http://169.254.169.254/latest/meta-data",
+            false
+        )); // link-local
         assert!(!is_safe_cover_url("http://10.0.0.5/x.jpg", false)); // private
         assert!(!is_safe_cover_url("http://192.168.1.1/x.jpg", false)); // private
         assert!(!is_safe_cover_url("http://[::1]/x.jpg", false)); // v6 loopback

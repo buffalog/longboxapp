@@ -173,9 +173,11 @@ pub async fn find_release(
     issue: &str,
     year: Option<i32>,
 ) -> Result<Option<Release>, NewznabError> {
-    Ok(find_release_excluding(indexers, series, issue, year, &[], None)
-        .await?
-        .map(|(_indexer, release)| release))
+    Ok(
+        find_release_excluding(indexers, series, issue, year, &[], None)
+            .await?
+            .map(|(_indexer, release)| release),
+    )
 }
 
 /// [`find_release`] with retry-exclusion: any release whose `guid` is
@@ -218,7 +220,8 @@ pub async fn find_release_excluding(
     for indexer in ordered {
         let effective_maxage =
             crate::query::effective_maxage_days(i64::from(indexer.maxage_days), cover_date);
-        match search_one_indexer(&client, indexer, series, issue, &[], Some(effective_maxage)).await {
+        match search_one_indexer(&client, indexer, series, issue, &[], Some(effective_maxage)).await
+        {
             Ok(results) => {
                 let kept: Vec<Release> = results
                     .into_iter()
@@ -317,15 +320,11 @@ pub async fn find_release_excluding_filtered(
     // `effective_maxage_days` keeps the configured floor for fresh
     // issues and automatically extends for older ones.
     let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
-        futures::future::join_all(
-            ordered
-                .iter()
-                .map(|idx| {
-                    let effective_maxage =
-                        crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
-                    search_one_indexer(&client, idx, series, issue, aliases, Some(effective_maxage))
-                }),
-        )
+        futures::future::join_all(ordered.iter().map(|idx| {
+            let effective_maxage =
+                crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
+            search_one_indexer(&client, idx, series, issue, aliases, Some(effective_maxage))
+        }))
         .await;
 
     let mut all_kept: Vec<Release> = Vec::new();
@@ -437,14 +436,13 @@ pub async fn search_all_indexers(
     }
 
     let client = http_client();
-    let per_indexer: Vec<Result<Vec<Release>, IndexerError>> = futures::future::join_all(
-        indexers.iter().map(|idx| {
+    let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
+        futures::future::join_all(indexers.iter().map(|idx| {
             let effective_maxage =
                 crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
             search_with(&client, idx, query, Some(effective_maxage))
-        }),
-    )
-    .await;
+        }))
+        .await;
 
     let mut outcome = SearchAllOutcome::default();
     for (idx, result) in indexers.iter().zip(per_indexer) {

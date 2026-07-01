@@ -178,7 +178,10 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         Arc::clone(&cv_arc),
         std::path::PathBuf::from(&configured),
     );
-    longbox_cv_enrichment::credits_resolver::spawn_credits_resolver(db.clone(), Arc::clone(&cv_arc));
+    longbox_cv_enrichment::credits_resolver::spawn_credits_resolver(
+        db.clone(),
+        Arc::clone(&cv_arc),
+    );
 
     // 11. Metron client (Item A v2). Kill switch is the construction
     //     gate: `metron_enabled = false` (the migration default) skips
@@ -251,22 +254,17 @@ fn spawn_wal_checkpoint(db: longbox_db::Pool) {
     use longbox_db::settings_repo;
     tokio::spawn(async move {
         loop {
-            let hours: i64 = settings_repo::get_or_default(
-                &db,
-                settings_repo::KEY_WAL_CHECKPOINT_HOURS,
-                6_i64,
-            )
-            .await
-            .unwrap_or(6);
+            let hours: i64 =
+                settings_repo::get_or_default(&db, settings_repo::KEY_WAL_CHECKPOINT_HOURS, 6_i64)
+                    .await
+                    .unwrap_or(6);
             if hours <= 0 {
                 // Disabled — long-sleep so a tune (settings flip back
                 // to a positive number) is picked up within minutes.
                 tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                 continue;
             }
-            let sleep_secs = u64::try_from(hours)
-                .unwrap_or(6)
-                .saturating_mul(3600);
+            let sleep_secs = u64::try_from(hours).unwrap_or(6).saturating_mul(3600);
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
 
             // PRAGMA wal_checkpoint returns one row: (busy, log,
@@ -382,13 +380,10 @@ async fn start_phase_b(
     // Poll interval from the settings table. get_or_default falls back
     // to 30 on a missing row or an unparseable value — defensive enough
     // that a typo in the row can't kill Phase B.
-    let poll_interval_seconds: u64 = settings_repo::get_or_default(
-        db,
-        settings_repo::KEY_PHASE_B_POLL_INTERVAL_SECONDS,
-        30u64,
-    )
-    .await
-    .unwrap_or(30);
+    let poll_interval_seconds: u64 =
+        settings_repo::get_or_default(db, settings_repo::KEY_PHASE_B_POLL_INTERVAL_SECONDS, 30u64)
+            .await
+            .unwrap_or(30);
     let postprocess_config = longbox_postprocess::PostprocessConfig {
         watch_path: watch_path.clone(),
         library_root,
@@ -417,7 +412,10 @@ mod tests {
         // circuits before any config touch. Pass deliberately-invalid
         // credentials to prove they're never used.
         let result = build_metron_client(false, Some("user"), Some("pass"));
-        assert!(result.is_none(), "disabled kill switch must collapse to None");
+        assert!(
+            result.is_none(),
+            "disabled kill switch must collapse to None"
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{CvImage, CvIssueFull, CvIssueCreditsRaw, CvPublisher, CvVolumeFull, CvVolumeSearchItem};
+use crate::models::{
+    CvImage, CvIssueCreditsRaw, CvIssueFull, CvPublisher, CvVolumeFull, CvVolumeSearchItem,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesSearchResult {
@@ -80,7 +82,11 @@ pub(crate) fn project_issue_credits(raw: CvIssueCreditsRaw) -> Vec<CvPersonCredi
             if role.is_empty() {
                 continue;
             }
-            out.push(CvPersonCredit { cv_person_id: c.id, name: c.name.clone(), role });
+            out.push(CvPersonCredit {
+                cv_person_id: c.id,
+                name: c.name.clone(),
+                role,
+            });
         }
     }
     out
@@ -323,18 +329,49 @@ mod credit_tests {
         // CV packs multi-role people into one comma-delimited `role` string.
         let raw = CvIssueCreditsRaw {
             person_credits: vec![
-                CvCreditRaw { id: 97470, name: "Bob Quinn".into(), role: "artist, colorist, cover".into() },
-                CvCreditRaw { id: 130355, name: "Ethan S. Parker".into(), role: "Writer".into() },
-                CvCreditRaw { id: 1, name: "Blank".into(), role: "  ".into() }, // whitespace-only -> dropped
+                CvCreditRaw {
+                    id: 97470,
+                    name: "Bob Quinn".into(),
+                    role: "artist, colorist, cover".into(),
+                },
+                CvCreditRaw {
+                    id: 130355,
+                    name: "Ethan S. Parker".into(),
+                    role: "Writer".into(),
+                },
+                CvCreditRaw {
+                    id: 1,
+                    name: "Blank".into(),
+                    role: "  ".into(),
+                }, // whitespace-only -> dropped
             ],
         };
         let out = project_issue_credits(raw);
-        assert_eq!(out, vec![
-            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "artist".into() },
-            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "colorist".into() },
-            CvPersonCredit { cv_person_id: 97470, name: "Bob Quinn".into(), role: "cover".into() },
-            CvPersonCredit { cv_person_id: 130355, name: "Ethan S. Parker".into(), role: "writer".into() },
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                CvPersonCredit {
+                    cv_person_id: 97470,
+                    name: "Bob Quinn".into(),
+                    role: "artist".into()
+                },
+                CvPersonCredit {
+                    cv_person_id: 97470,
+                    name: "Bob Quinn".into(),
+                    role: "colorist".into()
+                },
+                CvPersonCredit {
+                    cv_person_id: 97470,
+                    name: "Bob Quinn".into(),
+                    role: "cover".into()
+                },
+                CvPersonCredit {
+                    cv_person_id: 130355,
+                    name: "Ethan S. Parker".into(),
+                    role: "writer".into()
+                },
+            ]
+        );
     }
 }
 

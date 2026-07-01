@@ -2,7 +2,9 @@ use std::future::IntoFuture;
 use std::process::ExitCode;
 
 use longbox_db::scan_run_repo;
-use longbox_web::{bootstrap_run, build_opds_router, build_router, config::AppConfig, tracing_setup};
+use longbox_web::{
+    bootstrap_run, build_opds_router, build_router, config::AppConfig, tracing_setup,
+};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 

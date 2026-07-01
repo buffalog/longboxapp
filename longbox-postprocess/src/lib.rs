@@ -560,58 +560,58 @@ fn spawn_watcher(
     let poll_config = notify::Config::default().with_poll_interval(poll_interval);
     let mut watcher = notify::PollWatcher::new(
         move |res: notify::Result<notify::Event>| {
-        let event = match res {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(
-                    target: "longbox_postprocess",
-                    error = %e,
-                    "phase_b.watcher_event_error"
-                );
-                return;
-            }
-        };
-
-        // Eviction first: a Remove/Rename-From for a path that's in the
-        // pending-intervention cache must clear that entry, even if
-        // skip::should_skip would filter the path out of processing.
-        // The cache is a per-source-path map; eviction is keyed on the
-        // path string, not on whether it's currently CBZ-shaped.
-        for path in eviction_paths_from_event(&event) {
-            cache.remove_by_source_path(&path);
-        }
-
-        for path in paths_from_event(&event) {
-            if let Some(reason) = skip::should_skip(&path) {
-                tracing::debug!(
-                    target: "longbox_postprocess",
-                    path = %path.display(),
-                    reason = ?reason,
-                    "phase_b.skipped (watcher)"
-                );
-                continue;
-            }
-            match tx_for_cb.try_send(path.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
+            let event = match res {
+                Ok(e) => e,
+                Err(e) => {
                     tracing::warn!(
+                        target: "longbox_postprocess",
+                        error = %e,
+                        "phase_b.watcher_event_error"
+                    );
+                    return;
+                }
+            };
+
+            // Eviction first: a Remove/Rename-From for a path that's in the
+            // pending-intervention cache must clear that entry, even if
+            // skip::should_skip would filter the path out of processing.
+            // The cache is a per-source-path map; eviction is keyed on the
+            // path string, not on whether it's currently CBZ-shaped.
+            for path in eviction_paths_from_event(&event) {
+                cache.remove_by_source_path(&path);
+            }
+
+            for path in paths_from_event(&event) {
+                if let Some(reason) = skip::should_skip(&path) {
+                    tracing::debug!(
                         target: "longbox_postprocess",
                         path = %path.display(),
-                        "phase_b.channel_full (event dropped — consumer is slow)"
+                        reason = ?reason,
+                        "phase_b.skipped (watcher)"
                     );
+                    continue;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    // Consumer task has exited; watcher is irrelevant.
-                    // No point logging on every subsequent event; it
-                    // would spam. One log here and the watcher will
-                    // keep firing harmlessly until the process exits.
-                    tracing::warn!(
-                        target: "longbox_postprocess",
-                        "phase_b.consumer_closed (event dropped)"
-                    );
+                match tx_for_cb.try_send(path.clone()) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "longbox_postprocess",
+                            path = %path.display(),
+                            "phase_b.channel_full (event dropped — consumer is slow)"
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Consumer task has exited; watcher is irrelevant.
+                        // No point logging on every subsequent event; it
+                        // would spam. One log here and the watcher will
+                        // keep firing harmlessly until the process exits.
+                        tracing::warn!(
+                            target: "longbox_postprocess",
+                            "phase_b.consumer_closed (event dropped)"
+                        );
+                    }
                 }
             }
-        }
         },
         poll_config,
     )?;
@@ -1020,7 +1020,11 @@ mod tests {
             },
         );
         let snap = cache.snapshot();
-        assert_eq!(snap.len(), 1, "genuine Failed with on-disk source must push");
+        assert_eq!(
+            snap.len(),
+            1,
+            "genuine Failed with on-disk source must push"
+        );
         assert!(matches!(
             snap[0].reason,
             InterventionReason::MoveFailed(ref m) if m == "EXDEV"
@@ -1329,10 +1333,7 @@ mod tests {
 
         assert!(!empty_a.exists(), "empty-job-a must be removed");
         assert!(!empty_b.exists(), "empty-job-b must be removed");
-        assert!(
-            !empty_nested.exists(),
-            "nested-empty/inner must be removed"
-        );
+        assert!(!empty_nested.exists(), "nested-empty/inner must be removed");
         assert!(
             !empty_nested.parent().unwrap().exists(),
             "nested-empty parent must be removed (bottom-up cascades)"
@@ -1367,9 +1368,8 @@ mod tests {
         // If the watch path itself vanished (mount lost, user
         // intervention), the function must no-op silently rather
         // than panic.
-        let removed = cleanup_empty_watch_dirs(std::path::Path::new(
-            "/longbox-test-nonexistent-watch-path",
-        ));
+        let removed =
+            cleanup_empty_watch_dirs(std::path::Path::new("/longbox-test-nonexistent-watch-path"));
         assert_eq!(removed, 0);
     }
 

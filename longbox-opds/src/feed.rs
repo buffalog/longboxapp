@@ -379,7 +379,11 @@ mod tests {
             title: "Saga".into(),
             updated: "2026-06-15T00:00:00Z".into(),
             kind: FeedKind::Acquisition,
-            links: vec![Link::new("self", "http://h/opds/v1/series/1", ACQUISITION_TYPE)],
+            links: vec![Link::new(
+                "self",
+                "http://h/opds/v1/series/1",
+                ACQUISITION_TYPE,
+            )],
             pagination: Some(PageMeta {
                 total_results: 1,
                 items_per_page: 25,

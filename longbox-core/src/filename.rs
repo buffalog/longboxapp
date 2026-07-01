@@ -679,10 +679,16 @@ mod tests {
         // id=4 (priority 30) — catch-all for no-year filenames.
         // No new pattern claims a year-less filename.
         let p = parse("Saga_1.cbz", &patterns()).unwrap();
-        assert_eq!(p.pattern_id, 4, "underscored no-year shape still claimed by id=4");
+        assert_eq!(
+            p.pattern_id, 4,
+            "underscored no-year shape still claimed by id=4"
+        );
 
         let p = parse("Saga 1.cbz", &patterns()).unwrap();
-        assert_eq!(p.pattern_id, 4, "spaced no-year shape still claimed by id=4");
+        assert_eq!(
+            p.pattern_id, 4,
+            "spaced no-year shape still claimed by id=4"
+        );
     }
 
     // ---- A.9 Bug 1b: three more shapes Bug 1a's rollback surfaced ----
@@ -715,11 +721,7 @@ mod tests {
         assert_eq!(p.pattern_id, 8);
 
         // Spelled-out "Volume" also works.
-        let p = parse(
-            "Ranma 1/2 Volume 3 - Some Subtitle (1995).cbz",
-            &patterns(),
-        )
-        .unwrap();
+        let p = parse("Ranma 1/2 Volume 3 - Some Subtitle (1995).cbz", &patterns()).unwrap();
         assert_eq!(p.number, "3");
         assert_eq!(p.year, Some(1995));
         assert_eq!(p.pattern_id, 8);
@@ -768,11 +770,7 @@ mod tests {
 
         // Plain (YYYY) + trailing scanlator (no dash, no subtitle)
         // — id=2 strict ending fails, id=10 catches the fallthrough.
-        let p = parse(
-            "Some Series 042 (2023) (digital) (Empire).cbz",
-            &patterns(),
-        )
-        .unwrap();
+        let p = parse("Some Series 042 (2023) (digital) (Empire).cbz", &patterns()).unwrap();
         assert_eq!(p.series_title, "Some Series");
         assert_eq!(p.number, "042");
         assert_eq!(p.year, Some(2023));
@@ -814,7 +812,10 @@ mod tests {
 
         // id=2 still wins on plain-year no-subtitle shape.
         let p = parse("Saga 001 (2014).cbz", &patterns()).unwrap();
-        assert_eq!(p.pattern_id, 2, "plain-year no-subtitle still claimed by id=2");
+        assert_eq!(
+            p.pattern_id, 2,
+            "plain-year no-subtitle still claimed by id=2"
+        );
         assert_eq!(p.year, Some(2014));
 
         // id=7 (year-first) still wins on Wolverine shape.
@@ -867,11 +868,7 @@ mod tests {
 
     #[test]
     fn of_n_marker_year_first_is_claimed_by_id_12() {
-        let p = parse(
-            "Wolverine (2024) 003 (of 06) (Digital).cbz",
-            &patterns(),
-        )
-        .unwrap();
+        let p = parse("Wolverine (2024) 003 (of 06) (Digital).cbz", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 12);
         assert_eq!(p.series_title, "Wolverine");
         assert_eq!(p.number, "003");
@@ -896,13 +893,19 @@ mod tests {
         // strict patterns handle. Spot-check the most common shapes
         // claim the right pattern.
         let p = parse("Saga 001 (2014).cbz", &patterns()).unwrap();
-        assert_eq!(p.pattern_id, 2, "plain (YYYY) still id=2, not an (of N) variant");
+        assert_eq!(
+            p.pattern_id, 2,
+            "plain (YYYY) still id=2, not an (of N) variant"
+        );
 
         let p = parse("Wolverine (2024) 001.cbz", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 7, "plain year-first still id=7");
 
         let p = parse("20th Century Men 01 (0f 06) (2022).cbr", &patterns()).unwrap();
-        assert_eq!(p.pattern_id, 5, "(Xf Y) part-of still id=5, not the new (of N)");
+        assert_eq!(
+            p.pattern_id, 5,
+            "(Xf Y) part-of still id=5, not the new (of N)"
+        );
     }
 
     // ---- id=14: `Series vNN (YYYY)` collected editions, no subtitle ----
@@ -956,7 +959,10 @@ mod tests {
             &patterns(),
         )
         .unwrap();
-        assert_eq!(p.pattern_id, 8, "vN with subtitle must still claim via id=8");
+        assert_eq!(
+            p.pattern_id, 8,
+            "vN with subtitle must still claim via id=8"
+        );
     }
 
     #[test]
@@ -1027,9 +1033,7 @@ mod tests {
 
     #[test]
     fn normalize_dotted_basename_handles_cbr_extension() {
-        let n = normalize_dotted_basename(
-            "Some.Series.001.(2024).(digital).(Group-Empire).cbr",
-        );
+        let n = normalize_dotted_basename("Some.Series.001.(2024).(digital).(Group-Empire).cbr");
         assert_eq!(n, "Some Series 001 (2024).cbr");
     }
 
@@ -1045,9 +1049,7 @@ mod tests {
     fn normalize_dotted_basename_strips_square_brackets_too() {
         // Square-bracket scanlator tags appear in some NZB-style
         // names; same disposition as parens.
-        let n = normalize_dotted_basename(
-            "Title.001.(2024).[digital].[Empire].cbz",
-        );
+        let n = normalize_dotted_basename("Title.001.(2024).[digital].[Empire].cbz");
         assert_eq!(n, "Title 001 (2024).cbz");
     }
 
@@ -1056,9 +1058,7 @@ mod tests {
         // Multiple `(YYYY)` segments: first one wins (the release
         // year tag; later ones are typically scanlator group years
         // or volume start years).
-        let n = normalize_dotted_basename(
-            "Series.001.(2024).(2023 Reprint).(Digital).cbz",
-        );
+        let n = normalize_dotted_basename("Series.001.(2024).(2023 Reprint).(Digital).cbz");
         assert_eq!(n, "Series 001 (2024).cbz");
     }
 
@@ -1086,9 +1086,7 @@ mod tests {
         // token separator (older releases, certain repackagers). The
         // normalizer treats both equivalently — comic series titles
         // don't contain underscores, so the substitution is safe.
-        let n = normalize_dotted_basename(
-            "American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz",
-        );
+        let n = normalize_dotted_basename("American_Vampire_019_(2011)_(Minutemen-ThosTew).cbz");
         assert_eq!(n, "American Vampire 019 (2011).cbz");
     }
 
@@ -1154,8 +1152,7 @@ mod tests {
         // strip subtitles: id=10 (the permissive pattern) accepts the
         // normalized output `Saga 001 (2014).cbz` and loses the
         // ` - Volume One` capture.
-        let p = parse_with_normalization("Saga 001 (2014) - Volume One.cbz", &patterns())
-            .unwrap();
+        let p = parse_with_normalization("Saga 001 (2014) - Volume One.cbz", &patterns()).unwrap();
         assert_eq!(p.pattern_id, 2, "canonical input must claim against id=2");
         assert_eq!(p.title.as_deref(), Some("Volume One"));
     }

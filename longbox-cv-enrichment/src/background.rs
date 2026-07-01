@@ -27,7 +27,9 @@ use governor::clock::DefaultClock;
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
-use longbox_comicvine::{ComicVineClient, CvError, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult};
+use longbox_comicvine::{
+    ComicVineClient, CvError, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult,
+};
 
 type BackgroundLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 

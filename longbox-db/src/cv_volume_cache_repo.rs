@@ -151,10 +151,7 @@ where
 /// Fetch one row by primary key. Used by tests; the production code
 /// paths read via [`list_all_publishers`] and [`list_pending`].
 #[allow(dead_code)]
-pub async fn find_by_id<'e, E>(
-    executor: E,
-    cv_volume_id: i64,
-) -> Result<Option<CvVolumeCacheRow>>
+pub async fn find_by_id<'e, E>(executor: E, cv_volume_id: i64) -> Result<Option<CvVolumeCacheRow>>
 where
     E: SqliteExecutor<'e>,
 {

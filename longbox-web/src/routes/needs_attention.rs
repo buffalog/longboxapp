@@ -112,10 +112,9 @@ async fn dismiss_pull_failure(
     let owner = pull_attempt_repo::find_series_issue_by_id(&state.db, attempt_id).await?;
     pull_attempt_repo::delete_by_id(&state.db, attempt_id).await?;
     if let Some((series_id, issue_id)) = owner {
-        let purged = pull_attempt_repo::purge_stale_submitted_for_issue(
-            &state.db, series_id, issue_id,
-        )
-        .await?;
+        let purged =
+            pull_attempt_repo::purge_stale_submitted_for_issue(&state.db, series_id, issue_id)
+                .await?;
         if purged > 0 {
             tracing::info!(
                 target: "longbox_web",
@@ -125,10 +124,9 @@ async fn dismiss_pull_failure(
                 "dismiss_pull_failure.stale_submitted_purged"
             );
         }
-        let purged_grabbed = pull_attempt_repo::purge_stale_grabbed_for_issue(
-            &state.db, series_id, issue_id,
-        )
-        .await?;
+        let purged_grabbed =
+            pull_attempt_repo::purge_stale_grabbed_for_issue(&state.db, series_id, issue_id)
+                .await?;
         if purged_grabbed > 0 {
             tracing::info!(
                 target: "longbox_web",
@@ -146,9 +144,7 @@ async fn dismiss_pull_failure(
 /// all" action. Mirrors `list_failed`'s status filter
 /// (`'failed'`, `'mismatched'`), so a `pending` / `submitted` / `grabbed`
 /// attempt history is preserved. 204 even if zero rows matched.
-async fn dismiss_all_pull_failures(
-    State(state): State<AppState>,
-) -> Result<StatusCode, ApiError> {
+async fn dismiss_all_pull_failures(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     pull_attempt_repo::delete_all_failed(&state.db).await?;
     Ok(StatusCode::NO_CONTENT)
 }

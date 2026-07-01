@@ -363,7 +363,12 @@ mod tests {
         }
     }
 
-    fn input(title: &str, year: Option<i32>, count: u32, collision: bool) -> EnrichmentCandidateInput {
+    fn input(
+        title: &str,
+        year: Option<i32>,
+        count: u32,
+        collision: bool,
+    ) -> EnrichmentCandidateInput {
         EnrichmentCandidateInput {
             catalog_title: title.into(),
             catalog_start_year: year,
@@ -487,13 +492,21 @@ mod tests {
     fn year_within_one_passes_gate() {
         // Folder says 2024 but CV has start_year 2023 — off-by-one
         // due to solicitation vs actual release date. Should match.
-        let pool = vec![result(700, "Beneath the Trees Where Nobody Sees", Some(2023), 6)];
+        let pool = vec![result(
+            700,
+            "Beneath the Trees Where Nobody Sees",
+            Some(2023),
+            6,
+        )];
         let r = pick_volume(
             &input("Beneath the Trees Where Nobody Sees", Some(2024), 6, false),
             &pool,
             EnrichmentThresholds::default(),
         );
-        assert!(matches!(r, PickOutcome::Matched { .. }), "expected Matched, got {r:?}");
+        assert!(
+            matches!(r, PickOutcome::Matched { .. }),
+            "expected Matched, got {r:?}"
+        );
     }
 
     #[test]
@@ -592,10 +605,7 @@ mod tests {
             &pool,
             EnrichmentThresholds::default(),
         );
-        assert!(
-            matches!(r, PickOutcome::MultiMatch { .. }),
-            "got {r:?}"
-        );
+        assert!(matches!(r, PickOutcome::MultiMatch { .. }), "got {r:?}");
     }
 
     #[test]
@@ -629,11 +639,7 @@ mod tests {
             // is 0.38 → dominant-gap guard accepts.
             result(2001, "Wolverine Annual", Some(2024), 5),
         ];
-        let r = pick_volume(
-            &input("Wolverine", Some(2024), 5, false),
-            &pool,
-            thresholds,
-        );
+        let r = pick_volume(&input("Wolverine", Some(2024), 5, false), &pool, thresholds);
         assert!(
             matches!(r, PickOutcome::Matched { cv_id: 2000, .. }),
             "expected dominant-gap accept of 2000, got {r:?}"

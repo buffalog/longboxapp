@@ -20,9 +20,13 @@ const IMG: &[u8] = b"\xFF\xD8\xFF\xE0fake-jpeg-bytes";
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
-        .await
-        .unwrap();
+    longbox_db::opds_users_repo::create(
+        db,
+        USERNAME,
+        &longbox_opds::hash_password(PASSWORD).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn seed_issue(db: &longbox_db::Pool, cover_url: Option<&str>) -> i64 {
@@ -61,7 +65,8 @@ async fn seed_issue(db: &longbox_db::Pool, cover_url: Option<&str>) -> i64 {
 }
 
 fn basic() -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
     format!("Basic {encoded}")
 }
 
@@ -108,7 +113,9 @@ async fn fetches_from_cdn_serves_jpeg_and_caches() {
     let cdn = cdn_serving_image().await;
     let issue = seed_issue(&app.state.db, Some(&format!("{}/cover.jpg", cdn.uri()))).await;
 
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), true))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -139,7 +146,9 @@ async fn serves_from_cache_without_hitting_cdn() {
     let cached = app.covers_dir.path().join(format!("{issue}.jpg"));
     tokio::fs::write(&cached, b"cached-bytes").await.unwrap();
 
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), true))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_bytes(resp).await, b"cached-bytes");
 }
@@ -149,7 +158,9 @@ async fn null_cover_url_is_404() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
     let issue = seed_issue(&app.state.db, None).await;
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), true))
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -172,7 +183,9 @@ async fn cdn_failure_is_502() {
         .await;
     let issue = seed_issue(&app.state.db, Some(&format!("{}/cover.jpg", cdn.uri()))).await;
 
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), true))
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
@@ -189,7 +202,9 @@ async fn refuses_internal_cover_url_ssrf() {
         Some("http://169.254.169.254/latest/meta-data"),
     )
     .await;
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), true)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), true))
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -198,6 +213,8 @@ async fn cover_requires_auth() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
     let issue = seed_issue(&app.state.db, None).await;
-    let resp = app.request(get(&format!("/opds/v1/covers/{issue}"), false)).await;
+    let resp = app
+        .request(get(&format!("/opds/v1/covers/{issue}"), false))
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

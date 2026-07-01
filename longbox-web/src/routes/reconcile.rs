@@ -582,9 +582,7 @@ struct DuplicatesResponse {
 /// same normalized title with start_year within 2 years). Owned-and-
 /// present file counts ride along so the UI can render "merge smaller
 /// into larger" without a follow-up roundtrip.
-async fn duplicates(
-    State(state): State<AppState>,
-) -> Result<Json<DuplicatesResponse>, ApiError> {
+async fn duplicates(State(state): State<AppState>) -> Result<Json<DuplicatesResponse>, ApiError> {
     let pairs = series_repo::find_duplicate_pairs(&state.db).await?;
     Ok(Json(DuplicatesResponse { pairs }))
 }
@@ -643,8 +641,7 @@ async fn merge_duplicates(
     }
 
     let mut tx = state.db.begin().await.map_err(DbError::from)?;
-    series_repo::merge_series(&mut *tx, body.target_series_id, body.source_series_id)
-        .await?;
+    series_repo::merge_series(&mut *tx, body.target_series_id, body.source_series_id).await?;
     series_repo::hard_delete(&mut *tx, body.source_series_id).await?;
     tx.commit().await.map_err(DbError::from)?;
 

@@ -397,10 +397,7 @@ impl Scanner {
     /// the user hasn't dropped files in yet, which is a perfectly valid
     /// state.
     #[instrument(target = "longbox_scanner", skip(self), fields(series_id = series_id))]
-    pub async fn scan_series_folder(
-        &self,
-        series_id: i64,
-    ) -> Result<ScanReport, ScanError> {
+    pub async fn scan_series_folder(&self, series_id: i64) -> Result<ScanReport, ScanError> {
         let _guard = self
             .scan_lock
             .try_lock()

@@ -26,9 +26,7 @@ pub fn router() -> Router<AppState> {
         .route("/library/tidy/enrich-now", post(enrich_now))
 }
 
-async fn queue(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<EnrichmentQueueRow>>, ApiError> {
+async fn queue(State(state): State<AppState>) -> Result<Json<Vec<EnrichmentQueueRow>>, ApiError> {
     Ok(Json(series_repo::list_enrichment_queue(&state.db).await?))
 }
 
@@ -58,12 +56,11 @@ struct RecentOutcomeCounts {
 
 async fn summary(State(state): State<AppState>) -> Result<Json<EnrichmentSummary>, ApiError> {
     // Three numbers + an outcome breakdown. All single SELECTs.
-    let shallow_total = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM series WHERE cv_id IS NULL"#
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(longbox_db::DbError::from)?;
+    let shallow_total =
+        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n!: i64" FROM series WHERE cv_id IS NULL"#)
+            .fetch_one(&state.db)
+            .await
+            .map_err(longbox_db::DbError::from)?;
     let awaiting_attempt = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM series
            WHERE cv_id IS NULL AND last_enrichment_attempt_at IS NULL"#

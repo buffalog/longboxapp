@@ -18,9 +18,13 @@ const ACQ_TYPE: &str = "application/atom+xml;profile=opds-catalog;kind=acquisiti
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
-        .await
-        .unwrap();
+    longbox_db::opds_users_repo::create(
+        db,
+        USERNAME,
+        &longbox_opds::hash_password(PASSWORD).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn seed_series(db: &longbox_db::Pool, title: &str, publisher: Option<&str>) -> i64 {
@@ -43,7 +47,8 @@ async fn seed_series(db: &longbox_db::Pool, title: &str, publisher: Option<&str>
 }
 
 fn basic() -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
     format!("Basic {encoded}")
 }
 
@@ -67,7 +72,11 @@ fn content_type(resp: &axum::response::Response) -> String {
 async fn body_of(app: &TestApp, uri: &str) -> String {
     let resp = app.request(get(uri)).await;
     assert_eq!(resp.status(), StatusCode::OK, "non-200 for {uri}");
-    assert_eq!(content_type(&resp), NAV_TYPE, "wrong content-type for {uri}");
+    assert_eq!(
+        content_type(&resp),
+        NAV_TYPE,
+        "wrong content-type for {uri}"
+    );
     response_text(resp).await
 }
 
@@ -147,7 +156,12 @@ async fn series_feed_paginates_at_25() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
     for i in 0..30 {
-        seed_series(&app.state.db, &format!("Series {i:03}"), Some("Marvel Comics")).await;
+        seed_series(
+            &app.state.db,
+            &format!("Series {i:03}"),
+            Some("Marvel Comics"),
+        )
+        .await;
     }
 
     // Page 1: 25 entries, next but no previous.

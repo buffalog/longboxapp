@@ -6,8 +6,8 @@
 
 use longbox_db::{
     downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
-    pull_attempt_repo, pull_list_repo, series_repo, NewDownloaderConfig, NewFile,
-    NewIndexerConfig, NewIssue, NewLibraryRoot, NewPullAttempt, NewPullEntry, NewSeries, Pool,
+    pull_attempt_repo, pull_list_repo, series_repo, NewDownloaderConfig, NewFile, NewIndexerConfig,
+    NewIssue, NewLibraryRoot, NewPullAttempt, NewPullEntry, NewSeries, Pool,
 };
 use longbox_pull::sweep;
 use wiremock::matchers::{method, path, query_param};
@@ -415,7 +415,10 @@ async fn sweep_single_issue_404s_when_series_is_missing() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, longbox_pull::PullError::SeriesNotFound { series_id: 99_999 }),
+        matches!(
+            err,
+            longbox_pull::PullError::SeriesNotFound { series_id: 99_999 }
+        ),
         "got {err:?}"
     );
 }
@@ -581,11 +584,13 @@ async fn sweep_single_issue_purges_stale_submitted_before_in_flight_guard() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?")
-        .bind(stale.id)
-        .execute(&db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?",
+    )
+    .bind(stale.id)
+    .execute(&db)
+    .await
+    .unwrap();
 
     // Wire a real indexer + downloader so the engine can actually
     // submit once the stale row is out of the way.
@@ -599,7 +604,10 @@ async fn sweep_single_issue_purges_stale_submitted_before_in_flight_guard() {
     let summary = longbox_pull::sweep_single_issue(&db, series_id, issue_id)
         .await
         .unwrap();
-    assert_eq!(summary.submitted, 1, "must submit the retry after purging stale");
+    assert_eq!(
+        summary.submitted, 1,
+        "must submit the retry after purging stale"
+    );
 
     // Stale row gone, fresh `submitted` row in its place.
     let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
@@ -638,11 +646,13 @@ async fn sweep_single_issue_purges_stale_grabbed_when_unowned() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-48 hours') WHERE id = ?")
-        .bind(stale.id)
-        .execute(&db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE pull_attempts SET attempted_at = datetime('now', '-48 hours') WHERE id = ?",
+    )
+    .bind(stale.id)
+    .execute(&db)
+    .await
+    .unwrap();
 
     // Wire real services so the retry can actually submit.
     let indexer = MockServer::start().await;
@@ -665,9 +675,15 @@ async fn sweep_single_issue_purges_stale_grabbed_when_unowned() {
         .await
         .unwrap();
     assert_eq!(after.len(), 1, "exactly one row after purge + retry");
-    assert_ne!(after[0].id, stale.id, "stale grabbed row must have been deleted");
+    assert_ne!(
+        after[0].id, stale.id,
+        "stale grabbed row must have been deleted"
+    );
     assert_eq!(after[0].status, "submitted");
-    assert_eq!(after[0].release_id.as_deref(), Some("guid-fresh-after-purge"));
+    assert_eq!(
+        after[0].release_id.as_deref(),
+        Some("guid-fresh-after-purge")
+    );
 }
 
 #[tokio::test]
@@ -698,11 +714,13 @@ async fn sweep_single_issue_preserves_grabbed_audit_when_issue_is_owned() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-72 hours') WHERE id = ?")
-        .bind(preserved.id)
-        .execute(&db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE pull_attempts SET attempted_at = datetime('now', '-72 hours') WHERE id = ?",
+    )
+    .bind(preserved.id)
+    .execute(&db)
+    .await
+    .unwrap();
 
     // Catalog the issue as owned-and-present — this row is the
     // RESULT of the successful pull above.
@@ -735,7 +753,10 @@ async fn sweep_single_issue_preserves_grabbed_audit_when_issue_is_owned() {
     let purged = pull_attempt_repo::purge_stale_grabbed_for_issue(&db, series_id, issue_id)
         .await
         .unwrap();
-    assert_eq!(purged, 0, "owned issue's grabbed audit row must be preserved");
+    assert_eq!(
+        purged, 0,
+        "owned issue's grabbed audit row must be preserved"
+    );
 
     let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
         .await
@@ -784,7 +805,11 @@ async fn sweep_single_issue_still_blocks_on_fresh_submitted_under_threshold() {
     let after = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
         .await
         .unwrap();
-    assert_eq!(after.len(), 1, "fresh submitted must still block; no duplicate row");
+    assert_eq!(
+        after.len(),
+        1,
+        "fresh submitted must still block; no duplicate row"
+    );
     assert_eq!(after[0].release_id.as_deref(), Some("guid-fresh"));
 }
 

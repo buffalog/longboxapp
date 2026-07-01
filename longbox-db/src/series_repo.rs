@@ -216,11 +216,7 @@ where
 /// outcome means either a concurrent resolution already wrote the id
 /// (fine) or the series_id no longer exists (shouldn't happen but is
 /// harmless). Either case is logged at warn and not surfaced.
-pub async fn set_metron_id<'e, E>(
-    executor: E,
-    series_id: i64,
-    metron_id: &str,
-) -> Result<u64>
+pub async fn set_metron_id<'e, E>(executor: E, series_id: i64, metron_id: &str) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {
@@ -284,11 +280,9 @@ pub async fn count_without_metron_id<'e, E>(executor: E) -> Result<i64>
 where
     E: SqliteExecutor<'e>,
 {
-    let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM series WHERE metron_id IS NULL"#
-    )
-    .fetch_one(executor)
-    .await?;
+    let row = sqlx::query!(r#"SELECT COUNT(*) AS "n!: i64" FROM series WHERE metron_id IS NULL"#)
+        .fetch_one(executor)
+        .await?;
     Ok(row.n)
 }
 
