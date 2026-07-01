@@ -385,12 +385,12 @@ where
 /// `issues`; an issue's state is computed from its files + `cover_date`):
 ///   - **Available** = `owned_count`            (has an owned, present file)
 ///   - **Solicited** = `solicited_count`        (no owned file AND
-///                                               `cover_date >= today` — future)
+///     `cover_date >= today` — future)
 ///   - **Missing**   = `(total - solicited) - owned`  (released but not owned;
-///                                               a derived render-time state)
-/// The series-card badge denominator is `available = total - solicited`.
-/// "Solicited" keys off `cover_date` (the only date stored per issue), not
-/// the on-sale `store_date` — see `SeriesCard.svelte` for the caveat.
+///     a derived render-time state)
+///     The series-card badge denominator is `available = total - solicited`.
+///     "Solicited" keys off `cover_date` (the only date stored per issue), not
+///     the on-sale `store_date` — see `SeriesCard.svelte` for the caveat.
 ///
 /// There is no "finished/ended" signal here yet: ComicVine carries none,
 /// and the Metron `status` (Completed | Cancelled) that would unlock the
