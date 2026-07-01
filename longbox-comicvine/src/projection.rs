@@ -103,8 +103,6 @@ pub struct CvVolumeCredit {
 
 /// Project a person's raw volume_credits into deduped `CvVolumeCredit` entries
 /// (CV occasionally repeats a volume; keep first occurrence, preserve order).
-// ponytail: expect(dead_code) bridges until Task 2 adds the client method.
-#[allow(dead_code)]
 pub(crate) fn project_person_volume_credits(raw: CvPersonVolumeCreditsRaw) -> Vec<CvVolumeCredit> {
     let mut seen = std::collections::HashSet::new();
     raw.volume_credits
