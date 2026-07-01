@@ -314,3 +314,34 @@ async fn search_and_detail_count_owned_only() {
         .unwrap();
     assert!(none.is_empty());
 }
+
+#[tokio::test]
+async fn cv_person_id_of_returns_person_id_or_none() {
+    let pool = fresh_pool().await;
+    let iid = seed_owned_issue(&pool, 5001).await;
+    creator_repo::insert_issue_credits(
+        &pool,
+        iid,
+        &[CvPersonCredit {
+            cv_person_id: 55,
+            name: "Rick Remender".into(),
+            role: "writer".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    // find the creator id via search
+    let hits = creator_repo::search_creators(&pool, "remender")
+        .await
+        .unwrap();
+    let cid = hits[0].id;
+    assert_eq!(
+        creator_repo::cv_person_id_of(&pool, cid).await.unwrap(),
+        Some(55)
+    );
+    // unknown creator -> None
+    assert_eq!(
+        creator_repo::cv_person_id_of(&pool, 999999).await.unwrap(),
+        None
+    );
+}
