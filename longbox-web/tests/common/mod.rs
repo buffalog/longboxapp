@@ -1,6 +1,8 @@
 //! Shared test harness: in-memory pool + tempdir library + wiremock CV +
 //! Scanner, composed into an AppState and a Router we can drive with
 //! tower::ServiceExt::oneshot.
+// ponytail: different test binaries use different subsets of helpers; allow here beats per-item allows
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

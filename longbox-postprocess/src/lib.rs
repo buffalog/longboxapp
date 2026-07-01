@@ -288,8 +288,8 @@ pub struct SweepSummary {
 /// Running concurrently with the watcher is safe but wasteful: both
 /// paths may pick up the same file. The processor's metadata recheck
 /// + same-file conflict cleanup absorb the race — the second arrival
-/// either reports `Failed` (source gone) or `Conflict` (target landed
-/// from the other path). Neither outcome corrupts state.
+///   either reports `Failed` (source gone) or `Conflict` (target landed
+///   from the other path). Neither outcome corrupts state.
 pub async fn sweep_now(
     library_root: &Path,
     library_root_id: i64,

@@ -2535,7 +2535,7 @@ async fn settings_put_min_file_size_mb_rejects_invalid_values() {
             .request(json_request(
                 "PUT",
                 "/api/settings/min_file_size_mb",
-                &format!(r#"{{"value":"{raw}"}}"#),
+                format!(r#"{{"value":"{raw}"}}"#),
             ))
             .await;
         assert_eq!(

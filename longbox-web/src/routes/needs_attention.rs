@@ -100,8 +100,8 @@ async fn retry(
 ///      `submitted` row from a prior run (poll loop never resolved
 ///      it; SAB evicted the job) OR a stuck `grabbed` row whose
 ///      Phase B import never landed.
-/// The dismiss action covers all three rows in one trip so future
-/// searches actually fire.
+///      The dismiss action covers all three rows in one trip so future
+///      searches actually fire.
 async fn dismiss_pull_failure(
     State(state): State<AppState>,
     Path(attempt_id): Path<i64>,
