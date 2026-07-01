@@ -95,7 +95,6 @@ pub(crate) struct CvCreditRaw {
 /// requested via `field_list`.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CvIssueCreditsRaw {
-    pub id: i64,
     #[serde(default)]
     pub person_credits: Vec<CvCreditRaw>,
 }

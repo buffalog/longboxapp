@@ -322,7 +322,6 @@ mod credit_tests {
     fn splits_comma_delimited_roles_into_atomic_lowercase_rows() {
         // CV packs multi-role people into one comma-delimited `role` string.
         let raw = CvIssueCreditsRaw {
-            id: 42,
             person_credits: vec![
                 CvCreditRaw { id: 97470, name: "Bob Quinn".into(), role: "artist, colorist, cover".into() },
                 CvCreditRaw { id: 130355, name: "Ethan S. Parker".into(), role: "Writer".into() },

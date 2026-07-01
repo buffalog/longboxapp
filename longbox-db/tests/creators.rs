@@ -192,6 +192,40 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
     .await
     .unwrap();
 
+    // cv_issue_id present, not fetched, but NO owned file -> excluded (owns-predicate)
+    let sid2 = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(9999),
+            metron_id: None,
+            title: "Unowned Series".into(),
+            sort_title: "unowned series".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: sid2,
+            cv_issue_id: Some(2999),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    // No file inserted for this issue — no owned file means the EXISTS predicate fails.
+
     let work = creator_repo::list_issues_needing_credits(&pool, 50).await.unwrap();
     let ids: Vec<i64> = work.iter().map(|w| w.issue_id).collect();
     assert_eq!(ids, vec![owned], "only the owned, cv-keyed, unfetched issue");

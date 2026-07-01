@@ -60,6 +60,9 @@ async fn migration_creates_all_indexes() {
     assert!(names.contains(&"idx_files_issue".to_string()));
     assert!(names.contains(&"idx_files_status".to_string()));
     assert!(names.contains(&"idx_files_match_method".to_string()));
+    assert!(names.contains(&"idx_creators_name".to_string()));
+    assert!(names.contains(&"idx_issue_credits_creator".to_string()));
+    assert!(names.contains(&"idx_issue_credits_issue".to_string()));
 }
 
 #[tokio::test]
