@@ -209,6 +209,13 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //     iteration). Default 6h.
     spawn_wal_checkpoint(db.clone());
 
+    // 12b. Metron series-linking resolver. Drains the work-list of
+    //      CV-linked series not yet checked against Metron. Gated on
+    //      the Metron client existing — no client, no spawn.
+    if let Some(ref m) = metron {
+        crate::metron_link::spawn_metron_linker(db.clone(), Arc::clone(m));
+    }
+
     // 13. Compose state.
     Ok(AppState {
         db,

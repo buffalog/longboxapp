@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod error;
 pub mod frontend;
+pub mod metron_link;
 pub mod routes;
 pub mod state;
 pub mod tracing_setup;

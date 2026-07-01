@@ -1622,3 +1622,51 @@ where
     .await?;
     Ok(rows.into_iter().map(|r| (r.id, r.cv_id)).collect())
 }
+
+/// `(series_id, cv_id)` for CV-linked series not yet Metron-linked and not yet
+/// checked. Drives the Metron-linking resolver; excludes already-linked and
+/// already-checked-no-match series so the resolver converges.
+pub async fn list_metron_link_candidates<'e, E>(executor: E, limit: i64) -> Result<Vec<(i64, i64)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", cv_id AS "cv_id!: i64"
+           FROM series
+           WHERE cv_id IS NOT NULL
+             AND metron_id IS NULL
+             AND metron_link_checked_at IS NULL
+           ORDER BY id ASC
+           LIMIT ?"#,
+        limit,
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.cv_id)).collect())
+}
+
+/// Record a Metron-link check: stamp `metron_link_checked_at` (so the series
+/// leaves the work-list) and, on a match, set `metron_id`. `COALESCE` protects
+/// an already-set metron_id from being clobbered by a racing writer.
+/// `metron_id = None` = checked, no Metron match.
+pub async fn mark_metron_link_checked<'e, E>(
+    executor: E,
+    series_id: i64,
+    metron_id: Option<&str>,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET metron_id = COALESCE(metron_id, ?),
+               metron_link_checked_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        metron_id,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
