@@ -25,6 +25,45 @@ where
     Ok(row.id)
 }
 
+/// One issue awaiting credit resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IssueNeedingCredits {
+    pub issue_id: i64,
+    pub cv_issue_id: i64,
+}
+
+/// Owned, CV-keyed issues whose credits haven't been fetched yet, oldest
+/// first. Drives the background resolver. Skips non-owned (out of scope for
+/// search) and the ~36 issues with no cv_issue_id (can't be fetched).
+pub async fn list_issues_needing_credits<'e, E>(
+    executor: E,
+    limit: i64,
+) -> Result<Vec<IssueNeedingCredits>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT i.id AS "issue_id!: i64", i.cv_issue_id AS "cv_issue_id!: i64"
+           FROM issues i
+           WHERE i.credits_fetched = 0
+             AND i.cv_issue_id IS NOT NULL
+             AND EXISTS (SELECT 1 FROM files f
+                         WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1)
+           ORDER BY i.id ASC
+           LIMIT ?"#,
+        limit,
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| IssueNeedingCredits {
+            issue_id: r.issue_id,
+            cv_issue_id: r.cv_issue_id,
+        })
+        .collect())
+}
+
 /// Persist a fully-resolved set of atomic credits for one issue and flip
 /// `credits_fetched`. Transactional + idempotent: creators dedupe on
 /// cv_person_id, credit rows `INSERT OR IGNORE` against the UNIQUE

@@ -127,6 +127,78 @@ async fn insert_issue_credits_dedupes_creator_and_sets_fetched() {
 }
 
 #[tokio::test]
+async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
+    let pool = fresh_pool().await;
+    let owned = seed_owned_issue(&pool, 2001).await; // owned, cv_id, not fetched -> included
+    let already = seed_owned_issue(&pool, 2002).await;
+    creator_repo::insert_issue_credits(&pool, already, &[])
+        .await
+        .unwrap(); // fetched -> excluded
+    // owned but NO cv_issue_id -> excluded
+    let sid = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "X".into(),
+            sort_title: "x".into(),
+            start_year: None,
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let no_cv = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: sid,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let root = library_root_repo::insert(&pool, NewLibraryRoot { path: "/nocv".into() })
+        .await
+        .unwrap();
+    file_repo::insert(
+        &pool,
+        NewFile {
+            issue_id: Some(no_cv),
+            library_root_id: root.id,
+            path_relative: "n.cbz".into(),
+            size_bytes: 12345,
+            mtime: fixed_ts(),
+            last_scanned_at: fixed_ts(),
+            match_method: "comicinfo_xml".into(),
+            match_confidence: 0.95,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: fixed_ts(),
+            matched_at: Some(fixed_ts()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let work = creator_repo::list_issues_needing_credits(&pool, 50).await.unwrap();
+    let ids: Vec<i64> = work.iter().map(|w| w.issue_id).collect();
+    assert_eq!(ids, vec![owned], "only the owned, cv-keyed, unfetched issue");
+    assert_eq!(work[0].cv_issue_id, 2001);
+}
+
+#[tokio::test]
 async fn insert_empty_credits_marks_fetched_with_no_rows() {
     let pool = fresh_pool().await;
     let iid = seed_owned_issue(&pool, 1002).await;
