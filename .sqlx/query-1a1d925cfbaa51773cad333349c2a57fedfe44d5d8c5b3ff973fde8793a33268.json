@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET metron_id = COALESCE(metron_id, ?),\n               metron_link_checked_at = CURRENT_TIMESTAMP,\n               updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1a1d925cfbaa51773cad333349c2a57fedfe44d5d8c5b3ff973fde8793a33268"
+}

@@ -332,6 +332,72 @@ async fn existing_cv_id_pairs_returns_id_and_cv_id() {
 }
 
 #[tokio::test]
+async fn metron_link_candidates_and_mark() {
+    let pool = fresh_pool().await;
+    // (a) CV-linked, unlinked, unchecked -> a candidate
+    let cand = series_repo::insert(&pool, walking_dead()).await.unwrap(); // cv_id 12345
+                                                                          // (b) no cv_id -> excluded
+    series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: None,
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+    // (c) already Metron-linked -> excluded
+    let linked = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(222),
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::mark_metron_link_checked(&pool, linked.id, Some("917"))
+        .await
+        .unwrap();
+    // (d) checked with NO match -> excluded (this is the no-churn case)
+    let nomatch = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(333),
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::mark_metron_link_checked(&pool, nomatch.id, None)
+        .await
+        .unwrap();
+
+    let cands = series_repo::list_metron_link_candidates(&pool, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        cands,
+        vec![(cand.id, 12345)],
+        "only the cv-linked, unlinked, unchecked series"
+    );
+
+    // mark the candidate as matched -> metron_id set, and it leaves the work-list
+    series_repo::mark_metron_link_checked(&pool, cand.id, Some("916"))
+        .await
+        .unwrap();
+    let after = series_repo::list_metron_link_candidates(&pool, 50)
+        .await
+        .unwrap();
+    assert!(after.is_empty());
+    let row = series_repo::find_by_id(&pool, cand.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.metron_id.as_deref(), Some("916"));
+}
+
+#[tokio::test]
 async fn get_aliases_drops_short_junk_entries() {
     let pool = fresh_pool().await;
     let id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
