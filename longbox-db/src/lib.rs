@@ -5,6 +5,7 @@
 //! statements or `&mut Transaction<'_, Sqlite>` for transactional work.
 
 pub mod candidate;
+pub mod creator_repo;
 pub mod cv_volume_cache_repo;
 pub mod discovered_folders_repo;
 pub mod downloader_config_repo;
