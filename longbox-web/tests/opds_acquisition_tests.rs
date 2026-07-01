@@ -16,9 +16,13 @@ const ACQ_TYPE: &str = "application/atom+xml;profile=opds-catalog;kind=acquisiti
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
-        .await
-        .unwrap();
+    longbox_db::opds_users_repo::create(
+        db,
+        USERNAME,
+        &longbox_opds::hash_password(PASSWORD).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 fn now_pdt() -> time::PrimitiveDateTime {
@@ -104,7 +108,8 @@ async fn seed_file(
 }
 
 fn basic() -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
     format!("Basic {encoded}")
 }
 
@@ -128,7 +133,11 @@ fn content_type(resp: &axum::response::Response) -> String {
 async fn body_of(app: &TestApp, uri: &str, expect_type: &str) -> String {
     let resp = app.request(get(uri)).await;
     assert_eq!(resp.status(), StatusCode::OK, "non-200 for {uri}");
-    assert_eq!(content_type(&resp), expect_type, "wrong content-type for {uri}");
+    assert_eq!(
+        content_type(&resp),
+        expect_type,
+        "wrong content-type for {uri}"
+    );
     response_text(resp).await
 }
 
@@ -149,7 +158,15 @@ async fn series_detail_lists_issues_with_conditional_acquisition_links() {
         Some("https://cdn/c1.jpg"),
     )
     .await;
-    seed_file(&app.state.db, root_id, i1, "Saga/Saga 001.cbz", "owned", true).await;
+    seed_file(
+        &app.state.db,
+        root_id,
+        i1,
+        "Saga/Saga 001.cbz",
+        "owned",
+        true,
+    )
+    .await;
 
     // #2: no file → no acquisition link, but has a cover.
     seed_issue(
@@ -178,7 +195,8 @@ async fn series_detail_lists_issues_with_conditional_acquisition_links() {
 
     // Exactly one acquisition link in the whole feed (only #1 has a file).
     assert_eq!(
-        xml.matches(r#"rel="http://opds-spec.org/acquisition""#).count(),
+        xml.matches(r#"rel="http://opds-spec.org/acquisition""#)
+            .count(),
         1
     );
 }
@@ -198,7 +216,15 @@ async fn acquisition_mime_follows_extension() {
     let root_id = app.library_root_id;
     let series = seed_series(&app.state.db, "Rar").await;
     let issue = seed_issue(&app.state.db, series, "1", None, None, None).await;
-    seed_file(&app.state.db, root_id, issue, "Rar/Rar 001.cbr", "owned", true).await;
+    seed_file(
+        &app.state.db,
+        root_id,
+        issue,
+        "Rar/Rar 001.cbr",
+        "owned",
+        true,
+    )
+    .await;
 
     let xml = body_of(&app, &format!("/opds/v1/series/{series}"), ACQ_TYPE).await;
     assert!(xml.contains(r#"type="application/x-cbr""#));

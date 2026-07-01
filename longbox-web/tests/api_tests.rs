@@ -108,8 +108,7 @@ async fn health_reflects_enrichment_queue_depth() {
     .await
     .unwrap();
 
-    let body =
-        response_json(app.request(empty_request("GET", "/api/health")).await).await;
+    let body = response_json(app.request(empty_request("GET", "/api/health")).await).await;
     assert_eq!(body["enrichment_queue_depth"], 2);
 }
 
@@ -946,12 +945,10 @@ async fn force_delete_series_unlinks_owned_files_and_succeeds() {
         .scan_full(app.library_root_id)
         .await
         .unwrap();
-    let files_before = longbox_db::file_repo::list_by_library_root(
-        &app.state.db,
-        app.library_root_id,
-    )
-    .await
-    .unwrap();
+    let files_before =
+        longbox_db::file_repo::list_by_library_root(&app.state.db, app.library_root_id)
+            .await
+            .unwrap();
     assert_eq!(files_before.len(), 1);
     assert_eq!(files_before[0].status, "owned");
     assert!(files_before[0].issue_id.is_some());
@@ -982,12 +979,10 @@ async fn force_delete_series_unlinks_owned_files_and_succeeds() {
         .is_none());
 
     // File is preserved, but unlinked and flagged needs_review.
-    let files_after = longbox_db::file_repo::list_by_library_root(
-        &app.state.db,
-        app.library_root_id,
-    )
-    .await
-    .unwrap();
+    let files_after =
+        longbox_db::file_repo::list_by_library_root(&app.state.db, app.library_root_id)
+            .await
+            .unwrap();
     assert_eq!(files_after.len(), 1);
     assert_eq!(files_after[0].id, file_id);
     assert_eq!(files_after[0].status, "needs_review");
@@ -1129,12 +1124,9 @@ async fn delete_files_succeeds_when_series_has_owned_present_files() {
         .scan_full(app.library_root_id)
         .await
         .unwrap();
-    let files = longbox_db::file_repo::list_by_library_root(
-        &app.state.db,
-        app.library_root_id,
-    )
-    .await
-    .unwrap();
+    let files = longbox_db::file_repo::list_by_library_root(&app.state.db, app.library_root_id)
+        .await
+        .unwrap();
     assert_eq!(files.len(), 1, "scan should attach the one cbz");
     assert_eq!(
         files[0].status, "owned",
@@ -2393,13 +2385,9 @@ async fn series_folder_path_db_row_overrides_env_var_fallback() {
     // the response to reflect the row, not the env.
     let mut app = build_test_app().await;
     app.set_host_library_path_fallback(Some("/seed/from/env".into()));
-    longbox_db::settings_repo::set(
-        &app.state.db,
-        "host_library_path",
-        "/runtime/from/db",
-    )
-    .await
-    .unwrap();
+    longbox_db::settings_repo::set(&app.state.db, "host_library_path", "/runtime/from/db")
+        .await
+        .unwrap();
     let series_id = series_repo::insert(
         &app.state.db,
         NewSeries {
@@ -2707,8 +2695,7 @@ async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
     .unwrap();
 
     // Counted: files-only (no cv_id, has an owned+present file).
-    let (files_only_sid, files_only_iid) =
-        seed_series_and_issue(&app, "Files Only", "1").await;
+    let (files_only_sid, files_only_iid) = seed_series_and_issue(&app, "Files Only", "1").await;
     longbox_db::file_repo::insert(
         &app.state.db,
         longbox_db::NewFile {
@@ -2749,8 +2736,7 @@ async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
     .await
     .unwrap();
 
-    let body =
-        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
     assert_eq!(
         body["total_series"], 2,
         "enriched_only + files_only count; the cv_id-null no-files phantom is excluded"
@@ -2762,8 +2748,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
     let app = build_test_app().await;
 
     // Baseline: empty catalog → every count is 0.
-    let body =
-        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
     assert_eq!(body["pull_list_count"], 0);
     assert_eq!(body["pull_failures_count"], 0);
     assert_eq!(body["pending_interventions_count"], 0);
@@ -2877,8 +2862,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
             });
     }
 
-    let body =
-        response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
     assert_eq!(body["pull_list_count"], 2);
     assert_eq!(
         body["pull_failures_count"], 2,
@@ -3649,7 +3633,9 @@ async fn notify_completed_is_noop() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // The attempt stays in `submitted` — Phase B owns the success path.
-    let submitted = pull_attempt_repo::list_submitted(&app.state.db).await.unwrap();
+    let submitted = pull_attempt_repo::list_submitted(&app.state.db)
+        .await
+        .unwrap();
     assert_eq!(submitted.len(), 1);
     assert_eq!(submitted[0].status, "submitted");
 }
@@ -3685,11 +3671,18 @@ async fn notify_failed_marks_attempt_as_failed() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // The attempt is no longer `submitted`.
-    let submitted = pull_attempt_repo::list_submitted(&app.state.db).await.unwrap();
-    assert!(submitted.is_empty(), "submitted set should be empty after failure notice");
+    let submitted = pull_attempt_repo::list_submitted(&app.state.db)
+        .await
+        .unwrap();
+    assert!(
+        submitted.is_empty(),
+        "submitted set should be empty after failure notice"
+    );
 
     // And the row carries the SAB-supplied fail_msg verbatim.
-    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid).await.unwrap();
+    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid)
+        .await
+        .unwrap();
     let row = attempts.iter().find(|a| a.id == attempt_id).unwrap();
     assert_eq!(row.status, "failed");
     assert_eq!(row.error_message.as_deref(), Some("par2 repair failed"));
@@ -3740,7 +3733,9 @@ async fn notify_falls_back_to_status_string_when_fail_msg_is_blank() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid).await.unwrap();
+    let attempts = pull_attempt_repo::list_for_issue(&app.state.db, sid, iid)
+        .await
+        .unwrap();
     let row = attempts.iter().find(|a| a.status == "failed").unwrap();
     assert_eq!(row.error_message.as_deref(), Some("SABnzbd status: Failed"));
 }
@@ -3893,10 +3888,7 @@ async fn pull_search_200_when_series_has_no_missing_issues() {
     let app = build_test_app().await;
     let sid = seed_pull_series(&app, "Saga").await;
     let resp = app
-        .request(empty_request(
-            "POST",
-            &format!("/api/pull/search/{sid}"),
-        ))
+        .request(empty_request("POST", &format!("/api/pull/search/{sid}")))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
@@ -3930,15 +3922,15 @@ async fn pull_search_202_dispatches_per_missing_issue_for_unsubscribed_series() 
         .unwrap();
     }
     let resp = app
-        .request(empty_request(
-            "POST",
-            &format!("/api/pull/search/{sid}"),
-        ))
+        .request(empty_request("POST", &format!("/api/pull/search/{sid}")))
         .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let body = response_json(resp).await;
     assert_eq!(body["queued"], 2);
-    assert!(body["note"].is_null(), "note must be absent on 202: {body:?}");
+    assert!(
+        body["note"].is_null(),
+        "note must be absent on 202: {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -3982,10 +3974,7 @@ async fn pull_search_skips_solicited_and_owned_issues() {
     .await
     .unwrap();
     let resp = app
-        .request(empty_request(
-            "POST",
-            &format!("/api/pull/search/{sid}"),
-        ))
+        .request(empty_request("POST", &format!("/api/pull/search/{sid}")))
         .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let body = response_json(resp).await;
@@ -4244,7 +4233,10 @@ async fn search_all_missing_excludes_owned_present_issues() {
             .await,
     )
     .await;
-    assert_eq!(body["searched"], 1, "only the missing issue should be searched");
+    assert_eq!(
+        body["searched"], 1,
+        "only the missing issue should be searched"
+    );
     assert_eq!(body["skipped_solicited"], 0);
     // Sanity: the owned issue's id wasn't in the missing pool.
     let _ = iid_missing;
@@ -4328,9 +4320,11 @@ async fn export_pull_list_returns_subscriptions_with_cv_metadata() {
     .await
     .unwrap();
 
-    let body =
-        response_json(app.request(empty_request("GET", "/api/pull-list/export")).await)
-            .await;
+    let body = response_json(
+        app.request(empty_request("GET", "/api/pull-list/export"))
+            .await,
+    )
+    .await;
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["series_id"].as_i64().unwrap(), cv_linked);
@@ -4879,9 +4873,7 @@ async fn reconcile_phantoms_flags_a_pull_list_series_as_awaiting_first_download(
     .await;
     let all = body["all_zero_owned"].as_array().unwrap();
     let flag = |id: i64| {
-        all.iter()
-            .find(|p| p["id"] == id)
-            .expect("phantom present")["awaiting_first_download"]
+        all.iter().find(|p| p["id"] == id).expect("phantom present")["awaiting_first_download"]
             .as_bool()
             .unwrap()
     };
@@ -5093,7 +5085,10 @@ async fn reconcile_convert_links_to_existing_series_instead_of_duplicating() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     let result = &body["results"][0];
-    assert_eq!(result["status"], "linked", "matches existing — links, doesn't add");
+    assert_eq!(
+        result["status"], "linked",
+        "matches existing — links, doesn't add"
+    );
     assert_eq!(
         result["series_id"].as_i64().unwrap(),
         existing.id,
@@ -5110,15 +5105,13 @@ async fn reconcile_convert_links_to_existing_series_instead_of_duplicating() {
     assert_eq!(count, 1, "no duplicate series row");
 
     // The file attached to the survivor as owned via FilenameRegex.
-    let owned: Vec<_> = longbox_db::file_repo::list_by_library_root(
-        &app.state.db,
-        app.library_root_id,
-    )
-    .await
-    .unwrap()
-    .into_iter()
-    .filter(|f| f.status == "owned" && f.match_method == "filename_regex")
-    .collect();
+    let owned: Vec<_> =
+        longbox_db::file_repo::list_by_library_root(&app.state.db, app.library_root_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.status == "owned" && f.match_method == "filename_regex")
+            .collect();
     assert_eq!(owned.len(), 1);
 }
 
@@ -5655,9 +5648,7 @@ async fn merge_duplicates_moves_issues_and_deletes_source() {
         .request(json_request(
             "POST",
             "/api/library/tidy/duplicates/merge",
-            format!(
-                r#"{{"target_series_id":{target},"source_series_id":{source}}}"#
-            ),
+            format!(r#"{{"target_series_id":{target},"source_series_id":{source}}}"#),
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -5674,11 +5665,10 @@ async fn merge_duplicates_moves_issues_and_deletes_source() {
         .unwrap();
     assert_eq!(migrated.series_id, target);
     // Target's own issue is untouched.
-    let target_issue_row =
-        longbox_db::issue_repo::find_by_id(&app.state.db, target_issue)
-            .await
-            .unwrap()
-            .unwrap();
+    let target_issue_row = longbox_db::issue_repo::find_by_id(&app.state.db, target_issue)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(target_issue_row.series_id, target);
 }
 
@@ -5690,9 +5680,7 @@ async fn merge_duplicates_rejects_target_equals_source() {
         .request(json_request(
             "POST",
             "/api/library/tidy/duplicates/merge",
-            format!(
-                r#"{{"target_series_id":{sid},"source_series_id":{sid}}}"#
-            ),
+            format!(r#"{{"target_series_id":{sid},"source_series_id":{sid}}}"#),
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -5706,9 +5694,7 @@ async fn merge_duplicates_404s_on_unknown_series() {
         .request(json_request(
             "POST",
             "/api/library/tidy/duplicates/merge",
-            format!(
-                r#"{{"target_series_id":{real},"source_series_id":99999}}"#
-            ),
+            format!(r#"{{"target_series_id":{real},"source_series_id":99999}}"#),
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -5801,7 +5787,11 @@ async fn e2e_delete_folder_transitions_to_phantom_then_remove() {
     // doesn't refuse to scan a now-empty library root (the walker
     // filters by extension; non-cbz/cbr files are invisible to it).
     std::fs::remove_dir_all(app.library_path().join("Chew")).unwrap();
-    std::fs::write(app.library_path().join(".placeholder"), b"preflight keepalive").unwrap();
+    std::fs::write(
+        app.library_path().join(".placeholder"),
+        b"preflight keepalive",
+    )
+    .unwrap();
     app.state
         .scanner
         .scan_full(app.library_root_id)
@@ -6227,7 +6217,10 @@ async fn forward_week_hydrates_publisher_inline_from_metron_detail() {
     .to_string();
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/issue/"))
-        .and(wiremock::matchers::query_param("store_date_range_after", "2099-01-01"))
+        .and(wiremock::matchers::query_param(
+            "store_date_range_after",
+            "2099-01-01",
+        ))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(list_payload))
         .mount(&metron_server)
         .await;
@@ -6265,16 +6258,22 @@ async fn forward_week_hydrates_publisher_inline_from_metron_detail() {
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/issue/170031/"))
         .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .set_body_string(detail_payload(170031, "Absolute Green Lantern", "DC Comics")),
+            wiremock::ResponseTemplate::new(200).set_body_string(detail_payload(
+                170031,
+                "Absolute Green Lantern",
+                "DC Comics",
+            )),
         )
         .mount(&metron_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/issue/170032/"))
         .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .set_body_string(detail_payload(170032, "Action Comics", "DC Comics")),
+            wiremock::ResponseTemplate::new(200).set_body_string(detail_payload(
+                170032,
+                "Action Comics",
+                "DC Comics",
+            )),
         )
         .mount(&metron_server)
         .await;
@@ -6353,7 +6352,10 @@ async fn current_week_unaffected_by_metron_when_enabled() {
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     // CV-sourced row: cv_issue_id populated, metron_issue_id null.
-    assert!(!rows[0]["cv_issue_id"].is_null(), "CV path populates cv_issue_id");
+    assert!(
+        !rows[0]["cv_issue_id"].is_null(),
+        "CV path populates cv_issue_id"
+    );
     assert!(
         rows[0]["metron_issue_id"].is_null(),
         "CV path leaves metron_issue_id null"
@@ -6457,7 +6459,10 @@ async fn subscribe_via_metron_series_id_resolves_cv_id_and_writes_back() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let series_id = response_json(resp).await["series_id"].as_i64().unwrap();
-    assert_eq!(series_id, existing.id, "resolves to existing series via cv_id");
+    assert_eq!(
+        series_id, existing.id,
+        "resolves to existing series via cv_id"
+    );
 
     // Verify backfill ran — series.metron_id is now populated.
     let series = series_repo::find_by_id(&app.state.db, existing.id)
@@ -6571,9 +6576,15 @@ async fn enrich_finished_flips_completed_leaves_ongoing_and_counts_skipped() {
         cover_url: None,
     };
     // Completed → finished; Ongoing → stays false; no metron_id → skipped.
-    let a = series_repo::insert(&db, seed(1, Some("111"), "Alpha")).await.unwrap();
-    let b = series_repo::insert(&db, seed(2, Some("222"), "Bravo")).await.unwrap();
-    let _c = series_repo::insert(&db, seed(3, None, "Charlie")).await.unwrap();
+    let a = series_repo::insert(&db, seed(1, Some("111"), "Alpha"))
+        .await
+        .unwrap();
+    let b = series_repo::insert(&db, seed(2, Some("222"), "Bravo"))
+        .await
+        .unwrap();
+    let _c = series_repo::insert(&db, seed(3, None, "Charlie"))
+        .await
+        .unwrap();
 
     let detail = |id: i64, status: &str| {
         serde_json::json!({
@@ -7046,7 +7057,10 @@ async fn calendar_bulk_add_surfaces_background_failure_in_status() {
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(response_json(resp).await["results"][0]["status"], "resolving");
+    assert_eq!(
+        response_json(resp).await["results"][0]["status"],
+        "resolving"
+    );
 
     let outcome = poll_subscribe_status(&app, "cv:4040", 100).await;
     assert_eq!(outcome["status"], "failed");
@@ -7507,9 +7521,12 @@ async fn needs_attention_dismiss_deletes_one_attempt_by_id() {
         .await
         .unwrap()
         .id;
-    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_b, Some("rel-x")))
-        .await
-        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        failed_attempt(series, issue_b, Some("rel-x")),
+    )
+    .await
+    .unwrap();
 
     // Surface row carries pa.id — the dismiss endpoint targets that.
     let body = response_json(
@@ -7582,11 +7599,13 @@ async fn needs_attention_dismiss_also_purges_stale_submitted_for_same_issue() {
     .await
     .unwrap()
     .id;
-    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?")
-        .bind(stale_id)
-        .execute(&app.state.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE pull_attempts SET attempted_at = datetime('now', '-24 hours') WHERE id = ?",
+    )
+    .bind(stale_id)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
 
     let resp = app
         .request(empty_request(
@@ -7681,9 +7700,12 @@ async fn needs_attention_clear_all_deletes_every_failure_class_attempt() {
     pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_a, None))
         .await
         .unwrap();
-    pull_attempt_repo::insert(&app.state.db, failed_attempt(series, issue_b, Some("rel-x")))
-        .await
-        .unwrap();
+    pull_attempt_repo::insert(
+        &app.state.db,
+        failed_attempt(series, issue_b, Some("rel-x")),
+    )
+    .await
+    .unwrap();
     // A non-failure attempt — preserves history of an in-flight pull
     // that the bulk-clear must NOT touch.
     pull_attempt_repo::insert(

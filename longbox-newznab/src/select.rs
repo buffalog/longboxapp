@@ -212,10 +212,8 @@ fn wrap_of_marker(input: &str) -> String {
 fn strip_scene_noise(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)\b(?:digital-mobile|digital-rip|digital-hd|digital|webrip|webdl|mobile)\b",
-        )
-        .unwrap()
+        Regex::new(r"(?i)\b(?:digital-mobile|digital-rip|digital-hd|digital|webrip|webdl|mobile)\b")
+            .unwrap()
     });
     re.replace_all(input, " ").into_owned()
 }
@@ -229,7 +227,11 @@ fn wrap_rightmost_year(input: &str) -> String {
     };
     let bytes = input.as_bytes();
     // Don't double-wrap if the match is already inside `(...)`.
-    let prev = last.start().checked_sub(1).and_then(|i| bytes.get(i)).copied();
+    let prev = last
+        .start()
+        .checked_sub(1)
+        .and_then(|i| bytes.get(i))
+        .copied();
     let next = bytes.get(last.end()).copied();
     if prev == Some(b'(') && next == Some(b')') {
         return input.to_owned();
@@ -780,7 +782,10 @@ mod tests {
         assert_eq!(diag.total_results, 1);
         assert_eq!(diag.parseable_count, 1);
         let score = diag.best_similarity.unwrap();
-        assert!(score < 0.5, "Odin vs Beware-Eye-of-Odin should score low, got {score}");
+        assert!(
+            score < 0.5,
+            "Odin vs Beware-Eye-of-Odin should score low, got {score}"
+        );
     }
 
     #[test]
@@ -848,7 +853,10 @@ mod tests {
             "1",
             &[],
         );
-        assert!(outcome.kept.is_empty(), "Wolverine MAX must not pass at 0.75");
+        assert!(
+            outcome.kept.is_empty(),
+            "Wolverine MAX must not pass at 0.75"
+        );
         let diag = outcome.mismatch.unwrap();
         let score = diag.best_similarity.unwrap();
         assert!(
@@ -1373,8 +1381,7 @@ mod tests {
     #[test]
     fn normalize_no_year_still_no_parse() {
         let patterns = default_patterns();
-        let parsed =
-            parse_release_title("Wolverine.005.Digital.Mephisto-Empire", &patterns);
+        let parsed = parse_release_title("Wolverine.005.Digital.Mephisto-Empire", &patterns);
         assert!(
             parsed.is_none(),
             "No-year Scene title: graceful unparseable expected. got {parsed:?}"
@@ -1420,12 +1427,7 @@ mod tests {
         // Year-less variant: rightmost-year-wrap finds nothing, and
         // the `\d+ (of \d+)` shape falls through to pattern id=13
         // (`Series N (of M) yearless`).
-        check_normalized_parses_to(
-            "Some.Mini.02.of.04.digital.Empire",
-            "Some Mini",
-            "02",
-            None,
-        );
+        check_normalized_parses_to("Some.Mini.02.of.04.digital.Empire", "Some Mini", "02", None);
     }
 
     #[test]
@@ -1577,10 +1579,7 @@ mod tests {
     #[test]
     fn nzb_non_pure_year_bracket_does_not_capture_year() {
         let patterns = default_patterns();
-        let parsed = parse_release_title(
-            "Saga 042 [2025-Backup] [Digital] [Group]",
-            &patterns,
-        );
+        let parsed = parse_release_title("Saga 042 [2025-Backup] [Digital] [Group]", &patterns);
         // Year-less with the (of-N-style) catch-all may or may not
         // claim depending on shape; what's load-bearing is that we
         // don't accidentally capture `2025` from a non-pure bracket.
@@ -1691,12 +1690,7 @@ mod tests {
     #[test]
     fn double_wrap_does_not_occur_on_already_parenthesized_year() {
         // With trailing annotation.
-        check_normalized_parses_to(
-            "Saga 062 (2024) (digital)",
-            "Saga",
-            "062",
-            Some(2024),
-        );
+        check_normalized_parses_to("Saga 062 (2024) (digital)", "Saga", "062", Some(2024));
         // Bare — year is the only parenthesized segment, no
         // annotation block at all. Pre-fix this was the cleanest
         // double-wrap reproducer.
@@ -1729,9 +1723,15 @@ mod tests {
         );
         assert!(outcome.kept.is_empty(), "must reject the wrong-series grab");
         let diag = outcome.mismatch.expect("must produce a mismatch row");
-        assert_eq!(diag.parseable_count, 1, "Scene title is now parseable via normalizer");
+        assert_eq!(
+            diag.parseable_count, 1,
+            "Scene title is now parseable via normalizer"
+        );
         let score = diag.best_similarity.expect("similarity scored");
-        assert!(score < 0.5, "Odin vs Beware-the-Eye-of-Odin should score low, got {score}");
+        assert!(
+            score < 0.5,
+            "Odin vs Beware-the-Eye-of-Odin should score low, got {score}"
+        );
         let msg = diag.into_error_message("Odin", 0.75);
         assert!(
             msg.contains("below threshold"),
@@ -1795,7 +1795,10 @@ mod tests {
             &patterns,
         )
         .unwrap();
-        assert!(score >= 0.75, "publisher-prefixed should match, got {score}");
+        assert!(
+            score >= 0.75,
+            "publisher-prefixed should match, got {score}"
+        );
     }
 
     #[test]
@@ -1806,13 +1809,13 @@ mod tests {
         // strip "image" -> "saga") makes it match. Revert match_normalize to
         // `normalize_title(input)` and this test fails — that's the point.
         let patterns = default_patterns();
-        let score = score_release_title(
-            "Image-Saga.005.2012.digital.Zone-Empire",
-            "Saga",
-            &patterns,
-        )
-        .unwrap();
-        assert!(score >= 0.75, "short publisher-prefixed should match, got {score}");
+        let score =
+            score_release_title("Image-Saga.005.2012.digital.Zone-Empire", "Saga", &patterns)
+                .unwrap();
+        assert!(
+            score >= 0.75,
+            "short publisher-prefixed should match, got {score}"
+        );
     }
 
     #[test]
@@ -1820,9 +1823,16 @@ mod tests {
         let patterns = default_patterns();
         // "Spider.Man" (scene dotted) vs catalog "Spider-Man": hyphen split makes
         // them token-equal instead of {spider-man} vs {spider, man}.
-        let score = score_release_title("Spider.Man.005.2023.digital.X-Empire", "Spider-Man", &patterns)
-            .unwrap();
-        assert!(score >= 0.9, "hyphen variants should match high, got {score}");
+        let score = score_release_title(
+            "Spider.Man.005.2023.digital.X-Empire",
+            "Spider-Man",
+            &patterns,
+        )
+        .unwrap();
+        assert!(
+            score >= 0.9,
+            "hyphen variants should match high, got {score}"
+        );
     }
 
     #[test]
@@ -1832,10 +1842,7 @@ mod tests {
         // the rename uses the alias as its release title. Against the primary
         // title "FBP: Federal Bureau of Physics" it scores ~0.10 (way below
         // threshold). With the alias "Collider" supplied, it scores 1.0.
-        let pool = vec![release(
-            "Collider.001.2013.digital.Zone-Empire",
-            Some(10),
-        )];
+        let pool = vec![release("Collider.001.2013.digital.Zone-Empire", Some(10))];
         let outcome = filter_by_series_title(
             pool,
             &patterns,
@@ -1873,7 +1880,11 @@ mod tests {
             "1",
             &["Collider".to_string()],
         );
-        assert_eq!(outcome.kept.len(), 1, "alias-embedded release should be kept");
+        assert_eq!(
+            outcome.kept.len(),
+            1,
+            "alias-embedded release should be kept"
+        );
     }
 
     #[test]
@@ -1884,7 +1895,10 @@ mod tests {
         // like "Saga" -> still rejected. This is the bound the issue/year gates
         // also backstop; the strip alone cannot collapse unrelated series.
         let patterns = default_patterns();
-        let pool = vec![release("Batman.Comics.005.2016.digital.Zone-Empire", Some(10))];
+        let pool = vec![release(
+            "Batman.Comics.005.2016.digital.Zone-Empire",
+            Some(10),
+        )];
         let outcome = filter_by_series_title(
             pool,
             &patterns,
@@ -1894,9 +1908,13 @@ mod tests {
             &[],
             None,
             "5",
-            &["Comics".to_string()],   // generic alias
+            &["Comics".to_string()], // generic alias
         );
-        assert_eq!(outcome.kept.len(), 0, "generic alias must not cause a false match");
+        assert_eq!(
+            outcome.kept.len(),
+            0,
+            "generic alias must not cause a false match"
+        );
     }
 
     #[test]
@@ -1910,11 +1928,11 @@ mod tests {
             pool,
             &patterns,
             "Saga",
-            None,        // requested_year
-            0.75,        // threshold
-            &[],         // exclusion_keywords
-            None,        // min_size_bytes
-            "5",         // requested_issue (NEW, last arg) — "5" matches "005"
+            None, // requested_year
+            0.75, // threshold
+            &[],  // exclusion_keywords
+            None, // min_size_bytes
+            "5",  // requested_issue (NEW, last arg) — "5" matches "005"
             &[],
         );
         assert_eq!(outcome.kept.len(), 1);

@@ -265,15 +265,11 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
 /// second INSERT errors out and the per-issue code path logs and moves
 /// on. Window is bounded (each sweep_series call is short); cost on
 /// collision is one wasted indexer query.
-pub async fn sweep_single_series(
-    db: &Pool,
-    series_id: i64,
-) -> Result<SweepSummary, PullError> {
+pub async fn sweep_single_series(db: &Pool, series_id: i64) -> Result<SweepSummary, PullError> {
     let mut summary = SweepSummary::default();
-    let entry =
-        pull_list_repo::get(db, series_id)
-            .await?
-            .ok_or(PullError::NotOnPullList { series_id })?;
+    let entry = pull_list_repo::get(db, series_id)
+        .await?
+        .ok_or(PullError::NotOnPullList { series_id })?;
     let ctx = match load_sweep_context(db).await? {
         Ok(ctx) => ctx,
         Err(SweepGate::NoDownloader) => {
@@ -681,7 +677,8 @@ pub async fn sweep_single_issue(
     // Delete any `submitted` row for THIS issue older than
     // `STALE_SUBMITTED_HOURS` before the guard runs so the user's
     // explicit retry doesn't get swallowed.
-    let purged = pull_attempt_repo::purge_stale_submitted_for_issue(db, series_id, issue_id).await?;
+    let purged =
+        pull_attempt_repo::purge_stale_submitted_for_issue(db, series_id, issue_id).await?;
     if purged > 0 {
         tracing::info!(
             target: "longbox_pull",

@@ -13,7 +13,13 @@ use crate::types::IndexerConfig;
 pub fn normalize_query(s: &str) -> String {
     let lowered: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect();
     lowered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -219,10 +225,7 @@ mod tests {
 
     #[test]
     fn non_numeric_issues_pass_through_both_variations() {
-        assert_eq!(
-            build_search_term("Bone", "Annual 1", true),
-            "bone annual 1"
-        );
+        assert_eq!(build_search_term("Bone", "Annual 1", true), "bone annual 1");
         assert_eq!(
             build_search_term("Bone", "Annual 1", false),
             "bone annual 1"

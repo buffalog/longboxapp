@@ -393,7 +393,9 @@ async fn auto_tidy_marks_a_series_empty_past_the_threshold() {
     series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     assert_eq!(empty_scan_counter(&pool, sid).await, 2);
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         0,
         "two empty scans is below the threshold"
     );
@@ -401,14 +403,18 @@ async fn auto_tidy_marks_a_series_empty_past_the_threshold() {
     // The third tick reaches the threshold; the mark now fires.
     series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         1
     );
     assert_eq!(due_at(&pool, sid).await, Some(due));
 
     // A second mark pass is a no-op — the series is already marked.
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         0,
         "an already-marked series is not re-marked"
     );
@@ -440,7 +446,9 @@ async fn auto_tidy_never_marks_a_series_with_only_needs_review_files() {
     // And the sweep must not mark it even if the counter were somehow
     // elevated — the EXISTS guard in mark_for_auto_tidy catches it too.
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         0
     );
     assert_eq!(due_at(&pool, sid).await, None);
@@ -459,7 +467,9 @@ async fn auto_tidy_tick_clears_the_mark_when_needs_review_files_appear() {
     for _ in 0..3 {
         series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     }
-    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    series_repo::mark_for_auto_tidy(&pool, 3, due)
+        .await
+        .unwrap();
     assert_eq!(due_at(&pool, sid).await, Some(due));
 
     give_file_with_status(&pool, sid, "needs_review", 0.50).await;
@@ -526,7 +536,9 @@ async fn auto_tidy_never_marks_a_series_awaiting_a_first_download() {
     // an explicit "awaiting a first download" intent auto-tidy must not
     // act on.
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         0
     );
     assert_eq!(due_at(&pool, on_list).await, None);
@@ -542,7 +554,9 @@ async fn auto_tidy_purge_respects_the_recovery_window() {
     for _ in 0..3 {
         series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     }
-    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    series_repo::mark_for_auto_tidy(&pool, 3, due)
+        .await
+        .unwrap();
 
     // A purge before the deadline leaves the series alone.
     assert_eq!(
@@ -572,7 +586,9 @@ async fn auto_tidy_tick_clears_the_mark_when_files_return() {
     for _ in 0..3 {
         series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     }
-    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    series_repo::mark_for_auto_tidy(&pool, 3, due)
+        .await
+        .unwrap();
     assert_eq!(due_at(&pool, sid).await, Some(due));
 
     // The folder reappears: the series owns a present file again. The
@@ -595,7 +611,9 @@ async fn keep_phantom_series_clears_every_auto_tidy_signal() {
     for _ in 0..3 {
         series_repo::tick_empty_scan_counters(&pool).await.unwrap();
     }
-    series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap();
+    series_repo::mark_for_auto_tidy(&pool, 3, due)
+        .await
+        .unwrap();
 
     series_repo::keep_phantom_series(&pool, sid).await.unwrap();
 
@@ -664,7 +682,9 @@ async fn kept_series_is_not_marked_for_auto_tidy() {
         .unwrap();
 
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         0,
         "a tidy-exempt series must never be marked for removal"
     );
@@ -678,7 +698,9 @@ async fn unkeep_phantom_series_restores_normal_behavior() {
     let due = fixed_ts();
 
     series_repo::keep_phantom_series(&pool, sid).await.unwrap();
-    series_repo::unkeep_phantom_series(&pool, sid).await.unwrap();
+    series_repo::unkeep_phantom_series(&pool, sid)
+        .await
+        .unwrap();
 
     // Back in the phantom list, gone from the kept list.
     assert!(
@@ -689,13 +711,11 @@ async fn unkeep_phantom_series_restores_normal_behavior() {
             .any(|p| p.id == sid),
         "an un-kept series returns to the phantom list"
     );
-    assert!(
-        !series_repo::list_kept_series(&pool)
-            .await
-            .unwrap()
-            .iter()
-            .any(|p| p.id == sid),
-    );
+    assert!(!series_repo::list_kept_series(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.id == sid),);
 
     // And the scanner re-evaluates it normally: ticks resume, and once
     // past the threshold it can be marked again.
@@ -704,7 +724,9 @@ async fn unkeep_phantom_series_restores_normal_behavior() {
     }
     assert_eq!(empty_scan_counter(&pool, sid).await, 3);
     assert_eq!(
-        series_repo::mark_for_auto_tidy(&pool, 3, due).await.unwrap(),
+        series_repo::mark_for_auto_tidy(&pool, 3, due)
+            .await
+            .unwrap(),
         1,
         "an un-kept series is schedulable again after fresh empty scans"
     );
@@ -927,14 +949,13 @@ async fn upsert_number_only_returning_creates_missing_and_preserves_existing() {
 
     // Upsert "1", "2", "3" — "2" already exists, "1" and "3" are
     // synthesized fresh.
-    let resolved = issue_repo::upsert_number_only_returning(
-        &pool,
-        sid,
-        &["1".into(), "2".into(), "3".into()],
-    )
-    .await
-    .unwrap();
-    let by_number: std::collections::HashMap<String, i64> = resolved.into_iter().collect::<Vec<_>>()
+    let resolved =
+        issue_repo::upsert_number_only_returning(&pool, sid, &["1".into(), "2".into(), "3".into()])
+            .await
+            .unwrap();
+    let by_number: std::collections::HashMap<String, i64> = resolved
+        .into_iter()
+        .collect::<Vec<_>>()
         .into_iter()
         .map(|(id, n)| (n, id))
         .collect();
@@ -986,7 +1007,10 @@ async fn discovered_folders_auto_dismiss_not_in_clears_stale_open_rows() {
     let dismissed = discovered_folders_repo::auto_dismiss_not_in(&pool, &keep)
         .await
         .unwrap();
-    assert_eq!(dismissed, 1, "exactly the one stale folder is auto-dismissed");
+    assert_eq!(
+        dismissed, 1,
+        "exactly the one stale folder is auto-dismissed"
+    );
 
     let names: Vec<String> = discovered_folders_repo::list(&pool)
         .await
@@ -1011,7 +1035,10 @@ async fn discovered_folders_auto_dismiss_not_in_empty_keep_dismisses_every_open_
         .await
         .unwrap();
     assert_eq!(dismissed, 1);
-    assert!(discovered_folders_repo::list(&pool).await.unwrap().is_empty());
+    assert!(discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 // -------- A.9 F6 hot-fix: split-source dismiss --------
@@ -1030,7 +1057,10 @@ async fn auto_dismissed_folder_resurfaces_when_re_detected() {
         .await
         .unwrap();
     assert!(
-        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        discovered_folders_repo::list(&pool)
+            .await
+            .unwrap()
+            .is_empty(),
         "auto-dismissed row is hidden from the list"
     );
 
@@ -1043,8 +1073,14 @@ async fn auto_dismissed_folder_resurfaces_when_re_detected() {
     assert_eq!(rows.len(), 1, "row resurfaces after re-detection");
     assert_eq!(rows[0].folder_name, "Resurrect Me (2020)");
     assert_eq!(rows[0].file_count, 7, "refreshed file_count on resurface");
-    assert!(rows[0].auto_dismissed_at.is_none(), "auto_dismissed_at cleared");
-    assert!(rows[0].dismissed_at.is_none(), "user dismissed_at stays null");
+    assert!(
+        rows[0].auto_dismissed_at.is_none(),
+        "auto_dismissed_at cleared"
+    );
+    assert!(
+        rows[0].dismissed_at.is_none(),
+        "user dismissed_at stays null"
+    );
 }
 
 #[tokio::test]
@@ -1060,7 +1096,10 @@ async fn user_dismissed_folder_stays_hidden_when_re_detected() {
     discovered_folders_repo::dismiss(&pool, &["Never Show (2021)".into()])
         .await
         .unwrap();
-    assert!(discovered_folders_repo::list(&pool).await.unwrap().is_empty());
+    assert!(discovered_folders_repo::list(&pool)
+        .await
+        .unwrap()
+        .is_empty());
 
     // Re-detection attempt — should be a no-op on the user-dismissed row.
     discovered_folders_repo::upsert(&pool, folder("Never Show (2021)", 99))
@@ -1068,7 +1107,10 @@ async fn user_dismissed_folder_stays_hidden_when_re_detected() {
         .unwrap();
 
     assert!(
-        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        discovered_folders_repo::list(&pool)
+            .await
+            .unwrap()
+            .is_empty(),
         "user-dismissed folder stays hidden even after re-detection"
     );
 }
@@ -1096,7 +1138,10 @@ async fn combined_user_and_auto_dismiss_stays_hidden_after_auto_clear() {
     // The upsert is a no-op against a user-dismissed row, so even the
     // auto column stays set (the WHERE clause guarded the SET).
     assert!(
-        discovered_folders_repo::list(&pool).await.unwrap().is_empty(),
+        discovered_folders_repo::list(&pool)
+            .await
+            .unwrap()
+            .is_empty(),
         "user-dismiss still hides the row regardless of auto state"
     );
 }

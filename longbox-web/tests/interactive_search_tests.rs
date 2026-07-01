@@ -101,7 +101,11 @@ async fn newznab_serving(rss: &'static str) -> MockServer {
 
 async fn search(app: &TestApp, body: serde_json::Value) -> serde_json::Value {
     let resp = app
-        .request(json_request("POST", "/api/search/interactive", body.to_string()))
+        .request(json_request(
+            "POST",
+            "/api/search/interactive",
+            body.to_string(),
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     response_json(resp).await
@@ -114,17 +118,30 @@ async fn returns_all_results_scored_and_sorted() {
     let idx = newznab_serving(RSS).await;
     seed_indexer(&app.state.db, "NZBGeek", &idx.uri()).await;
 
-    let body = search(&app, json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" })).await;
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
     let results = body["results"].as_array().unwrap();
 
     // All three returned (no confidence threshold — user decides).
     assert_eq!(results.len(), 3);
     // Default sort: confidence descending — the two Saga releases first.
-    let conf: Vec<f64> = results.iter().map(|r| r["confidence"].as_f64().unwrap()).collect();
-    assert!(conf[0] >= conf[1] && conf[1] >= conf[2], "not sorted desc: {conf:?}");
+    let conf: Vec<f64> = results
+        .iter()
+        .map(|r| r["confidence"].as_f64().unwrap())
+        .collect();
+    assert!(
+        conf[0] >= conf[1] && conf[1] >= conf[2],
+        "not sorted desc: {conf:?}"
+    );
     assert!(conf[0] > 0.9, "top result should be a strong Saga match");
     // The wrong-series Batman release is present but low-confidence.
-    let batman = results.iter().find(|r| r["title"].as_str().unwrap().contains("Batman")).unwrap();
+    let batman = results
+        .iter()
+        .find(|r| r["title"].as_str().unwrap().contains("Batman"))
+        .unwrap();
     assert!(batman["confidence"].as_f64().unwrap() < 0.5);
 
     // Per-result fields populated.
@@ -147,7 +164,11 @@ async fn partial_results_with_inline_indexer_error() {
     // the whole search.
     seed_indexer(&app.state.db, "Dead", "http://127.0.0.1:1").await;
 
-    let body = search(&app, json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" })).await;
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
     assert_eq!(body["results"].as_array().unwrap().len(), 3);
     let errors = body["errors"].as_array().unwrap();
     assert_eq!(errors.len(), 1);
@@ -155,15 +176,25 @@ async fn partial_results_with_inline_indexer_error() {
     let err_text = errors[0]["error"].as_str().unwrap();
     assert!(!err_text.is_empty());
     // The indexer API key must not leak into the error returned to the client.
-    assert!(!err_text.contains("apikey"), "apikey leaked in error: {err_text}");
-    assert!(!err_text.contains("KEY"), "apikey leaked in error: {err_text}");
+    assert!(
+        !err_text.contains("apikey"),
+        "apikey leaked in error: {err_text}"
+    );
+    assert!(
+        !err_text.contains("KEY"),
+        "apikey leaked in error: {err_text}"
+    );
 }
 
 #[tokio::test]
 async fn empty_results_when_no_indexers() {
     let app = build_test_app().await;
     let (series, issue) = seed_series_issue(&app.state.db).await;
-    let body = search(&app, json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" })).await;
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
     assert!(body["results"].as_array().unwrap().is_empty());
     assert!(body["errors"].as_array().unwrap().is_empty());
 }
@@ -261,5 +292,9 @@ async fn grab_without_downloader_configured_fails_cleanly() {
     )
     .await;
     assert_eq!(body["success"], false);
-    assert!(body["error"].as_str().unwrap().to_lowercase().contains("downloader"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("downloader"));
 }

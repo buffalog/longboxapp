@@ -45,9 +45,8 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 /// The dummy hash is computed once and cached.
 pub fn dummy_verify(password: &str) -> bool {
     static DUMMY: OnceLock<String> = OnceLock::new();
-    let hash = DUMMY.get_or_init(|| {
-        hash_password("longbox-not-a-real-password").expect("hash dummy password")
-    });
+    let hash = DUMMY
+        .get_or_init(|| hash_password("longbox-not-a-real-password").expect("hash dummy password"));
     let _ = bcrypt::verify(password, hash);
     false
 }

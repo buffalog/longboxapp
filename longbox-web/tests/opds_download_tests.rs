@@ -14,9 +14,13 @@ const PASSWORD: &str = "hunter2";
 async fn configure_opds(db: &longbox_db::Pool) {
     use longbox_db::settings_repo as s;
     s::set(db, s::KEY_OPDS_ENABLED, "true").await.unwrap();
-    longbox_db::opds_users_repo::create(db, USERNAME, &longbox_opds::hash_password(PASSWORD).unwrap())
-        .await
-        .unwrap();
+    longbox_db::opds_users_repo::create(
+        db,
+        USERNAME,
+        &longbox_opds::hash_password(PASSWORD).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 fn now_pdt() -> time::PrimitiveDateTime {
@@ -100,7 +104,8 @@ async fn seed_file(
 }
 
 fn basic() -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
     format!("Basic {encoded}")
 }
 
@@ -158,7 +163,15 @@ async fn content_type_follows_extension() {
     let app = build_test_app().await;
     configure_opds(&app.state.db).await;
     let issue = seed_issue(&app.state.db).await;
-    seed_file(&app, issue, "Dl/Dl 001.cbr", "owned", true, Some(b"rar-bytes")).await;
+    seed_file(
+        &app,
+        issue,
+        "Dl/Dl 001.cbr",
+        "owned",
+        true,
+        Some(b"rar-bytes"),
+    )
+    .await;
 
     let resp = app
         .request(get(&format!("/opds/v1/issues/{issue}/download"), true))

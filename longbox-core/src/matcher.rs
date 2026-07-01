@@ -345,8 +345,10 @@ mod tests {
         for n in 1..=24 {
             bigger_issues.push(issue(100 + n, 918, &n.to_string()));
         }
-        let large_id_many_issues =
-            candidate(series(918, "Sam and Twitch Case Files", Some(2024)), bigger_issues);
+        let large_id_many_issues = candidate(
+            series(918, "Sam and Twitch Case Files", Some(2024)),
+            bigger_issues,
+        );
         let candidates = vec![small_id_few_issues, large_id_many_issues];
         let ci = ComicInfo {
             series: Some("Sam and Twitch Case Files".into()),
@@ -556,8 +558,8 @@ mod tests {
             id: 1,
             cv_id: None,
             metron_id: None,
-            title: "Pérez".into(),         // precomposed
-            sort_title: "pérez".into(),    // precomposed (NFC)
+            title: "Pérez".into(),      // precomposed
+            sort_title: "pérez".into(), // precomposed (NFC)
             start_year: None,
             publisher: None,
             description: None,

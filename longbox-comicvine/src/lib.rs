@@ -17,4 +17,6 @@ mod rate_limit;
 pub use client::{ComicVineClient, ComicVineClientConfig, CvRateLimitSnapshot};
 pub use enrichment::{pick_volume, EnrichmentCandidateInput, EnrichmentThresholds, PickOutcome};
 pub use error::CvError;
-pub use projection::{CvCalendarItem, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult};
+pub use projection::{
+    CvCalendarItem, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult,
+};
