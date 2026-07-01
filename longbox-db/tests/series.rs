@@ -395,6 +395,32 @@ async fn metron_link_candidates_and_mark() {
         .unwrap()
         .unwrap();
     assert_eq!(row.metron_id.as_deref(), Some("916"));
+
+    // COALESCE must not clobber an already-set metron_id on a second write.
+    let clobber = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(444),
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::mark_metron_link_checked(&pool, clobber.id, Some("meta-A"))
+        .await
+        .unwrap();
+    series_repo::mark_metron_link_checked(&pool, clobber.id, Some("meta-B"))
+        .await
+        .unwrap();
+    let clobber_row = series_repo::find_by_id(&pool, clobber.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        clobber_row.metron_id.as_deref(),
+        Some("meta-A"),
+        "COALESCE must not clobber an already-set metron_id"
+    );
 }
 
 #[tokio::test]
