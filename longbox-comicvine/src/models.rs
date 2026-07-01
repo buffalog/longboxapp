@@ -99,6 +99,26 @@ pub(crate) struct CvIssueCreditsRaw {
     pub person_credits: Vec<CvCreditRaw>,
 }
 
+/// One entry of a person's `volume_credits` — a series they're credited on.
+/// From `/person/4040-<id>/?field_list=volume_credits`. Only id+name used.
+// ponytail: expect(dead_code) bridges until Task 2 adds the client method;
+// will error once CvPersonVolumeCreditsRaw is deserialized there, forcing removal.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvVolumeCreditRaw {
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The `results` object of a person volume-credits fetch (field_list-limited).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvPersonVolumeCreditsRaw {
+    #[serde(default)]
+    pub volume_credits: Vec<CvVolumeCreditRaw>,
+}
+
 /// Full issue detail from `/issues/` results — both the
 /// `filter=volume:<id>` (per-volume) and `filter=store_date:<from>|<to>`
 /// (release-calendar) queries deserialize into this.

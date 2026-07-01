@@ -5,7 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    CvImage, CvIssueCreditsRaw, CvIssueFull, CvPublisher, CvVolumeFull, CvVolumeSearchItem,
+    CvImage, CvIssueCreditsRaw, CvIssueFull, CvPersonVolumeCreditsRaw, CvPublisher, CvVolumeFull,
+    CvVolumeSearchItem,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,30 @@ pub(crate) fn project_issue_credits(raw: CvIssueCreditsRaw) -> Vec<CvPersonCredi
         }
     }
     out
+}
+
+/// One series (CV volume) a creator is credited on — a bibliography entry.
+/// Series-level only: CV's `volume_credits` carries no role/issue detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvVolumeCredit {
+    pub cv_volume_id: i64,
+    pub name: String,
+}
+
+/// Project a person's raw volume_credits into deduped `CvVolumeCredit` entries
+/// (CV occasionally repeats a volume; keep first occurrence, preserve order).
+// ponytail: expect(dead_code) bridges until Task 2 adds the client method.
+#[allow(dead_code)]
+pub(crate) fn project_person_volume_credits(raw: CvPersonVolumeCreditsRaw) -> Vec<CvVolumeCredit> {
+    let mut seen = std::collections::HashSet::new();
+    raw.volume_credits
+        .into_iter()
+        .filter(|v| seen.insert(v.id))
+        .map(|v| CvVolumeCredit {
+            cv_volume_id: v.id,
+            name: v.name,
+        })
+        .collect()
 }
 
 pub(crate) fn project_search_item(item: CvVolumeSearchItem) -> SeriesSearchResult {
@@ -369,6 +394,46 @@ mod credit_tests {
                     cv_person_id: 130355,
                     name: "Ethan S. Parker".into(),
                     role: "writer".into()
+                },
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod volume_credit_tests {
+    use super::*;
+    use crate::models::{CvPersonVolumeCreditsRaw, CvVolumeCreditRaw};
+
+    #[test]
+    fn projects_and_dedupes_by_volume_id() {
+        let raw = CvPersonVolumeCreditsRaw {
+            volume_credits: vec![
+                CvVolumeCreditRaw {
+                    id: 7084,
+                    name: "Avengers".into(),
+                },
+                CvVolumeCreditRaw {
+                    id: 18166,
+                    name: "Uncanny X-Force".into(),
+                },
+                CvVolumeCreditRaw {
+                    id: 7084,
+                    name: "Avengers".into(),
+                }, // dup -> dropped
+            ],
+        };
+        let out = project_person_volume_credits(raw);
+        assert_eq!(
+            out,
+            vec![
+                CvVolumeCredit {
+                    cv_volume_id: 7084,
+                    name: "Avengers".into()
+                },
+                CvVolumeCredit {
+                    cv_volume_id: 18166,
+                    name: "Uncanny X-Force".into()
                 },
             ]
         );
