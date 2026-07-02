@@ -11,8 +11,9 @@ use crate::models::{
     MetronSeriesListRow,
 };
 use crate::projection::{
-    project_calendar_item, project_calendar_item_from_detail, project_series_detail,
-    project_series_ref, MetronCalendarItem, MetronSeriesDetail, MetronSeriesRef,
+    project_calendar_item, project_calendar_item_from_detail, project_issue_ref,
+    project_series_detail, project_series_ref, MetronCalendarItem, MetronIssueRef,
+    MetronSeriesDetail, MetronSeriesRef,
 };
 use crate::rate_limit::MetronRateLimiter;
 
@@ -152,6 +153,45 @@ impl MetronClient {
             }
             page = page.saturating_add(1);
             debug!(target: "longbox_metron", page, "paginating next issue page");
+        }
+
+        Ok(out)
+    }
+
+    /// All of a series' issues from Metron (`issue/?series_id=`), paginated.
+    /// Returns id + number for each — the issue-linking resolver matches our
+    /// issue numbers against these.
+    #[instrument(target = "longbox_metron", skip(self))]
+    pub async fn fetch_issues_by_series_id(
+        &self,
+        metron_series_id: i64,
+    ) -> Result<Vec<MetronIssueRef>, MetronError> {
+        let mut out = Vec::new();
+        let mut page: u32 = 1;
+        let limit_str = PAGE_LIMIT.to_string();
+        let series_str = metron_series_id.to_string();
+
+        loop {
+            let page_str = page.to_string();
+            let url = self.build_url(
+                "issue/",
+                &[
+                    ("series_id", series_str.as_str()),
+                    ("page_size", limit_str.as_str()),
+                    ("page", page_str.as_str()),
+                ],
+            )?;
+            let body = self.execute_with_retry(url).await?;
+            let envelope: MetronList<MetronIssueListRow> = parse_json(&body)?;
+            let total = envelope.count;
+            let has_next = envelope.next.is_some();
+            for row in envelope.results {
+                out.push(project_issue_ref(row));
+            }
+            if !has_next || out.len() as i64 >= total {
+                break;
+            }
+            page = page.saturating_add(1);
         }
 
         Ok(out)
