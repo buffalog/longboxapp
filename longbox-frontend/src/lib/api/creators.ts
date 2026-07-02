@@ -41,3 +41,20 @@ export interface DiscoveredVolume {
 export function getCreatorDiscovery(id: number): Promise<DiscoveredVolume[]> {
   return apiFetch(`/creators/${id}/discover`);
 }
+
+export interface CvCreatorCandidate {
+  cv_person_id: number;
+  name: string;
+  description: string | null;
+  country: string | null;
+  image_url: string | null;
+  in_library_creator_id: number | null;
+}
+
+export function searchCvCreators(q: string): Promise<CvCreatorCandidate[]> {
+  return apiFetch(`/creators/cv-search?q=${encodeURIComponent(q)}`);
+}
+
+export function discoverByCvPerson(cvPersonId: number): Promise<DiscoveredVolume[]> {
+  return apiFetch(`/creators/discover?cv_person_id=${cvPersonId}`);
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cv_person_id AS \"cv_person_id!: i64\", id AS \"id!: i64\"\n           FROM creators WHERE cv_person_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "cv_person_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "3be22ac56a50799beea871e5ebfef9bd1337eccc38457ed8ea2518fc636f12f9"
+}

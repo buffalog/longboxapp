@@ -270,6 +270,22 @@ where
     Ok(row.and_then(|r| r.cv_person_id))
 }
 
+/// All `(cv_person_id, local creator id)` pairs for creators that carry a
+/// CV person id. Small table (~2k rows); used to flag CV person-search hits
+/// that are already in the library.
+pub async fn cv_person_id_map<'e, E>(executor: E) -> Result<Vec<(i64, i64)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT cv_person_id AS "cv_person_id!: i64", id AS "id!: i64"
+           FROM creators WHERE cv_person_id IS NOT NULL"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.cv_person_id, r.id)).collect())
+}
+
 /// Paginated in-library issues for a creator, optional role + series filters.
 /// Page is 1-based; page size 50; ordered by cover_date ASC.
 pub async fn creator_issues<'e, E>(
