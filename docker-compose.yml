@@ -21,14 +21,14 @@ services:
       # correctly. Use `scripts/db-shell.sh` and
       # `scripts/db-backup.sh` for host-side access.
       - longbox-db:/data
-      - ${LIBRARY_PATH}:/library
+      - ${LIBRARY_PATH}:/comics
       # Phase B watch folder. Bind-mounted as writable (Step 6 will
       # move files out of it). Optional — when DOWNLOAD_WATCH_HOST is
       # unset the mount is just an empty in-container directory, and
       # Phase B sees no candidates.
       - ${DOWNLOAD_WATCH_HOST:-./.empty-watch}:/watch
     environment:
-      LIBRARY_ROOT_PATH: /library
+      LIBRARY_ROOT_PATH: /comics
       DATABASE_URL: "sqlite:/data/longbox.db?mode=rwc"
       BIND_ADDR: "0.0.0.0:3000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
