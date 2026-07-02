@@ -139,7 +139,7 @@ async fn issue_link_loop(db: Pool, metron: Arc<MetronClient>) {
                             .map(|i| (i.id, i.number.clone(), i.metron_issue_id.is_some()))
                             .collect();
                         for (issue_id, m_issue_id) in match_issue_links(&rows, &refs) {
-                            if series_repo_set_issue_ok(&db, issue_id, m_issue_id).await {
+                            if set_issue_metron_id_ok(&db, issue_id, m_issue_id).await {
                                 issues_linked += 1;
                             }
                         }
@@ -169,11 +169,17 @@ async fn issue_link_loop(db: Pool, metron: Arc<MetronClient>) {
     }
 }
 
-/// Small helper so the loop body stays readable.
-async fn series_repo_set_issue_ok(db: &Pool, issue_id: i64, metron_issue_id: i64) -> bool {
-    issue_repo::set_metron_issue_id(db, issue_id, &metron_issue_id.to_string())
-        .await
-        .is_ok()
+/// Write one issue's Metron id; returns whether it stuck. Logs on failure so a
+/// swallowed write (the series is marked done regardless) is diagnosable —
+/// v1 has no re-link scan, so a lost write leaves that issue NULL.
+async fn set_issue_metron_id_ok(db: &Pool, issue_id: i64, metron_issue_id: i64) -> bool {
+    match issue_repo::set_metron_issue_id(db, issue_id, &metron_issue_id.to_string()).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(target: "longbox_metron_link", issue_id, error = %e, "set_metron_issue_id failed");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
