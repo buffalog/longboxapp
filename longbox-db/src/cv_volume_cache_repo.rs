@@ -25,6 +25,7 @@ pub struct CvVolumeCacheRow {
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub start_year: Option<i64>,
+    pub cover_url: Option<String>,
     pub fetched_at: Option<PrimitiveDateTime>,
     pub first_seen_at: PrimitiveDateTime,
 }
@@ -61,6 +62,38 @@ where
         CvVolumePublisherEntry,
         r#"SELECT cv_volume_id AS "cv_volume_id!: i64",
                   publisher
+           FROM cv_volume_cache"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Discovery-facing metadata for one cached volume. `publisher`/`start_year`/
+/// `cover_url` are all `None` for a still-pending row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CvVolumeMeta {
+    pub cv_volume_id: i64,
+    pub publisher: Option<String>,
+    pub start_year: Option<i64>,
+    pub cover_url: Option<String>,
+}
+
+/// All cache rows projected to discovery metadata. Discovery reads this once
+/// per request and builds a `HashMap<cv_volume_id, CvVolumeMeta>` for in-memory
+/// joins — mirrors `list_all_publishers` (the calendar path).
+// ponytail: fetch-all + HashMap like the calendar path; if the cache grows to
+// 100k+ rows, switch to a batched IN query keyed on the discovered ids.
+pub async fn list_metadata_all<'e, E>(executor: E) -> Result<Vec<CvVolumeMeta>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        CvVolumeMeta,
+        r#"SELECT cv_volume_id AS "cv_volume_id!: i64",
+                  publisher,
+                  start_year,
+                  cover_url
            FROM cv_volume_cache"#
     )
     .fetch_all(executor)
@@ -128,6 +161,7 @@ pub async fn mark_fetched<'e, E>(
     publisher: Option<&str>,
     description: Option<&str>,
     start_year: Option<i32>,
+    cover_url: Option<&str>,
 ) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
@@ -135,12 +169,13 @@ where
     let start_year_i64 = start_year.map(i64::from);
     let result = sqlx::query!(
         r#"UPDATE cv_volume_cache
-           SET publisher = ?, description = ?, start_year = ?,
+           SET publisher = ?, description = ?, start_year = ?, cover_url = ?,
                fetched_at = CURRENT_TIMESTAMP
            WHERE cv_volume_id = ?"#,
         publisher,
         description,
         start_year_i64,
+        cover_url,
         cv_volume_id,
     )
     .execute(executor)
@@ -161,6 +196,7 @@ where
                   publisher,
                   description,
                   start_year,
+                  cover_url,
                   fetched_at AS "fetched_at: _",
                   first_seen_at AS "first_seen_at!: _"
            FROM cv_volume_cache

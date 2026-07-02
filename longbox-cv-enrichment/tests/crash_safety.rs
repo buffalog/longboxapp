@@ -526,14 +526,21 @@ async fn cv_volume_cache_list_pending_excludes_fetched_rows() {
         .unwrap();
 
     // Fill 222 with a real publisher.
-    cv_volume_cache_repo::mark_fetched(&pool, 222, Some("Image Comics"), Some("desc"), Some(2012))
+    cv_volume_cache_repo::mark_fetched(
+        &pool,
+        222,
+        Some("Image Comics"),
+        Some("desc"),
+        Some(2012),
+        Some("https://cv/cover-222.jpg"),
+    )
         .await
         .unwrap();
 
     // Fill 333 with a NULL publisher (CV returned no publisher data).
     // fetched_at MUST still be set — otherwise the worker re-attempts
     // forever on volumes that legitimately have no publisher field.
-    cv_volume_cache_repo::mark_fetched(&pool, 333, None, None, None)
+    cv_volume_cache_repo::mark_fetched(&pool, 333, None, None, None, None)
         .await
         .unwrap();
 
@@ -570,6 +577,7 @@ async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
         Some("Dark Horse"),
         Some("Long description."),
         Some(2024),
+        Some("https://cv/cover-42.jpg"),
     )
     .await
     .unwrap();
@@ -582,6 +590,7 @@ async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
     assert_eq!(row.publisher.as_deref(), Some("Dark Horse"));
     assert_eq!(row.description.as_deref(), Some("Long description."));
     assert_eq!(row.start_year, Some(2024));
+    assert_eq!(row.cover_url.as_deref(), Some("https://cv/cover-42.jpg"));
     assert!(row.fetched_at.is_some(), "fetched_at set on success");
 }
 

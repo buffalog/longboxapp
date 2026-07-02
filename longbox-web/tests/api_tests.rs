@@ -6037,6 +6037,7 @@ async fn calendar_falls_back_to_cv_volume_cache_for_untracked_volumes() {
         Some("Boom! Studios"),
         Some("A short series description."),
         Some(2023),
+        None,
     )
     .await
     .unwrap();
@@ -6052,6 +6053,7 @@ async fn calendar_falls_back_to_cv_volume_cache_for_untracked_volumes() {
         Some("Boom! Studios"),
         Some("A short series description."),
         Some(2023),
+        None,
     )
     .await
     .unwrap();
