@@ -60,6 +60,21 @@ pub(crate) struct CvVolumeSearchItem {
     pub deck: Option<String>,
 }
 
+/// One entry from `search/?resources=person`. `deck` is CV's one-line bio;
+/// `image` / `country` are optional. Person search results carry no usable
+/// issue count, so we don't model one.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CvPersonSearchItem {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub deck: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub image: Option<CvImage>,
+}
+
 /// Full volume detail from `/volume/4050-<id>/`. Same base fields as search
 /// plus the long-form `description` and `site_detail_url`.
 #[derive(Debug, Clone, Deserialize)]
