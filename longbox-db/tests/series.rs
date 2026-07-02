@@ -6,6 +6,69 @@ use longbox_db::{
     NewLibraryRoot, NewSeries, SeriesUpdate,
 };
 
+#[tokio::test]
+async fn metron_issue_link_candidates_writer_and_marker() {
+    let pool = fresh_pool().await;
+    // series with metron_id but issues not yet linked -> a candidate
+    let s = series_repo::insert(&pool, walking_dead()).await.unwrap();
+    series_repo::set_metron_id(&pool, s.id, "916")
+        .await
+        .unwrap();
+    let iid = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: s.id,
+            cv_issue_id: Some(1),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    // a series WITHOUT metron_id -> excluded
+    series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(9),
+            ..walking_dead()
+        },
+    )
+    .await
+    .unwrap();
+
+    let cands = series_repo::list_metron_issue_link_candidates(&pool, 50)
+        .await
+        .unwrap();
+    assert_eq!(cands, vec![(s.id, "916".to_string())]);
+
+    // link the issue + mark the series done
+    issue_repo::set_metron_issue_id(&pool, iid, "7997")
+        .await
+        .unwrap();
+    series_repo::mark_metron_issues_linked(&pool, s.id)
+        .await
+        .unwrap();
+
+    // series leaves the work-list; issue carries the metron id
+    assert!(series_repo::list_metron_issue_link_candidates(&pool, 50)
+        .await
+        .unwrap()
+        .is_empty());
+    let issue = issue_repo::find_by_id(&pool, iid).await.unwrap().unwrap();
+    assert_eq!(issue.metron_issue_id.as_deref(), Some("7997"));
+    // set race-guard: a second set with a different id does NOT clobber
+    issue_repo::set_metron_issue_id(&pool, iid, "9999")
+        .await
+        .unwrap();
+    let issue2 = issue_repo::find_by_id(&pool, iid).await.unwrap().unwrap();
+    assert_eq!(issue2.metron_issue_id.as_deref(), Some("7997"));
+}
+
 fn walking_dead() -> NewSeries {
     NewSeries {
         cv_id: Some(12345),

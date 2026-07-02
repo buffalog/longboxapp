@@ -232,6 +232,30 @@ where
     Ok(row.is_some())
 }
 
+/// Link an issue to its Metron issue id. Race-guarded (only sets when NULL or
+/// already equal), so a re-run or concurrent writer can't clobber.
+pub async fn set_metron_issue_id<'e, E>(
+    executor: E,
+    issue_id: i64,
+    metron_issue_id: &str,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE issues
+           SET metron_issue_id = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?
+             AND (metron_issue_id IS NULL OR metron_issue_id = ?)"#,
+        metron_issue_id,
+        issue_id,
+        metron_issue_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn insert<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,

@@ -214,6 +214,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //      the Metron client existing — no client, no spawn.
     if let Some(ref m) = metron {
         crate::metron_link::spawn_metron_linker(db.clone(), Arc::clone(m));
+        crate::metron_link::spawn_metron_issue_linker(db.clone(), Arc::clone(m));
     }
 
     // 13. Compose state.

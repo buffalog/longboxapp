@@ -20,4 +20,4 @@ mod rate_limit;
 
 pub use client::{MetronClient, MetronClientConfig};
 pub use error::MetronError;
-pub use projection::{MetronCalendarItem, MetronSeriesDetail, MetronSeriesRef};
+pub use projection::{MetronCalendarItem, MetronIssueRef, MetronSeriesDetail, MetronSeriesRef};
