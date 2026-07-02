@@ -148,7 +148,10 @@ fn build_discovery(
     cache_meta: &HashMap<i64, CvVolumeMeta>,
     blocked_publishers: &[String],
 ) -> (Vec<DiscoveredVolume>, u32) {
-    let owned: HashMap<i64, i64> = owned_pairs.iter().map(|(sid, cvid)| (*cvid, *sid)).collect();
+    let owned: HashMap<i64, i64> = owned_pairs
+        .iter()
+        .map(|(sid, cvid)| (*cvid, *sid))
+        .collect();
     let mut filtered_count = 0u32;
     let mut out: Vec<DiscoveredVolume> = credits
         .into_iter()

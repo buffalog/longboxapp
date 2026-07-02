@@ -534,8 +534,8 @@ async fn cv_volume_cache_list_pending_excludes_fetched_rows() {
         Some(2012),
         Some("https://cv/cover-222.jpg"),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Fill 333 with a NULL publisher (CV returned no publisher data).
     // fetched_at MUST still be set — otherwise the worker re-attempts
@@ -652,7 +652,10 @@ async fn cv_volume_cache_list_metadata_all_projects_fetched_and_pending() {
     let fetched = &meta[&10];
     assert_eq!(fetched.publisher.as_deref(), Some("Image Comics"));
     assert_eq!(fetched.start_year, Some(2014));
-    assert_eq!(fetched.cover_url.as_deref(), Some("https://cv/cover-10.jpg"));
+    assert_eq!(
+        fetched.cover_url.as_deref(),
+        Some("https://cv/cover-10.jpg")
+    );
 
     let pending = &meta[&20];
     assert!(pending.publisher.is_none());
