@@ -3,7 +3,15 @@
   import { addSeries } from '$lib/api/series';
   import Button from '$lib/components/Button.svelte';
 
-  let { volumes }: { volumes: DiscoveredVolume[] } = $props();
+  let {
+    volumes,
+    filteredCount = 0,
+    onShowFiltered,
+  }: {
+    volumes: DiscoveredVolume[];
+    filteredCount?: number;
+    onShowFiltered?: () => void;
+  } = $props();
 
   let addingId = $state<number | null>(null);
   let addedIds = $state<Set<number>>(new Set());
@@ -20,18 +28,32 @@
       addingId = null;
     }
   }
+
+  function meta(v: DiscoveredVolume): string {
+    return [v.start_year, v.publisher].filter(Boolean).join(' · ');
+  }
 </script>
 
 {#if volumes.length === 0}
   <p class="text-sm text-slate-500">No series found for this creator.</p>
 {:else}
-  <h2 class="mb-2 text-lg font-semibold">Not in your library ({notInLibrary.length})</h2>
-  <ul class="mb-6 space-y-1">
+  <h3 class="mb-2 text-lg font-semibold">Not in your library ({notInLibrary.length})</h3>
+  <ul class="mb-2 space-y-2">
     {#each notInLibrary as v (v.cv_volume_id)}
-      <li class="flex items-baseline justify-between gap-2">
-        <span>{v.name}</span>
+      <li class="flex items-center justify-between gap-3">
+        <div class="flex min-w-0 items-center gap-2">
+          {#if v.cover_url}
+            <img src={v.cover_url} alt={v.name} loading="lazy" class="h-12 w-8 shrink-0 rounded object-cover" />
+          {:else}
+            <div class="h-12 w-8 shrink-0 rounded bg-slate-100"></div>
+          {/if}
+          <div class="min-w-0">
+            <div class="truncate">{v.name}</div>
+            {#if meta(v)}<div class="text-xs text-slate-400">{meta(v)}</div>{/if}
+          </div>
+        </div>
         {#if addedIds.has(v.cv_volume_id)}
-          <span class="text-sm text-green-600">✓ Added</span>
+          <span class="shrink-0 text-sm text-green-600">✓ Added</span>
         {:else}
           <Button
             variant="secondary"
@@ -44,7 +66,13 @@
     {/each}
   </ul>
 
-  <h2 class="mb-2 text-lg font-semibold">In your library ({inLibrary.length})</h2>
+  {#if filteredCount > 0 && onShowFiltered}
+    <button class="mb-4 text-sm text-blue-600 hover:underline" onclick={onShowFiltered}>
+      {filteredCount} {filteredCount === 1 ? 'edition' : 'editions'} hidden by the publisher filter — show {filteredCount === 1 ? 'it' : 'them'}
+    </button>
+  {/if}
+
+  <h3 class="mb-2 text-lg font-semibold">In your library ({inLibrary.length})</h3>
   <ul class="space-y-1">
     {#each inLibrary as v (v.cv_volume_id)}
       <li><a href={`/series/${v.series_id}`} class="hover:underline">{v.name}</a></li>

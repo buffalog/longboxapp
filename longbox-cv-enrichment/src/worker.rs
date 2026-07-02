@@ -406,6 +406,7 @@ async fn cache_fill_one(db: &Pool, bg: &BackgroundCvClient, cv_volume_id: i64) {
         volume.publisher.as_deref(),
         volume.description.as_deref(),
         volume.start_year,
+        volume.cover_url.as_deref(),
     )
     .await
     {

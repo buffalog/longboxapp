@@ -526,14 +526,21 @@ async fn cv_volume_cache_list_pending_excludes_fetched_rows() {
         .unwrap();
 
     // Fill 222 with a real publisher.
-    cv_volume_cache_repo::mark_fetched(&pool, 222, Some("Image Comics"), Some("desc"), Some(2012))
-        .await
-        .unwrap();
+    cv_volume_cache_repo::mark_fetched(
+        &pool,
+        222,
+        Some("Image Comics"),
+        Some("desc"),
+        Some(2012),
+        Some("https://cv/cover-222.jpg"),
+    )
+    .await
+    .unwrap();
 
     // Fill 333 with a NULL publisher (CV returned no publisher data).
     // fetched_at MUST still be set — otherwise the worker re-attempts
     // forever on volumes that legitimately have no publisher field.
-    cv_volume_cache_repo::mark_fetched(&pool, 333, None, None, None)
+    cv_volume_cache_repo::mark_fetched(&pool, 333, None, None, None, None)
         .await
         .unwrap();
 
@@ -570,6 +577,7 @@ async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
         Some("Dark Horse"),
         Some("Long description."),
         Some(2024),
+        Some("https://cv/cover-42.jpg"),
     )
     .await
     .unwrap();
@@ -582,6 +590,7 @@ async fn cv_volume_cache_mark_fetched_writes_all_three_fields() {
     assert_eq!(row.publisher.as_deref(), Some("Dark Horse"));
     assert_eq!(row.description.as_deref(), Some("Long description."));
     assert_eq!(row.start_year, Some(2024));
+    assert_eq!(row.cover_url.as_deref(), Some("https://cv/cover-42.jpg"));
     assert!(row.fetched_at.is_some(), "fetched_at set on success");
 }
 
@@ -607,4 +616,49 @@ async fn cv_volume_cache_pending_orders_oldest_first() {
     // The first batch (1000, 1001) must come before the second
     // batch (1002, 1003). Within a batch, order is by cv_volume_id ASC.
     assert_eq!(ids, vec![1000, 1001, 1002, 1003]);
+}
+
+/// list_metadata_all is discovery's join source: it projects every cache row
+/// (fetched or still pending) to (cv_volume_id, publisher, start_year,
+/// cover_url). A fetched row carries its resolved metadata; a still-pending
+/// row carries NULLs — discovery treats those as "not enriched yet".
+#[tokio::test]
+async fn cv_volume_cache_list_metadata_all_projects_fetched_and_pending() {
+    let pool = fresh_pool().await;
+
+    // One fetched row (full metadata) + one still-pending row (all NULL).
+    cv_volume_cache_repo::bulk_queue_pending(&pool, &[10, 20])
+        .await
+        .unwrap();
+    cv_volume_cache_repo::mark_fetched(
+        &pool,
+        10,
+        Some("Image Comics"),
+        Some("desc"),
+        Some(2014),
+        Some("https://cv/cover-10.jpg"),
+    )
+    .await
+    .unwrap();
+
+    let meta: std::collections::HashMap<i64, cv_volume_cache_repo::CvVolumeMeta> =
+        cv_volume_cache_repo::list_metadata_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.cv_volume_id, m))
+            .collect();
+
+    let fetched = &meta[&10];
+    assert_eq!(fetched.publisher.as_deref(), Some("Image Comics"));
+    assert_eq!(fetched.start_year, Some(2014));
+    assert_eq!(
+        fetched.cover_url.as_deref(),
+        Some("https://cv/cover-10.jpg")
+    );
+
+    let pending = &meta[&20];
+    assert!(pending.publisher.is_none());
+    assert!(pending.start_year.is_none());
+    assert!(pending.cover_url.is_none());
 }

@@ -1,23 +1,29 @@
 <script lang="ts">
-  import { getCreatorDiscovery, type DiscoveredVolume } from '$lib/api/creators';
+  import { getCreatorDiscovery, type DiscoveryResponse } from '$lib/api/creators';
   import CreatorDiscovery from '$lib/components/CreatorDiscovery.svelte';
 
   let { data } = $props();
 
-  let discovery = $state<DiscoveredVolume[] | null>(null);
+  let discovery = $state<DiscoveryResponse | null>(null);
   let discovering = $state(false);
   let discoverError = $state<string | null>(null);
+  let showFiltered = $state(false);
 
   async function loadDiscovery() {
     discovering = true;
     discoverError = null;
     try {
-      discovery = await getCreatorDiscovery(data.creator.id);
+      discovery = await getCreatorDiscovery(data.creator.id, showFiltered);
     } catch (e) {
       discoverError = e instanceof Error ? e.message : 'Failed to load bibliography';
     } finally {
       discovering = false;
     }
+  }
+
+  function revealFiltered() {
+    showFiltered = true;
+    loadDiscovery();
   }
 </script>
 
@@ -52,6 +58,10 @@
     </button>
     {#if discoverError}<p class="mt-2 text-sm text-red-600">{discoverError}</p>{/if}
   {:else}
-    <CreatorDiscovery volumes={discovery} />
+    <CreatorDiscovery
+      volumes={discovery.results}
+      filteredCount={discovery.filtered_count}
+      onShowFiltered={revealFiltered}
+    />
   {/if}
 </section>
