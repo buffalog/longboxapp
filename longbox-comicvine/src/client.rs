@@ -8,13 +8,14 @@ use url::Url;
 
 use crate::error::{excerpt, CvError};
 use crate::models::{
-    CvIssueCreditsRaw, CvIssueFull, CvPersonVolumeCreditsRaw, CvResponse, CvVolumeFull,
-    CvVolumeSearchItem,
+    CvIssueCreditsRaw, CvIssueFull, CvPersonSearchItem, CvPersonVolumeCreditsRaw, CvResponse,
+    CvVolumeFull, CvVolumeSearchItem,
 };
 use crate::projection::{
-    project_calendar_item, project_issue, project_issue_credits, project_person_volume_credits,
-    project_search_item, project_volume, CvCalendarItem, CvIssueDetail, CvPersonCredit,
-    CvVolumeCredit, CvVolumeDetail, SeriesSearchResult,
+    project_calendar_item, project_issue, project_issue_credits, project_person_search_item,
+    project_person_volume_credits, project_search_item, project_volume, CvCalendarItem,
+    CvIssueDetail, CvPersonCredit, CvPersonSearchResult, CvVolumeCredit, CvVolumeDetail,
+    SeriesSearchResult,
 };
 use crate::rate_limit::CvRateLimiter;
 
@@ -195,6 +196,27 @@ impl ComicVineClient {
         let envelope = parse_envelope::<Vec<CvVolumeSearchItem>>(&body)?;
         let results = unwrap_envelope_results(envelope, &body)?;
         Ok(results.into_iter().map(project_search_item).collect())
+    }
+
+    #[instrument(target = "longbox_comicvine", skip(self), fields(query = %query))]
+    pub async fn search_persons(&self, query: &str) -> Result<Vec<CvPersonSearchResult>, CvError> {
+        let limit = PAGE_LIMIT.to_string();
+        let url = self.build_url(
+            "search/",
+            &[
+                ("resources", "person"),
+                ("query", query),
+                ("field_list", "id,name,deck,image,country"),
+                ("limit", limit.as_str()),
+            ],
+        )?;
+        let body = self.execute_with_retry(url).await?;
+        let envelope = parse_envelope::<Vec<CvPersonSearchItem>>(&body)?;
+        let results = unwrap_envelope_results(envelope, &body)?;
+        Ok(results
+            .into_iter()
+            .map(project_person_search_item)
+            .collect())
     }
 
     #[instrument(target = "longbox_comicvine", skip(self))]

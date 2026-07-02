@@ -18,6 +18,6 @@ pub use client::{ComicVineClient, ComicVineClientConfig, CvRateLimitSnapshot};
 pub use enrichment::{pick_volume, EnrichmentCandidateInput, EnrichmentThresholds, PickOutcome};
 pub use error::CvError;
 pub use projection::{
-    CvCalendarItem, CvIssueDetail, CvPersonCredit, CvVolumeCredit, CvVolumeDetail,
-    SeriesSearchResult,
+    CvCalendarItem, CvIssueDetail, CvPersonCredit, CvPersonSearchResult, CvVolumeCredit,
+    CvVolumeDetail, SeriesSearchResult,
 };

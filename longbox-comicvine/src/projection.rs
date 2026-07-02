@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    CvImage, CvIssueCreditsRaw, CvIssueFull, CvPersonVolumeCreditsRaw, CvPublisher, CvVolumeFull,
-    CvVolumeSearchItem,
+    CvImage, CvIssueCreditsRaw, CvIssueFull, CvPersonSearchItem, CvPersonVolumeCreditsRaw,
+    CvPublisher, CvVolumeFull, CvVolumeSearchItem,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +113,27 @@ pub(crate) fn project_person_volume_credits(raw: CvPersonVolumeCreditsRaw) -> Ve
             name: v.name,
         })
         .collect()
+}
+
+/// A ComicVine person surfaced by `search_persons`. `description` is CV's
+/// one-line `deck` (disambiguator); `image_url` is the medium cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvPersonSearchResult {
+    pub cv_person_id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub country: Option<String>,
+    pub image_url: Option<String>,
+}
+
+pub(crate) fn project_person_search_item(item: CvPersonSearchItem) -> CvPersonSearchResult {
+    CvPersonSearchResult {
+        cv_person_id: item.id,
+        name: item.name,
+        description: item.deck,
+        country: item.country,
+        image_url: extract_cover(item.image),
+    }
 }
 
 pub(crate) fn project_search_item(item: CvVolumeSearchItem) -> SeriesSearchResult {
@@ -339,6 +360,30 @@ mod tests {
         assert_eq!(projected.site_detail_url, "https://cv/volume/4050-18166/");
         assert!(projected.cover_url.is_none());
         assert_eq!(projected.start_year, Some(2012));
+    }
+
+    #[test]
+    fn project_person_search_item_maps_fields() {
+        let item = CvPersonSearchItem {
+            id: 52884,
+            name: "Fiona Staples".into(),
+            deck: Some("Canadian comic book artist.".into()),
+            country: Some("Canada".into()),
+            image: Some(CvImage {
+                medium_url: Some("https://cv/img/med.jpg".into()),
+            }),
+        };
+        let out = project_person_search_item(item);
+        assert_eq!(
+            out,
+            CvPersonSearchResult {
+                cv_person_id: 52884,
+                name: "Fiona Staples".into(),
+                description: Some("Canadian comic book artist.".into()),
+                country: Some("Canada".into()),
+                image_url: Some("https://cv/img/med.jpg".into()),
+            }
+        );
     }
 }
 
