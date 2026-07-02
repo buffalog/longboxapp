@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE issues\n           SET metron_issue_id = ?, updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?\n             AND (metron_issue_id IS NULL OR metron_issue_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "64080cda9e6b2a4fd96ab607310fc8dd6891c7d6d2d859487c70324e6bddb992"
+}

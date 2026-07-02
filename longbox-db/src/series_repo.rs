@@ -1645,6 +1645,46 @@ where
     Ok(rows.into_iter().map(|r| (r.id, r.cv_id)).collect())
 }
 
+/// `(series_id, metron_id)` for Metron-linked series whose issues haven't been
+/// linked yet. Drives the issue-linking resolver.
+pub async fn list_metron_issue_link_candidates<'e, E>(
+    executor: E,
+    limit: i64,
+) -> Result<Vec<(i64, String)>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", metron_id AS "metron_id!: String"
+           FROM series
+           WHERE metron_id IS NOT NULL
+             AND metron_issues_linked_at IS NULL
+           ORDER BY id ASC
+           LIMIT ?"#,
+        limit,
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.metron_id)).collect())
+}
+
+/// Stamp a series' issue-linking as done (matched, partially matched, or a
+/// terminal fetch error) so it leaves the work-list.
+pub async fn mark_metron_issues_linked<'e, E>(executor: E, series_id: i64) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE series
+           SET metron_issues_linked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"#,
+        series_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Record a Metron-link check: stamp `metron_link_checked_at` (so the series
 /// leaves the work-list) and, on a match, set `metron_id`. `COALESCE` protects
 /// an already-set metron_id from being clobbered by a racing writer.

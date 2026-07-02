@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series\n           SET metron_issues_linked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP\n           WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0a286c422a167f0a212fca4f3f76a8caf7f57fd231e229b7fbdaa15c6dda12b9"
+}

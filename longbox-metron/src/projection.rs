@@ -78,7 +78,22 @@ pub struct MetronSeriesRef {
     pub issue_count: i64,
 }
 
+/// One issue of a series from `GET /api/issue/?series_id=`. Just the fields
+/// the issue-linking resolver needs: the Metron issue id and its number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetronIssueRef {
+    pub metron_issue_id: i64,
+    pub issue_number: String,
+}
+
 // -------- projection functions --------
+
+pub(crate) fn project_issue_ref(raw: crate::models::MetronIssueListRow) -> MetronIssueRef {
+    MetronIssueRef {
+        metron_issue_id: raw.id,
+        issue_number: raw.number,
+    }
+}
 
 pub(crate) fn project_calendar_item(raw: MetronIssueListRow) -> MetronCalendarItem {
     MetronCalendarItem {
@@ -154,6 +169,34 @@ pub(crate) fn project_series_ref(raw: MetronSeriesListRow) -> MetronSeriesRef {
 /// only ever flip the badge to "complete" on an affirmative signal).
 pub(crate) fn finished_from_status(status: Option<&str>) -> bool {
     matches!(status, Some("Completed") | Some("Cancelled"))
+}
+
+#[cfg(test)]
+mod issue_ref_tests {
+    use super::*;
+    use crate::models::{MetronEmbeddedSeriesLite, MetronIssueListRow};
+
+    #[test]
+    fn project_issue_ref_pulls_id_and_number() {
+        let raw = MetronIssueListRow {
+            id: 7997,
+            series: MetronEmbeddedSeriesLite {
+                name: "Saga".into(),
+                volume: 1,
+                year_began: 2012,
+            },
+            number: "1".into(),
+            issue: None,
+            cover_date: None,
+            store_date: None,
+            image: None,
+            cover_hash: None,
+            modified: None,
+        };
+        let r = project_issue_ref(raw);
+        assert_eq!(r.metron_issue_id, 7997);
+        assert_eq!(r.issue_number, "1");
+    }
 }
 
 #[cfg(test)]
