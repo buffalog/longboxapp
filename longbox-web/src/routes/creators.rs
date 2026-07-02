@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use longbox_comicvine::CvVolumeCredit;
+use longbox_comicvine::{CvPersonSearchResult, CvVolumeCredit};
 use longbox_db::{
     creator_repo::{self, CreatorDetail, CreatorIssueRow, CreatorSearchRow},
     series_repo,
@@ -15,6 +15,8 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/creators/search", get(search_handler))
+        .route("/creators/cv-search", get(cv_search_handler))
+        .route("/creators/discover", get(discover_cv_handler))
         .route("/creators/:id", get(detail_handler))
         .route("/creators/:id/issues", get(issues_handler))
         .route("/creators/:id/discover", get(discover))
@@ -144,8 +146,53 @@ fn build_discovery(
     out
 }
 
-/// A creator's full CV series bibliography, owned/not-owned flagged. Live CV
-/// call (one request); empty when the creator has no known cv_person_id.
+/// A ComicVine person-search hit, flagged with the local creator id when the
+/// person is already in the library (so the UI can badge + link them instead
+/// of offering discovery). Preserves CV's ranking order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct CvCreatorCandidate {
+    cv_person_id: i64,
+    name: String,
+    description: Option<String>,
+    country: Option<String>,
+    image_url: Option<String>,
+    in_library_creator_id: Option<i64>,
+}
+
+/// Pure join: flag each CV person hit with its local creator id, if any.
+/// `cv_to_local` is `(cv_person_id, creator_id)` pairs from
+/// `creator_repo::cv_person_id_map`.
+fn flag_candidates(
+    persons: Vec<CvPersonSearchResult>,
+    cv_to_local: &[(i64, i64)],
+) -> Vec<CvCreatorCandidate> {
+    let map: HashMap<i64, i64> = cv_to_local.iter().copied().collect();
+    persons
+        .into_iter()
+        .map(|p| CvCreatorCandidate {
+            in_library_creator_id: map.get(&p.cv_person_id).copied(),
+            cv_person_id: p.cv_person_id,
+            name: p.name,
+            description: p.description,
+            country: p.country,
+            image_url: p.image_url,
+        })
+        .collect()
+}
+
+/// Shared: a CV person's series bibliography, owned/not-owned flagged.
+/// One live CV call (person volume_credits) + the pure `build_discovery` join.
+async fn discover_by_cv_person(
+    state: &AppState,
+    cv_person_id: i64,
+) -> Result<Vec<DiscoveredVolume>, ApiError> {
+    let credits = state.cv.fetch_person_volume_credits(cv_person_id).await?;
+    let owned = series_repo::existing_cv_id_pairs(&state.db).await?;
+    Ok(build_discovery(credits, &owned))
+}
+
+/// Discover by LOCAL creator id (existing route). Empty when the creator has
+/// no known cv_person_id.
 async fn discover(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -153,9 +200,34 @@ async fn discover(
     let Some(person_id) = creator_repo::cv_person_id_of(&state.db, id).await? else {
         return Ok(Json(Vec::new()));
     };
-    let credits = state.cv.fetch_person_volume_credits(person_id).await?;
-    let owned = series_repo::existing_cv_id_pairs(&state.db).await?;
-    Ok(Json(build_discovery(credits, &owned)))
+    Ok(Json(discover_by_cv_person(&state, person_id).await?))
+}
+
+async fn cv_search_handler(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<CvCreatorCandidate>>, ApiError> {
+    let q = params.q.trim();
+    if q.chars().count() < 2 {
+        return Err(ApiError::BadRequest {
+            message: "query parameter `q` must be at least 2 characters".into(),
+        });
+    }
+    let persons = state.cv.search_persons(q).await?;
+    let map = creator_repo::cv_person_id_map(&state.db).await?;
+    Ok(Json(flag_candidates(persons, &map)))
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverCvParams {
+    cv_person_id: i64,
+}
+
+async fn discover_cv_handler(
+    State(state): State<AppState>,
+    Query(params): Query<DiscoverCvParams>,
+) -> Result<Json<Vec<DiscoveredVolume>>, ApiError> {
+    Ok(Json(discover_by_cv_person(&state, params.cv_person_id).await?))
 }
 
 #[cfg(test)]
@@ -230,5 +302,32 @@ mod discover_tests {
         let out = build_discovery(credits, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "Avengers"); // the foreign reprint was dropped
+    }
+
+    #[test]
+    fn flag_candidates_marks_in_library_and_preserves_order() {
+        use longbox_comicvine::CvPersonSearchResult;
+        let persons = vec![
+            CvPersonSearchResult {
+                cv_person_id: 52884,
+                name: "Fiona Staples".into(),
+                description: Some("Saga artist".into()),
+                country: Some("Canada".into()),
+                image_url: None,
+            },
+            CvPersonSearchResult {
+                cv_person_id: 999,
+                name: "Nobody Owned".into(),
+                description: None,
+                country: None,
+                image_url: None,
+            },
+        ];
+        let map = vec![(52884_i64, 7_i64)];
+        let out = flag_candidates(persons, &map);
+        assert_eq!(out[0].in_library_creator_id, Some(7));
+        assert_eq!(out[0].cv_person_id, 52884);
+        assert_eq!(out[1].in_library_creator_id, None);
+        assert_eq!(out.len(), 2);
     }
 }
