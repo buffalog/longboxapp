@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
     searchCreators, searchCvCreators, discoverByCvPerson,
-    type CreatorSearchRow, type CvCreatorCandidate, type DiscoveredVolume,
+    type CreatorSearchRow, type CvCreatorCandidate, type DiscoveryResponse,
   } from '$lib/api/creators';
   import CreatorDiscovery from '$lib/components/CreatorDiscovery.svelte';
 
@@ -12,13 +12,13 @@
   let loading = $state(false);
 
   let expanded = $state<number | null>(null);
-  let expandedVolumes = $state<DiscoveredVolume[] | null>(null);
+  let expandedData = $state<DiscoveryResponse | null>(null);
   let expandLoading = $state(false);
 
   function onInput() {
     clearTimeout(timer);
     const term = q.trim();
-    expanded = null; expandedVolumes = null;
+    expanded = null; expandedData = null;
     if (term.length < 2) { results = []; cvResults = []; return; }
     timer = setTimeout(async () => {
       loading = true;
@@ -32,15 +32,22 @@
   }
 
   async function toggleDiscover(cvPersonId: number) {
-    if (expanded === cvPersonId) { expanded = null; expandedVolumes = null; return; }
+    if (expanded === cvPersonId) { expanded = null; expandedData = null; return; }
     expanded = cvPersonId;
-    expandedVolumes = null;
+    expandedData = null;
     expandLoading = true;
     try {
-      expandedVolumes = await discoverByCvPerson(cvPersonId);
+      expandedData = await discoverByCvPerson(cvPersonId);
     } finally {
       expandLoading = false;
     }
+  }
+
+  async function revealFiltered(cvPersonId: number) {
+    // Don't flip expandLoading here: that unmounts CreatorDiscovery and wipes
+    // its acquire state (the "✓ Added" marks). Swap the data in place instead —
+    // the component instance persists across the prop update.
+    expandedData = await discoverByCvPerson(cvPersonId, true);
   }
 </script>
 
@@ -91,8 +98,12 @@
             {#if expanded === p.cv_person_id}
               {#if expandLoading}
                 <p class="mt-2 text-sm text-slate-500">Loading bibliography…</p>
-              {:else if expandedVolumes !== null}
-                <CreatorDiscovery volumes={expandedVolumes} />
+              {:else if expandedData !== null}
+                <CreatorDiscovery
+                  volumes={expandedData.results}
+                  filteredCount={expandedData.filtered_count}
+                  onShowFiltered={() => revealFiltered(p.cv_person_id)}
+                />
               {/if}
             {/if}
           </div>

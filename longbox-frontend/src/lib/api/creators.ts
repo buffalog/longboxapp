@@ -36,10 +36,18 @@ export interface DiscoveredVolume {
   cv_volume_id: number;
   name: string;
   series_id: number | null; // non-null => already in the library
+  publisher: string | null;
+  start_year: number | null;
+  cover_url: string | null;
 }
 
-export function getCreatorDiscovery(id: number): Promise<DiscoveredVolume[]> {
-  return apiFetch(`/creators/${id}/discover`);
+export interface DiscoveryResponse {
+  results: DiscoveredVolume[];
+  filtered_count: number;
+}
+
+export function getCreatorDiscovery(id: number, showFiltered = false): Promise<DiscoveryResponse> {
+  return apiFetch(`/creators/${id}/discover${showFiltered ? '?show_filtered=true' : ''}`);
 }
 
 export interface CvCreatorCandidate {
@@ -55,6 +63,7 @@ export function searchCvCreators(q: string): Promise<CvCreatorCandidate[]> {
   return apiFetch(`/creators/cv-search?q=${encodeURIComponent(q)}`);
 }
 
-export function discoverByCvPerson(cvPersonId: number): Promise<DiscoveredVolume[]> {
-  return apiFetch(`/creators/discover?cv_person_id=${cvPersonId}`);
+export function discoverByCvPerson(cvPersonId: number, showFiltered = false): Promise<DiscoveryResponse> {
+  const sf = showFiltered ? '&show_filtered=true' : '';
+  return apiFetch(`/creators/discover?cv_person_id=${cvPersonId}${sf}`);
 }

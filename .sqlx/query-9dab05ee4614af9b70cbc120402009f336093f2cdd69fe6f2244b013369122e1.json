@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cv_volume_id AS \"cv_volume_id!: i64\",\n                  publisher,\n                  start_year,\n                  cover_url\n           FROM cv_volume_cache",
+  "describe": {
+    "columns": [
+      {
+        "name": "cv_volume_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_year",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cover_url",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9dab05ee4614af9b70cbc120402009f336093f2cdd69fe6f2244b013369122e1"
+}

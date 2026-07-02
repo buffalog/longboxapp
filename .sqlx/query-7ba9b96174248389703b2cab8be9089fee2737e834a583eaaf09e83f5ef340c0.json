@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT cv_volume_id AS \"cv_volume_id!: i64\",\n                  publisher,\n                  description,\n                  start_year,\n                  fetched_at AS \"fetched_at: _\",\n                  first_seen_at AS \"first_seen_at!: _\"\n           FROM cv_volume_cache\n           WHERE cv_volume_id = ?",
+  "query": "SELECT cv_volume_id AS \"cv_volume_id!: i64\",\n                  publisher,\n                  description,\n                  start_year,\n                  cover_url,\n                  fetched_at AS \"fetched_at: _\",\n                  first_seen_at AS \"first_seen_at!: _\"\n           FROM cv_volume_cache\n           WHERE cv_volume_id = ?",
   "describe": {
     "columns": [
       {
@@ -24,13 +24,18 @@
         "type_info": "Int64"
       },
       {
-        "name": "fetched_at: _",
+        "name": "cover_url",
         "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "fetched_at: _",
+        "ordinal": 5,
         "type_info": "Datetime"
       },
       {
         "name": "first_seen_at!: _",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Datetime"
       }
     ],
@@ -43,8 +48,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "de59b22a519ae39172354ba780943c80f55ede69fd9afa555f6c21bee59090e2"
+  "hash": "7ba9b96174248389703b2cab8be9089fee2737e834a583eaaf09e83f5ef340c0"
 }

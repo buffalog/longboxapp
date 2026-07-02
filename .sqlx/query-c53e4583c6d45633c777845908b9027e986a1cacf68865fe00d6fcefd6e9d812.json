@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cv_volume_cache\n           SET publisher = ?, description = ?, start_year = ?, cover_url = ?,\n               fetched_at = CURRENT_TIMESTAMP\n           WHERE cv_volume_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c53e4583c6d45633c777845908b9027e986a1cacf68865fe00d6fcefd6e9d812"
+}
