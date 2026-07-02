@@ -227,7 +227,9 @@ async fn discover_cv_handler(
     State(state): State<AppState>,
     Query(params): Query<DiscoverCvParams>,
 ) -> Result<Json<Vec<DiscoveredVolume>>, ApiError> {
-    Ok(Json(discover_by_cv_person(&state, params.cv_person_id).await?))
+    Ok(Json(
+        discover_by_cv_person(&state, params.cv_person_id).await?,
+    ))
 }
 
 #[cfg(test)]

@@ -213,7 +213,10 @@ impl ComicVineClient {
         let body = self.execute_with_retry(url).await?;
         let envelope = parse_envelope::<Vec<CvPersonSearchItem>>(&body)?;
         let results = unwrap_envelope_results(envelope, &body)?;
-        Ok(results.into_iter().map(project_person_search_item).collect())
+        Ok(results
+            .into_iter()
+            .map(project_person_search_item)
+            .collect())
     }
 
     #[instrument(target = "longbox_comicvine", skip(self))]
