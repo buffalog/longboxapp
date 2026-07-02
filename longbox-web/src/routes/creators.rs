@@ -4,7 +4,8 @@ use axum::{Json, Router};
 use longbox_comicvine::{CvPersonSearchResult, CvVolumeCredit};
 use longbox_db::{
     creator_repo::{self, CreatorDetail, CreatorIssueRow, CreatorSearchRow},
-    series_repo,
+    cv_volume_cache_repo::{self, CvVolumeMeta},
+    publisher_filter_repo, series_repo,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -83,13 +84,26 @@ async fn issues_handler(
 }
 
 /// One series in a creator's CV bibliography. `series_id` is `Some(local id)`
-/// when the volume is already in the library (link to it), `None` when not
-/// (offer to acquire via `POST /api/series {cv_id}`).
+/// when the volume is already in the library. `publisher`/`start_year`/
+/// `cover_url` come from `cv_volume_cache` — `None` until the fill worker
+/// enriches the id (eventually-consistent).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct DiscoveredVolume {
     cv_volume_id: i64,
     name: String,
     series_id: Option<i64>,
+    publisher: Option<String>,
+    start_year: Option<i64>,
+    cover_url: Option<String>,
+}
+
+/// Discovery response: the volumes plus how many NOT-owned volumes the
+/// publisher blocklist removed (0 when `show_filtered=true`). Mirrors
+/// cv_search.rs's `{ results, filtered_count }`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct DiscoveryResponse {
+    results: Vec<DiscoveredVolume>,
+    filtered_count: u32,
 }
 
 /// Foreign-market reprint collection-line markers (lowercase substrings).
@@ -123,27 +137,46 @@ fn is_foreign_reprint(name: &str) -> bool {
     FOREIGN_COLLECTION_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// Pure join+sort: map each CV volume credit to owned/not-owned against the
-/// catalog's `(series_id, cv_id)` pairs, then sort by name case-insensitively.
+/// Pure join+filter+sort. Maps each CV volume credit to owned/not-owned
+/// against `owned_pairs`, enriches from `cache_meta`, drops static foreign
+/// reprints (silently) and NOT-owned volumes whose cached publisher is in
+/// `blocked_publishers` (counted). Owned volumes are never publisher-filtered.
+/// Returns (results sorted by name, count removed by the publisher blocklist).
 fn build_discovery(
     credits: Vec<CvVolumeCredit>,
     owned_pairs: &[(i64, i64)],
-) -> Vec<DiscoveredVolume> {
-    let owned: HashMap<i64, i64> = owned_pairs
-        .iter()
-        .map(|(sid, cvid)| (*cvid, *sid))
-        .collect();
+    cache_meta: &HashMap<i64, CvVolumeMeta>,
+    blocked_publishers: &[String],
+) -> (Vec<DiscoveredVolume>, u32) {
+    let owned: HashMap<i64, i64> = owned_pairs.iter().map(|(sid, cvid)| (*cvid, *sid)).collect();
+    let mut filtered_count = 0u32;
     let mut out: Vec<DiscoveredVolume> = credits
         .into_iter()
         .filter(|c| !is_foreign_reprint(&c.name))
-        .map(|c| DiscoveredVolume {
-            series_id: owned.get(&c.cv_volume_id).copied(),
-            cv_volume_id: c.cv_volume_id,
-            name: c.name,
+        .filter_map(|c| {
+            let series_id = owned.get(&c.cv_volume_id).copied();
+            let meta = cache_meta.get(&c.cv_volume_id);
+            let publisher = meta.and_then(|m| m.publisher.clone());
+            if series_id.is_none() {
+                if let Some(p) = publisher.as_deref() {
+                    if blocked_publishers.iter().any(|b| b == &p.to_lowercase()) {
+                        filtered_count += 1;
+                        return None;
+                    }
+                }
+            }
+            Some(DiscoveredVolume {
+                cv_volume_id: c.cv_volume_id,
+                name: c.name,
+                series_id,
+                publisher,
+                start_year: meta.and_then(|m| m.start_year),
+                cover_url: meta.and_then(|m| m.cover_url.clone()),
+            })
         })
         .collect();
     out.sort_by_key(|a| a.name.to_lowercase());
-    out
+    (out, filtered_count)
 }
 
 /// A ComicVine person-search hit, flagged with the local creator id when the
@@ -180,15 +213,52 @@ fn flag_candidates(
         .collect()
 }
 
-/// Shared: a CV person's series bibliography, owned/not-owned flagged.
-/// One live CV call (person volume_credits) + the pure `build_discovery` join.
+/// Shared: a CV person's series bibliography, owned/not-owned flagged and
+/// enriched from cv_volume_cache. Queues the NOT-owned volume ids for the
+/// enrichment worker (fire-and-forget), then joins the cache + applies the
+/// publisher blocklist (unless `show_filtered`). One live CV call.
 async fn discover_by_cv_person(
     state: &AppState,
     cv_person_id: i64,
-) -> Result<Vec<DiscoveredVolume>, ApiError> {
+    show_filtered: bool,
+) -> Result<DiscoveryResponse, ApiError> {
     let credits = state.cv.fetch_person_volume_credits(cv_person_id).await?;
     let owned = series_repo::existing_cv_id_pairs(&state.db).await?;
-    Ok(build_discovery(credits, &owned))
+    let owned_ids: std::collections::HashSet<i64> = owned.iter().map(|(_, cvid)| *cvid).collect();
+
+    // Queue not-owned volumes for background enrichment — but skip static
+    // foreign reprints, which build_discovery always drops, so we don't burn
+    // a worker fetch_volume on a volume that will never render.
+    let to_queue: Vec<i64> = credits
+        .iter()
+        .filter(|c| !owned_ids.contains(&c.cv_volume_id) && !is_foreign_reprint(&c.name))
+        .map(|c| c.cv_volume_id)
+        .collect();
+    if let Err(e) = cv_volume_cache_repo::bulk_queue_pending(&state.db, &to_queue).await {
+        tracing::warn!(target: "longbox_web", error = %e, "discovery enqueue failed");
+    }
+
+    let cache_meta: HashMap<i64, CvVolumeMeta> = cv_volume_cache_repo::list_metadata_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|m| (m.cv_volume_id, m))
+        .collect();
+    let blocked = if show_filtered {
+        Vec::new()
+    } else {
+        publisher_filter_repo::blocked_names_lower(&state.db).await?
+    };
+    let (results, filtered_count) = build_discovery(credits, &owned, &cache_meta, &blocked);
+    Ok(DiscoveryResponse {
+        results,
+        filtered_count,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverParams {
+    #[serde(default)]
+    show_filtered: bool,
 }
 
 /// Discover by LOCAL creator id (existing route). Empty when the creator has
@@ -196,11 +266,17 @@ async fn discover_by_cv_person(
 async fn discover(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<DiscoveredVolume>>, ApiError> {
+    Query(params): Query<DiscoverParams>,
+) -> Result<Json<DiscoveryResponse>, ApiError> {
     let Some(person_id) = creator_repo::cv_person_id_of(&state.db, id).await? else {
-        return Ok(Json(Vec::new()));
+        return Ok(Json(DiscoveryResponse {
+            results: Vec::new(),
+            filtered_count: 0,
+        }));
     };
-    Ok(Json(discover_by_cv_person(&state, person_id).await?))
+    Ok(Json(
+        discover_by_cv_person(&state, person_id, params.show_filtered).await?,
+    ))
 }
 
 async fn cv_search_handler(
@@ -221,14 +297,16 @@ async fn cv_search_handler(
 #[derive(Debug, Deserialize)]
 struct DiscoverCvParams {
     cv_person_id: i64,
+    #[serde(default)]
+    show_filtered: bool,
 }
 
 async fn discover_cv_handler(
     State(state): State<AppState>,
     Query(params): Query<DiscoverCvParams>,
-) -> Result<Json<Vec<DiscoveredVolume>>, ApiError> {
+) -> Result<Json<DiscoveryResponse>, ApiError> {
     Ok(Json(
-        discover_by_cv_person(&state, params.cv_person_id).await?,
+        discover_by_cv_person(&state, params.cv_person_id, params.show_filtered).await?,
     ))
 }
 
@@ -251,24 +329,84 @@ mod discover_tests {
         ];
         // series id 3 owns cv volume 7084; 999 is not in the library
         let owned = vec![(3_i64, 7084_i64)];
-        let out = build_discovery(credits, &owned);
+        let (out, _) = build_discovery(credits, &owned, &HashMap::new(), &[]);
         assert_eq!(
             out,
             vec![
                 DiscoveredVolume {
                     cv_volume_id: 7084,
                     name: "avengers".into(),
-                    series_id: Some(3)
+                    series_id: Some(3),
+                    publisher: None,
+                    start_year: None,
+                    cover_url: None,
                 },
                 DiscoveredVolume {
                     cv_volume_id: 999,
                     name: "Deadly Class".into(),
-                    series_id: None
+                    series_id: None,
+                    publisher: None,
+                    start_year: None,
+                    cover_url: None,
                 },
             ]
         );
         // case-insensitive sort put lowercase "avengers" before "Deadly Class"
         assert_eq!(out[0].cv_volume_id, 7084);
+    }
+
+    #[test]
+    fn build_discovery_enriches_and_publisher_filters() {
+        use std::collections::HashMap;
+        let credits = vec![
+            CvVolumeCredit {
+                cv_volume_id: 10,
+                name: "Saga".into(),
+            },
+            CvVolumeCredit {
+                cv_volume_id: 20,
+                name: "Panini Reprint".into(),
+            },
+            CvVolumeCredit {
+                cv_volume_id: 30,
+                name: "Nailbiter".into(),
+            },
+            CvVolumeCredit {
+                cv_volume_id: 40,
+                name: "Blocked Book".into(),
+            },
+        ];
+        let owned = vec![(3_i64, 10_i64)];
+        let mut meta = HashMap::new();
+        meta.insert(
+            30,
+            CvVolumeMeta {
+                cv_volume_id: 30,
+                publisher: Some("Image".into()),
+                start_year: Some(2014),
+                cover_url: Some("http://c/30.jpg".into()),
+            },
+        );
+        meta.insert(
+            40,
+            CvVolumeMeta {
+                cv_volume_id: 40,
+                publisher: Some("Panini".into()),
+                start_year: Some(2010),
+                cover_url: None,
+            },
+        );
+        let blocked = vec!["panini".to_string()];
+        let (results, filtered) = build_discovery(credits, &owned, &meta, &blocked);
+        assert_eq!(filtered, 1);
+        let names: Vec<&str> = results.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["Nailbiter", "Saga"]);
+        let saga = results.iter().find(|v| v.cv_volume_id == 10).unwrap();
+        assert_eq!(saga.series_id, Some(3));
+        let nail = results.iter().find(|v| v.cv_volume_id == 30).unwrap();
+        assert_eq!(nail.publisher.as_deref(), Some("Image"));
+        assert_eq!(nail.start_year, Some(2014));
+        assert_eq!(nail.cover_url.as_deref(), Some("http://c/30.jpg"));
     }
 
     #[test]
@@ -301,7 +439,7 @@ mod discover_tests {
                 name: "100% Marvel. Los Vengadores".into(),
             },
         ];
-        let out = build_discovery(credits, &[]);
+        let (out, _) = build_discovery(credits, &[], &HashMap::new(), &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "Avengers"); // the foreign reprint was dropped
     }

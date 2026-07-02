@@ -7887,5 +7887,7 @@ async fn creators_discover_empty_when_no_cv_person_id() {
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(response_json(resp).await.as_array().unwrap().len(), 0);
+    let body = response_json(resp).await;
+    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+    assert_eq!(body["filtered_count"].as_u64().unwrap(), 0);
 }
