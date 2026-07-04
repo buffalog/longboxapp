@@ -1435,6 +1435,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper",
+ "longbox-archive",
  "longbox-comicvine",
  "longbox-core",
  "longbox-cv-enrichment",

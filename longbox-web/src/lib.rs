@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod frontend;
 pub mod metron_link;
+pub(crate) mod pathsafe;
 pub mod routes;
 pub mod state;
 pub mod tracing_setup;

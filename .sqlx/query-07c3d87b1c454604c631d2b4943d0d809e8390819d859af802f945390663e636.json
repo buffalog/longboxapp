@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO reading_progress (issue_id, last_page, updated_at)\n           VALUES (?, ?, CURRENT_TIMESTAMP)\n           ON CONFLICT(issue_id) DO UPDATE SET\n               last_page = excluded.last_page,\n               updated_at = CURRENT_TIMESTAMP",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "07c3d87b1c454604c631d2b4943d0d809e8390819d859af802f945390663e636"
+}
