@@ -33,6 +33,25 @@ fn write_cbz(path: &Path, comic_info: Option<&str>) {
 // -------- health --------
 
 #[tokio::test]
+async fn spa_shell_is_served_no_cache() {
+    // The SPA shell (index.html, returned for the bare root and every
+    // client-side route) must never be cached stale — a stale shell points at
+    // hashed chunk filenames that 404 after a redeploy and crashes the app.
+    let app = build_test_app().await;
+    for uri in ["/", "/series/42"] {
+        let resp = app.request(empty_request("GET", uri)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache"),
+            "{uri} should be no-cache"
+        );
+    }
+}
+
+#[tokio::test]
 async fn health_returns_200_with_version() {
     let app = build_test_app().await;
     let resp = app.request(empty_request("GET", "/api/health")).await;
