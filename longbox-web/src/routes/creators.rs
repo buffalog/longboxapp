@@ -131,16 +131,81 @@ const FOREIGN_COLLECTION_MARKERS: &[&str] = &[
     "marvel héroes",
 ];
 
-/// True when a volume name is a foreign-market reprint collection line.
-fn is_foreign_reprint(name: &str) -> bool {
+/// Collected-edition markers (lowercase substrings). A trade/omnibus/etc. is a
+/// bundle of an existing run, not an ongoing series to subscribe to, so it's
+/// dropped from discovery. Only unambiguous markers that never appear in a live
+/// ongoing series title — zero-false-positive. Deliberately excludes "collection",
+/// "complete", "deluxe", "classic" and bare "presents": those false-positive on
+/// real ongoing titles (e.g. "The Complete Collection" reprint lines DO slip
+/// through, accepted). Extend when a real collected-edition miss surfaces.
+const COLLECTED_EDITION_MARKERS: &[&str] = &[
+    "omnibus",
+    "compendium",
+    "tpb",
+    "hardcover",
+    "trade paperback",
+    "epic collection",
+    "ultimate collection",
+    "masterworks",
+    "showcase presents",
+];
+
+/// Publishers that only produce foreign-market / translated editions of Western
+/// comics (European + Latin-American Panini-family houses and peers). Never an
+/// English-language original publisher, and matched by lowercase EXACT equality
+/// against the CV publisher string, so filtering them is zero-false-positive.
+/// English-original non-US houses (Titan, Rebellion, IDW, Dark Horse, Boom) are
+/// intentionally absent. Japanese-language manga publishers (Shueisha, Kodansha,
+/// …) are also absent — blocking manga originals is a separate scope call, not
+/// "foreign-reprint noise". Built from what the live cv_volume_cache actually
+/// showed; extend when a real foreign-edition miss surfaces.
+const FOREIGN_PUBLISHERS: &[&str] = &[
+    "panini verlag",
+    "panini españa",
+    "panini comics",
+    "panini brasil",
+    "marvel uk/panini uk",
+    "cross cult",
+    "splitter",
+    "delcourt",
+    "le lombard",
+    "urban comics",
+    "ecc ediciones",
+    "planeta deagostini",
+    "norma editorial",
+    "aleta ediciones",
+    "dolmen editorial",
+    "editorial hidra",
+    "saldapress",
+    "editorial televisa",
+    "moztros producciones",
+    "ovni press",
+    "egmont polska",
+    "silvester strips",
+];
+
+/// True when a volume name is a foreign-market reprint line or a collected
+/// edition — neither is an ongoing series to subscribe to.
+fn is_excluded_name(name: &str) -> bool {
     let lower = name.to_lowercase();
-    FOREIGN_COLLECTION_MARKERS.iter().any(|m| lower.contains(m))
+    FOREIGN_COLLECTION_MARKERS
+        .iter()
+        .chain(COLLECTED_EDITION_MARKERS)
+        .any(|m| lower.contains(m))
+}
+
+/// True when a publisher only produces foreign-market editions (exact match).
+fn is_foreign_publisher(publisher: &str) -> bool {
+    let lower = publisher.to_lowercase();
+    FOREIGN_PUBLISHERS.iter().any(|p| *p == lower)
 }
 
 /// Pure join+filter+sort. Maps each CV volume credit to owned/not-owned
 /// against `owned_pairs`, enriches from `cache_meta`, drops static foreign
-/// reprints (silently) and NOT-owned volumes whose cached publisher is in
-/// `blocked_publishers` (counted). Owned volumes are never publisher-filtered.
+/// reprints and collected editions (by name) plus foreign-market publishers (by
+/// enriched publisher field) silently, and NOT-owned volumes whose cached
+/// publisher is in `blocked_publishers` (counted). Owned volumes are never
+/// publisher-filtered by the user blocklist.
 /// Returns (results sorted by name, count removed by the publisher blocklist).
 fn build_discovery(
     credits: Vec<CvVolumeCredit>,
@@ -155,11 +220,19 @@ fn build_discovery(
     let mut filtered_count = 0u32;
     let mut out: Vec<DiscoveredVolume> = credits
         .into_iter()
-        .filter(|c| !is_foreign_reprint(&c.name))
+        .filter(|c| !is_excluded_name(&c.name))
         .filter_map(|c| {
             let series_id = owned.get(&c.cv_volume_id).copied();
             let meta = cache_meta.get(&c.cv_volume_id);
             let publisher = meta.and_then(|m| m.publisher.clone());
+            // Static foreign-edition publishers are always dropped (silent,
+            // like foreign-reprint titles) — not part of the user's counted
+            // blocklist. Only fires once enrichment has populated publisher.
+            if let Some(p) = publisher.as_deref() {
+                if is_foreign_publisher(p) {
+                    return None;
+                }
+            }
             if series_id.is_none() {
                 if let Some(p) = publisher.as_deref() {
                     if blocked_publishers.iter().any(|b| b == &p.to_lowercase()) {
@@ -229,12 +302,12 @@ async fn discover_by_cv_person(
     let owned = series_repo::existing_cv_id_pairs(&state.db).await?;
     let owned_ids: std::collections::HashSet<i64> = owned.iter().map(|(_, cvid)| *cvid).collect();
 
-    // Queue not-owned volumes for background enrichment — but skip static
-    // foreign reprints, which build_discovery always drops, so we don't burn
-    // a worker fetch_volume on a volume that will never render.
+    // Queue not-owned volumes for background enrichment — but skip names
+    // build_discovery always drops (foreign reprints, collected editions), so
+    // we don't burn a worker fetch_volume on a volume that will never render.
     let to_queue: Vec<i64> = credits
         .iter()
-        .filter(|c| !owned_ids.contains(&c.cv_volume_id) && !is_foreign_reprint(&c.name))
+        .filter(|c| !owned_ids.contains(&c.cv_volume_id) && !is_excluded_name(&c.name))
         .map(|c| c.cv_volume_id)
         .collect();
     if let Err(e) = cv_volume_cache_repo::bulk_queue_pending(&state.db, &to_queue).await {
@@ -413,21 +486,64 @@ mod discover_tests {
     }
 
     #[test]
-    fn is_foreign_reprint_matches_markers_not_english_titles() {
-        // Foreign collection lines -> filtered.
-        assert!(is_foreign_reprint("100% Marvel. Caballero Luna"));
-        assert!(is_foreign_reprint("Biblioteca Marvel: Spiderman"));
-        assert!(is_foreign_reprint("Coleccionable Los Vengadores"));
-        assert!(is_foreign_reprint("Marvel Deluxe. Lobezno"));
-        assert!(is_foreign_reprint("Marvel Héroes: Lobezno")); // accented Panini line
-                                                               // Real English titles from the live data -> NOT filtered (zero false positives).
-        assert!(!is_foreign_reprint("Batman by Tom King Omnibus"));
-        assert!(!is_foreign_reprint("Marvel Comics Presents"));
-        assert!(!is_foreign_reprint("Action Comics"));
-        assert!(!is_foreign_reprint("All-Star Batman"));
-        assert!(!is_foreign_reprint("The Amazing Spider-Man"));
-        // Unaccented US "Marvel Heroes" must NOT match (only the accented line).
-        assert!(!is_foreign_reprint("Marvel Heroes"));
+    fn is_excluded_name_matches_markers_not_english_titles() {
+        // Foreign collection lines -> excluded.
+        assert!(is_excluded_name("100% Marvel. Caballero Luna"));
+        assert!(is_excluded_name("Biblioteca Marvel: Spiderman"));
+        assert!(is_excluded_name("Coleccionable Los Vengadores"));
+        assert!(is_excluded_name("Marvel Deluxe. Lobezno"));
+        assert!(is_excluded_name("Marvel Héroes: Lobezno")); // accented Panini line
+                                                             // Collected editions from the live data -> excluded.
+        assert!(is_excluded_name("Batman by Tom King Omnibus"));
+        assert!(is_excluded_name("Black Science Compendium"));
+        assert!(is_excluded_name(
+            "Venom Modern Era Epic Collection: Agent Venom"
+        ));
+        assert!(is_excluded_name(
+            "Marvel Masterworks: The Amazing Spider-Man"
+        ));
+        assert!(is_excluded_name("Showcase Presents: Superman"));
+        // Real ongoing English titles -> NOT excluded (zero false positives).
+        assert!(!is_excluded_name("Marvel Comics Presents"));
+        assert!(!is_excluded_name("Action Comics"));
+        assert!(!is_excluded_name("All-Star Batman"));
+        assert!(!is_excluded_name("The Amazing Spider-Man"));
+        // Consciously-excluded FP-prone words still pass through.
+        assert!(!is_excluded_name("The Complete Collection")); // no safe marker
+        assert!(!is_excluded_name("Daredevil Deluxe")); // bare "deluxe" is FP-prone
+                                                        // Unaccented US "Marvel Heroes" must NOT match (only the accented line).
+        assert!(!is_excluded_name("Marvel Heroes"));
+    }
+
+    #[test]
+    fn build_discovery_drops_foreign_publishers() {
+        use std::collections::HashMap;
+        let credits = vec![
+            CvVolumeCredit {
+                cv_volume_id: 1,
+                name: "Wolverine and Deadpool".into(), // English name, foreign pub
+            },
+            CvVolumeCredit {
+                cv_volume_id: 2,
+                name: "Deadly Class".into(),
+            },
+        ];
+        let mut meta = HashMap::new();
+        meta.insert(
+            1,
+            CvVolumeMeta {
+                cv_volume_id: 1,
+                publisher: Some("Marvel UK/Panini UK".into()),
+                start_year: Some(2010),
+                cover_url: None,
+            },
+        );
+        // No blocklist entry — the foreign publisher is dropped by the static
+        // list, silently (filtered_count stays 0).
+        let (out, filtered) = build_discovery(credits, &[], &meta, &[]);
+        assert_eq!(filtered, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "Deadly Class");
     }
 
     #[test]
