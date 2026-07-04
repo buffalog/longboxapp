@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use longbox_archive::{read_comic_info, read_entries};
+use longbox_archive::{extract_entry, list_entry_names, read_comic_info, read_entries};
 
 /// The exact `ComicInfo.xml` body baked into both fixtures.
 const EXPECTED_COMIC_INFO: &str =
@@ -45,4 +45,25 @@ fn reads_all_entries_from_rar5() {
     assert_eq!(names, vec!["page-001.jpg", "ComicInfo.xml"]);
     // Entries come back decompressed — the ComicInfo bytes round-trip.
     assert_eq!(entries[1].data, EXPECTED_COMIC_INFO.as_bytes());
+}
+
+#[test]
+fn list_entry_names_from_rar4_and_rar5() {
+    for fx in ["sample-rar4.cbr", "sample-rar5.cbr"] {
+        assert_eq!(
+            list_entry_names(&fixture(fx)).unwrap(),
+            vec!["page-001.jpg", "ComicInfo.xml"],
+            "{fx}"
+        );
+    }
+}
+
+#[test]
+fn extract_entry_from_rar_by_name() {
+    let path = fixture("sample-rar5.cbr");
+    assert_eq!(
+        extract_entry(&path, "ComicInfo.xml").unwrap().as_deref(),
+        Some(EXPECTED_COMIC_INFO.as_bytes())
+    );
+    assert!(extract_entry(&path, "nope.jpg").unwrap().is_none());
 }

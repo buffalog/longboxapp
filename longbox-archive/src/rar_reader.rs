@@ -77,6 +77,56 @@ pub(crate) fn read_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveErro
     Ok(entries)
 }
 
+/// List the names of every file entry (directories skipped), in archive
+/// order. Headers are walked and skipped — no entry data is decompressed.
+/// Names are normalized to `/` separators, matching [`extract_entry`].
+pub(crate) fn list_entry_names(path: &Path) -> Result<Vec<String>, ArchiveError> {
+    let mut archive = Archive::new(path)
+        .open_for_processing()
+        .map_err(|e| rar_err(path, e))?;
+
+    let mut names = Vec::new();
+    while let Some(header) = archive.read_header().map_err(|e| rar_err(path, e))? {
+        let (is_file, name) = {
+            let entry = header.entry();
+            (
+                entry.is_file(),
+                entry.filename.to_string_lossy().replace('\\', "/"),
+            )
+        };
+        if is_file {
+            names.push(name);
+        }
+        archive = header.skip().map_err(|e| rar_err(path, e))?;
+    }
+    Ok(names)
+}
+
+/// Extract one entry's bytes by exact (normalized) name. libunrar is
+/// sequential, so this walks headers from the start, skipping until the
+/// match, and decompresses only that entry. `Ok(None)` if no entry matches.
+pub(crate) fn extract_entry(path: &Path, name: &str) -> Result<Option<Vec<u8>>, ArchiveError> {
+    let mut archive = Archive::new(path)
+        .open_for_processing()
+        .map_err(|e| rar_err(path, e))?;
+
+    while let Some(header) = archive.read_header().map_err(|e| rar_err(path, e))? {
+        let (is_file, entry_name) = {
+            let entry = header.entry();
+            (
+                entry.is_file(),
+                entry.filename.to_string_lossy().replace('\\', "/"),
+            )
+        };
+        if is_file && entry_name == name {
+            let (data, _rest) = header.read().map_err(|e| rar_err(path, e))?;
+            return Ok(Some(data));
+        }
+        archive = header.skip().map_err(|e| rar_err(path, e))?;
+    }
+    Ok(None)
+}
+
 fn rar_err<E: std::fmt::Display>(path: &Path, e: E) -> ArchiveError {
     ArchiveError::Rar {
         path: path.to_path_buf(),

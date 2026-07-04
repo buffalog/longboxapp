@@ -64,6 +64,41 @@ pub(crate) fn read_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveErro
     Ok(entries)
 }
 
+/// List the names of every file entry (directories skipped), in archive
+/// order. Only the central directory is read — no entry data is decompressed.
+pub(crate) fn list_entry_names(path: &Path) -> Result<Vec<String>, ArchiveError> {
+    let file = std::fs::File::open(path).map_err(|source| io_err(path, source))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| zip_err(path, e))?;
+
+    let mut names = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| zip_err(path, e))?;
+        if entry.is_dir() {
+            continue;
+        }
+        names.push(entry.name().to_owned());
+    }
+    Ok(names)
+}
+
+/// Extract one entry's bytes by exact name. `by_name` matches the same stored
+/// name `list_entry_names` returns. `Ok(None)` when no such entry exists.
+pub(crate) fn extract_entry(path: &Path, name: &str) -> Result<Option<Vec<u8>>, ArchiveError> {
+    let file = std::fs::File::open(path).map_err(|source| io_err(path, source))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| zip_err(path, e))?;
+
+    let mut entry = match archive.by_name(name) {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(zip_err(path, e)),
+    };
+    let mut data = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut data)
+        .map_err(|source| io_err(path, source))?;
+    Ok(Some(data))
+}
+
 fn io_err(path: &Path, source: std::io::Error) -> ArchiveError {
     ArchiveError::Io {
         path: path.to_path_buf(),
@@ -155,5 +190,49 @@ mod tests {
         assert_eq!(names, vec!["page-001.jpg", "ComicInfo.xml"]);
         assert_eq!(entries[0].data, b"\xFF\xD8\xFF");
         assert_eq!(entries[1].data, xml.as_bytes());
+    }
+
+    /// Write a CBZ with the given entries (name, bytes), in order.
+    fn write_cbz_entries(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (entry_name, bytes) in entries {
+            zip.start_file(*entry_name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn list_entry_names_lists_files_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let cbz = write_cbz_entries(
+            tmp.path(),
+            "Multi.cbz",
+            &[
+                ("001.jpg", b"a"),
+                ("002.jpg", b"b"),
+                ("ComicInfo.xml", b"<x/>"),
+            ],
+        );
+        assert_eq!(
+            list_entry_names(&cbz).unwrap(),
+            vec!["001.jpg", "002.jpg", "ComicInfo.xml"]
+        );
+    }
+
+    #[test]
+    fn extract_entry_returns_bytes_or_none() {
+        let tmp = TempDir::new().unwrap();
+        let cbz = write_cbz_entries(tmp.path(), "Multi.cbz", &[("001.jpg", b"\xFF\xD8\xFF")]);
+        assert_eq!(
+            extract_entry(&cbz, "001.jpg").unwrap().as_deref(),
+            Some(&b"\xFF\xD8\xFF"[..])
+        );
+        assert!(extract_entry(&cbz, "missing.jpg").unwrap().is_none());
     }
 }

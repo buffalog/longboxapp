@@ -22,6 +22,7 @@ pub mod pool;
 pub mod publisher_filter_repo;
 pub mod pull_attempt_repo;
 pub mod pull_list_repo;
+pub mod reading_progress_repo;
 pub mod release_cache_repo;
 pub mod scan_run_repo;
 pub mod series_repo;

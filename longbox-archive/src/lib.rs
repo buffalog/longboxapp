@@ -75,6 +75,27 @@ pub fn read_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
     }
 }
 
+/// List the names of every file entry (directories omitted), in archive
+/// order — no entry data is decompressed. The reader uses this to enumerate
+/// pages cheaply, then pulls individual pages with [`extract_entry`]. Names
+/// use `/` separators (RAR `\` separators are normalized).
+pub fn list_entry_names(path: &Path) -> Result<Vec<String>, ArchiveError> {
+    match classify(path).ok_or_else(|| ArchiveError::UnknownFormat(path.to_path_buf()))? {
+        Format::Zip => zip_reader::list_entry_names(path),
+        Format::Rar => rar_reader::list_entry_names(path),
+    }
+}
+
+/// Extract a single file entry by its exact name (as returned by
+/// [`list_entry_names`]), decompressing only that entry. `Ok(None)` if no
+/// entry matches — the reader treats that as a 404 rather than an error.
+pub fn extract_entry(path: &Path, name: &str) -> Result<Option<Vec<u8>>, ArchiveError> {
+    match classify(path).ok_or_else(|| ArchiveError::UnknownFormat(path.to_path_buf()))? {
+        Format::Zip => zip_reader::extract_entry(path, name),
+        Format::Rar => rar_reader::extract_entry(path, name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

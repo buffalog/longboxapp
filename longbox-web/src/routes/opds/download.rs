@@ -16,6 +16,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use tokio_util::io::ReaderStream;
 
 use crate::error::ApiError;
+use crate::pathsafe::is_contained;
 use crate::state::AppState;
 
 /// `GET /opds/v1/issues/{id}/download`.
@@ -84,17 +85,6 @@ pub async fn download(
         })
 }
 
-/// True only when `path_relative` stays within the library root: a
-/// non-empty relative path with no root/prefix component and no `..`
-/// escape. Only `Normal` and `CurDir` components are allowed.
-fn is_contained(path_relative: &str) -> bool {
-    use std::path::Component;
-    !path_relative.is_empty()
-        && std::path::Path::new(path_relative)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-}
-
 /// RFC 6266 `Content-Disposition` with an ASCII-sanitized `filename` and a
 /// percent-encoded `filename*` so non-ASCII names round-trip and embedded
 /// quotes/control chars can't break the header.
@@ -116,21 +106,6 @@ fn content_disposition(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn containment_allows_plain_relative_paths() {
-        assert!(is_contained("Batman/Batman 001.cbz"));
-        assert!(is_contained("file.cbz"));
-        assert!(is_contained("./a/b.cbz"));
-    }
-
-    #[test]
-    fn containment_rejects_escapes() {
-        assert!(!is_contained("")); // empty
-        assert!(!is_contained("/etc/hosts")); // absolute
-        assert!(!is_contained("../../../etc/hosts")); // parent traversal
-        assert!(!is_contained("a/../../b.cbz")); // mid-path traversal
-    }
 
     #[test]
     fn content_disposition_neutralizes_quotes_and_keeps_basename() {

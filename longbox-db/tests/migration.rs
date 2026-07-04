@@ -34,6 +34,7 @@ async fn migration_creates_all_tables() {
             "publisher_filters".to_string(),
             "pull_attempts".to_string(),
             "pull_list".to_string(),
+            "reading_progress".to_string(),
             "scan_runs".to_string(),
             "series".to_string(),
             "settings".to_string(),

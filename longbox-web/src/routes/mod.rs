@@ -28,6 +28,7 @@ pub mod opds_users;
 pub mod postprocess;
 pub mod publishers;
 pub mod pull;
+pub mod reader;
 pub mod reconcile;
 pub mod scan;
 pub mod series;
@@ -66,6 +67,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(downloader::router())
         .merge(webhooks::router())
         .merge(pull::router())
+        .merge(reader::router())
         .merge(reconcile::router())
         .merge(calendar::router())
         .merge(needs_attention::router())
