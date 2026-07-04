@@ -13,11 +13,11 @@
 
   // --- Reader state --------------------------------------------------------
   let totalPages = $state(0);
-  let currentPage = $state(1);
+  // Primary position. In spread mode this is the LEFT page of the current
+  // spread; page 1 (cover) always shows alone.
+  let leftPage = $state(1);
   let seriesId = $state<number | null>(null);
   let fitMode = $state<'width' | 'page'>('width');
-  // 'single' | 'spread'. Spread rendering lands in commit 5; the preference is
-  // read from localStorage here so the wiring exists early.
   let viewMode = $state<'single' | 'spread'>('single');
   let hudVisible = $state(false);
   let loading = $state(true);
@@ -30,6 +30,12 @@
 
   const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 
+  // Whether the current spread shows two pages side by side. The cover
+  // (leftPage 1) and a trailing lone page on an even-total book show alone.
+  const showPair = $derived(
+    viewMode === 'spread' && leftPage >= 2 && leftPage + 1 <= totalPages
+  );
+
   // --- Load ----------------------------------------------------------------
   async function init() {
     try {
@@ -40,7 +46,7 @@
       ]);
       totalPages = count.count;
       seriesId = issue.series_id;
-      currentPage = clamp(progress.last_page, 1, Math.max(1, totalPages));
+      leftPage = clamp(progress.last_page, 1, Math.max(1, totalPages));
     } catch (e) {
       loadError = e instanceof Error ? e.message : 'Failed to open reader';
     } finally {
@@ -49,15 +55,28 @@
   }
 
   // --- Navigation ----------------------------------------------------------
+  // Spread stepping: cover (1) pairs forward to 2, then advances two at a time,
+  // clamped at N so the last spread never points past the final page.
+  const nextSpread = (lp: number, n: number) => (lp === 1 ? 2 : Math.min(lp + 2, n));
+  const prevSpread = (lp: number) => (lp <= 2 ? 1 : lp - 2);
+
   function next() {
-    currentPage = clamp(currentPage + 1, 1, totalPages);
+    leftPage =
+      viewMode === 'spread'
+        ? clamp(nextSpread(leftPage, totalPages), 1, totalPages)
+        : clamp(leftPage + 1, 1, totalPages);
   }
   function prev() {
-    currentPage = clamp(currentPage - 1, 1, totalPages);
+    leftPage = viewMode === 'spread' ? prevSpread(leftPage) : clamp(leftPage - 1, 1, totalPages);
   }
 
   function toggleFit() {
     fitMode = fitMode === 'width' ? 'page' : 'width';
+  }
+
+  function toggleView() {
+    viewMode = viewMode === 'single' ? 'spread' : 'single';
+    localStorage.setItem('longbox_reader_spread', String(viewMode === 'spread'));
   }
 
   function toggleFullscreen() {
@@ -88,6 +107,10 @@
       case 'T':
         toggleFit();
         break;
+      case 's':
+      case 'S':
+        toggleView();
+        break;
     }
   }
 
@@ -113,7 +136,6 @@
     }
   }
   function holdHud() {
-    // Pointer resting on the HUD itself keeps it up.
     if (hudTimer) clearTimeout(hudTimer);
     hudVisible = true;
   }
@@ -141,7 +163,6 @@
   }
 
   function onMouseMove(e: MouseEvent) {
-    // Hovering the middle zone surfaces the HUD (then it auto-hides).
     if (zoneOf(e.clientX) === 'middle') showHud();
   }
 
@@ -156,6 +177,11 @@
       if (hudTimer) clearTimeout(hudTimer);
     };
   });
+
+  // HUD page label: a range when a two-page spread is showing, else a single.
+  const pageLabel = $derived(
+    showPair ? `Pages ${leftPage}–${leftPage + 1} of ${totalPages}` : `Page ${leftPage} of ${totalPages}`
+  );
 </script>
 
 <svelte:head>
@@ -169,7 +195,8 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="fixed inset-0 z-50 flex justify-center bg-black text-white {fitMode === 'width'
+  class="fixed inset-0 z-50 flex justify-center bg-black text-white {viewMode === 'single' &&
+  fitMode === 'width'
     ? 'items-start overflow-y-auto'
     : 'items-center overflow-hidden'}"
   onclick={onClick}
@@ -197,10 +224,36 @@
         Back to series
       </button>
     </div>
+  {:else if viewMode === 'spread'}
+    <!-- Two-up spread: full-height row, no gap. A lone page (cover, or the last
+         page of an even-total book) is centered at half width. -->
+    <div class="flex h-screen w-full items-center justify-center">
+      {#if showPair}
+        <img
+          src={pageImageUrl(issueId, leftPage)}
+          alt={`Page ${leftPage}`}
+          class="h-screen w-1/2 select-none object-contain"
+          draggable="false"
+        />
+        <img
+          src={pageImageUrl(issueId, leftPage + 1)}
+          alt={`Page ${leftPage + 1}`}
+          class="h-screen w-1/2 select-none object-contain"
+          draggable="false"
+        />
+      {:else}
+        <img
+          src={pageImageUrl(issueId, leftPage)}
+          alt={`Page ${leftPage}`}
+          class="mx-auto h-screen w-1/2 select-none object-contain"
+          draggable="false"
+        />
+      {/if}
+    </div>
   {:else}
     <img
-      src={pageImageUrl(issueId, currentPage)}
-      alt={`Page ${currentPage}`}
+      src={pageImageUrl(issueId, leftPage)}
+      alt={`Page ${leftPage}`}
       class="select-none {fitMode === 'width' ? 'h-auto w-full' : 'max-h-screen w-auto'}"
       style={fitMode === 'page' ? 'height:100vh;width:auto;object-fit:contain' : ''}
       draggable="false"
@@ -230,13 +283,23 @@
       onmouseenter={holdHud}
       onmouseleave={armHudTimer}
     >
-      <span class="tabular-nums text-slate-200">Page {currentPage} of {totalPages}</span>
+      <span class="tabular-nums text-slate-200">{pageLabel}</span>
       <button
         class="rounded border border-slate-500 px-2 py-0.5 text-slate-200 hover:bg-white/10"
-        onclick={toggleFit}
+        onclick={toggleView}
+        title="Toggle single / two-page (S)"
       >
-        {fitMode === 'width' ? 'Fit width' : 'Fit page'}
+        {viewMode === 'spread' ? '2P' : '1P'}
       </button>
+      {#if viewMode === 'single'}
+        <button
+          class="rounded border border-slate-500 px-2 py-0.5 text-slate-200 hover:bg-white/10"
+          onclick={toggleFit}
+          title="Toggle fit width / page (T)"
+        >
+          {fitMode === 'width' ? 'Fit width' : 'Fit page'}
+        </button>
+      {/if}
     </div>
   {/if}
 </div>
