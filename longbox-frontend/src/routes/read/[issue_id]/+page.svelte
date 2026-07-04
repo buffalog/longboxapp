@@ -5,6 +5,7 @@
     getPageCount,
     getIssue,
     getReadingProgress,
+    saveReadingProgress,
     pageImageUrl
   } from '$lib/api/reader';
 
@@ -27,6 +28,7 @@
   // When the HUD was last revealed, so a middle *click* that arrives right
   // after the reveal-on-hover move doesn't immediately toggle it back off.
   let hudShownAt = 0;
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 
@@ -166,6 +168,39 @@
     if (zoneOf(e.clientX) === 'middle') showHud();
   }
 
+  // --- Preloading + progress ----------------------------------------------
+  /** Warm the browser cache for a page (fire-and-forget). No-op out of range. */
+  function preload(page: number) {
+    if (page >= 1 && page <= totalPages) {
+      const img = new Image();
+      img.src = pageImageUrl(issueId, page);
+    }
+  }
+
+  /** Debounced, fire-and-forget progress write — coalesces rapid page turns. */
+  function scheduleSave(page: number) {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void saveReadingProgress(issueId, page).catch(() => {});
+    }, 500);
+  }
+
+  // On every position change (once loaded): preload the next page(s) for the
+  // active mode and schedule a debounced progress save.
+  $effect(() => {
+    const lp = leftPage;
+    if (loading || totalPages === 0) return;
+    if (viewMode === 'spread') {
+      preload(lp + 2);
+      preload(lp + 3);
+    } else {
+      preload(lp + 1);
+      preload(lp + 2);
+    }
+    scheduleSave(lp);
+  });
+
   onMount(() => {
     if (localStorage.getItem('longbox_reader_spread') === 'true') {
       viewMode = 'spread';
@@ -175,6 +210,12 @@
     return () => {
       window.removeEventListener('keydown', onKeydown);
       if (hudTimer) clearTimeout(hudTimer);
+      // Flush a pending progress write so exiting right after a page turn
+      // still persists the final position.
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        void saveReadingProgress(issueId, leftPage).catch(() => {});
+      }
     };
   });
 
