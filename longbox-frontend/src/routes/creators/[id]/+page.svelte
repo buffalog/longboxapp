@@ -1,6 +1,9 @@
 <script lang="ts">
   import { getCreatorDiscovery, type DiscoveryResponse } from '$lib/api/creators';
   import CreatorDiscovery from '$lib/components/CreatorDiscovery.svelte';
+  import CreatorSeriesCard from '$lib/components/CreatorSeriesCard.svelte';
+
+  const gridClass = 'grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5';
 
   let { data } = $props();
 
@@ -35,17 +38,22 @@
   {/each}
 </div>
 
-<ul class="space-y-2">
-  {#each data.creator.series as s (s.series_id)}
-    <li class="flex items-center gap-3">
-      <a href={`/series/${s.series_id}`} class="flex items-center gap-3 hover:underline">
-        {#if s.cover_url}<img src={s.cover_url} alt="" width="40" class="rounded" />{/if}
-        {s.name}
-      </a>
-      <span class="text-sm text-slate-500">{s.issue_count} issues</span>
-    </li>
-  {/each}
-</ul>
+{#if data.creator.series.length > 0}
+  <h2 class="mb-2 text-lg font-semibold">In your library ({data.creator.series.length})</h2>
+  <ul class={gridClass}>
+    {#each data.creator.series as s (s.series_id)}
+      <li>
+        <CreatorSeriesCard coverUrl={s.cover_url} title={s.name} href={`/series/${s.series_id}`}>
+          {#snippet footer()}
+            <span class="text-xs text-slate-500"
+              >{s.issue_count} {s.issue_count === 1 ? 'issue' : 'issues'}</span
+            >
+          {/snippet}
+        </CreatorSeriesCard>
+      </li>
+    {/each}
+  </ul>
+{/if}
 
 <section class="mt-8">
   {#if discovery === null}

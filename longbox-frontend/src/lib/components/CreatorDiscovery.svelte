@@ -2,6 +2,7 @@
   import { type DiscoveredVolume } from '$lib/api/creators';
   import { addSeries } from '$lib/api/series';
   import Button from '$lib/components/Button.svelte';
+  import CreatorSeriesCard from '$lib/components/CreatorSeriesCard.svelte';
 
   let {
     volumes,
@@ -16,8 +17,11 @@
   let addingId = $state<number | null>(null);
   let addedIds = $state<Set<number>>(new Set());
 
-  const inLibrary = $derived(volumes.filter((d) => d.series_id !== null));
+  // Owned volumes are shown by the page's eager "In your library" grid (the
+  // only source with issue counts), so discovery only renders the not-owned set.
   const notInLibrary = $derived(volumes.filter((d) => d.series_id === null));
+
+  const gridClass = 'grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5';
 
   async function acquire(cvVolumeId: number) {
     addingId = cvVolumeId;
@@ -37,45 +41,35 @@
 {#if volumes.length === 0}
   <p class="text-sm text-slate-500">No series found for this creator.</p>
 {:else}
-  <h3 class="mb-2 text-lg font-semibold">Not in your library ({notInLibrary.length})</h3>
-  <ul class="mb-2 space-y-2">
+  <h2 class="mb-2 text-lg font-semibold">Not in your library ({notInLibrary.length})</h2>
+  <ul class={gridClass}>
     {#each notInLibrary as v (v.cv_volume_id)}
-      <li class="flex items-center justify-between gap-3">
-        <div class="flex min-w-0 items-center gap-2">
-          {#if v.cover_url}
-            <img src={v.cover_url} alt={v.name} loading="lazy" class="h-12 w-8 shrink-0 rounded object-cover" />
-          {:else}
-            <div class="h-12 w-8 shrink-0 rounded bg-slate-100"></div>
-          {/if}
-          <div class="min-w-0">
-            <div class="truncate">{v.name}</div>
-            {#if meta(v)}<div class="text-xs text-slate-400">{meta(v)}</div>{/if}
-          </div>
-        </div>
-        {#if addedIds.has(v.cv_volume_id)}
-          <span class="shrink-0 text-sm text-green-600">✓ Added</span>
-        {:else}
-          <Button
-            variant="secondary"
-            size="sm"
-            loading={addingId === v.cv_volume_id}
-            onclick={() => acquire(v.cv_volume_id)}
-          >Add to Library</Button>
-        {/if}
+      <li>
+        <CreatorSeriesCard coverUrl={v.cover_url} title={v.name}>
+          {#snippet footer()}
+            {#if meta(v)}<span class="text-xs text-slate-500">{meta(v)}</span>{/if}
+            {#if addedIds.has(v.cv_volume_id)}
+              <span class="mt-1 text-sm text-green-600">✓ Added</span>
+            {:else}
+              <Button
+                variant="secondary"
+                size="sm"
+                class="mt-1 w-full justify-center"
+                loading={addingId === v.cv_volume_id}
+                onclick={() => acquire(v.cv_volume_id)}>Add to Library</Button
+              >
+            {/if}
+          {/snippet}
+        </CreatorSeriesCard>
       </li>
     {/each}
   </ul>
 
   {#if filteredCount > 0 && onShowFiltered}
-    <button class="mb-4 text-sm text-blue-600 hover:underline" onclick={onShowFiltered}>
-      {filteredCount} {filteredCount === 1 ? 'edition' : 'editions'} hidden by the publisher filter — show {filteredCount === 1 ? 'it' : 'them'}
+    <button class="mt-4 text-sm text-blue-600 hover:underline" onclick={onShowFiltered}>
+      {filteredCount}
+      {filteredCount === 1 ? 'edition' : 'editions'} hidden by the publisher filter — show
+      {filteredCount === 1 ? 'it' : 'them'}
     </button>
   {/if}
-
-  <h3 class="mb-2 text-lg font-semibold">In your library ({inLibrary.length})</h3>
-  <ul class="space-y-1">
-    {#each inLibrary as v (v.cv_volume_id)}
-      <li><a href={`/series/${v.series_id}`} class="hover:underline">{v.name}</a></li>
-    {/each}
-  </ul>
 {/if}
