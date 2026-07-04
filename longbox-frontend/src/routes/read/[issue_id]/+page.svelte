@@ -29,6 +29,9 @@
   // after the reveal-on-hover move doesn't immediately toggle it back off.
   let hudShownAt = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  // Subtle cross-page fade: drops to 0 on a page turn, restored to 1 when the
+  // new image loads (see onImgLoad). CSS transitions the change over 0.12s.
+  let pageOpacity = $state(1);
 
   const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 
@@ -201,6 +204,15 @@
     scheduleSave(lp);
   });
 
+  // Fade out on each page turn; onImgLoad fades the new page back in.
+  $effect(() => {
+    leftPage;
+    pageOpacity = 0;
+  });
+  function onImgLoad() {
+    pageOpacity = 1;
+  }
+
   onMount(() => {
     if (localStorage.getItem('longbox_reader_spread') === 'true') {
       viewMode = 'spread';
@@ -274,12 +286,18 @@
           src={pageImageUrl(issueId, leftPage)}
           alt={`Page ${leftPage}`}
           class="h-screen w-1/2 select-none object-contain"
+          style:opacity={pageOpacity}
+          style:transition="opacity 0.12s ease-in-out"
+          onload={onImgLoad}
+          onerror={onImgLoad}
           draggable="false"
         />
         <img
           src={pageImageUrl(issueId, leftPage + 1)}
           alt={`Page ${leftPage + 1}`}
           class="h-screen w-1/2 select-none object-contain"
+          style:opacity={pageOpacity}
+          style:transition="opacity 0.12s ease-in-out"
           draggable="false"
         />
       {:else}
@@ -287,6 +305,10 @@
           src={pageImageUrl(issueId, leftPage)}
           alt={`Page ${leftPage}`}
           class="mx-auto h-screen w-1/2 select-none object-contain"
+          style:opacity={pageOpacity}
+          style:transition="opacity 0.12s ease-in-out"
+          onload={onImgLoad}
+          onerror={onImgLoad}
           draggable="false"
         />
       {/if}
@@ -297,6 +319,10 @@
       alt={`Page ${leftPage}`}
       class="select-none {fitMode === 'width' ? 'h-auto w-full' : 'max-h-screen w-auto'}"
       style={fitMode === 'page' ? 'height:100vh;width:auto;object-fit:contain' : ''}
+      style:opacity={pageOpacity}
+      style:transition="opacity 0.12s ease-in-out"
+      onload={onImgLoad}
+      onerror={onImgLoad}
       draggable="false"
     />
   {/if}

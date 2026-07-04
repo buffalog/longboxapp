@@ -7,7 +7,8 @@
     XCircle,
     ExternalLink,
     FileImage,
-    Search
+    Search,
+    BookOpen
   } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { searchIssueNow } from '$lib/api/pull';
@@ -187,6 +188,16 @@
         <statusMeta.Icon class="size-4" aria-hidden="true" />
         <span class="text-xs font-medium">{statusMeta.label}</span>
       </span>
+      {#if issue.file?.is_present}
+        <a
+          href={`/read/${issue.id}`}
+          aria-label={`Read issue ${issue.number}`}
+          class="inline-flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <BookOpen class="size-3" aria-hidden="true" />
+          Read
+        </a>
+      {/if}
       {#if showSearchButton}
         <button
           type="button"
