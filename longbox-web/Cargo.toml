@@ -27,6 +27,7 @@ longbox-scan-scheduler = { path = "../longbox-scan-scheduler" }
 longbox-cv-enrichment = { path = "../longbox-cv-enrichment" }
 longbox-webhooks = { path = "../longbox-webhooks" }
 longbox-opds = { path = "../longbox-opds" }
+longbox-archive = { path = "../longbox-archive" }
 axum = { version = "0.7", features = ["macros"] }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
