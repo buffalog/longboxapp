@@ -93,6 +93,8 @@
   }
 
   function exit() {
+    // Fullscreen is released in the unmount cleanup, which every exit path
+    // (this, browser Back, any nav) routes through — no need to do it here.
     goto(seriesId ? `/series/${seriesId}` : '/series');
   }
 
@@ -115,6 +117,12 @@
       case 's':
       case 'S':
         toggleView();
+        break;
+      case 'Escape':
+        // First ESC: browser natively exits fullscreen — let it. Second ESC
+        // (no longer fullscreen) lands here and leaves the reader.
+        if (document.fullscreenElement) return;
+        exit();
         break;
     }
   }
@@ -217,10 +225,16 @@
     if (localStorage.getItem('longbox_reader_spread') === 'true') {
       viewMode = 'spread';
     }
-    void init();
+    // Take over the whole display once data is in. Rejected if the browser
+    // has no user-gesture context to grant it — reader works fine without it,
+    // and F still toggles it on demand.
+    void init().then(() => document.documentElement.requestFullscreen?.()?.catch(() => {}));
     window.addEventListener('keydown', onKeydown);
     return () => {
       window.removeEventListener('keydown', onKeydown);
+      // <html> keeps its fullscreen across client-side nav; drop it on any exit
+      // so we never strand the destination page fullscreen.
+      if (document.fullscreenElement) document.exitFullscreen?.();
       if (hudTimer) clearTimeout(hudTimer);
       // Flush a pending progress write so exiting right after a page turn
       // still persists the final position.
