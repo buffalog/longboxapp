@@ -21,7 +21,8 @@ vi.mock('$lib/api/admin', () => ({ restartServer: vi.fn() }));
 vi.mock('$lib/api/publishers', () => ({
   addFilter: vi.fn(),
   deleteFilter: vi.fn(),
-  resetFiltersToDefaults: vi.fn()
+  resetFiltersToDefaults: vi.fn(),
+  addRecommendedFilters: vi.fn()
 }));
 
 vi.mock('$app/navigation', () => ({
@@ -60,6 +61,7 @@ function pageData(over: Partial<Settings> = {}) {
       data: {
         settings: settings(over),
         publisherFilters: [],
+        recommendedPublishers: [],
         indexers: [],
         downloader: null,
         webhooks: [],
@@ -216,5 +218,26 @@ describe('Settings page — Tunable settings', () => {
     expect(toast.warning).toHaveBeenCalledWith(
       expect.stringContaining('whole number')
     );
+  });
+
+  it('adds a selected recommended publisher and clears the selection', async () => {
+    const { addRecommendedFilters } = await import('$lib/api/publishers');
+    vi.mocked(addRecommendedFilters).mockResolvedValue({ added: [] });
+
+    const props = pageData();
+    props.props.data.recommendedPublishers = ['Murray Comics', 'Panini Verlag'];
+    render(Page, props);
+
+    // Collapsed by default: expand the picker.
+    await fireEvent.click(
+      screen.getByRole('button', { name: /Add recommended publishers \(2\)/ })
+    );
+
+    // Pick one, then add just the selection.
+    await fireEvent.click(screen.getByLabelText('Murray Comics'));
+    await fireEvent.click(screen.getByRole('button', { name: /Add selected \(1\)/ }));
+
+    expect(addRecommendedFilters).toHaveBeenCalledWith(['Murray Comics']);
+    expect(invalidateAll).toHaveBeenCalled();
   });
 });
