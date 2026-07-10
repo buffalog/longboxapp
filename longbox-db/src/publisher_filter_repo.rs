@@ -20,6 +20,81 @@ pub const DEFAULT_BLOCKED_PUBLISHERS: &[&str] = &[
     "Salvat",
 ];
 
+/// Curated superset of [`DEFAULT_BLOCKED_PUBLISHERS`]: foreign-market reprint
+/// publishers of major US comics. Unlike the defaults, this list is **never**
+/// auto-seeded — it powers the opt-in "Add recommended publishers" Settings
+/// action, where the user picks entries (minus any already in their blocklist)
+/// and adds them explicitly.
+///
+/// Strings are the exact publisher names ComicVine returns, empirically
+/// collected by running `/cv/search` (unfiltered) for Batman, Superman,
+/// Spider-Man, Wonder Woman, X-Men, Hulk, Avengers, Flash, Green Lantern,
+/// Justice League, and Fantastic Four and keeping the clearly-foreign-market
+/// reprinters. Deliberately excludes US/English originals (IDW, Image, Dark
+/// Horse, Titan, etc.), major foreign *original* publishers (Sergio Bonelli,
+/// Dargaud, Japanese manga houses), and Marvel UK/Panini UK (carries original
+/// UK material). Extend it as new reprint noise surfaces in real searches.
+pub const RECOMMENDED_BLOCKED_PUBLISHERS: &[&str] = &[
+    // Germany
+    "Panini Verlag",
+    "Dino Comics",
+    "Egmont Ehapa Verlag",
+    "Carlsen Verlag",
+    "Norbert Hethke Verlag",
+    // France / Belgium / French-Canada
+    "Panini France",
+    "Urban Comics",
+    "TM-Semic",
+    "Semic S.A.",
+    "Arédit - Artima",
+    "Editions Interpresse S.A.",
+    "Éditions de l'Occident",
+    "Editions Héritage",
+    "Éditions Glénat",
+    // Spain
+    "Planeta DeAgostini",
+    "ECC Ediciones",
+    "Panini España",
+    "Ediciones Zinco",
+    "Norma Editorial",
+    "Editorial Bruguera",
+    "Ediciones Vértice",
+    "Salvat",
+    // Italy
+    "Play Press",
+    "RW Edizioni",
+    "Edifumetto",
+    "Editrice Cenisio",
+    "Edizioni Williams Inteuropa",
+    "Glenat Italia",
+    "Arnoldo Mondadori Editore",
+    "Newton Comics",
+    // Mexico / Latin America / Brazil
+    "Editorial Televisa",
+    "Editorial Novaro",
+    "Grupo Editorial Vid",
+    "Abril",
+    "Panini Brasil",
+    "Panini Comics",
+    "Epucol",
+    // Netherlands
+    "JuniorPress BV",
+    "Oberon BV",
+    // Scandinavia / Poland
+    "Semic Press AB",
+    "Atlantic Förlags AB",
+    "Hjemmet",
+    "Egmont Publishing A/S",
+    "Egmont Polska",
+    // Australia
+    "Murray Comics",
+    "Horwitz",
+    // UK
+    "Thorpe & Porter",
+    // Turkey
+    "Marmara Çizgi",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublisherFilterMode {
@@ -138,4 +213,30 @@ pub async fn reset_to_defaults(pool: &crate::Pool) -> Result<u64> {
         inserted += result.rows_affected();
     }
     Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn recommended_list_is_a_clean_superset_of_defaults() {
+        // No duplicates (case-insensitive, matching the DB's NOCASE column).
+        let mut seen = HashSet::new();
+        for name in RECOMMENDED_BLOCKED_PUBLISHERS {
+            assert!(
+                seen.insert(name.to_lowercase()),
+                "duplicate recommended publisher: {name:?}"
+            );
+        }
+        // Every auto-seeded default is present, so the diff endpoint never
+        // re-offers a default the fresh-install user already has.
+        for def in DEFAULT_BLOCKED_PUBLISHERS {
+            assert!(
+                seen.contains(&def.to_lowercase()),
+                "default {def:?} missing from recommended superset"
+            );
+        }
+    }
 }
