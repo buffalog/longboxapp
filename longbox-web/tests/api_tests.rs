@@ -184,7 +184,8 @@ async fn cv_search_happy_path() {
     // so Image-published Walking Dead survives.
     assert_eq!(body["results"][0]["cv_id"], 2127);
     assert_eq!(body["results"][0]["name"], "The Walking Dead");
-    assert_eq!(body["filtered_count"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
+    assert_eq!(body["filtered_in_library"], 0);
 }
 
 #[tokio::test]
@@ -259,7 +260,8 @@ async fn cv_search_blocks_seeded_reprint_publishers() {
     let results = body["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["publisher"], "DC Comics");
-    assert_eq!(body["filtered_count"], 2);
+    assert_eq!(body["filtered_publisher"], 2);
+    assert_eq!(body["filtered_in_library"], 0);
 }
 
 #[tokio::test]
@@ -292,7 +294,79 @@ async fn cv_search_show_filtered_bypasses_blocklist() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert_eq!(body["results"].as_array().unwrap().len(), 2);
-    assert_eq!(body["filtered_count"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
+    assert_eq!(body["filtered_in_library"], 0);
+}
+
+#[tokio::test]
+async fn cv_search_hides_and_annotates_owned_series() {
+    let app = build_test_app().await;
+    // Seed a tracked series whose cv_id matches the first search hit.
+    let owned_id: i64 = sqlx::query_scalar(
+        "INSERT INTO series (cv_id, title, sort_title) VALUES (1, 'Batman', 'batman') RETURNING id",
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+
+    // Three hits: id 1 owned (DC), id 2 owned-AND-Panini-blocked, id 3 fresh.
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("query", "batman"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 3, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 1, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 20, "image": null, "deck": null },
+                    { "id": 2, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 11, "name": "Panini Comics" },
+                      "count_of_issues": 5, "image": null, "deck": null },
+                    { "id": 3, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 5, "image": null, "deck": null }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    // Seed cv_id 2 as owned too, to exercise in-library precedence over the
+    // publisher bucket (Panini is default-blocked but must count as owned).
+    sqlx::query("INSERT INTO series (cv_id, title, sort_title) VALUES (2, 'Batman', 'batman2')")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    // Default (filtered) view: both owned hidden, none double-counted.
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=batman"))
+        .await;
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["cv_id"], 3);
+    assert_eq!(results[0]["in_library_series_id"], serde_json::Value::Null);
+    assert_eq!(body["filtered_in_library"], 2);
+    assert_eq!(body["filtered_publisher"], 0);
+
+    // Revealed view: owned results reappear, annotated with local series id.
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/cv/search?q=batman&show_filtered=true",
+        ))
+        .await;
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["cv_id"], 1);
+    assert_eq!(results[0]["in_library_series_id"], owned_id);
+    assert_eq!(results[2]["in_library_series_id"], serde_json::Value::Null);
+    assert_eq!(body["filtered_in_library"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
 }
 
 // -------- /api/publishers/filters --------
