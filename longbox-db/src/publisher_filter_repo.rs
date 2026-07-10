@@ -142,9 +142,11 @@ where
     Ok(rows)
 }
 
-/// Convenience: just the publisher names of `block` rows, lowercased
-/// for direct comparison against CV's publisher strings. CV search uses
-/// this on every request.
+/// Convenience: just the publisher names of `block` rows, trimmed and
+/// lowercased for direct comparison against CV's publisher strings. CV
+/// search uses this on every request. The caller must normalise the CV
+/// side the same way (`.trim().to_lowercase()`) so incidental whitespace
+/// or casing on either side can't defeat a match.
 pub async fn blocked_names_lower<'e, E>(executor: E) -> Result<Vec<String>>
 where
     E: SqliteExecutor<'e>,
@@ -154,7 +156,7 @@ where
         .await?;
     Ok(rows
         .into_iter()
-        .map(|r| r.publisher_name.to_lowercase())
+        .map(|r| r.publisher_name.trim().to_lowercase())
         .collect())
 }
 

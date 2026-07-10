@@ -118,7 +118,12 @@ async fn handler(
             continue;
         }
         let is_blocked = match v.publisher.as_deref() {
-            Some(p) => blocked.iter().any(|b| b == &p.to_lowercase()),
+            // Normalise the CV side to match `blocked_names_lower`
+            // (trim + lowercase) so whitespace/casing can't defeat a block.
+            Some(p) => {
+                let norm = p.trim().to_lowercase();
+                blocked.iter().any(|b| b == &norm)
+            }
             None => false,
         };
         if is_blocked {
