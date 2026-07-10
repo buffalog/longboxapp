@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO publisher_filters (publisher_name, mode)\n               VALUES (?, 'block')\n               RETURNING id AS \"id!: i64\", publisher_name AS \"publisher_name!\",\n                         mode AS \"mode!\", created_at AS \"created_at: _\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "publisher_name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "mode!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "275665dd649daa5cf33d198378f9d1c33da7b3dd37bb80472caa536463595cd4"
+}

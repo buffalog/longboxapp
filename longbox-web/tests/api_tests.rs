@@ -459,6 +459,107 @@ async fn publisher_filters_create_then_delete() {
 }
 
 #[tokio::test]
+async fn publisher_filters_recommended_excludes_already_blocked() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/publishers/filters/recommended"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let names: Vec<String> = response_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    // "Panini Comics" is a seeded default → already blocked → not offered.
+    assert!(!names.contains(&"Panini Comics".to_string()));
+    // A recommended entry that isn't a seeded default → offered.
+    assert!(names.contains(&"Murray Comics".to_string()));
+}
+
+#[tokio::test]
+async fn publisher_filters_add_recommended_inserts_and_is_idempotent() {
+    let app = build_test_app().await;
+    // Case-insensitive request; canonical casing must be stored regardless.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["murray comics", "Ediciones Zinco"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let added: Vec<String> = response_json(resp).await["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["publisher_name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(added.len(), 2);
+    assert!(added.contains(&"Murray Comics".to_string())); // canonical casing
+    assert!(added.contains(&"Ediciones Zinco".to_string()));
+
+    // Now blocked → no longer offered by the picker.
+    let resp = app
+        .request(empty_request("GET", "/api/publishers/filters/recommended"))
+        .await;
+    let names: Vec<String> = response_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert!(!names.contains(&"Murray Comics".to_string()));
+
+    // Re-adding the same ones is a clean no-op (INSERT OR IGNORE).
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["Murray Comics"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(resp).await["added"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn publisher_filters_add_recommended_ignores_non_recommended() {
+    let app = build_test_app().await;
+    let before = app
+        .request(empty_request("GET", "/api/publishers/filters"))
+        .await;
+    let before_len = response_json(before).await.as_array().unwrap().len();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["Totally Made Up Publisher"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(resp).await["added"].as_array().unwrap().len(),
+        0
+    );
+
+    // Nothing written — the non-recommended name is not a general injection path.
+    let after = app
+        .request(empty_request("GET", "/api/publishers/filters"))
+        .await;
+    assert_eq!(
+        response_json(after).await.as_array().unwrap().len(),
+        before_len
+    );
+}
+
+#[tokio::test]
 async fn publisher_filters_create_case_insensitive_conflict() {
     let app = build_test_app().await;
     // "panini comics" (lowercase) collides with the seeded "Panini Comics".

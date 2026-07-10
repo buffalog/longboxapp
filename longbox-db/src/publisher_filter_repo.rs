@@ -160,6 +160,63 @@ where
         .collect())
 }
 
+/// The recommended publishers not already on the user's blocklist
+/// (case-insensitive), returned in canonical CV casing and the const's order.
+/// Powers the "Add recommended publishers" picker — the user only ever sees
+/// entries they don't already have.
+pub async fn recommended_available<'e, E>(executor: E) -> Result<Vec<&'static str>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let blocked: std::collections::HashSet<String> =
+        blocked_names_lower(executor).await?.into_iter().collect();
+    Ok(RECOMMENDED_BLOCKED_PUBLISHERS
+        .iter()
+        .copied()
+        .filter(|name| !blocked.contains(&name.trim().to_lowercase()))
+        .collect())
+}
+
+/// Bulk-add recommended publishers to the blocklist. Only names present in
+/// [`RECOMMENDED_BLOCKED_PUBLISHERS`] are accepted — matched case-insensitively
+/// against the request but **stored with the canonical CV casing** from the
+/// const, so a sloppy client can't write a mis-cased row. Non-recommended
+/// names are silently ignored (the picker never sends them). Already-present
+/// rows are skipped via `INSERT OR IGNORE`. Returns the rows actually inserted,
+/// so the caller can update its view without a refetch.
+///
+/// Takes a `&Pool` directly: the loop needs its own executor borrow per
+/// iteration, same as [`reset_to_defaults`].
+pub async fn add_recommended(
+    pool: &crate::Pool,
+    requested: &[String],
+) -> Result<Vec<PublisherFilterRow>> {
+    let want: std::collections::HashSet<String> =
+        requested.iter().map(|s| s.trim().to_lowercase()).collect();
+    let mut inserted = Vec::new();
+    for canonical in RECOMMENDED_BLOCKED_PUBLISHERS {
+        if !want.contains(&canonical.trim().to_lowercase()) {
+            continue;
+        }
+        // INSERT OR IGNORE + RETURNING yields a row only when a new row was
+        // actually written; a conflict (already blocked) returns no row.
+        let row = sqlx::query_as!(
+            PublisherFilterRow,
+            r#"INSERT OR IGNORE INTO publisher_filters (publisher_name, mode)
+               VALUES (?, 'block')
+               RETURNING id AS "id!: i64", publisher_name AS "publisher_name!",
+                         mode AS "mode!", created_at AS "created_at: _""#,
+            canonical
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(r) = row {
+            inserted.push(r);
+        }
+    }
+    Ok(inserted)
+}
+
 pub async fn insert<'e, E>(executor: E, input: NewPublisherFilter) -> Result<PublisherFilterRow>
 where
     E: SqliteExecutor<'e>,
