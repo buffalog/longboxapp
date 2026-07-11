@@ -32,6 +32,7 @@
   import BulkActionBar from '$lib/components/BulkActionBar.svelte';
   import Button from '$lib/components/Button.svelte';
   import CvSearchInput from '$lib/components/CvSearchInput.svelte';
+  import DuplicateFilesSection from '$lib/components/DuplicateFilesSection.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -1000,6 +1001,13 @@
       </ul>
     </section>
   {/if}
+
+  <!-- ==================== Duplicate files ==================== -->
+  <!-- Self-contained: lazy-loads + paginates its own (potentially large)
+       data, so it renders independently of the all-clear guard above. -->
+  <div class="mt-8">
+    <DuplicateFilesSection />
+  </div>
 
   <!-- ====================== Kept series ======================= -->
   <!-- Collapsed by default — low-traffic management surface for the

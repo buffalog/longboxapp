@@ -505,6 +505,92 @@ where
     Ok(result.rows_affected())
 }
 
+/// One present file belonging to an issue that has more than one present
+/// file — a candidate in a duplicate-file group. Carries the denormalized
+/// series title + issue number (for display) and everything the resolver
+/// needs: `library_root_id` (to resolve the absolute path for deletion) and
+/// `cached_comicinfo_xml` (issue-number fallback when the filename doesn't
+/// parse). Rows for one issue arrive contiguous and `id`-ascending, matching
+/// the app's served-file tiebreak.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
+pub struct DuplicateFileCandidate {
+    pub issue_id: i64,
+    pub series_title: String,
+    pub issue_number: String,
+    pub file_id: i64,
+    pub path_relative: String,
+    pub size_bytes: i64,
+    /// FileStatus as TEXT; the served-file pick prefers `owned`.
+    pub status: String,
+    pub library_root_id: i64,
+    pub cached_comicinfo_xml: Option<String>,
+}
+
+/// Count of issues that have more than one `is_present = 1` file — the total
+/// number of duplicate-file groups, for the paginated detector's `total`.
+pub async fn count_duplicate_file_groups<'e, E>(executor: E) -> Result<i64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM (
+               SELECT issue_id FROM files
+               WHERE is_present = 1 AND issue_id IS NOT NULL
+               GROUP BY issue_id HAVING COUNT(*) > 1
+           )"#
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(row.n)
+}
+
+/// Every present-file candidate for one page of duplicate-file groups.
+///
+/// The inner subquery selects the page's `issue_id`s (those with >1 present
+/// file, ordered by `issue_id` for stable pagination, `LIMIT`/`OFFSET`); the
+/// outer query returns all present files for those issues, ordered
+/// `issue_id, id` so each group's rows are contiguous and `id`-ascending.
+/// Classification (are these truly the same issue?) and the keep-suggestion
+/// are the web layer's job — this repo only surfaces the raw candidates.
+pub async fn duplicate_file_candidates_page<'e, E>(
+    executor: E,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DuplicateFileCandidate>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        DuplicateFileCandidate,
+        r#"SELECT f.issue_id AS "issue_id!: i64",
+                  s.title AS series_title,
+                  i.number AS issue_number,
+                  f.id AS "file_id!: i64",
+                  f.path_relative,
+                  f.size_bytes AS "size_bytes!: i64",
+                  f.status,
+                  f.library_root_id AS "library_root_id!: i64",
+                  f.cached_comicinfo_xml
+           FROM files f
+           JOIN issues i ON f.issue_id = i.id
+           JOIN series s ON i.series_id = s.id
+           WHERE f.is_present = 1
+             AND f.issue_id IN (
+                 SELECT ff.issue_id FROM files ff
+                 WHERE ff.is_present = 1 AND ff.issue_id IS NOT NULL
+                 GROUP BY ff.issue_id HAVING COUNT(*) > 1
+                 ORDER BY ff.issue_id
+                 LIMIT ? OFFSET ?
+             )
+           ORDER BY f.issue_id, f.id"#,
+        limit,
+        offset
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
