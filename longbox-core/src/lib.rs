@@ -20,7 +20,7 @@ pub mod series;
 pub mod similarity;
 
 pub use comicinfo::{extract_cv_issue_id_from_url, extract_metron_issue_id_from_url, ComicInfo};
-pub use comicinfo_writer::{ComicInfoMetadata, CoverDate};
+pub use comicinfo_writer::ComicInfoMetadata;
 pub use error::{CoreError, Result};
 pub use file::{classify_status, FileStatus, LocalFile, MatchMethod};
 pub use filename::{

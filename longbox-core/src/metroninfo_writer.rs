@@ -21,8 +21,13 @@
 //! `(SeriesRow, IssueRow)` in hand and nothing else. That populates
 //! `<IDS>` (CV + Metron source-tagged), `<Publisher><Name>`,
 //! `<Series>` (name, sort name, start year), `<Number>`, `<Summary>`
-//! (HTML in CDATA), `<CoverDate>`, `<URLs>` (CV canonical), and
-//! `<LastModified>`. The schema's optional richer fields
+//! (HTML in CDATA), `<URLs>` (CV canonical), and `<LastModified>`.
+//!
+//! Note: LongBox deliberately does NOT emit the issue's own
+//! `<CoverDate>`. Per-issue publish dates leak into reader apps and
+//! mis-sort/mis-group issues; only the series-level `<StartYear>` is
+//! written. `issues.cover_date` in the DB is unaffected.
+//! The schema's optional richer fields
 //! (`Stories`, `Genres`, `Tags`, `Arcs`, `Characters`, `Teams`,
 //! `Universes`, `Locations`, `Reprints`, `GTIN`, `Credits`,
 //! `Prices`, `StoreDate`, `Format`, `PageCount`, etc.) are not in
@@ -30,8 +35,6 @@
 
 use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-
-pub use crate::comicinfo_writer::CoverDate;
 
 /// Catalog-derived MetronInfo write set. Build from `(SeriesRow,
 /// IssueRow)` at the call site; the writer doesn't reach into the DB.
@@ -63,10 +66,6 @@ pub struct MetronInfoMetadata {
     pub start_year: Option<i32>,
     /// Issue number, raw string. Pass-through; never reformatted.
     pub number: String,
-    /// Cover date. `xs:date` is strict — only a complete `YYYY-MM-DD`
-    /// produces output. Partial dates (`YYYY-MM`, `YYYY`) won't
-    /// construct a [`CoverDate`] in the first place.
-    pub cover_date: Option<CoverDate>,
     /// Raw HTML allowed; goes into a CDATA section in the output.
     pub summary: Option<String>,
     /// `<LastModified>` timestamp. Caller supplies — tests use a fixed
@@ -101,13 +100,6 @@ impl MetronInfoMetadata {
         push_text(&mut out, "Number", &self.number, 2);
         if let Some(s) = self.summary.as_deref() {
             push_cdata(&mut out, "Summary", s, 2);
-        }
-        if let Some(d) = self.cover_date {
-            // <CoverDate> is xs:date (single YYYY-MM-DD element), not
-            // ComicInfo's three-element Year/Month/Day split. Cover-
-            // date partials are filtered upstream — only full dates
-            // reach this writer.
-            push_date(&mut out, "CoverDate", d, 2);
         }
         push_urls(&mut out, self.cv_issue_id);
         push_last_modified(&mut out, self.last_modified);
@@ -227,20 +219,6 @@ fn push_int(out: &mut String, tag: &str, value: i32, indent: usize) {
     out.push_str(">\n");
 }
 
-fn push_date(out: &mut String, tag: &str, d: CoverDate, indent: usize) {
-    for _ in 0..indent {
-        out.push(' ');
-    }
-    out.push('<');
-    out.push_str(tag);
-    out.push('>');
-    // xs:date format YYYY-MM-DD, zero-padded.
-    out.push_str(&format!("{:04}-{:02}-{:02}", d.year, d.month, d.day));
-    out.push_str("</");
-    out.push_str(tag);
-    out.push_str(">\n");
-}
-
 /// CDATA-wrap `value`. If `value` contains a literal `]]>`, split it
 /// across two CDATA sections via the standard `]]]]><![CDATA[>` trick
 /// so the resulting concatenation reads `]]>` to a parser without
@@ -288,11 +266,6 @@ mod tests {
             series_sort: Some("Saga".into()),
             start_year: Some(2012),
             number: "1".into(),
-            cover_date: Some(CoverDate {
-                year: 2012,
-                month: 3,
-                day: 14,
-            }),
             summary: Some("<p>A galactic war epic.</p>".into()),
             last_modified: datetime!(2026-06-01 18:06:08 UTC),
         }
@@ -317,7 +290,6 @@ mod tests {
   </Series>
   <Number>1</Number>
   <Summary><![CDATA[<p>A galactic war epic.</p>]]></Summary>
-  <CoverDate>2012-03-14</CoverDate>
   <URLs>
     <URL primary="true">https://comicvine.gamespot.com/issue/4000-364354/</URL>
   </URLs>
@@ -434,7 +406,6 @@ mod tests {
             series_sort: None,
             start_year: None,
             number: "1".into(),
-            cover_date: None,
             summary: None,
             last_modified: datetime!(2026-06-01 18:06:08 UTC),
         };
@@ -511,27 +482,20 @@ mod tests {
     }
 
     #[test]
-    fn cover_date_emits_iso_yyyy_mm_dd_zero_padded() {
-        let m = MetronInfoMetadata {
-            cover_date: Some(CoverDate {
-                year: 2026,
-                month: 3,
-                day: 7,
-            }),
-            ..fixture()
-        };
-        let xml = m.to_xml();
-        assert!(xml.contains("<CoverDate>2026-03-07</CoverDate>"));
-    }
-
-    #[test]
-    fn cover_date_omitted_when_none() {
-        let m = MetronInfoMetadata {
-            cover_date: None,
-            ..fixture()
-        };
-        let xml = m.to_xml();
-        assert!(!xml.contains("<CoverDate"));
+    fn never_emits_per_issue_cover_date() {
+        // The issue's own publish date must NOT be embedded — it leaks
+        // into readers and mis-sorts/mis-groups issues. Only the
+        // series-level <StartYear> is written, even for a fully-populated
+        // fixture.
+        let xml = fixture().to_xml();
+        assert!(
+            !xml.contains("<CoverDate"),
+            "must not emit <CoverDate>: {xml}"
+        );
+        assert!(
+            xml.contains("<StartYear>2012</StartYear>"),
+            "must keep <StartYear>"
+        );
     }
 
     #[test]

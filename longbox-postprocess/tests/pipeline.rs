@@ -498,7 +498,20 @@ async fn imports_owned_via_filename_match() {
     let xml = read_cbz_entry(&target, "ComicInfo.xml").expect("ComicInfo.xml missing");
     assert!(xml.contains("<Series>Saga</Series>"));
     assert!(xml.contains("<Number>1</Number>"));
-    assert!(xml.contains("<Year>2012</Year>"));
+    // Series-level Volume is written; the issue's own publish date is NOT.
+    assert!(xml.contains("<Volume>2012</Volume>"));
+    assert!(
+        !xml.contains("<Year"),
+        "per-issue <Year> must not be embedded"
+    );
+    assert!(
+        !xml.contains("<Month"),
+        "per-issue <Month> must not be embedded"
+    );
+    assert!(
+        !xml.contains("<Day"),
+        "per-issue <Day> must not be embedded"
+    );
     assert!(xml.contains("<Web>https://comicvine.gamespot.com/issue/4000-364354/</Web>"));
 
     // Catalog row reflects Phase B's import.
