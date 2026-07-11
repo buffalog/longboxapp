@@ -14,6 +14,7 @@ pub mod creators;
 pub mod cv_search;
 pub mod dashboard;
 pub mod downloader;
+pub mod duplicate_files;
 pub mod enrichment;
 pub mod files;
 pub mod health;
@@ -69,6 +70,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(pull::router())
         .merge(reader::router())
         .merge(reconcile::router())
+        .merge(duplicate_files::router())
         .merge(calendar::router())
         .merge(needs_attention::router())
         .merge(enrichment::router())
