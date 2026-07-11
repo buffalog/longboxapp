@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM (\n               SELECT issue_id FROM files\n               WHERE is_present = 1 AND issue_id IS NOT NULL\n               GROUP BY issue_id HAVING COUNT(*) > 1\n           )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4d141935543f40daccb532c86834112cac298d665ef499b6c46d430450b6403f"
+}
