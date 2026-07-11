@@ -23,16 +23,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Date components for ComicInfo's `Year` / `Month` / `Day` elements.
-/// Always source from the issue's cover date, never from
-/// [`ComicInfoMetadata::start_year`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoverDate {
-    pub year: i32,
-    pub month: u8,
-    pub day: u8,
-}
-
 /// Catalog-derived ComicInfo write set. Build from `(SeriesRow,
 /// IssueRow)` at the call site; the writer doesn't reach into the DB.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
