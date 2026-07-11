@@ -653,7 +653,6 @@ async fn import_as_owned(
 }
 
 fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
-    let cover_date = parse_cover_date(issue.cover_date.as_deref());
     let web = issue
         .cv_issue_id
         .map(|id| format!("https://comicvine.gamespot.com/issue/4000-{id}/"));
@@ -663,7 +662,6 @@ fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
         start_year: series.start_year.map(|y| y as i32),
         publisher: series.publisher.clone(),
         title: issue.title.clone(),
-        cover_date,
         web,
         summary: issue.summary.clone(),
     }

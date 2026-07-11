@@ -2,12 +2,17 @@
 //! [`ComicInfoMetadata`] value and emits UTF-8 XML bytes suitable for
 //! embedding directly into a CBZ archive as `ComicInfo.xml`.
 //!
-//! Phase B's input shape, not Phase A's parser projection: separate
-//! `start_year` (Volume) and `cover_date` (Year/Month/Day) fields, plus
-//! Publisher and a single canonical Web URL — none of which the
-//! parser-side [`crate::ComicInfo`] carries today. The two types are
-//! kept distinct because their use cases diverge (parse partial input
-//! vs. write a canonical set).
+//! Phase B's input shape, not Phase A's parser projection: a
+//! `start_year` (Volume) field, plus Publisher and a single canonical
+//! Web URL — none of which the parser-side [`crate::ComicInfo`] carries
+//! today. The two types are kept distinct because their use cases
+//! diverge (parse partial input vs. write a canonical set).
+//!
+//! Note: LongBox deliberately does NOT emit the issue's own publish
+//! date (`Year`/`Month`/`Day`). Per-issue dates leak into reader apps
+//! and mis-sort/mis-group issues; only the series-level `Volume` is
+//! written. The `issues.cover_date` DB column is unaffected and still
+//! serves enrichment, pull maxage, and solicited-issue detection.
 //!
 //! Output shape: canonical ComicInfo v1, with the xmlns:xsi / xmlns:xsd
 //! attributes most external tools expect. 2-space indent, one element
@@ -44,7 +49,6 @@ pub struct ComicInfoMetadata {
     pub start_year: Option<i32>,
     pub publisher: Option<String>,
     pub title: Option<String>,
-    pub cover_date: Option<CoverDate>,
     /// Canonical ComicVine issue URL. Phase B uses the issue's CV slug
     /// to construct one; absent if the catalog row has no CV link.
     pub web: Option<String>,
@@ -76,11 +80,6 @@ impl ComicInfoMetadata {
         }
         if let Some(t) = self.title.as_deref() {
             push_text(&mut out, "Title", t);
-        }
-        if let Some(d) = self.cover_date {
-            push_int(&mut out, "Year", d.year);
-            push_int(&mut out, "Month", i32::from(d.month));
-            push_int(&mut out, "Day", i32::from(d.day));
         }
         if let Some(w) = self.web.as_deref() {
             push_text(&mut out, "Web", w);
@@ -161,11 +160,6 @@ mod tests {
             start_year: Some(2012),
             publisher: Some("Image".into()),
             title: Some("The Will".into()),
-            cover_date: Some(CoverDate {
-                year: 2012,
-                month: 3,
-                day: 14,
-            }),
             web: Some("https://comicvine.gamespot.com/saga-1/4000-364354/".into()),
             summary: Some("<p>A galactic war epic.</p>".into()),
         }
@@ -200,7 +194,6 @@ mod tests {
             start_year: None,
             publisher: None,
             title: None,
-            cover_date: None,
             web: None,
             summary: None,
         };
@@ -225,7 +218,6 @@ mod tests {
             start_year: None,
             publisher: None,
             title: None,
-            cover_date: None,
             web: None,
             summary: None,
         };
@@ -246,7 +238,6 @@ mod tests {
                 start_year: None,
                 publisher: None,
                 title: None,
-                cover_date: None,
                 web: None,
                 summary: None,
             };
@@ -309,11 +300,15 @@ mod tests {
     }
 
     #[test]
-    fn cover_date_emits_three_separate_elements() {
+    fn never_emits_per_issue_publish_date() {
+        // The issue's own publish date must NOT be embedded — it leaks
+        // into readers and mis-sorts/mis-groups issues. Only the
+        // series-level <Volume> is written.
         let xml = fixture().to_xml();
-        assert!(xml.contains("<Year>2012</Year>"));
-        assert!(xml.contains("<Month>3</Month>"));
-        assert!(xml.contains("<Day>14</Day>"));
+        assert!(!xml.contains("<Year"), "must not emit <Year>: {xml}");
+        assert!(!xml.contains("<Month"), "must not emit <Month>: {xml}");
+        assert!(!xml.contains("<Day"), "must not emit <Day>: {xml}");
+        assert!(xml.contains("<Volume>2012</Volume>"), "must keep <Volume>");
     }
 
     /// Golden-file check against a hand-built canonical ComicInfo.xml.
@@ -330,9 +325,6 @@ mod tests {
   <Volume>2012</Volume>
   <Publisher>Image</Publisher>
   <Title>The Will</Title>
-  <Year>2012</Year>
-  <Month>3</Month>
-  <Day>14</Day>
   <Web>https://comicvine.gamespot.com/saga-1/4000-364354/</Web>
   <Summary><![CDATA[<p>A galactic war epic.</p>]]></Summary>
 </ComicInfo>
