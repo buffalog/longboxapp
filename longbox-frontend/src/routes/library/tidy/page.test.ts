@@ -236,9 +236,7 @@ describe('library tidy page', () => {
     await waitFor(() => expect(keepPhantom).toHaveBeenCalledWith(1));
     // last_matched_count -> 0: the transition subsection empties and the
     // row drops to "Empty series".
-    await waitFor(() =>
-      expect(screen.queryByText('Recently lost files')).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByText('Recently lost files')).not.toBeInTheDocument());
     expect(screen.getByText('Lost Series')).toBeInTheDocument();
   });
 
@@ -377,7 +375,8 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     vi.mocked(addFolders).mockResolvedValue({
       succeeded: [{ folder_name: 'Saga (2012)', series_id: 99 }],
@@ -412,7 +411,8 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     // POST /reconcile/add resolves 200 with a populated `failed` array.
     vi.mocked(addFolders).mockResolvedValue({
@@ -427,9 +427,7 @@ describe('library tidy page', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
     // The failure surfaces inline and the modal stays open for a retry.
-    await waitFor(() =>
-      expect(screen.getByText('ComicVine rate limited')).toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.getByText('ComicVine rate limited')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Add' })).toBeInTheDocument();
   });
 
@@ -446,9 +444,7 @@ describe('library tidy page', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Delete series' }));
 
-    await waitFor(() =>
-      expect(screen.getByText(/Files reappeared on disk/)).toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.getByText(/Files reappeared on disk/)).toBeInTheDocument());
     // The delete failed — the row is still present (along with the
     // modal still showing the same title, so getAllByText is what
     // captures the "row is still rendered" intent).
@@ -506,7 +502,11 @@ describe('library tidy page', () => {
       created_at: '2026-01-01T00:00:00',
       updated_at: '2026-06-02T00:00:00'
     });
-    vi.mocked(searchVolumes).mockResolvedValue({ results: [], filtered_count: 0 });
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [],
+      filtered_publisher: 0,
+      filtered_in_library: 0
+    });
     render(
       TidyPage,
       pageData({ enrichmentQueue: [enrichmentRow({ id: 42, title: 'Ambiguous' })] })
@@ -530,15 +530,14 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     // Find the CvSearchInput's input field (search role) and type.
     const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Real Volume' } });
     // The debounce is 300ms — wait for the result button to appear.
-    const pickButton = await waitFor(() =>
-      screen.getByRole('button', { name: /Real Volume/ })
-    );
+    const pickButton = await waitFor(() => screen.getByRole('button', { name: /Real Volume/ }));
     await fireEvent.click(pickButton);
 
     await waitFor(() => expect(setSeriesCvId).toHaveBeenCalledWith(42, 12345));
@@ -571,7 +570,8 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     // owned_count: 6 (the default) — the inline warning explains the
     // files are almost certainly misassigned, and offers a force-delete
@@ -583,23 +583,17 @@ describe('library tidy page', () => {
 
     const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Real' } });
-    const pickButton = await waitFor(() =>
-      screen.getByRole('button', { name: /Real Volume/ })
-    );
+    const pickButton = await waitFor(() => screen.getByRole('button', { name: /Real Volume/ }));
     await fireEvent.click(pickButton);
 
     await waitFor(() =>
       expect(screen.getByText(/Already linked to "Other Series"/)).toBeInTheDocument()
     );
     expect(screen.getByText(/almost certainly misassigned/)).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /Delete duplicate anyway/ })
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Delete duplicate anyway/ })).toBeInTheDocument();
     // Plain "Delete duplicate" (no "anyway") is reserved for the
     // zero-owned-files case.
-    expect(
-      screen.queryByRole('button', { name: /^Delete duplicate$/ })
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Delete duplicate$/ })).not.toBeInTheDocument();
     expect(screen.getByText('Ambiguous')).toBeInTheDocument();
     expect(toast.warning).not.toHaveBeenCalled();
   });
@@ -626,7 +620,8 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     render(
       TidyPage,
@@ -637,9 +632,7 @@ describe('library tidy page', () => {
 
     const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Real' } });
-    const pickButton = await waitFor(() =>
-      screen.getByRole('button', { name: /Real Volume/ })
-    );
+    const pickButton = await waitFor(() => screen.getByRole('button', { name: /Real Volume/ }));
     await fireEvent.click(pickButton);
 
     const forceBtn = await waitFor(() =>
@@ -647,15 +640,11 @@ describe('library tidy page', () => {
     );
     await fireEvent.click(forceBtn);
 
-    await waitFor(() =>
-      expect(deleteSeries).toHaveBeenCalledWith(42, { force: true })
-    );
+    await waitFor(() => expect(deleteSeries).toHaveBeenCalledWith(42, { force: true }));
     await waitFor(() =>
       expect(screen.queryByText('Enrichment needs review')).not.toBeInTheDocument()
     );
-    expect(toast.success).toHaveBeenCalledWith(
-      expect.stringContaining('queued for re-match')
-    );
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('queued for re-match'));
   });
 
   it('shows a Delete duplicate button when the colliding row has zero owned files', async () => {
@@ -680,7 +669,8 @@ describe('library tidy page', () => {
           description: null
         }
       ],
-      filtered_count: 0
+      filtered_publisher: 0,
+      filtered_in_library: 0
     });
     render(
       TidyPage,
@@ -691,9 +681,7 @@ describe('library tidy page', () => {
 
     const input = screen.getByPlaceholderText('Series name…') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Real' } });
-    const pickButton = await waitFor(() =>
-      screen.getByRole('button', { name: /Real Volume/ })
-    );
+    const pickButton = await waitFor(() => screen.getByRole('button', { name: /Real Volume/ }));
     await fireEvent.click(pickButton);
 
     // Zero-owned case: button label is "Delete duplicate" (no "anyway").
@@ -703,9 +691,7 @@ describe('library tidy page', () => {
     expect(screen.getByText(/Already linked to "Real Series"/)).toBeInTheDocument();
     await fireEvent.click(deleteBtn);
 
-    await waitFor(() =>
-      expect(deleteSeries).toHaveBeenCalledWith(42, { force: false })
-    );
+    await waitFor(() => expect(deleteSeries).toHaveBeenCalledWith(42, { force: false }));
     await waitFor(() =>
       expect(screen.queryByText('Enrichment needs review')).not.toBeInTheDocument()
     );

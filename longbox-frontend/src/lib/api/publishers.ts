@@ -26,3 +26,18 @@ export function deleteFilter(id: number): Promise<void> {
 export function resetFiltersToDefaults(): Promise<{ inserted: number }> {
   return apiFetch('/publishers/filters/reset-defaults', { method: 'POST' });
 }
+
+/** Recommended reprint publishers the user hasn't blocked yet. */
+export function listRecommendedFilters(): Promise<string[]> {
+  return apiFetch('/publishers/filters/recommended');
+}
+
+/** Bulk-add selected recommended publishers; returns the rows inserted. */
+export function addRecommendedFilters(
+  publisherNames: string[]
+): Promise<{ added: PublisherFilter[] }> {
+  return apiFetch('/publishers/filters/recommended', {
+    method: 'POST',
+    body: JSON.stringify({ publisher_names: publisherNames })
+  });
+}

@@ -43,7 +43,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default CV search resolves to an empty result. Tests that drive
   // the picker override this with concrete results.
-  vi.mocked(searchVolumes).mockResolvedValue({ results: [], filtered_count: 0 });
+  vi.mocked(searchVolumes).mockResolvedValue({
+    results: [],
+    filtered_publisher: 0,
+    filtered_in_library: 0
+  });
 });
 
 function cvResult(over: Partial<SeriesSearchResult> = {}): SeriesSearchResult {
@@ -66,9 +70,7 @@ function seriesDetail(over: Partial<SeriesDetail> = {}): SeriesDetail {
   // precedence so tests can exercise the "server-says-N-but-issues-
   // show-zero" mismatch directly.
   const issues = over.issues ?? [];
-  const derivedOwnedCount = issues.filter(
-    (i) => i.file?.status === 'owned'
-  ).length;
+  const derivedOwnedCount = issues.filter((i) => i.file?.status === 'owned').length;
   return {
     id: 1,
     cv_id: 12345,
@@ -96,9 +98,7 @@ describe('series detail page', () => {
     render(Page, pageData(seriesDetail({ cv_id: 12345 })));
 
     expect(screen.getByRole('button', { name: /Refresh/ })).toBeInTheDocument();
-    expect(
-      screen.getByText(/Hit Refresh to fetch from ComicVine/)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Hit Refresh to fetch from ComicVine/)).toBeInTheDocument();
   });
 
   it('confirms with the computed folder path and sends deleteFiles=true', async () => {
@@ -338,9 +338,7 @@ describe('series detail page', () => {
     render(Page, pageData(seriesDetail({ cv_id: null, publisher: null })));
 
     expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/Hit Refresh to fetch from ComicVine/)
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Hit Refresh to fetch from ComicVine/)).not.toBeInTheDocument();
     expect(
       screen.getByText(/will appear here as the next scan parses and attaches them/)
     ).toBeInTheDocument();
@@ -361,10 +359,7 @@ describe('series detail page', () => {
   });
 
   it('opens the CV picker and pre-populates with the series title', async () => {
-    render(
-      Page,
-      pageData(seriesDetail({ cv_id: null, title: 'Wolverine', start_year: 2024 }))
-    );
+    render(Page, pageData(seriesDetail({ cv_id: null, title: 'Wolverine', start_year: 2024 })));
     await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
 
     // Picker section is now visible.
@@ -379,16 +374,17 @@ describe('series detail page', () => {
 
   it('picking a CV result fires setSeriesCvId and invalidates the page', async () => {
     const picked = cvResult({ cv_id: 4242, name: 'Wolverine (2024)' });
-    vi.mocked(searchVolumes).mockResolvedValue({ results: [picked], filtered_count: 0 });
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [picked],
+      filtered_publisher: 0,
+      filtered_in_library: 0
+    });
     vi.mocked(setSeriesCvId).mockResolvedValue({
       ...seriesDetail({ cv_id: picked.cv_id, title: picked.name }),
       issues: undefined as never
     });
 
-    render(
-      Page,
-      pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' }))
-    );
+    render(Page, pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' })));
     await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
 
     // Wait for the first result to render, then click it. CvSearchInput
@@ -408,7 +404,11 @@ describe('series detail page', () => {
 
   it('keeps the picker open and warns on cv_id_in_use without invalidating', async () => {
     const picked = cvResult({ cv_id: 4242, name: 'Already Linked' });
-    vi.mocked(searchVolumes).mockResolvedValue({ results: [picked], filtered_count: 0 });
+    vi.mocked(searchVolumes).mockResolvedValue({
+      results: [picked],
+      filtered_publisher: 0,
+      filtered_in_library: 0
+    });
     vi.mocked(setSeriesCvId).mockRejectedValue(
       new ApiError(409, 'conflict.cv_id_in_use', 'taken', {
         existing_series_id: 99,
@@ -416,10 +416,7 @@ describe('series detail page', () => {
       })
     );
 
-    render(
-      Page,
-      pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' }))
-    );
+    render(Page, pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' })));
     await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /Already Linked/ })).toBeInTheDocument()
@@ -462,9 +459,7 @@ describe('series detail page', () => {
       expect(writeText).toHaveBeenCalledWith('/Volumes/Comics/Adventureman (2020)')
     );
     const { toast } = await import('$lib/stores/toast.svelte');
-    expect(toast.success).toHaveBeenCalledWith(
-      expect.stringContaining('Cmd+Shift+G')
-    );
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Cmd+Shift+G'));
   });
 
   it('Copy Path copies the container path and warns when host_library_path is unset', async () => {
@@ -480,13 +475,9 @@ describe('series detail page', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: /Copy Path/ }));
 
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith('/library/Adventureman (2020)')
-    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('/library/Adventureman (2020)'));
     const { toast } = await import('$lib/stores/toast.svelte');
-    expect(toast.warning).toHaveBeenCalledWith(
-      expect.stringContaining('HOST_LIBRARY_PATH')
-    );
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('HOST_LIBRARY_PATH'));
   });
 
   it('Copy Path reveals a fallback input when the Clipboard API rejects', async () => {

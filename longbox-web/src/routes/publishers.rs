@@ -13,6 +13,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/publishers/filters", get(list).post(create))
+        .route(
+            "/publishers/filters/recommended",
+            get(list_recommended).post(add_recommended),
+        )
         .route("/publishers/filters/:id", axum::routing::delete(remove))
         .route("/publishers/filters/reset-defaults", post(reset_defaults))
 }
@@ -93,4 +97,37 @@ async fn remove(
 async fn reset_defaults(State(state): State<AppState>) -> Result<Json<ResetResponse>, ApiError> {
     let inserted = publisher_filter_repo::reset_to_defaults(&state.db).await?;
     Ok(Json(ResetResponse { inserted }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddRecommendedBody {
+    /// Names the user selected from the recommended list. Matched
+    /// case-insensitively; anything not in the recommended set is ignored.
+    publisher_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AddRecommendedResponse {
+    /// Rows actually inserted (canonical casing), so the client can splice
+    /// them into its list without a refetch. Excludes any that were already
+    /// present or not recommended.
+    added: Vec<PublisherFilterRow>,
+}
+
+/// Recommended publishers the user hasn't blocked yet — the picker's contents.
+async fn list_recommended(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<&'static str>>, ApiError> {
+    Ok(Json(
+        publisher_filter_repo::recommended_available(&state.db).await?,
+    ))
+}
+
+/// Bulk-add selected recommended publishers to the blocklist.
+async fn add_recommended(
+    State(state): State<AppState>,
+    Json(body): Json<AddRecommendedBody>,
+) -> Result<Json<AddRecommendedResponse>, ApiError> {
+    let added = publisher_filter_repo::add_recommended(&state.db, &body.publisher_names).await?;
+    Ok(Json(AddRecommendedResponse { added }))
 }
