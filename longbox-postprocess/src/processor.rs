@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use longbox_core::{
-    classify_status, match_file, ComicInfo, ComicInfoMetadata, CoverDate, FileStatus, LibraryPath,
+    classify_status, match_file, ComicInfo, ComicInfoMetadata, FileStatus, LibraryPath,
     MatchMethod, MetronInfoMetadata, ParsingPattern,
 };
 use longbox_db::{
@@ -653,7 +653,6 @@ async fn import_as_owned(
 }
 
 fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
-    let cover_date = parse_cover_date(issue.cover_date.as_deref());
     let web = issue
         .cv_issue_id
         .map(|id| format!("https://comicvine.gamespot.com/issue/4000-{id}/"));
@@ -663,7 +662,6 @@ fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
         start_year: series.start_year.map(|y| y as i32),
         publisher: series.publisher.clone(),
         title: issue.title.clone(),
-        cover_date,
         web,
         summary: issue.summary.clone(),
     }
@@ -674,7 +672,6 @@ fn compose_metadata(series: &SeriesRow, issue: &IssueRow) -> ComicInfoMetadata {
 /// only surfaces as `<SortName>` when it differs from the canonical
 /// title; the writer omits the element when they're equal.
 fn compose_metroninfo_metadata(series: &SeriesRow, issue: &IssueRow) -> MetronInfoMetadata {
-    let cover_date = parse_cover_date(issue.cover_date.as_deref());
     let series_sort = if series.sort_title == series.title {
         None
     } else {
@@ -689,7 +686,6 @@ fn compose_metroninfo_metadata(series: &SeriesRow, issue: &IssueRow) -> MetronIn
         series_sort,
         start_year: series.start_year.map(|y| y as i32),
         number: issue.number.clone(),
-        cover_date,
         summary: issue.summary.clone(),
         last_modified: OffsetDateTime::now_utc(),
     }
@@ -703,21 +699,6 @@ fn compose_metroninfo_metadata(series: &SeriesRow, issue: &IssueRow) -> MetronIn
 /// written copies.
 fn is_metadata_entry(name: &str) -> bool {
     name.eq_ignore_ascii_case("ComicInfo.xml") || name.eq_ignore_ascii_case("MetronInfo.xml")
-}
-
-/// CV's cover_date is `YYYY-MM-DD` or `YYYY-MM` or just `YYYY`.
-/// Only the full form populates Year/Month/Day; partials drop.
-fn parse_cover_date(raw: Option<&str>) -> Option<CoverDate> {
-    let s = raw?;
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some(CoverDate {
-        year: parts[0].parse().ok()?,
-        month: parts[1].parse().ok()?,
-        day: parts[2].parse().ok()?,
-    })
 }
 
 /// Stage 1 of the rewrite-and-move flow: re-emit the source archive
@@ -939,14 +920,6 @@ mod tests {
         assert_eq!(m.series_sort, None);
         assert_eq!(m.start_year, Some(2012));
         assert_eq!(m.number, "1");
-        assert_eq!(
-            m.cover_date,
-            Some(CoverDate {
-                year: 2012,
-                month: 3,
-                day: 14
-            })
-        );
         assert_eq!(m.summary.as_deref(), Some("Galactic war epic."));
     }
 
@@ -983,21 +956,6 @@ mod tests {
         };
         let m = compose_metroninfo_metadata(&series, &issue_fixture());
         assert_eq!(m.series_sort.as_deref(), Some("Walking Dead Deluxe"));
-    }
-
-    #[test]
-    fn compose_partial_cover_date_collapses_to_none() {
-        // CV / Metron sometimes return cover_date as just "YYYY-MM" or
-        // "YYYY". The writer requires a full date for xs:date validity,
-        // so partials must collapse to None at compose time.
-        for partial in ["2012", "2012-03", "", "not-a-date"] {
-            let issue = IssueRow {
-                cover_date: Some(partial.into()),
-                ..issue_fixture()
-            };
-            let m = compose_metroninfo_metadata(&series_fixture(), &issue);
-            assert_eq!(m.cover_date, None, "expected None for {partial:?}");
-        }
     }
 
     #[test]

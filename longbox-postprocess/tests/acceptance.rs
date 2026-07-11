@@ -401,6 +401,33 @@ async fn six_file_acceptance_smoke() {
         metron_xml.contains("<LastModified>"),
         "LastModified timestamp present: {metron_xml}"
     );
+    // Bug fix, end-to-end: the seeded issue has DB cover_date
+    // "2012-03-14", but the issue's own publish date must NOT be
+    // embedded — per-issue dates leak into readers and mis-sort issues.
+    // The series-level <StartYear> above is the only date-ish field.
+    assert!(
+        !metron_xml.contains("<CoverDate"),
+        "per-issue <CoverDate> must not be embedded: {metron_xml}"
+    );
+
+    // Same guarantee on the ComicInfo side of the same tagged archive:
+    // <Volume> (series-level) present, per-issue Year/Month/Day absent.
+    let mut ci_entry = archive
+        .by_name("ComicInfo.xml")
+        .expect("ComicInfo.xml openable by name");
+    let mut ci_xml = String::new();
+    std::io::Read::read_to_string(&mut ci_entry, &mut ci_xml).expect("ComicInfo.xml is UTF-8");
+    drop(ci_entry);
+    assert!(
+        ci_xml.contains("<Volume>2012</Volume>"),
+        "series-level <Volume> must land: {ci_xml}"
+    );
+    for tag in ["<Year", "<Month", "<Day"] {
+        assert!(
+            !ci_xml.contains(tag),
+            "per-issue {tag}> must not be embedded: {ci_xml}"
+        );
+    }
 
     // Criterion 3 alt — file (b): filename-only match.
     let row_b =
