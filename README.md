@@ -70,4 +70,4 @@ Thanks also to the people behind [ComicVine](https://comicvine.gamespot.com/), [
 
 ## License
 
-*License TBD. See [LICENSE](LICENSE) when published.*
+LongBox is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.

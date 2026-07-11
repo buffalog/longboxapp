@@ -5,7 +5,7 @@ members = ["longbox-core", "longbox-db", "longbox-comicvine", "longbox-metron", 
 [workspace.package]
 edition = "2021"
 version = "2.1.0"
-license = "MIT"
+license = "GPL-3.0-or-later"
 rust-version = "1.78"
 
 [workspace.lints.rust]
