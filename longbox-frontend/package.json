@@ -2,6 +2,7 @@
   "name": "longbox-frontend",
   "version": "0.0.1",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
