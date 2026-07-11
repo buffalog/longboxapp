@@ -174,6 +174,24 @@ where
     Ok(row)
 }
 
+/// Map of `cv_id -> local series id` for every CV-linked series. Used by
+/// Add-search to flag results already in the library without a per-result
+/// query (search returns up to ~100 rows; one scan of the CV-linked set is
+/// cheaper and simpler than dynamic `IN (...)` SQL). A personal library is
+/// small enough that fetching all owned cv_ids is trivial.
+pub async fn owned_cv_ids<'e, E>(executor: E) -> Result<std::collections::HashMap<i64, i64>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", cv_id AS "cv_id!: i64"
+           FROM series WHERE cv_id IS NOT NULL"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.cv_id, r.id)).collect())
+}
+
 /// Promote a shallow series to CV-linked (Step 6c.2). Single-purpose;
 /// the existing [`SeriesUpdate`] excludes `cv_id` as immutable. This
 /// is the one sanctioned path to assign cv_id post-creation.

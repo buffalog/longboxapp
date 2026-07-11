@@ -20,6 +20,81 @@ pub const DEFAULT_BLOCKED_PUBLISHERS: &[&str] = &[
     "Salvat",
 ];
 
+/// Curated superset of [`DEFAULT_BLOCKED_PUBLISHERS`]: foreign-market reprint
+/// publishers of major US comics. Unlike the defaults, this list is **never**
+/// auto-seeded — it powers the opt-in "Add recommended publishers" Settings
+/// action, where the user picks entries (minus any already in their blocklist)
+/// and adds them explicitly.
+///
+/// Strings are the exact publisher names ComicVine returns, empirically
+/// collected by running `/cv/search` (unfiltered) for Batman, Superman,
+/// Spider-Man, Wonder Woman, X-Men, Hulk, Avengers, Flash, Green Lantern,
+/// Justice League, and Fantastic Four and keeping the clearly-foreign-market
+/// reprinters. Deliberately excludes US/English originals (IDW, Image, Dark
+/// Horse, Titan, etc.), major foreign *original* publishers (Sergio Bonelli,
+/// Dargaud, Japanese manga houses), and Marvel UK/Panini UK (carries original
+/// UK material). Extend it as new reprint noise surfaces in real searches.
+pub const RECOMMENDED_BLOCKED_PUBLISHERS: &[&str] = &[
+    // Germany
+    "Panini Verlag",
+    "Dino Comics",
+    "Egmont Ehapa Verlag",
+    "Carlsen Verlag",
+    "Norbert Hethke Verlag",
+    // France / Belgium / French-Canada
+    "Panini France",
+    "Urban Comics",
+    "TM-Semic",
+    "Semic S.A.",
+    "Arédit - Artima",
+    "Editions Interpresse S.A.",
+    "Éditions de l'Occident",
+    "Editions Héritage",
+    "Éditions Glénat",
+    // Spain
+    "Planeta DeAgostini",
+    "ECC Ediciones",
+    "Panini España",
+    "Ediciones Zinco",
+    "Norma Editorial",
+    "Editorial Bruguera",
+    "Ediciones Vértice",
+    "Salvat",
+    // Italy
+    "Play Press",
+    "RW Edizioni",
+    "Edifumetto",
+    "Editrice Cenisio",
+    "Edizioni Williams Inteuropa",
+    "Glenat Italia",
+    "Arnoldo Mondadori Editore",
+    "Newton Comics",
+    // Mexico / Latin America / Brazil
+    "Editorial Televisa",
+    "Editorial Novaro",
+    "Grupo Editorial Vid",
+    "Abril",
+    "Panini Brasil",
+    "Panini Comics",
+    "Epucol",
+    // Netherlands
+    "JuniorPress BV",
+    "Oberon BV",
+    // Scandinavia / Poland
+    "Semic Press AB",
+    "Atlantic Förlags AB",
+    "Hjemmet",
+    "Egmont Publishing A/S",
+    "Egmont Polska",
+    // Australia
+    "Murray Comics",
+    "Horwitz",
+    // UK
+    "Thorpe & Porter",
+    // Turkey
+    "Marmara Çizgi",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublisherFilterMode {
@@ -67,9 +142,11 @@ where
     Ok(rows)
 }
 
-/// Convenience: just the publisher names of `block` rows, lowercased
-/// for direct comparison against CV's publisher strings. CV search uses
-/// this on every request.
+/// Convenience: just the publisher names of `block` rows, trimmed and
+/// lowercased for direct comparison against CV's publisher strings. CV
+/// search uses this on every request. The caller must normalise the CV
+/// side the same way (`.trim().to_lowercase()`) so incidental whitespace
+/// or casing on either side can't defeat a match.
 pub async fn blocked_names_lower<'e, E>(executor: E) -> Result<Vec<String>>
 where
     E: SqliteExecutor<'e>,
@@ -79,8 +156,65 @@ where
         .await?;
     Ok(rows
         .into_iter()
-        .map(|r| r.publisher_name.to_lowercase())
+        .map(|r| r.publisher_name.trim().to_lowercase())
         .collect())
+}
+
+/// The recommended publishers not already on the user's blocklist
+/// (case-insensitive), returned in canonical CV casing and the const's order.
+/// Powers the "Add recommended publishers" picker — the user only ever sees
+/// entries they don't already have.
+pub async fn recommended_available<'e, E>(executor: E) -> Result<Vec<&'static str>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let blocked: std::collections::HashSet<String> =
+        blocked_names_lower(executor).await?.into_iter().collect();
+    Ok(RECOMMENDED_BLOCKED_PUBLISHERS
+        .iter()
+        .copied()
+        .filter(|name| !blocked.contains(&name.trim().to_lowercase()))
+        .collect())
+}
+
+/// Bulk-add recommended publishers to the blocklist. Only names present in
+/// [`RECOMMENDED_BLOCKED_PUBLISHERS`] are accepted — matched case-insensitively
+/// against the request but **stored with the canonical CV casing** from the
+/// const, so a sloppy client can't write a mis-cased row. Non-recommended
+/// names are silently ignored (the picker never sends them). Already-present
+/// rows are skipped via `INSERT OR IGNORE`. Returns the rows actually inserted,
+/// so the caller can update its view without a refetch.
+///
+/// Takes a `&Pool` directly: the loop needs its own executor borrow per
+/// iteration, same as [`reset_to_defaults`].
+pub async fn add_recommended(
+    pool: &crate::Pool,
+    requested: &[String],
+) -> Result<Vec<PublisherFilterRow>> {
+    let want: std::collections::HashSet<String> =
+        requested.iter().map(|s| s.trim().to_lowercase()).collect();
+    let mut inserted = Vec::new();
+    for canonical in RECOMMENDED_BLOCKED_PUBLISHERS {
+        if !want.contains(&canonical.trim().to_lowercase()) {
+            continue;
+        }
+        // INSERT OR IGNORE + RETURNING yields a row only when a new row was
+        // actually written; a conflict (already blocked) returns no row.
+        let row = sqlx::query_as!(
+            PublisherFilterRow,
+            r#"INSERT OR IGNORE INTO publisher_filters (publisher_name, mode)
+               VALUES (?, 'block')
+               RETURNING id AS "id!: i64", publisher_name AS "publisher_name!",
+                         mode AS "mode!", created_at AS "created_at: _""#,
+            canonical
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(r) = row {
+            inserted.push(r);
+        }
+    }
+    Ok(inserted)
 }
 
 pub async fn insert<'e, E>(executor: E, input: NewPublisherFilter) -> Result<PublisherFilterRow>
@@ -138,4 +272,30 @@ pub async fn reset_to_defaults(pool: &crate::Pool) -> Result<u64> {
         inserted += result.rows_affected();
     }
     Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn recommended_list_is_a_clean_superset_of_defaults() {
+        // No duplicates (case-insensitive, matching the DB's NOCASE column).
+        let mut seen = HashSet::new();
+        for name in RECOMMENDED_BLOCKED_PUBLISHERS {
+            assert!(
+                seen.insert(name.to_lowercase()),
+                "duplicate recommended publisher: {name:?}"
+            );
+        }
+        // Every auto-seeded default is present, so the diff endpoint never
+        // re-offers a default the fresh-install user already has.
+        for def in DEFAULT_BLOCKED_PUBLISHERS {
+            assert!(
+                seen.contains(&def.to_lowercase()),
+                "default {def:?} missing from recommended superset"
+            );
+        }
+    }
 }

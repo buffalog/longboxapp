@@ -49,7 +49,10 @@
       // Drop the result if the query has changed since we kicked off.
       if (q !== query.trim()) return;
       results = r.results;
-      filteredCount = r.filtered_count;
+      // This picker (Change Match / tidy / files) isn't library-aware; it
+      // just needs a total to drive the reveal toggle. Sum both hidden
+      // buckets — publisher blocklist + already-in-library.
+      filteredCount = r.filtered_publisher + r.filtered_in_library;
       error = null;
     } catch (e) {
       results = [];
@@ -106,7 +109,7 @@
       />
       Show filtered results
       {#if filteredCount > 0}
-        <span class="text-slate-500">({filteredCount} hidden by publisher blocklist)</span>
+        <span class="text-slate-500">({filteredCount} hidden)</span>
       {/if}
     </label>
   {/if}

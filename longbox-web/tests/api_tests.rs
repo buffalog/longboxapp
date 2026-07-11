@@ -184,7 +184,8 @@ async fn cv_search_happy_path() {
     // so Image-published Walking Dead survives.
     assert_eq!(body["results"][0]["cv_id"], 2127);
     assert_eq!(body["results"][0]["name"], "The Walking Dead");
-    assert_eq!(body["filtered_count"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
+    assert_eq!(body["filtered_in_library"], 0);
 }
 
 #[tokio::test]
@@ -259,7 +260,8 @@ async fn cv_search_blocks_seeded_reprint_publishers() {
     let results = body["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["publisher"], "DC Comics");
-    assert_eq!(body["filtered_count"], 2);
+    assert_eq!(body["filtered_publisher"], 2);
+    assert_eq!(body["filtered_in_library"], 0);
 }
 
 #[tokio::test]
@@ -292,7 +294,114 @@ async fn cv_search_show_filtered_bypasses_blocklist() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert_eq!(body["results"].as_array().unwrap().len(), 2);
-    assert_eq!(body["filtered_count"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
+    assert_eq!(body["filtered_in_library"], 0);
+}
+
+#[tokio::test]
+async fn cv_search_blocklist_matches_ignore_whitespace_and_case() {
+    let app = build_test_app().await;
+    // CV returns the seeded-blocked "Panini Comics" with stray whitespace and
+    // odd casing; normalisation (trim + lowercase both sides) must still block.
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("query", "batman"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 2, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 1, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 20, "image": null, "deck": null },
+                    { "id": 2, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 11, "name": "  pANINi comics  " },
+                      "count_of_issues": 5, "image": null, "deck": null }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=batman"))
+        .await;
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["publisher"], "DC Comics");
+    assert_eq!(body["filtered_publisher"], 1);
+}
+
+#[tokio::test]
+async fn cv_search_hides_and_annotates_owned_series() {
+    let app = build_test_app().await;
+    // Seed a tracked series whose cv_id matches the first search hit.
+    let owned_id: i64 = sqlx::query_scalar(
+        "INSERT INTO series (cv_id, title, sort_title) VALUES (1, 'Batman', 'batman') RETURNING id",
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+
+    // Three hits: id 1 owned (DC), id 2 owned-AND-Panini-blocked, id 3 fresh.
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("query", "batman"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
+                "status_code": 1, "error": "OK",
+                "number_of_total_results": 3, "limit": 100, "offset": 0,
+                "results": [
+                    { "id": 1, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 20, "image": null, "deck": null },
+                    { "id": 2, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 11, "name": "Panini Comics" },
+                      "count_of_issues": 5, "image": null, "deck": null },
+                    { "id": 3, "name": "Batman", "start_year": "2024",
+                      "publisher": { "id": 10, "name": "DC Comics" },
+                      "count_of_issues": 5, "image": null, "deck": null }
+                ]
+            }"#,
+        ))
+        .mount(&app.cv_server)
+        .await;
+
+    // Seed cv_id 2 as owned too, to exercise in-library precedence over the
+    // publisher bucket (Panini is default-blocked but must count as owned).
+    sqlx::query("INSERT INTO series (cv_id, title, sort_title) VALUES (2, 'Batman', 'batman2')")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    // Default (filtered) view: both owned hidden, none double-counted.
+    let resp = app
+        .request(empty_request("GET", "/api/cv/search?q=batman"))
+        .await;
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["cv_id"], 3);
+    assert_eq!(results[0]["in_library_series_id"], serde_json::Value::Null);
+    assert_eq!(body["filtered_in_library"], 2);
+    assert_eq!(body["filtered_publisher"], 0);
+
+    // Revealed view: owned results reappear, annotated with local series id.
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/cv/search?q=batman&show_filtered=true",
+        ))
+        .await;
+    let body = response_json(resp).await;
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["cv_id"], 1);
+    assert_eq!(results[0]["in_library_series_id"], owned_id);
+    assert_eq!(results[2]["in_library_series_id"], serde_json::Value::Null);
+    assert_eq!(body["filtered_in_library"], 0);
+    assert_eq!(body["filtered_publisher"], 0);
 }
 
 // -------- /api/publishers/filters --------
@@ -347,6 +456,107 @@ async fn publisher_filters_create_then_delete() {
         ))
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn publisher_filters_recommended_excludes_already_blocked() {
+    let app = build_test_app().await;
+    let resp = app
+        .request(empty_request("GET", "/api/publishers/filters/recommended"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let names: Vec<String> = response_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    // "Panini Comics" is a seeded default → already blocked → not offered.
+    assert!(!names.contains(&"Panini Comics".to_string()));
+    // A recommended entry that isn't a seeded default → offered.
+    assert!(names.contains(&"Murray Comics".to_string()));
+}
+
+#[tokio::test]
+async fn publisher_filters_add_recommended_inserts_and_is_idempotent() {
+    let app = build_test_app().await;
+    // Case-insensitive request; canonical casing must be stored regardless.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["murray comics", "Ediciones Zinco"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let added: Vec<String> = response_json(resp).await["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["publisher_name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(added.len(), 2);
+    assert!(added.contains(&"Murray Comics".to_string())); // canonical casing
+    assert!(added.contains(&"Ediciones Zinco".to_string()));
+
+    // Now blocked → no longer offered by the picker.
+    let resp = app
+        .request(empty_request("GET", "/api/publishers/filters/recommended"))
+        .await;
+    let names: Vec<String> = response_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert!(!names.contains(&"Murray Comics".to_string()));
+
+    // Re-adding the same ones is a clean no-op (INSERT OR IGNORE).
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["Murray Comics"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(resp).await["added"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn publisher_filters_add_recommended_ignores_non_recommended() {
+    let app = build_test_app().await;
+    let before = app
+        .request(empty_request("GET", "/api/publishers/filters"))
+        .await;
+    let before_len = response_json(before).await.as_array().unwrap().len();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/publishers/filters/recommended",
+            r#"{"publisher_names": ["Totally Made Up Publisher"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(resp).await["added"].as_array().unwrap().len(),
+        0
+    );
+
+    // Nothing written — the non-recommended name is not a general injection path.
+    let after = app
+        .request(empty_request("GET", "/api/publishers/filters"))
+        .await;
+    assert_eq!(
+        response_json(after).await.as_array().unwrap().len(),
+        before_len
+    );
 }
 
 #[tokio::test]

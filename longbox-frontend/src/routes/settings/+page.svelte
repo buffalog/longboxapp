@@ -7,7 +7,12 @@
   import { ApiError } from '$lib/api/client';
   import { restartServer } from '$lib/api/admin';
   import { triggerPostprocess } from '$lib/api/postprocess';
-  import { addFilter, deleteFilter, resetFiltersToDefaults } from '$lib/api/publishers';
+  import {
+    addFilter,
+    addRecommendedFilters,
+    deleteFilter,
+    resetFiltersToDefaults
+  } from '$lib/api/publishers';
   import { updateSetting, type EditableSettingKey } from '$lib/api/settings';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -23,6 +28,27 @@
   let newPublisher = $state('');
   let busy = $state(false);
   let error = $state<ApiError | null>(null);
+
+  // "Add recommended publishers" picker: collapsed by default; `selected`
+  // holds the checked names. The available list comes from the server
+  // (recommended minus already-blocked) and shrinks on invalidateAll.
+  let showRecommended = $state(false);
+  let selected = $state<Set<string>>(new Set());
+
+  function toggleSelected(name: string): void {
+    const next = new Set(selected);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    selected = next;
+  }
+
+  async function handleAddRecommended(names: string[]): Promise<void> {
+    if (names.length === 0) return;
+    await withBusy(async () => {
+      await addRecommendedFilters(names);
+      selected = new Set();
+    });
+  }
 
   // Editable settings — one draft + saving flag per tunable. Drafts
   // are seeded from the server's canonical value on mount; we don't
@@ -605,6 +631,81 @@
         {/each}
       </ul>
     {/if}
+
+    <!-- Opt-in recommended reprint publishers (never auto-applied). -->
+    <div class="mt-4 border-t border-slate-100 pt-4">
+      {#if data.recommendedPublishers.length === 0}
+        <p class="text-sm text-slate-500">
+          All recommended reprint publishers are already in your blocklist.
+        </p>
+      {:else}
+        <button
+          type="button"
+          class="text-sm font-medium text-blue-700 hover:underline"
+          onclick={() => (showRecommended = !showRecommended)}
+          aria-expanded={showRecommended}
+        >
+          {showRecommended ? '▾' : '▸'} Add recommended publishers ({data
+            .recommendedPublishers.length})
+        </button>
+
+        {#if showRecommended}
+          <p class="mt-2 text-xs text-slate-500">
+            Curated foreign-market reprint publishers of major US comics. Select the ones to hide
+            from ComicVine search, or add them all — nothing is added until you click.
+          </p>
+
+          <div class="mt-2 flex items-center justify-between">
+            <label class="inline-flex items-center gap-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                class="rounded border-slate-300"
+                checked={selected.size === data.recommendedPublishers.length}
+                onchange={(e) =>
+                  (selected = (e.target as HTMLInputElement).checked
+                    ? new Set(data.recommendedPublishers)
+                    : new Set())}
+              />
+              Select all
+            </label>
+            <span class="text-xs text-slate-500">{selected.size} selected</span>
+          </div>
+
+          <ul
+            class="mt-2 max-h-64 divide-y divide-slate-100 overflow-y-auto rounded-md border border-slate-200"
+          >
+            {#each data.recommendedPublishers as name (name)}
+              <li class="px-3 py-1.5 text-sm">
+                <label class="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    class="rounded border-slate-300"
+                    checked={selected.has(name)}
+                    onchange={() => toggleSelected(name)}
+                    disabled={busy}
+                  />
+                  <span>{name}</span>
+                </label>
+              </li>
+            {/each}
+          </ul>
+
+          <div class="mt-3 flex gap-2">
+            <Button
+              size="sm"
+              disabled={busy || selected.size === 0}
+              onclick={() => handleAddRecommended([...selected])}
+            >Add selected ({selected.size})</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onclick={() => handleAddRecommended([...data.recommendedPublishers])}
+            >Add all</Button>
+          </div>
+        {/if}
+      {/if}
+    </div>
   </section>
 
   <IndexerSettings indexers={data.indexers} />

@@ -7,17 +7,29 @@
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import LoadingSpinner from '$lib/components/LoadingSpinner.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
-  import type { SeriesSearchResult } from '$lib/types';
+  import type { CvSearchResultItem } from '$lib/api/cv';
 
   let query = $state('');
-  let results = $state<SeriesSearchResult[]>([]);
-  let filteredCount = $state(0);
+  let results = $state<CvSearchResultItem[]>([]);
+  let filteredPublisher = $state(0);
+  let filteredInLibrary = $state(0);
+  let hiddenTotal = $derived(filteredPublisher + filteredInLibrary);
   let showFiltered = $state(false);
   let searching = $state(false);
   let addingId = $state<number | null>(null);
   let addedIds = $state<Set<number>>(new Set());
   let error = $state<ApiError | null>(null);
   let successMessage = $state<string | null>(null);
+
+  // "14 hidden (11 publisher blocklist, 3 already in library)" — each clause
+  // dropped when its count is zero, so the two reasons never collapse into
+  // one ambiguous number. Empty when nothing is hidden.
+  let hiddenLabel = $derived.by(() => {
+    const parts: string[] = [];
+    if (filteredPublisher > 0) parts.push(`${filteredPublisher} publisher blocklist`);
+    if (filteredInLibrary > 0) parts.push(`${filteredInLibrary} already in library`);
+    return parts.length > 0 ? `${hiddenTotal} hidden (${parts.join(', ')})` : '';
+  });
 
   let debounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -26,7 +38,8 @@
     const q = query.trim();
     if (!q) {
       results = [];
-      filteredCount = 0;
+      filteredPublisher = 0;
+      filteredInLibrary = 0;
       return;
     }
     debounce = setTimeout(() => {
@@ -40,11 +53,13 @@
     try {
       const r = await searchVolumes(q, { showFiltered });
       results = r.results;
-      filteredCount = r.filtered_count;
+      filteredPublisher = r.filtered_publisher;
+      filteredInLibrary = r.filtered_in_library;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
       results = [];
-      filteredCount = 0;
+      filteredPublisher = 0;
+      filteredInLibrary = 0;
     } finally {
       searching = false;
     }
@@ -109,7 +124,7 @@
       oninput={handleInput}
     />
   </div>
-  {#if filteredCount > 0 || showFiltered}
+  {#if hiddenTotal > 0 || showFiltered}
     <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-600">
       <input
         type="checkbox"
@@ -118,8 +133,8 @@
         class="rounded border-slate-300"
       />
       Show filtered results
-      {#if filteredCount > 0}
-        <span class="text-slate-500">({filteredCount} hidden by publisher blocklist)</span>
+      {#if hiddenLabel}
+        <span class="text-slate-500">{hiddenLabel}</span>
       {/if}
     </label>
   {/if}
@@ -146,8 +161,17 @@
           {#if r.description}
             <p class="line-clamp-2 text-xs text-slate-600">{r.description}</p>
           {/if}
-          <div class="mt-1">
-            {#if addedIds.has(r.cv_id)}
+          <div class="mt-1 flex items-center gap-2">
+            {#if r.in_library_series_id != null}
+              <!-- Already tracked: no add affordance, link out to the series. -->
+              <span
+                class="inline-flex items-center rounded bg-blue-50 px-1.5 py-0.5 text-xs font-medium text-blue-700"
+              >In Library</span>
+              <a
+                href={`/series/${r.in_library_series_id}`}
+                class="text-xs font-medium text-blue-700 hover:underline"
+              >View Series →</a>
+            {:else if addedIds.has(r.cv_id)}
               <span class="text-xs font-medium text-green-700">✓ Added</span>
             {:else}
               <Button
