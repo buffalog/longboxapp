@@ -237,6 +237,20 @@ struct ResolveResponse {
     results: Vec<ResolveResult>,
 }
 
+/// Serializes all resolve batches process-wide. Without it, two concurrent
+/// resolves of the *same* issue with *different* keeps could each read the
+/// full present set before either deletes and, between them, delete every
+/// copy — total loss for that issue. Holding this for the batch means the
+/// second batch's per-group re-read (`resolve_one`) sees the first's deletes
+/// and refuses the now-stale group. Resolve is not hot; a global lock is
+/// cheap insurance on a permanent-delete path.
+// ponytail: process-wide lock; if resolve ever needs throughput, key it per
+// issue_id instead.
+fn resolve_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Best-effort batch: each resolution is independent, so one refusal or one
 /// undeletable file never sinks the rest. Every group re-runs the full safety
 /// check server-side — the client's `kind`/suggestion is never trusted.
@@ -244,6 +258,9 @@ async fn resolve(
     State(state): State<AppState>,
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
+    // Serialize against concurrent resolves so a group's re-validation and
+    // deletes are atomic w.r.t. another resolve touching the same issue.
+    let _guard = resolve_lock().lock().await;
     let patterns = load_patterns(&state).await?;
     let roots: HashMap<i64, String> = library_root_repo::list_all(&state.db)
         .await?
@@ -370,13 +387,37 @@ async fn delete_loser(
         .ok_or_else(|| format!("unknown library_root_id {}", loser.library_root_id))?;
     let abs = Path::new(root).join(&loser.path_relative);
 
-    match tokio::fs::remove_file(&abs).await {
-        Ok(()) => {}
+    // `is_contained` above is purely lexical (rejects `..`/absolute). Delete
+    // is higher-stakes than the read paths that share that guard, so also
+    // resolve symlinks and confirm the real target is still inside the real
+    // library root — a symlinked parent directory can't redirect the delete
+    // outside. Canonicalize fails with NotFound iff the file is already gone,
+    // which we treat as success.
+    let canon_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|e| format!("cannot resolve library root path: {e}"))?;
+    match tokio::fs::canonicalize(&abs).await {
+        Ok(canon_target) => {
+            if !canon_target.starts_with(&canon_root) {
+                tracing::warn!(
+                    file_id = loser.id,
+                    path = %loser.path_relative,
+                    resolved = %canon_target.display(),
+                    "duplicate-files: refused path resolving outside library root"
+                );
+                return Err("resolved path escapes its library root".to_owned());
+            }
+            if let Err(e) = tokio::fs::remove_file(&canon_target).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("failed to delete file: {e}"));
+                }
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Already gone on disk — treat as success and clean up the row.
             tracing::info!(file_id = loser.id, path = %abs.display(), "duplicate-files: file already absent");
         }
-        Err(e) => return Err(format!("failed to delete file: {e}")),
+        Err(e) => return Err(format!("cannot resolve file path: {e}")),
     }
 
     match file_repo::delete(&state.db, loser.id).await {
