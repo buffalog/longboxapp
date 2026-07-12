@@ -31,9 +31,16 @@ FROM rust:1.95-alpine AS backend-builder
 RUN apk add --no-cache musl-dev sqlite-dev sqlite-static pkgconfig perl make g++
 WORKDIR /build
 
-# Make sure the MUSL target is installed (rust:alpine usually has it but we
-# install explicitly to be reproducible across base-image variants).
-RUN rustup target add aarch64-unknown-linux-musl
+# Resolve the Rust musl target from BuildKit's TARGETARCH so this Dockerfile
+# builds natively on both amd64 and arm64 runners (multi-arch CI). Each
+# matrix runner builds only its own arch — no QEMU, no cross-linking.
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) echo "x86_64-unknown-linux-musl"  > /tmp/rust-target ;; \
+      arm64) echo "aarch64-unknown-linux-musl" > /tmp/rust-target ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac
+RUN rustup target add "$(cat /tmp/rust-target)"
 
 # Copy the workspace + offline sqlx cache.
 ENV SQLX_OFFLINE=true
@@ -63,7 +70,10 @@ COPY --from=frontend-builder /build/longbox-web/frontend-dist/ ./longbox-web/fro
 # libsqlite3 package.
 ENV RUSTFLAGS="-C target-feature=+crt-static -L native=/usr/lib"
 
-RUN cargo build --release --target aarch64-unknown-linux-musl --package longbox-web
+# Build for the resolved target, then stage the binary at a fixed,
+# arch-independent path so the runtime COPY doesn't need the target triple.
+RUN cargo build --release --target "$(cat /tmp/rust-target)" --package longbox-web \
+ && cp "target/$(cat /tmp/rust-target)/release/longbox" /build/longbox
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -78,7 +88,7 @@ RUN addgroup -g 1000 -S longbox \
  && mkdir -p /data /library \
  && chown -R longbox:longbox /data /home/longbox
 
-COPY --from=backend-builder /build/target/aarch64-unknown-linux-musl/release/longbox /usr/local/bin/longbox
+COPY --from=backend-builder /build/longbox /usr/local/bin/longbox
 RUN chmod +x /usr/local/bin/longbox
 
 USER longbox
