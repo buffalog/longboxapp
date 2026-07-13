@@ -47,6 +47,12 @@ pub struct MatchResult {
     pub issue_id: Option<i64>,
     pub method: MatchMethod,
     pub confidence: f64,
+    /// Tier 2 and Tier 3 both resolved an issue — and disagreed about which.
+    /// The file's own two sources of truth contradict each other, so no
+    /// confidence score is meaningful; a human has to look. Callers must
+    /// classify this as `needs_review` regardless of confidence (see
+    /// [`crate::classify_status`]).
+    pub ambiguous: bool,
 }
 
 /// Tier 2 → Tier 3 cascade against a pre-fetched candidate pool. Tier 1
@@ -55,28 +61,67 @@ pub struct MatchResult {
 ///
 /// Returns the strongest non-failing result. `Unmatched` (confidence 0.0)
 /// when neither tier produces a score ≥ [`NEEDS_REVIEW_FLOOR`].
+///
+/// **Tier 2 does not get to win unchallenged — about the issue number.** Real
+/// libraries contain files whose embedded ComicInfo `<Number>` is simply wrong:
+/// "Ferocious (2025) 002.cbz" is physically issue 2, correctly named and
+/// foldered, and its `<Number>` says 1. Tier 2 running first meant that lie was
+/// believed and the file was silently filed under issue 1, colliding with the
+/// real #1. So Tier 3 is always computed too, and when both tiers land in the
+/// **same series** but name different issues, we neither trust Tier 2 nor
+/// guess: we take the filename's issue (in the failure mode we have actually
+/// observed, the filename is the one telling the truth) and mark the result
+/// `ambiguous`, so it lands in `needs_review` for a human instead of being
+/// quietly filed.
+///
+/// **The cross-check is deliberately confined to one series.** When the tiers
+/// pick *different series*, Tier 2 still wins outright and nothing is flagged.
+/// That isn't a contradiction — it's Tier 3 having less to go on. Two volumes
+/// of one title (Ultimate Spider-Man 2000 and 2024) score identically on title
+/// similarity, so the year hint decides, and a filename's year is very often
+/// absent while ComicInfo's `<Volume>` is right there. Letting a yearless
+/// filename overrule ComicInfo about *which volume* would drag correctly-tagged
+/// files onto the wrong series — manufacturing the very collisions this exists
+/// to prevent. The evidence is about wrong numbers inside the right series;
+/// this fix goes exactly that far and no further.
+///
+/// Tier 3 producing no parse, or agreeing with Tier 2, changes nothing —
+/// Tier 2's result stands, exactly as before.
 pub fn match_file(
     comic_info: Option<&ComicInfo>,
     filename_parse: Option<&ParsedFilename>,
     candidates: &[Candidate],
 ) -> MatchResult {
-    if let Some(result) = tier2_comicinfo(comic_info, candidates) {
-        return result;
-    }
-    if let Some(result) = tier3_filename(filename_parse, candidates) {
-        return result;
-    }
-    MatchResult {
-        issue_id: None,
-        method: MatchMethod::Unmatched,
-        confidence: 0.0,
+    let tier3 = tier3_filename(filename_parse, candidates);
+    match (tier2_comicinfo(comic_info, candidates), tier3) {
+        (Some((tier2, series2)), Some((tier3, series3))) => {
+            if series2 == series3 && tier2.issue_id != tier3.issue_id {
+                MatchResult {
+                    ambiguous: true,
+                    ..tier3
+                }
+            } else {
+                tier2
+            }
+        }
+        (Some((tier2, _)), None) => tier2,
+        (None, Some((tier3, _))) => tier3,
+        (None, None) => MatchResult {
+            issue_id: None,
+            method: MatchMethod::Unmatched,
+            confidence: 0.0,
+            ambiguous: false,
+        },
     }
 }
 
-fn tier2_comicinfo(
-    comic_info: Option<&ComicInfo>,
-    candidates: &[Candidate],
-) -> Option<MatchResult> {
+/// Each tier returns its result **and the series it landed in**, so
+/// [`match_file`] can tell "these two disagree about the issue" (a real
+/// contradiction) from "these two are looking at different volumes entirely"
+/// (Tier 3 lacking a year hint, not evidence of anything).
+type TierMatch = (MatchResult, i64);
+
+fn tier2_comicinfo(comic_info: Option<&ComicInfo>, candidates: &[Candidate]) -> Option<TierMatch> {
     let ci = comic_info?;
     let series_text = ci.series.as_deref()?;
     let number_text = ci.number.as_deref()?;
@@ -94,7 +139,7 @@ fn tier2_comicinfo(
 fn tier3_filename(
     filename_parse: Option<&ParsedFilename>,
     candidates: &[Candidate],
-) -> Option<MatchResult> {
+) -> Option<TierMatch> {
     let fp = filename_parse?;
     match_in_candidates(
         &fp.series_title,
@@ -113,7 +158,7 @@ fn match_in_candidates(
     candidates: &[Candidate],
     confidence_ceiling: f64,
     method: MatchMethod,
-) -> Option<MatchResult> {
+) -> Option<TierMatch> {
     let (score, candidate) = best_candidate_match(title_text, year_hint, candidates)?;
     let confidence = score.min(confidence_ceiling);
     if confidence < NEEDS_REVIEW_FLOOR {
@@ -124,11 +169,15 @@ fn match_in_candidates(
         .issues
         .iter()
         .find(|i| i.number.matches(&needle))?;
-    Some(MatchResult {
-        issue_id: Some(issue.id),
-        method,
-        confidence,
-    })
+    Some((
+        MatchResult {
+            issue_id: Some(issue.id),
+            method,
+            confidence,
+            ambiguous: false,
+        },
+        candidate.series.id,
+    ))
 }
 
 /// Score every candidate against `title_text` (after normalization), return
@@ -609,6 +658,177 @@ mod tests {
         assert_eq!(r.issue_id, Some(10));
     }
 
+    // -------- Tier 2 / Tier 3 cross-check --------
+
+    /// The live Ferocious case, end to end: the file is physically issue 2,
+    /// named and foldered correctly, but its embedded `<Number>` says 1. Tier
+    /// 2 used to win outright and file it under #1 as `owned`, colliding with
+    /// the real #1 — which is how all 28 mismatch groups happened.
+    fn ferocious() -> Vec<Candidate> {
+        let s = series(1, "Ferocious", Some(2025));
+        vec![candidate(
+            s,
+            (1..=5)
+                .map(|n| issue(8467 + n, 1, &n.to_string()))
+                .collect(),
+        )]
+    }
+
+    fn lying_comicinfo() -> ComicInfo {
+        ComicInfo {
+            series: Some("Ferocious".into()),
+            number: Some("1".into()), // the lie
+            year: Some(2025),
+            ..Default::default()
+        }
+    }
+
+    fn honest_filename(number: &str) -> ParsedFilename {
+        ParsedFilename {
+            series_title: "Ferocious".into(),
+            number: number.to_owned(),
+            volume: None,
+            year: Some(2025),
+            title: None,
+            pattern_id: 2,
+        }
+    }
+
+    #[test]
+    fn disagreement_takes_the_filename_issue_and_flags_it() {
+        let r = match_file(
+            Some(&lying_comicinfo()),
+            Some(&honest_filename("2")),
+            &ferocious(),
+        );
+        assert!(r.ambiguous, "tier2/tier3 disagreement must be flagged");
+        assert_eq!(r.issue_id, Some(8469), "the filename's issue (#2) wins");
+        assert_eq!(r.method, MatchMethod::FilenameRegex);
+        // And the flag — not the confidence — is what keeps it out of `owned`,
+        // even at a threshold the file's 0.90 would otherwise clear.
+        use crate::file::classify_status;
+        assert_eq!(
+            classify_status(r.issue_id, r.confidence, r.method, 0.85, r.ambiguous),
+            crate::FileStatus::NeedsReview
+        );
+        // Even a user who dropped the threshold to the floor still gets a
+        // human in the loop — the whole reason this is a flag, not a clamp.
+        assert_eq!(
+            classify_status(r.issue_id, r.confidence, r.method, 0.65, r.ambiguous),
+            crate::FileStatus::NeedsReview
+        );
+    }
+
+    #[test]
+    fn agreement_is_unchanged_tier2_still_wins() {
+        let ci = ComicInfo {
+            series: Some("Ferocious".into()),
+            number: Some("2".into()),
+            year: Some(2025),
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), &ferocious());
+        assert!(!r.ambiguous);
+        assert_eq!(r.issue_id, Some(8469));
+        // Tier 2 still owns the result (uncapped confidence, ComicInfo method).
+        assert_eq!(r.method, MatchMethod::ComicInfoXml);
+        assert!(r.confidence > FILENAME_CONFIDENCE_CEILING);
+    }
+
+    #[test]
+    fn tier3_no_parse_leaves_tier2_standing() {
+        // Nothing to cross-check against — Tier 2's word is all we have.
+        let r = match_file(Some(&lying_comicinfo()), None, &ferocious());
+        assert!(!r.ambiguous);
+        assert_eq!(r.issue_id, Some(8468));
+        assert_eq!(r.method, MatchMethod::ComicInfoXml);
+    }
+
+    #[test]
+    fn tier3_parsing_an_issue_the_series_lacks_leaves_tier2_standing() {
+        // The filename says #9; the series only has #1–#5, so Tier 3 resolves
+        // nothing. That's not a disagreement, it's an absence — don't flag.
+        let r = match_file(
+            Some(&lying_comicinfo()),
+            Some(&honest_filename("9")),
+            &ferocious(),
+        );
+        assert!(!r.ambiguous);
+        assert_eq!(r.issue_id, Some(8468));
+    }
+
+    #[test]
+    fn tier2_below_floor_still_falls_through_to_tier3_unflagged() {
+        // Tier 2 never resolves, so there's nothing to contradict — the
+        // pre-existing fall-through, not an ambiguity.
+        let ci = ComicInfo {
+            series: Some("ZZZZZZZZZ".into()),
+            number: Some("1".into()),
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), &ferocious());
+        assert!(!r.ambiguous);
+        assert_eq!(r.method, MatchMethod::FilenameRegex);
+        assert_eq!(r.issue_id, Some(8469));
+    }
+
+    #[test]
+    fn a_yearless_filename_never_drags_a_file_onto_the_wrong_volume() {
+        // Two volumes of one title — the relaunch case (Ultimate Spider-Man
+        // 2000 and 2024, Daredevil, X-Men, take your pick). They score
+        // identically on title similarity, so the year hint alone decides.
+        //
+        // ComicInfo knows the volume (2024) and is RIGHT. The filename carries
+        // no year, so Tier 3 falls back to a tiebreak and picks the 2000
+        // volume. That's not a contradiction — it's Tier 3 having strictly
+        // less information. Treating it as one would take a correctly-tagged,
+        // owned file, re-point it at the wrong volume's #1, and flag it for
+        // review — colliding with the real 2000 #1 and manufacturing a fresh
+        // mismatch group. The cure would be causing the disease.
+        //
+        // So: cross-series disagreement leaves Tier 2 standing, unflagged.
+        let mut old_volume_issues = Vec::new();
+        for n in 1..=20 {
+            old_volume_issues.push(issue(100 + n, 1, &n.to_string()));
+        }
+        let candidates = vec![
+            candidate(
+                series(1, "Ultimate Spider-Man", Some(2000)),
+                old_volume_issues,
+            ),
+            candidate(
+                series(2, "Ultimate Spider-Man", Some(2024)),
+                vec![issue(201, 2, "1")],
+            ),
+        ];
+        let ci = ComicInfo {
+            series: Some("Ultimate Spider-Man".into()),
+            number: Some("1".into()),
+            year: Some(2024), // correct, and the only thing that knows
+            ..Default::default()
+        };
+        let parsed = ParsedFilename {
+            series_title: "Ultimate Spider-Man".into(),
+            number: "1".into(),
+            volume: None,
+            year: None, // the common case
+            title: None,
+            pattern_id: 2,
+        };
+        let r = match_file(Some(&ci), Some(&parsed), &candidates);
+        assert_eq!(
+            r.issue_id,
+            Some(201),
+            "must stay on the 2024 volume ComicInfo names"
+        );
+        assert_eq!(r.method, MatchMethod::ComicInfoXml);
+        assert!(
+            !r.ambiguous,
+            "a missing year hint is not a contradiction — flagging it would \
+             bury the user in false positives on every multi-volume series"
+        );
+    }
+
     #[test]
     fn threshold_boundary_at_exact_value_classifies_as_owned() {
         // classify_status is the post-hoc step. Just verify it's reachable
@@ -618,8 +838,9 @@ mod tests {
             issue_id: Some(7),
             method: MatchMethod::ComicInfoXml,
             confidence: 0.85,
+            ambiguous: false,
         };
-        let s = classify_status(r.issue_id, r.confidence, r.method, 0.85);
+        let s = classify_status(r.issue_id, r.confidence, r.method, 0.85, r.ambiguous);
         assert_eq!(s, crate::FileStatus::Owned);
     }
 }

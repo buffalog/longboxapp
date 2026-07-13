@@ -159,10 +159,7 @@ fn is_collection_volume(r: &SeriesSearchResult) -> Option<&'static str> {
         }
     }
 
-    let desc_lower = match r.description.as_deref() {
-        Some(d) => d.to_lowercase(),
-        None => return None,
-    };
+    let desc_lower = r.description.as_deref()?.to_lowercase();
 
     const DESC_TERMS: &[&str] = &[
         "trade paperback",
