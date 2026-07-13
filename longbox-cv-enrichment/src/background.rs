@@ -151,8 +151,17 @@ mod tests {
         assert_eq!(interactive_done.load(Ordering::SeqCst), 10);
         // Background floor: 9 spacings × 200ms = 1800ms. The first
         // acquire is free; the last 9 are spaced.
+        //
+        // Compared with a few ms of slack, not at the exact boundary. Governor
+        // keeps its own monotonic clock, so under `start_paused` the virtual
+        // clock advances by what governor *asked* for and `elapsed` lands a
+        // hair under the nominal total — CI has produced 1.799958s, short by
+        // 42µs, and failed a `>= 1800ms` assert on a gate that spaced the calls
+        // perfectly. The slack is 100× smaller than a single 200ms spacing, so
+        // an ungated run (~10ms total) still fails this loudly.
+        const SLACK: Duration = Duration::from_millis(5);
         assert!(
-            elapsed >= Duration::from_millis(1800),
+            elapsed >= Duration::from_millis(1800) - SLACK,
             "background gate failed to enforce spacing — elapsed {elapsed:?}",
         );
     }
