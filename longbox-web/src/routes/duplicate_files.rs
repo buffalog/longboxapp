@@ -11,10 +11,18 @@
 //!    duplication but because distinct issues were wrongly matched to one
 //!    issue row (e.g. files for #1, #2, #5 all under one `issue_id`). Those
 //!    are NOT duplicates — deleting the "losers" would destroy distinct
-//!    issues. Every candidate's own issue number is parsed (filename, then
-//!    cached ComicInfo); a group is actionable only when they all agree.
-//!    Mismatch groups are surfaced read-only (`kind = "mismatch"`) and the
-//!    resolve endpoint independently re-validates and refuses them.
+//!    issues. Every candidate's own issue number is parsed from its filename
+//!    (never from its ComicInfo — see `parse_filename_number`); a group is
+//!    actionable only when they all agree.
+//!    Mismatch groups get `kind = "mismatch"` and the delete resolver
+//!    independently re-validates and refuses them.
+//!
+//!    A mismatch group is repaired by *re-pointing* the stray files, not by
+//!    deleting them — see the `correct` endpoint. Root cause: some files carry
+//!    a wrong `<Number>` in their embedded ComicInfo.xml, and Tier 2 of the
+//!    match cascade believes it over the (correct) filename. Nothing physical
+//!    happens on a correction; it's a plain `files.issue_id` FK fix to an
+//!    issue row that already exists.
 //!
 //! 2. **Server never picks.** The suggested keep is only a hint in the GET
 //!    payload; the resolve endpoint acts solely on explicit
@@ -26,15 +34,16 @@
 //! file delete fails the row is left intact (retryable); the kept file/row is
 //! never touched.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_core::{parse_filename, ComicInfo, ParsingPattern};
+use longbox_core::{parse_filename_with_normalization, FileStatus, ParsingPattern};
 use longbox_db::{
-    file_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
+    file_repo, issue_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +55,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/library/tidy/duplicate-files", get(list))
         .route("/library/tidy/duplicate-files/resolve", post(resolve))
+        .route("/library/tidy/duplicate-files/correct", post(correct))
 }
 
 /// A candidate whose size is below this absolute floor is treated as
@@ -78,9 +88,15 @@ struct DupCandidate {
     size_bytes: i64,
     /// `cbz` | `cbr` | `cb7` | `other`, from the path extension.
     format: String,
-    /// The issue number parsed from this file (filename, then cached
-    /// ComicInfo). `None` when neither yields a number.
+    /// The issue number parsed from this file's name. `None` when it doesn't
+    /// parse — which keeps the group out of the deletable `duplicate` bucket.
     parsed_number: Option<String>,
+    /// For a file in a `mismatch` group: the issue row in the SAME series
+    /// whose number matches this file's *filename*-parsed number — i.e. where
+    /// this file should have been pointed all along. `None` when the
+    /// suggestion isn't unambiguous (see [`propose_targets`] /
+    /// [`target_accepts`]) — those files stay manual-review-only.
+    suggested_issue_id: Option<i64>,
     /// The copy the app currently serves (owned-preferred, then lowest id).
     is_served: bool,
     /// Size looks corrupt relative to the floor / its siblings — flagged so a
@@ -93,15 +109,26 @@ struct DupCandidate {
 #[derive(Debug, Serialize, PartialEq)]
 struct DupGroup {
     issue_id: i64,
+    series_id: i64,
     series_title: String,
     issue_number: String,
     /// `duplicate` (all candidates agree on issue number → actionable) or
     /// `mismatch` (numbers disagree → distinct issues wrongly merged; NOT
-    /// deletable here, needs a re-split fix instead).
+    /// deletable here — re-point the strays instead, see `correct`).
     kind: &'static str,
     /// Pre-selected keep — a hint only; `Some` only for `duplicate` groups.
     suggested_keep_file_id: Option<i64>,
+    /// Every issue row in this group's series, so the UI can offer an
+    /// override when it disagrees with (or we can't produce) a suggestion.
+    /// Only populated for `mismatch` groups.
+    issue_options: Vec<IssueOption>,
     files: Vec<DupCandidate>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct IssueOption {
+    issue_id: i64,
+    number: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,7 +154,8 @@ async fn list(
     let candidates = file_repo::duplicate_file_candidates_page(&state.db, per_page, offset).await?;
     let patterns = load_patterns(&state).await?;
 
-    let groups = build_groups(candidates, &patterns);
+    let mut groups = build_groups(candidates, &patterns);
+    annotate_suggestions(&state, &patterns, &mut groups).await?;
     Ok(Json(ListResponse {
         groups,
         total,
@@ -175,11 +203,9 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
             path_relative: r.path_relative.clone(),
             size_bytes: r.size_bytes,
             format: derive_format(&r.path_relative).to_owned(),
-            parsed_number: parse_candidate_number(
-                &r.path_relative,
-                r.cached_comicinfo_xml.as_deref(),
-                patterns,
-            ),
+            parsed_number: parse_filename_number(&r.path_relative, patterns),
+            // Filled in by `annotate_suggestions` (needs the DB).
+            suggested_issue_id: None,
             is_served: Some(r.file_id) == served_id,
             suspect_corrupt: is_suspect_size(r.size_bytes, largest),
             under_unsorted: under_unsorted(&r.path_relative),
@@ -192,12 +218,152 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
 
     DupGroup {
         issue_id: rows[0].issue_id,
+        series_id: rows[0].series_id,
         series_title: rows[0].series_title.clone(),
         issue_number: rows[0].issue_number.clone(),
         kind: if is_dup { "duplicate" } else { "mismatch" },
         suggested_keep_file_id,
+        issue_options: Vec::new(),
         files,
     }
+}
+
+// -------- suggested corrections (mismatch groups) --------
+
+/// For every `mismatch` group, fill in each stray file's `suggested_issue_id`
+/// and the group's `issue_options` (override list).
+///
+/// A mismatch group is N distinct issues wrongly collapsed onto one issue row.
+/// The fix is a pointer correction, not a delete: look up the issue row in the
+/// same series whose number equals the file's *filename*-parsed number, and
+/// suggest it. Every suggestion must be unambiguous, so we bail on:
+///
+/// - the filename yielding no number,
+/// - two files in the group claiming the same number (which of them is really
+///   that issue? we can't know),
+/// - two issue rows in the series sharing a normalized number (duplicate
+///   catalog rows — pick one and we may pick wrong),
+/// - the target row not existing,
+/// - the target already holding a present file that parses to a *different*
+///   number (re-pointing there would just create a fresh mismatch).
+///
+/// A target already holding a present file with the *same* number is fine: the
+/// re-point turns it into an honest duplicate group, which the delete resolver
+/// then handles as usual.
+// ponytail: one query per distinct series + one per distinct proposed target,
+// both cached per request. At the real ~28 mismatch groups that's trivial; the
+// ceiling is O(groups × files) round-trips at per_page=200. Collapse to two
+// `IN` queries if a library ever gets bad enough for that to bite.
+async fn annotate_suggestions(
+    state: &AppState,
+    patterns: &[ParsingPattern],
+    groups: &mut [DupGroup],
+) -> Result<(), ApiError> {
+    // Cache across groups: the same series can own several mismatch groups.
+    let mut series_issues: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
+    let mut present_numbers: HashMap<i64, Vec<Option<String>>> = HashMap::new();
+
+    for group in groups.iter_mut().filter(|g| g.kind == "mismatch") {
+        if let Entry::Vacant(slot) = series_issues.entry(group.series_id) {
+            let issues = issue_repo::list_by_series(&state.db, group.series_id).await?;
+            slot.insert(issues.into_iter().map(|i| (i.number, i.id)).collect());
+        }
+        let issues = &series_issues[&group.series_id];
+
+        let filename_numbers: Vec<Option<String>> = group
+            .files
+            .iter()
+            .map(|f| parse_filename_number(&f.path_relative, patterns))
+            .collect();
+
+        for (idx, target) in propose_targets(group.issue_id, &filename_numbers, issues)
+            .into_iter()
+            .enumerate()
+        {
+            let Some(target) = target else { continue };
+            if let Entry::Vacant(slot) = present_numbers.entry(target) {
+                let nums = file_repo::list_by_issue(&state.db, target)
+                    .await?
+                    .iter()
+                    .filter(|f| f.is_present)
+                    .map(|f| parse_filename_number(&f.path_relative, patterns))
+                    .collect();
+                slot.insert(nums);
+            }
+            // A `Some(target)` implies a `Some` number — but don't lean on
+            // that: an empty claim would vacuously satisfy `target_accepts`.
+            let Some(claimed) = filename_numbers[idx].as_deref() else {
+                continue;
+            };
+            if target_accepts(claimed, &present_numbers[&target]) {
+                group.files[idx].suggested_issue_id = Some(target);
+            }
+        }
+
+        group.issue_options = issues
+            .iter()
+            .map(|(number, issue_id)| IssueOption {
+                issue_id: *issue_id,
+                number: number.clone(),
+            })
+            .collect();
+    }
+    Ok(())
+}
+
+/// Per-file target issue (aligned with `filename_numbers`), before the
+/// occupancy check. `None` for any file we can't confidently place — see
+/// [`annotate_suggestions`] for the rules. Pure, so the ambiguity rules are
+/// testable without a DB.
+fn propose_targets(
+    current_issue_id: i64,
+    filename_numbers: &[Option<String>],
+    series_issues: &[(String, i64)],
+) -> Vec<Option<i64>> {
+    let count_of = |target: &str| -> usize {
+        filename_numbers
+            .iter()
+            .filter(|n| n.as_deref().map(norm_num).as_deref() == Some(target))
+            .count()
+    };
+
+    filename_numbers
+        .iter()
+        .map(|number| {
+            let number = norm_num(number.as_deref()?);
+            // Two files claiming the same number: can't tell them apart.
+            if count_of(&number) > 1 {
+                return None;
+            }
+            let mut rows = series_issues
+                .iter()
+                .filter(|(n, _)| norm_num(n) == number)
+                .map(|(_, id)| *id);
+            let target = rows.next()?;
+            // Duplicate catalog rows for one number — refuse to guess.
+            if rows.next().is_some() {
+                return None;
+            }
+            // Already where it belongs (this is the file the group is
+            // *named* after) — nothing to correct.
+            if target == current_issue_id {
+                return None;
+            }
+            Some(target)
+        })
+        .collect()
+}
+
+/// May a file claiming issue number `number` be re-pointed at a target issue
+/// whose present files parse to `existing`? Only when every file already
+/// sitting there agrees on the number (or there are none) — an occupant with a
+/// different number means the target is *itself* mismatched, and moving a file
+/// in would tangle it further.
+fn target_accepts(number: &str, existing: &[Option<String>]) -> bool {
+    let number = norm_num(number);
+    existing
+        .iter()
+        .all(|n| matches!(n, Some(x) if norm_num(x) == number))
 }
 
 // -------- POST: resolve --------
@@ -328,13 +494,7 @@ async fn resolve_one(
     }
     let numbers: Vec<Option<String>> = present
         .iter()
-        .map(|f| {
-            parse_candidate_number(
-                &f.path_relative,
-                f.cached_comicinfo_xml.as_deref(),
-                patterns,
-            )
-        })
+        .map(|f| parse_filename_number(&f.path_relative, patterns))
         .collect();
     if !classify_is_duplicate(&numbers) {
         return Ok(refuse(
@@ -428,6 +588,151 @@ async fn delete_loser(
     }
 }
 
+// -------- POST: correct (re-point a mismatched file) --------
+
+#[derive(Debug, Deserialize)]
+struct CorrectBody {
+    file_id: i64,
+    /// The issue this file should have been pointed at all along.
+    issue_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CorrectResult {
+    file_id: i64,
+    from_issue_id: i64,
+    to_issue_id: i64,
+}
+
+/// Re-point one file's `issue_id`. Nothing physical happens — the file stays
+/// on disk, the target issue row already exists; this is a plain FK fix.
+///
+/// One correction per request, explicitly confirmed by a human. Everything is
+/// re-derived server-side and the client's target is never taken on faith: the
+/// file's own filename has to independently agree that the target is where it
+/// belongs. Any doubt → 422, nothing written.
+///
+/// The corrected row is stamped `manual` / confidence 1.0. That's what makes
+/// the fix stick: the file's embedded ComicInfo `<Number>` is still wrong and
+/// still there, so without the manual marker the next scan's Tier 2 would
+/// happily re-point it back at the wrong issue.
+async fn correct(
+    State(state): State<AppState>,
+    Json(body): Json<CorrectBody>,
+) -> Result<Json<CorrectResult>, ApiError> {
+    // Share the resolver's lock: a concurrent delete-resolve reads the same
+    // present-file sets we validate against.
+    let _guard = resolve_lock().lock().await;
+    let patterns = load_patterns(&state).await?;
+
+    let refuse = |message: String| ApiError::Unprocessable {
+        code: "unprocessable.correction_refused",
+        message,
+    };
+
+    let file = file_repo::find_by_id(&state.db, body.file_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "file",
+            id: body.file_id.to_string(),
+        })?;
+    if !file.is_present {
+        return Err(refuse("file is not present on disk".to_owned()));
+    }
+    // The user has explicitly disclaimed this file. The scanner is careful to
+    // preserve that; so are we. (Our write would stamp it `owned` and quietly
+    // un-ignore it.)
+    if file.status == FileStatus::Ignored.as_db_str() {
+        return Err(refuse(
+            "file is marked ignored — un-ignore it first if you want it filed".to_owned(),
+        ));
+    }
+    let Some(from_issue_id) = file.issue_id else {
+        return Err(refuse(
+            "file is not matched to any issue — nothing to correct".to_owned(),
+        ));
+    };
+    if from_issue_id == body.issue_id {
+        return Err(refuse("file already points at that issue".to_owned()));
+    }
+    // A row that's already `manual` IS re-pointable: this request is itself a
+    // human's explicit click, so a previous human decision can be superseded
+    // by a newer one. Refusing here would make a mis-correction unfixable
+    // through the UI — and the filename gate below still has to corroborate
+    // the new target either way.
+
+    let from_issue = issue_repo::find_by_id(&state.db, from_issue_id)
+        .await?
+        .ok_or_else(|| refuse("the file's current issue no longer exists".to_owned()))?;
+    let to_issue = issue_repo::find_by_id(&state.db, body.issue_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "issue",
+            id: body.issue_id.to_string(),
+        })?;
+    if to_issue.series_id != from_issue.series_id {
+        return Err(refuse(
+            "target issue belongs to a different series — this endpoint only re-points within one series".to_owned(),
+        ));
+    }
+
+    // The client's target must be independently corroborated by the file's
+    // own filename. This is the check that makes a blindly-POSTed issue_id
+    // harmless.
+    let Some(claimed) = parse_filename_number(&file.path_relative, &patterns) else {
+        return Err(refuse(
+            "cannot parse an issue number from this file's name — refusing to re-point on a number we can't confirm".to_owned(),
+        ));
+    };
+    if norm_num(&claimed) != norm_num(&to_issue.number) {
+        return Err(refuse(format!(
+            "filename parses to issue {claimed}, but the target issue is {} — refusing",
+            to_issue.number
+        )));
+    }
+
+    // The target must not already hold a present file with a *different*
+    // number: moving in would tangle a second mismatch.
+    let occupants: Vec<Option<String>> = file_repo::list_by_issue(&state.db, to_issue.id)
+        .await?
+        .iter()
+        .filter(|f| f.is_present && f.id != file.id)
+        .map(|f| parse_filename_number(&f.path_relative, &patterns))
+        .collect();
+    if !target_accepts(&claimed, &occupants) {
+        return Err(refuse(
+            "target issue already holds a present file for a different issue number — resolve that mismatch first".to_owned(),
+        ));
+    }
+
+    // Write only the match columns, and only if the row still points where we
+    // validated it. The scanner writes `files` rows outside our lock, so a
+    // whole-row write-back from the snapshot we read at the top could silently
+    // revert a concurrent scan's disk-state columns.
+    let now = crate::routes::reconcile::utc_now();
+    let swapped =
+        file_repo::repoint_manual(&state.db, file.id, from_issue_id, to_issue.id, now).await?;
+    if !swapped {
+        return Err(refuse(
+            "this file was re-matched while you were deciding — reload and try again".to_owned(),
+        ));
+    }
+
+    tracing::info!(
+        file_id = file.id,
+        path = %file.path_relative,
+        from_issue_id,
+        to_issue_id = to_issue.id,
+        "duplicate-files: re-pointed mismatched file"
+    );
+
+    Ok(Json(CorrectResult {
+        file_id: file.id,
+        from_issue_id,
+        to_issue_id: to_issue.id,
+    }))
+}
+
 // -------- pure helpers --------
 
 /// Lowercased archive extension bucket.
@@ -460,21 +765,28 @@ fn is_suspect_size(size: i64, largest_sibling: i64) -> bool {
     size < SUSPECT_ABS_FLOOR_BYTES || size.saturating_mul(SUSPECT_RATIO_DENOM) < largest_sibling
 }
 
-/// Parse this file's own issue number: filename via the enabled patterns
-/// first, cached ComicInfo `<Number>` as fallback. `None` when neither yields
-/// one — which forces the group to `mismatch` (we won't delete on a number we
-/// can't confirm).
-fn parse_candidate_number(
-    path_relative: &str,
-    cached_xml: Option<&str>,
-    patterns: &[ParsingPattern],
-) -> Option<String> {
+/// This file's own issue number, from its **filename alone**. `None` when the
+/// name yields nothing — which forces the group to `mismatch` (we won't delete
+/// on a number we can't confirm).
+///
+/// The one and only authority for what a file *is*, everywhere in this module:
+/// the group classifier that gates deletion, the resolver's re-validation, and
+/// the suggested corrections. They must not be able to disagree.
+///
+/// It used to fall back to the cached ComicInfo `<Number>` when the filename
+/// didn't parse — i.e. to the exact source this whole feature exists because it
+/// lies. That was a live data-loss path: a scene-named file (`Foo.2025.002.cbz`,
+/// which the non-normalizing parser can't read) whose `<Number>` wrongly says 1
+/// would report "1", agree with the real issue-1 file it had been mis-matched
+/// onto, and the group would present as a deletable `duplicate` — offering to
+/// permanently delete one of two *distinct comics*. Two distinct issues can
+/// look like duplicates only if we ask a liar to identify them.
+///
+/// Uses the scanner's Tier-3 normalizing cascade, so this module's idea of a
+/// file's number is the same one a future scan will re-derive.
+fn parse_filename_number(path_relative: &str, patterns: &[ParsingPattern]) -> Option<String> {
     let basename = path_relative.rsplit('/').next().unwrap_or(path_relative);
-    if let Some(p) = parse_filename(basename, patterns) {
-        return Some(p.number);
-    }
-    let xml = cached_xml?;
-    ComicInfo::parse(xml.as_bytes()).ok()?.number
+    parse_filename_with_normalization(basename, patterns).map(|p| p.number)
 }
 
 /// Normalise an issue number for equality: strip leading zeros from a
@@ -562,6 +874,7 @@ mod tests {
             size_bytes: size,
             format: derive_format(path).to_owned(),
             parsed_number: None,
+            suggested_issue_id: None,
             is_served: false,
             suspect_corrupt: suspect,
             under_unsorted: unsorted,
@@ -654,6 +967,88 @@ mod tests {
             cand(2, "Darkness/001.cbr", 101_500_000, false, false),
         ];
         assert_eq!(suggest_keep(&files), Some(2));
+    }
+
+    // -------- suggested corrections --------
+
+    /// The real Ferocious series: issue rows #1–#5 exist and are distinct.
+    fn ferocious_issues() -> Vec<(String, i64)> {
+        (1..=5).map(|n| (n.to_string(), 8467 + n)).collect()
+    }
+
+    fn nums(v: &[Option<&str>]) -> Vec<Option<String>> {
+        v.iter().map(|n| n.map(str::to_owned)).collect()
+    }
+
+    #[test]
+    fn proposes_the_issue_row_the_filename_names() {
+        // The live case: files for #1, #2 and #5 all sitting on issue #1's row
+        // (id 8468) because #2's and #5's embedded <Number> both say 1.
+        let targets = propose_targets(
+            8468,
+            &nums(&[Some("1"), Some("2"), Some("5")]),
+            &ferocious_issues(),
+        );
+        // #1's file is already home — nothing to correct.
+        assert_eq!(targets[0], None);
+        assert_eq!(targets[1], Some(8469));
+        assert_eq!(targets[2], Some(8472));
+    }
+
+    #[test]
+    fn leading_zeros_still_find_the_target() {
+        let targets = propose_targets(8468, &nums(&[Some("002")]), &ferocious_issues());
+        assert_eq!(targets[0], Some(8469));
+    }
+
+    #[test]
+    fn no_proposal_when_two_files_claim_the_same_number() {
+        // Which of these two IS issue #2? We can't know — both stay manual.
+        let targets = propose_targets(
+            8468,
+            &nums(&[Some("1"), Some("2"), Some("2")]),
+            &ferocious_issues(),
+        );
+        assert_eq!(targets[1], None);
+        assert_eq!(targets[2], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_target_issue_row_does_not_exist() {
+        // Series only has #1–#5; a file parsing to #9 has nowhere to go.
+        let targets = propose_targets(8468, &nums(&[Some("9")]), &ferocious_issues());
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_filename_yields_no_number() {
+        let targets = propose_targets(8468, &nums(&[None]), &ferocious_issues());
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_series_has_duplicate_rows_for_that_number() {
+        // Two catalog rows both numbered "2" — pick one and we may pick wrong.
+        let issues = vec![
+            ("1".to_owned(), 8468),
+            ("2".to_owned(), 8469),
+            ("02".to_owned(), 9999),
+        ];
+        let targets = propose_targets(8468, &nums(&[Some("2")]), &issues);
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn target_accepts_an_empty_or_agreeing_issue_but_not_a_conflicting_one() {
+        // Nothing there → fine.
+        assert!(target_accepts("2", &[]));
+        // Occupant agrees on the number → re-pointing makes an honest
+        // duplicate group, which the delete resolver then handles.
+        assert!(target_accepts("2", &nums(&[Some("002")])));
+        // Occupant is a different issue → target is itself mismatched.
+        assert!(!target_accepts("2", &nums(&[Some("3")])));
+        // Occupant's number is unknown → can't clear it, so don't.
+        assert!(!target_accepts("2", &nums(&[None])));
     }
 
     #[test]

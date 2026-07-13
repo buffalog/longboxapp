@@ -565,7 +565,7 @@ async fn load_patterns(state: &AppState) -> Result<Vec<ParsingPattern>, ApiError
         .collect())
 }
 
-fn utc_now() -> PrimitiveDateTime {
+pub(crate) fn utc_now() -> PrimitiveDateTime {
     let n = OffsetDateTime::now_utc();
     PrimitiveDateTime::new(n.date(), n.time())
 }

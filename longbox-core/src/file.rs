@@ -103,24 +103,32 @@ impl FileStatus {
 }
 
 /// Derive a [`FileStatus`] from a match result and the caller's threshold.
-/// The matcher itself returns only `(issue_id, method, confidence)` — this
-/// helper is the post-hoc classification step.
+/// The matcher itself returns only `(issue_id, method, confidence, ambiguous)`
+/// — this helper is the post-hoc classification step.
+///
+/// `ambiguous` (Tier 2 and Tier 3 named *different* issues) forces
+/// `NeedsReview` no matter how confident either tier was. Confidence measures
+/// how well the title matched, which says nothing about which of two
+/// contradicting issue numbers is real — so it can't be allowed to wave the
+/// file through as `Owned`. Note the threshold is user-tunable, which is
+/// exactly why this is an explicit flag and not a confidence clamp.
 pub fn classify_status(
     issue_id: Option<i64>,
     confidence: f64,
     method: MatchMethod,
     threshold: f64,
+    ambiguous: bool,
 ) -> FileStatus {
     match method {
         MatchMethod::Ignored => FileStatus::Ignored,
         MatchMethod::Unmatched => FileStatus::Unmatched,
         _ => {
-            if issue_id.is_some() && confidence >= threshold {
-                FileStatus::Owned
-            } else if issue_id.is_some() {
+            if issue_id.is_none() {
+                FileStatus::Unmatched
+            } else if ambiguous || confidence < threshold {
                 FileStatus::NeedsReview
             } else {
-                FileStatus::Unmatched
+                FileStatus::Owned
             }
         }
     }
@@ -188,39 +196,39 @@ mod tests {
 
     #[test]
     fn classify_owned_when_above_threshold() {
-        let status = classify_status(Some(7), 0.95, MatchMethod::ComicInfoXml, 0.85);
+        let status = classify_status(Some(7), 0.95, MatchMethod::ComicInfoXml, 0.85, false);
         assert_eq!(status, FileStatus::Owned);
     }
 
     #[test]
     fn classify_owned_at_exact_threshold() {
         // Spec uses `>=`. 0.85 exactly = owned at default threshold.
-        let status = classify_status(Some(7), 0.85, MatchMethod::FilenameRegex, 0.85);
+        let status = classify_status(Some(7), 0.85, MatchMethod::FilenameRegex, 0.85, false);
         assert_eq!(status, FileStatus::Owned);
     }
 
     #[test]
     fn classify_needs_review_below_threshold_with_candidate() {
-        let status = classify_status(Some(7), 0.72, MatchMethod::ComicInfoXml, 0.85);
+        let status = classify_status(Some(7), 0.72, MatchMethod::ComicInfoXml, 0.85, false);
         assert_eq!(status, FileStatus::NeedsReview);
     }
 
     #[test]
     fn classify_unmatched_when_no_candidate() {
-        let status = classify_status(None, 0.0, MatchMethod::Unmatched, 0.85);
+        let status = classify_status(None, 0.0, MatchMethod::Unmatched, 0.85, false);
         assert_eq!(status, FileStatus::Unmatched);
     }
 
     #[test]
     fn classify_ignored_overrides_confidence() {
         // Even with high confidence, Ignored method → Ignored status.
-        let status = classify_status(Some(7), 1.0, MatchMethod::Ignored, 0.85);
+        let status = classify_status(Some(7), 1.0, MatchMethod::Ignored, 0.85, false);
         assert_eq!(status, FileStatus::Ignored);
     }
 
     #[test]
     fn classify_manual_at_full_confidence() {
-        let status = classify_status(Some(7), 1.0, MatchMethod::Manual, 0.85);
+        let status = classify_status(Some(7), 1.0, MatchMethod::Manual, 0.85, false);
         assert_eq!(status, FileStatus::Owned);
     }
 }

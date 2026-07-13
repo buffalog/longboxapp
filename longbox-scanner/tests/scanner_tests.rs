@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use common::{build_fixture_library, fresh_pool, seed_library_root, seed_walking_dead, write_cbz};
-use longbox_db::{file_repo, FileRow, NewSeries};
+use longbox_db::{file_repo, issue_repo, FileRow, NewSeries};
 use longbox_scanner::{ScanError, Scanner, ScannerConfig};
 use tempfile::TempDir;
 
@@ -882,4 +882,180 @@ async fn rescan_unmatched_skipped_when_library_root_empty() {
     );
     let runs = scan_run_repo::list_recent(&pool, 10, &[]).await.unwrap();
     assert_eq!(runs.len(), 0, "rescan_unmatched must not record a scan_run");
+}
+
+// -------- tier 2 / tier 3 cross-check --------
+
+/// A file whose embedded `<Number>` lies. This is the live "Ferocious" /
+/// "Void Rivals" shape: the archive is physically issue 2, named and foldered
+/// correctly, but its ComicInfo says `<Number>1</Number>`.
+///
+/// Before the cross-check, Tier 2 won outright: the file was filed under issue
+/// 1 as `owned`, silently colliding with the real #1 — which is how every
+/// mismatch group in Library Tidy got made. Now Tier 3 contradicts Tier 2, the
+/// file goes to the filename's issue, and it lands in `needs_review` for a
+/// human instead of being quietly mis-filed.
+#[tokio::test]
+async fn tier2_lying_about_the_number_is_flagged_not_silently_filed() {
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    write_cbz(
+        &tmp.path()
+            .join("Walking Dead (2003)")
+            .join("Walking Dead 002 (2003).cbz"),
+        Some(
+            r#"<?xml version="1.0"?>
+<ComicInfo>
+  <Series>The Walking Dead</Series>
+  <Number>1</Number>
+  <Volume>2003</Volume>
+</ComicInfo>"#,
+        ),
+    );
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let f = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 002 (2003).cbz",
+    )
+    .await;
+    let issues = issue_repo::list_by_series(&pool, 1).await.unwrap();
+    let issue_2 = issues.iter().find(|i| i.number == "2").unwrap().id;
+    let issue_1 = issues.iter().find(|i| i.number == "1").unwrap().id;
+
+    assert_eq!(
+        f.issue_id,
+        Some(issue_2),
+        "must land on the issue its FILENAME names, not the one its ComicInfo claims"
+    );
+    assert_ne!(f.issue_id, Some(issue_1));
+    assert_eq!(
+        f.status, "needs_review",
+        "a tier2/tier3 contradiction is never silently owned"
+    );
+    assert_eq!(f.match_method, "filename_regex");
+}
+
+/// The agreeing case is untouched: Tier 2 still wins, still `owned`.
+#[tokio::test]
+async fn tier2_agreeing_with_the_filename_still_matches_normally() {
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    write_cbz(
+        &tmp.path()
+            .join("Walking Dead (2003)")
+            .join("Walking Dead 003 (2003).cbz"),
+        Some(
+            r#"<?xml version="1.0"?>
+<ComicInfo>
+  <Series>The Walking Dead</Series>
+  <Number>3</Number>
+  <Volume>2003</Volume>
+</ComicInfo>"#,
+        ),
+    );
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let f = find_file(
+        &pool,
+        library_root_id,
+        "Walking Dead (2003)/Walking Dead 003 (2003).cbz",
+    )
+    .await;
+    assert_eq!(f.status, "owned");
+    assert_eq!(f.match_method, "comicinfo_xml");
+}
+
+/// A human's pointer outlives the scanner. Without this, every Library Tidy
+/// correction (and every Accept Match) is undone by the next nightly scan: the
+/// still-wrong `<Number>` re-points the row and overwrites the `manual` marker
+/// that was supposed to protect it.
+#[tokio::test]
+async fn a_manual_pointer_survives_a_rescan() {
+    let tmp = TempDir::new().unwrap();
+    let pool = fresh_pool().await;
+    seed_walking_dead(&pool).await;
+    // Physically issue 2, but its ComicInfo says 1 — so an unaided scan has
+    // every reason to want this row pointed at issue 1.
+    write_cbz(
+        &tmp.path()
+            .join("Walking Dead (2003)")
+            .join("Walking Dead 002 (2003).cbz"),
+        Some(
+            r#"<?xml version="1.0"?>
+<ComicInfo>
+  <Series>The Walking Dead</Series>
+  <Number>1</Number>
+  <Volume>2003</Volume>
+</ComicInfo>"#,
+        ),
+    );
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let path = "Walking Dead (2003)/Walking Dead 002 (2003).cbz";
+    let f = find_file(&pool, library_root_id, path).await;
+    let issues = issue_repo::list_by_series(&pool, 1).await.unwrap();
+    // Deliberately issue THREE — an issue neither tier would pick (ComicInfo
+    // says 1, the filename says 2). If we pinned it to 2, the matcher would
+    // land there on its own and the test would pass without the persist fix
+    // doing anything. Pointing somewhere only a human would choose is the only
+    // way to prove the scanner leaves a human's pointer alone.
+    let issue_3 = issues.iter().find(|i| i.number == "3").unwrap().id;
+
+    // A human confirms it: manual, owned. (What POST /correct and the Accept
+    // Match flow both write.)
+    file_repo::update(
+        &pool,
+        f.id,
+        longbox_db::FileUpdate {
+            issue_id: Some(issue_3),
+            size_bytes: f.size_bytes,
+            mtime: f.mtime,
+            last_scanned_at: f.last_scanned_at,
+            match_method: "manual".into(),
+            match_confidence: 1.0,
+            status: "owned".into(),
+            cached_comicinfo_xml: f.cached_comicinfo_xml.clone(),
+            cached_at: f.cached_at,
+            is_present: true,
+            last_seen_at: f.last_seen_at,
+            matched_at: f.matched_at,
+        },
+    )
+    .await
+    .unwrap();
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let after = find_file(&pool, library_root_id, path).await;
+    assert_eq!(
+        after.issue_id,
+        Some(issue_3),
+        "the scanner must not re-point a row a human pointed by hand"
+    );
+    assert_eq!(
+        after.match_method, "manual",
+        "and must not overwrite the marker that says so"
+    );
+    assert_eq!(after.status, "owned");
 }

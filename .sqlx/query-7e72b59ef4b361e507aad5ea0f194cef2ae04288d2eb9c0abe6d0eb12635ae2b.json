@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files\n              SET issue_id = ?,\n                  match_method = 'manual',\n                  match_confidence = 1.0,\n                  status = 'owned',\n                  matched_at = ?\n            WHERE id = ? AND issue_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7e72b59ef4b361e507aad5ea0f194cef2ae04288d2eb9c0abe6d0eb12635ae2b"
+}

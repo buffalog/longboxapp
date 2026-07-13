@@ -6,17 +6,28 @@ export interface DupCandidate {
   size_bytes: number;
   format: string;
   parsed_number: string | null;
+  /** Where this file should have been pointed, per its filename. Null when the
+   * server couldn't produce an unambiguous suggestion — manual review only. */
+  suggested_issue_id: number | null;
   is_served: boolean;
   suspect_corrupt: boolean;
   under_unsorted: boolean;
 }
 
+export interface IssueOption {
+  issue_id: number;
+  number: string;
+}
+
 export interface DupGroup {
   issue_id: number;
+  series_id: number;
   series_title: string;
   issue_number: string;
   kind: 'duplicate' | 'mismatch';
   suggested_keep_file_id: number | null;
+  /** Every issue in the series — the override list for a mismatch group. */
+  issue_options: IssueOption[];
   files: DupCandidate[];
 }
 
@@ -52,5 +63,23 @@ export function resolveDuplicateFiles(
   return apiFetch('/library/tidy/duplicate-files/resolve', {
     method: 'POST',
     body: JSON.stringify({ resolutions })
+  });
+}
+
+export interface CorrectResult {
+  file_id: number;
+  from_issue_id: number;
+  to_issue_id: number;
+}
+
+/**
+ * Re-point one mismatched file at its real issue. Nothing is deleted. The
+ * server re-validates independently and 422s on any ambiguity, so a refusal
+ * here is a real answer, not a UI bug.
+ */
+export function correctDuplicateFile(fileId: number, issueId: number): Promise<CorrectResult> {
+  return apiFetch('/library/tidy/duplicate-files/correct', {
+    method: 'POST',
+    body: JSON.stringify({ file_id: fileId, issue_id: issueId })
   });
 }

@@ -539,8 +539,12 @@ impl Scanner {
 
         let new_status = compute_status(Some(existing), &match_result, match_threshold);
 
-        // Only update if the status actually changed.
-        if existing.status != new_status.as_db_str() {
+        // Update when the status changed OR the pointer did. Status alone
+        // isn't enough: an ambiguous match is `needs_review`, and these rows
+        // are already `needs_review` — so a rematch that finally resolves an
+        // issue_id would compute it and throw it away, leaving the file
+        // pointed at nothing with no way to retry.
+        if existing.status != new_status.as_db_str() || existing.issue_id != match_result.issue_id {
             self.persist(
                 discovered,
                 existing.library_root_id,
@@ -570,6 +574,7 @@ impl Scanner {
                             issue_id: Some(issue.id),
                             method: MatchMethod::WebUrlCv,
                             confidence: 1.0,
+                            ambiguous: false,
                         });
                     }
                 }
@@ -581,6 +586,7 @@ impl Scanner {
                             issue_id: Some(issue.id),
                             method: MatchMethod::WebUrlMetron,
                             confidence: 1.0,
+                            ambiguous: false,
                         });
                     }
                 }
@@ -626,7 +632,17 @@ impl Scanner {
             // columns (mtime, size, last_scanned_at, last_seen_at, is_present).
             let preserve_ignored =
                 new_status == FileStatus::Ignored && row.status == FileStatus::Ignored.as_db_str();
-            let new_issue_id = if preserve_ignored {
+            // Same deal for a row a human has already pointed by hand (Accept
+            // Match, or a Library Tidy mismatch correction): the *pointer* is
+            // theirs, not ours. `compute_status` already keeps such a row
+            // Owned, but that alone protected the status while leaving
+            // `issue_id` to be silently rewritten by the matcher on the very
+            // next scan — which is exactly how a hand-fixed file gets dragged
+            // back to the wrong issue by the bad `<Number>` that put it there.
+            // A manual decision outranks every automatic tier, permanently.
+            let preserve_manual = row.match_method == MatchMethod::Manual.as_db_str();
+            let preserve = preserve_ignored || preserve_manual;
+            let new_issue_id = if preserve {
                 row.issue_id
             } else {
                 match_result.issue_id
@@ -636,12 +652,12 @@ impl Scanner {
                 size_bytes: i64::try_from(discovered.size_bytes).unwrap_or(i64::MAX),
                 mtime: discovered.mtime,
                 last_scanned_at: now,
-                match_method: if preserve_ignored {
+                match_method: if preserve {
                     row.match_method.clone()
                 } else {
                     match_result.method.as_db_str().to_owned()
                 },
-                match_confidence: if preserve_ignored {
+                match_confidence: if preserve {
                     row.match_confidence
                 } else {
                     match_result.confidence
@@ -854,6 +870,7 @@ fn compute_status(
         match_result.confidence,
         match_result.method,
         threshold,
+        match_result.ambiguous,
     )
 }
 
@@ -1009,6 +1026,7 @@ mod tests {
             issue_id: Some(42),
             method: MatchMethod::FilenameRegex,
             confidence,
+            ambiguous: false,
         }
     }
 

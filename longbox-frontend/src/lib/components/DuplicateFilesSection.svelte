@@ -2,8 +2,10 @@
   import { AlertTriangle, Copy } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
+    correctDuplicateFile,
     listDuplicateFiles,
     resolveDuplicateFiles,
+    type DupCandidate,
     type DupGroup,
     type Resolution
   } from '$lib/api/duplicateFiles';
@@ -30,6 +32,12 @@
   let pending = $state<DupGroup[] | null>(null);
   let resolving = $state(false);
 
+  // file_id -> issue the user will re-point that file to. Seeded from the
+  // server's suggestion; overridable per file. 0 = "leave it alone".
+  let moveTo = $state<Record<number, number>>({});
+  // file_id currently being corrected, so only its own button spins.
+  let correcting = $state<number | null>(null);
+
   const pageCount = $derived(Math.max(1, Math.ceil(total / PER_PAGE)));
   const duplicateGroups = $derived(groups.filter((g) => g.kind === 'duplicate'));
 
@@ -46,13 +54,17 @@
       total = res.total;
       // Seed keep-selection from the server suggestion for each dup group.
       const next: Record<number, number> = {};
+      const nextMove: Record<number, number> = {};
       for (const g of res.groups) {
         if (g.kind === 'duplicate') {
           const fid = g.suggested_keep_file_id ?? g.files[0]?.file_id;
           if (fid !== undefined) next[g.issue_id] = fid;
+        } else {
+          for (const f of g.files) nextMove[f.file_id] = f.suggested_issue_id ?? 0;
         }
       }
       keep = next;
+      moveTo = nextMove;
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
       groups = [];
@@ -66,6 +78,28 @@
     // fail the server's "keep must be a present candidate" guard rather than
     // delete anything, which is the safe degenerate outcome.
     return keep[g.issue_id] ?? g.suggested_keep_file_id ?? g.files[0]?.file_id ?? -1;
+  }
+
+  function numberOf(g: DupGroup, issueId: number): string {
+    return g.issue_options.find((o) => o.issue_id === issueId)?.number ?? '?';
+  }
+
+  // Re-point one file. Not destructive — no confirm modal, the button click
+  // IS the confirmation. Reload after: the group may reclassify (or vanish)
+  // once the stray leaves, and the server is the authority on that.
+  async function correctFile(g: DupGroup, f: DupCandidate): Promise<void> {
+    const target = moveTo[f.file_id];
+    if (!target) return;
+    correcting = f.file_id;
+    try {
+      await correctDuplicateFile(f.file_id, target);
+      toast.success(`Moved to ${g.series_title} #${numberOf(g, target)}.`);
+      await loadPage(page);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      correcting = null;
+    }
   }
 
   function deleteCountFor(gs: DupGroup[]): number {
@@ -146,7 +180,8 @@
   <p class="mb-3 text-sm text-slate-600">
     Issues with more than one physical file on disk. Pick the copy to keep; the others are
     permanently deleted from disk. Groups flagged “not a duplicate” hold distinct issues wrongly
-    sharing one record and can’t be resolved here.
+    sharing one record — those are fixed by moving each file to its real issue, not by deleting
+    anything.
   </p>
 
   {#if error}
@@ -178,8 +213,9 @@
           {#if g.kind === 'mismatch'}
             <p class="mb-2 text-xs text-amber-800">
               These files parse to different issue numbers, so they’re distinct issues wrongly
-              matched to one record — deleting one would lose a real issue. This needs a re-split
-              fix, not deletion.
+              matched to one record — usually because a file’s embedded ComicInfo.xml carries the
+              wrong issue number. Nothing here is deleted: move each stray file to the issue its
+              filename says it is. Files with no suggestion need a manual call.
             </p>
           {/if}
 
@@ -218,6 +254,46 @@
                       </span>
                     {/if}
                   </div>
+
+                  {#if g.kind === 'mismatch'}
+                    <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                      <label class="text-slate-500" for={`move-${f.file_id}`}>Move to</label>
+                      <select
+                        id={`move-${f.file_id}`}
+                        class="rounded border border-slate-300 px-1.5 py-1 text-xs"
+                        value={moveTo[f.file_id] ?? 0}
+                        onchange={(e) =>
+                          (moveTo = {
+                            ...moveTo,
+                            [f.file_id]: Number(e.currentTarget.value)
+                          })}
+                        disabled={correcting !== null}
+                      >
+                        <option value={0}>Leave on #{g.issue_number}</option>
+                        {#each g.issue_options as o (o.issue_id)}
+                          {#if o.issue_id !== g.issue_id}
+                            <option value={o.issue_id}>#{o.number}</option>
+                          {/if}
+                        {/each}
+                      </select>
+                      {#if f.suggested_issue_id}
+                        <span class="text-slate-500">
+                          suggested: #{numberOf(g, f.suggested_issue_id)}
+                        </span>
+                      {:else}
+                        <span class="text-amber-800">no confident suggestion — your call</span>
+                      {/if}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={!moveTo[f.file_id] || correcting !== null}
+                        loading={correcting === f.file_id}
+                        onclick={() => correctFile(g, f)}
+                      >
+                        Move
+                      </Button>
+                    </div>
+                  {/if}
                 </div>
               </li>
             {/each}

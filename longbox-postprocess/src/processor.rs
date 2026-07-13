@@ -174,6 +174,7 @@ pub async fn process_one(
         match_result.confidence,
         match_result.method,
         owned_threshold,
+        match_result.ambiguous,
     );
 
     // Pull-engine trust override: a sub-threshold match for an issue
@@ -182,7 +183,16 @@ pub async fn process_one(
     // filter at submit time, so the local confidence floor is
     // redundant evidence we can afford to skip. See
     // `pull_attempt_repo::issue_has_attempt` for the rationale.
+    // …but an *ambiguous* match is never trusted through, pull attempt or not.
+    // The pull-list override exists to forgive a weak *confidence* score on an
+    // issue we ourselves asked for. Ambiguity isn't weak confidence — it's the
+    // file's ComicInfo and its filename naming two different issues, and
+    // nothing about a pull attempt adjudicates that. It matters here more than
+    // anywhere: `import_as_owned` doesn't just set a status, it MOVES the
+    // archive into the target issue's canonical path and REWRITES its embedded
+    // metadata. Guessing wrong is not a row we can flip back.
     let trust_via_pull = match match_result.issue_id {
+        Some(_) if match_result.ambiguous => false,
         Some(id) => pull_attempt_repo::issue_has_attempt(db, id).await?,
         None => false,
     };
@@ -221,6 +231,17 @@ pub async fn process_one(
             )
             .await?
         }
+        // An ambiguous match usually scores ABOVE the threshold (0.90 vs
+        // 0.85) — saying "below owned threshold" would be a flat lie in the
+        // logs of exactly the files someone is trying to debug.
+        (Some(_), _, false) if match_result.ambiguous => Outcome::Skipped {
+            reason: format!(
+                "ambiguous match for series hint {hint:?}: this file's ComicInfo \
+                 and its filename name different issues (confidence={:.2}) — \
+                 left in the watch folder for a human",
+                match_result.confidence
+            ),
+        },
         (Some(_), _, false) => Outcome::Skipped {
             reason: format!(
                 "needs-review-tier match for series hint {hint:?} \
@@ -404,6 +425,7 @@ async fn try_folder_match(
         match_result.confidence,
         match_result.method,
         owned_threshold,
+        match_result.ambiguous,
     );
     // Pull-engine trust override (mirrors Tier 2 in `process_one`):
     // a sub-threshold folder match for an issue with pull-attempt
