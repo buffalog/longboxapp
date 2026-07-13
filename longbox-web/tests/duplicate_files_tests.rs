@@ -1,7 +1,14 @@
-//! Duplicate-file detector: detection query, and the permanent-delete
-//! resolve path. This feature deletes real user files, so the tests cover
-//! both the happy path (loser gone from disk AND DB, keeper untouched) and
-//! every refusal guard (keep-not-a-candidate, mismatched issue numbers).
+//! Duplicate-file detector: detection query, the permanent-delete resolve
+//! path, and the re-point ("correct") path for mismatch groups.
+//!
+//! Resolve deletes real user files, so the tests cover both the happy path
+//! (loser gone from disk AND DB, keeper untouched) and every refusal guard
+//! (keep-not-a-candidate, mismatched issue numbers).
+//!
+//! Correct deletes nothing, but it re-points real rows: a bad re-point
+//! silently mis-files a comic and could hand the delete resolver a bogus
+//! "duplicate" group later. So its guards get the same treatment — every
+//! refusal is asserted to have written nothing.
 
 mod common;
 
@@ -15,8 +22,8 @@ fn now_pdt() -> PrimitiveDateTime {
     PrimitiveDateTime::new(n.date(), n.time())
 }
 
-async fn seed_series_issue(app: &TestApp, title: &str, number: &str) -> i64 {
-    let series = series_repo::insert(
+async fn seed_series(app: &TestApp, title: &str) -> i64 {
+    series_repo::insert(
         &app.state.db,
         NewSeries {
             cv_id: None,
@@ -31,11 +38,14 @@ async fn seed_series_issue(app: &TestApp, title: &str, number: &str) -> i64 {
     )
     .await
     .unwrap()
-    .id;
+    .id
+}
+
+async fn seed_issue(app: &TestApp, series_id: i64, number: &str) -> i64 {
     issue_repo::insert(
         &app.state.db,
         NewIssue {
-            series_id: series,
+            series_id,
             cv_issue_id: None,
             metron_issue_id: None,
             number: number.to_owned(),
@@ -48,6 +58,11 @@ async fn seed_series_issue(app: &TestApp, title: &str, number: &str) -> i64 {
     .await
     .unwrap()
     .id
+}
+
+async fn seed_series_issue(app: &TestApp, title: &str, number: &str) -> i64 {
+    let series = seed_series(app, title).await;
+    seed_issue(app, series, number).await
 }
 
 /// Insert a file row and (optionally) write real bytes to disk under the
@@ -410,6 +425,337 @@ async fn resolve_refuses_to_delete_a_non_contained_loser_path() {
     // Its DB row is preserved (nothing to retry-lose), keeper untouched.
     assert!(db_row_exists(&app, evil).await);
     assert!(on_disk(&app, "Saga/Saga 1.cbz") && db_row_exists(&app, keep).await);
+}
+
+// -------- correct: re-pointing a mismatched file --------
+
+/// The live Ferocious shape: issue rows #1–#5 all exist and are distinct, but
+/// the files for #2 and #5 got matched onto #1's row because their embedded
+/// ComicInfo `<Number>` wrongly says 1. Returns (series, [issue ids #1..#5]).
+async fn seed_ferocious(app: &TestApp) -> (i64, Vec<i64>) {
+    let series = seed_series(app, "Ferocious").await;
+    let mut issues = Vec::new();
+    for n in 1..=5 {
+        issues.push(seed_issue(app, series, &n.to_string()).await);
+    }
+    (series, issues)
+}
+
+#[tokio::test]
+async fn correct_repoints_a_mismatched_file_and_pins_it_against_rescan() {
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    let home = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let stray = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    // Detection surfaces it as a mismatch AND names the target for the stray.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = &body["groups"][0];
+    assert_eq!(g["kind"], "mismatch");
+    let files = g["files"].as_array().unwrap();
+    let stray_row = files.iter().find(|f| f["file_id"] == stray).unwrap();
+    assert_eq!(stray_row["suggested_issue_id"], issues[1]);
+    // The file already on its own issue gets no suggestion.
+    let home_row = files.iter().find(|f| f["file_id"] == home).unwrap();
+    assert_eq!(home_row["suggested_issue_id"], serde_json::Value::Null);
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{stray},"issue_id":{}}}"#, issues[1]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = response_json(resp).await;
+    assert_eq!(r["from_issue_id"], issues[0]);
+    assert_eq!(r["to_issue_id"], issues[1]);
+
+    // The row now points at #2 — and is stamped manual, so the next scan's
+    // Tier 2 can't drag it back to #1 on the strength of the bad XML.
+    let row = file_repo::find_by_id(&app.state.db, stray)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.issue_id, Some(issues[1]));
+    assert_eq!(row.match_method, "manual");
+    assert_eq!(row.status, "owned");
+    // Nothing was deleted. This is a pointer fix, not a tidy-up.
+    assert!(on_disk(&app, "Ferocious/Ferocious 002.cbz"));
+    assert!(db_row_exists(&app, home).await && on_disk(&app, "Ferocious/Ferocious 001.cbz"));
+
+    // The group is gone: each issue now holds exactly one present file.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    assert_eq!(response_json(resp).await["total"], 0);
+}
+
+#[tokio::test]
+async fn correct_refuses_a_target_the_filename_does_not_agree_with() {
+    // The core guard: the client asks to move Ferocious 002 onto issue #5.
+    // The file's own name says 2. Refuse — a blindly-POSTed issue_id must be
+    // harmless.
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let stray = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{stray},"issue_id":{}}}"#, issues[4]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let row = file_repo::find_by_id(&app.state.db, stray)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.issue_id, Some(issues[0]), "nothing may be written");
+}
+
+#[tokio::test]
+async fn correct_refuses_a_target_in_a_different_series() {
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let stray = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    // A #2 in a different series — same number, wrong book.
+    let other = seed_series_issue(&app, "Saga", "2").await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{stray},"issue_id":{other}}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let row = file_repo::find_by_id(&app.state.db, stray)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.issue_id, Some(issues[0]));
+}
+
+#[tokio::test]
+async fn correct_refuses_when_the_target_already_holds_a_different_issue() {
+    // Issue #2 is itself already mismatched (it holds a file for #3). Moving
+    // our #2 in there would tangle it further — refuse, and don't suggest it.
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let stray = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    seed_file(
+        &app,
+        issues[1],
+        "Ferocious/Ferocious 003.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["issue_id"] == issues[0])
+        .unwrap();
+    let stray_row = g["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["file_id"] == stray)
+        .unwrap();
+    assert_eq!(stray_row["suggested_issue_id"], serde_json::Value::Null);
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{stray},"issue_id":{}}}"#, issues[1]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let row = file_repo::find_by_id(&app.state.db, stray)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.issue_id, Some(issues[0]));
+}
+
+#[tokio::test]
+async fn correct_allows_a_target_whose_occupant_agrees_on_the_number() {
+    // Issue #2 already holds a genuine second copy of #2. Re-pointing our
+    // stray there is correct: the result is an honest duplicate group, which
+    // the delete resolver then handles.
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let stray = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    seed_file(
+        &app,
+        issues[1],
+        "backup/Ferocious 002.cbr",
+        true,
+        80_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{stray},"issue_id":{}}}"#, issues[1]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Issue #2 now has two present files that agree → a resolvable duplicate.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let groups = body["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["issue_id"], issues[1]);
+    assert_eq!(groups[0]["kind"], "duplicate");
+}
+
+#[tokio::test]
+async fn correct_refuses_a_no_op_and_404s_an_unknown_file() {
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    let f = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    // Already there.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{f},"issue_id":{}}}"#, issues[0]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown file.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":999999,"issue_id":{}}}"#, issues[1]),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Unknown issue.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{f},"issue_id":999999}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

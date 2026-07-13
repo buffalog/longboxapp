@@ -976,6 +976,88 @@ mod tests {
         assert_eq!(suggest_keep(&files), Some(2));
     }
 
+    // -------- suggested corrections --------
+
+    /// The real Ferocious series: issue rows #1–#5 exist and are distinct.
+    fn ferocious_issues() -> Vec<(String, i64)> {
+        (1..=5).map(|n| (n.to_string(), 8467 + n)).collect()
+    }
+
+    fn nums(v: &[Option<&str>]) -> Vec<Option<String>> {
+        v.iter().map(|n| n.map(str::to_owned)).collect()
+    }
+
+    #[test]
+    fn proposes_the_issue_row_the_filename_names() {
+        // The live case: files for #1, #2 and #5 all sitting on issue #1's row
+        // (id 8468) because #2's and #5's embedded <Number> both say 1.
+        let targets = propose_targets(
+            8468,
+            &nums(&[Some("1"), Some("2"), Some("5")]),
+            &ferocious_issues(),
+        );
+        // #1's file is already home — nothing to correct.
+        assert_eq!(targets[0], None);
+        assert_eq!(targets[1], Some(8469));
+        assert_eq!(targets[2], Some(8472));
+    }
+
+    #[test]
+    fn leading_zeros_still_find_the_target() {
+        let targets = propose_targets(8468, &nums(&[Some("002")]), &ferocious_issues());
+        assert_eq!(targets[0], Some(8469));
+    }
+
+    #[test]
+    fn no_proposal_when_two_files_claim_the_same_number() {
+        // Which of these two IS issue #2? We can't know — both stay manual.
+        let targets = propose_targets(
+            8468,
+            &nums(&[Some("1"), Some("2"), Some("2")]),
+            &ferocious_issues(),
+        );
+        assert_eq!(targets[1], None);
+        assert_eq!(targets[2], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_target_issue_row_does_not_exist() {
+        // Series only has #1–#5; a file parsing to #9 has nowhere to go.
+        let targets = propose_targets(8468, &nums(&[Some("9")]), &ferocious_issues());
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_filename_yields_no_number() {
+        let targets = propose_targets(8468, &nums(&[None]), &ferocious_issues());
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn no_proposal_when_the_series_has_duplicate_rows_for_that_number() {
+        // Two catalog rows both numbered "2" — pick one and we may pick wrong.
+        let issues = vec![
+            ("1".to_owned(), 8468),
+            ("2".to_owned(), 8469),
+            ("02".to_owned(), 9999),
+        ];
+        let targets = propose_targets(8468, &nums(&[Some("2")]), &issues);
+        assert_eq!(targets[0], None);
+    }
+
+    #[test]
+    fn target_accepts_an_empty_or_agreeing_issue_but_not_a_conflicting_one() {
+        // Nothing there → fine.
+        assert!(target_accepts("2", &[]));
+        // Occupant agrees on the number → re-pointing makes an honest
+        // duplicate group, which the delete resolver then handles.
+        assert!(target_accepts("2", &nums(&[Some("002")])));
+        // Occupant is a different issue → target is itself mismatched.
+        assert!(!target_accepts("2", &nums(&[Some("3")])));
+        // Occupant's number is unknown → can't clear it, so don't.
+        assert!(!target_accepts("2", &nums(&[None])));
+    }
+
     #[test]
     fn suggest_keep_falls_back_to_largest_when_all_suspect() {
         let files = vec![
