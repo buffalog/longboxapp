@@ -13,8 +13,15 @@
 //!    are NOT duplicates — deleting the "losers" would destroy distinct
 //!    issues. Every candidate's own issue number is parsed (filename, then
 //!    cached ComicInfo); a group is actionable only when they all agree.
-//!    Mismatch groups are surfaced read-only (`kind = "mismatch"`) and the
-//!    resolve endpoint independently re-validates and refuses them.
+//!    Mismatch groups get `kind = "mismatch"` and the delete resolver
+//!    independently re-validates and refuses them.
+//!
+//!    A mismatch group is repaired by *re-pointing* the stray files, not by
+//!    deleting them — see the `correct` endpoint. Root cause: some files carry
+//!    a wrong `<Number>` in their embedded ComicInfo.xml, and Tier 2 of the
+//!    match cascade believes it over the (correct) filename. Nothing physical
+//!    happens on a correction; it's a plain `files.issue_id` FK fix to an
+//!    issue row that already exists.
 //!
 //! 2. **Server never picks.** The suggested keep is only a hint in the GET
 //!    payload; the resolve endpoint acts solely on explicit
@@ -26,15 +33,16 @@
 //! file delete fails the row is left intact (retryable); the kept file/row is
 //! never touched.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_core::{parse_filename, ComicInfo, ParsingPattern};
+use longbox_core::{parse_filename, parse_filename_with_normalization, ComicInfo, ParsingPattern};
 use longbox_db::{
-    file_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
+    file_repo, issue_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +89,17 @@ struct DupCandidate {
     /// The issue number parsed from this file (filename, then cached
     /// ComicInfo). `None` when neither yields a number.
     parsed_number: Option<String>,
+    /// For a file in a `mismatch` group: the issue row in the SAME series
+    /// whose number matches this file's *filename*-parsed number — i.e. where
+    /// this file should have been pointed all along. `None` when the
+    /// suggestion isn't unambiguous (see [`propose_target`] /
+    /// [`target_accepts`]) — those files stay manual-review-only.
+    ///
+    /// Deliberately filename-only, not the [`parse_candidate_number`]
+    /// cascade: the whole failure mode is a file whose embedded ComicInfo
+    /// `<Number>` is *wrong*, so ComicInfo is the one source we must not
+    /// trust here.
+    suggested_issue_id: Option<i64>,
     /// The copy the app currently serves (owned-preferred, then lowest id).
     is_served: bool,
     /// Size looks corrupt relative to the floor / its siblings — flagged so a
@@ -93,15 +112,26 @@ struct DupCandidate {
 #[derive(Debug, Serialize, PartialEq)]
 struct DupGroup {
     issue_id: i64,
+    series_id: i64,
     series_title: String,
     issue_number: String,
     /// `duplicate` (all candidates agree on issue number → actionable) or
     /// `mismatch` (numbers disagree → distinct issues wrongly merged; NOT
-    /// deletable here, needs a re-split fix instead).
+    /// deletable here — re-point the strays instead, see `correct`).
     kind: &'static str,
     /// Pre-selected keep — a hint only; `Some` only for `duplicate` groups.
     suggested_keep_file_id: Option<i64>,
+    /// Every issue row in this group's series, so the UI can offer an
+    /// override when it disagrees with (or we can't produce) a suggestion.
+    /// Only populated for `mismatch` groups.
+    issue_options: Vec<IssueOption>,
     files: Vec<DupCandidate>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct IssueOption {
+    issue_id: i64,
+    number: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,7 +157,8 @@ async fn list(
     let candidates = file_repo::duplicate_file_candidates_page(&state.db, per_page, offset).await?;
     let patterns = load_patterns(&state).await?;
 
-    let groups = build_groups(candidates, &patterns);
+    let mut groups = build_groups(candidates, &patterns);
+    annotate_suggestions(&state, &patterns, &mut groups).await?;
     Ok(Json(ListResponse {
         groups,
         total,
@@ -180,6 +211,8 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
                 r.cached_comicinfo_xml.as_deref(),
                 patterns,
             ),
+            // Filled in by `annotate_suggestions` (needs the DB).
+            suggested_issue_id: None,
             is_served: Some(r.file_id) == served_id,
             suspect_corrupt: is_suspect_size(r.size_bytes, largest),
             under_unsorted: under_unsorted(&r.path_relative),
@@ -192,12 +225,143 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
 
     DupGroup {
         issue_id: rows[0].issue_id,
+        series_id: rows[0].series_id,
         series_title: rows[0].series_title.clone(),
         issue_number: rows[0].issue_number.clone(),
         kind: if is_dup { "duplicate" } else { "mismatch" },
         suggested_keep_file_id,
+        issue_options: Vec::new(),
         files,
     }
+}
+
+// -------- suggested corrections (mismatch groups) --------
+
+/// For every `mismatch` group, fill in each stray file's `suggested_issue_id`
+/// and the group's `issue_options` (override list).
+///
+/// A mismatch group is N distinct issues wrongly collapsed onto one issue row.
+/// The fix is a pointer correction, not a delete: look up the issue row in the
+/// same series whose number equals the file's *filename*-parsed number, and
+/// suggest it. Every suggestion must be unambiguous, so we bail on:
+///
+/// - the filename yielding no number,
+/// - two files in the group claiming the same number (which of them is really
+///   that issue? we can't know),
+/// - two issue rows in the series sharing a normalized number (duplicate
+///   catalog rows — pick one and we may pick wrong),
+/// - the target row not existing,
+/// - the target already holding a present file that parses to a *different*
+///   number (re-pointing there would just create a fresh mismatch).
+///
+/// A target already holding a present file with the *same* number is fine: the
+/// re-point turns it into an honest duplicate group, which the delete resolver
+/// then handles as usual.
+async fn annotate_suggestions(
+    state: &AppState,
+    patterns: &[ParsingPattern],
+    groups: &mut [DupGroup],
+) -> Result<(), ApiError> {
+    // Cache across groups: the same series can own several mismatch groups.
+    let mut series_issues: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
+    let mut present_numbers: HashMap<i64, Vec<Option<String>>> = HashMap::new();
+
+    for group in groups.iter_mut().filter(|g| g.kind == "mismatch") {
+        if let Entry::Vacant(slot) = series_issues.entry(group.series_id) {
+            let issues = issue_repo::list_by_series(&state.db, group.series_id).await?;
+            slot.insert(issues.into_iter().map(|i| (i.number, i.id)).collect());
+        }
+        let issues = &series_issues[&group.series_id];
+
+        let filename_numbers: Vec<Option<String>> = group
+            .files
+            .iter()
+            .map(|f| parse_filename_number(&f.path_relative, patterns))
+            .collect();
+
+        for (idx, target) in propose_targets(group.issue_id, &filename_numbers, issues)
+            .into_iter()
+            .enumerate()
+        {
+            let Some(target) = target else { continue };
+            if let Entry::Vacant(slot) = present_numbers.entry(target) {
+                let nums = file_repo::list_by_issue(&state.db, target)
+                    .await?
+                    .iter()
+                    .filter(|f| f.is_present)
+                    .map(|f| parse_filename_number(&f.path_relative, patterns))
+                    .collect();
+                slot.insert(nums);
+            }
+            let claimed = filename_numbers[idx].as_deref().unwrap_or_default();
+            if target_accepts(claimed, &present_numbers[&target]) {
+                group.files[idx].suggested_issue_id = Some(target);
+            }
+        }
+
+        group.issue_options = issues
+            .iter()
+            .map(|(number, issue_id)| IssueOption {
+                issue_id: *issue_id,
+                number: number.clone(),
+            })
+            .collect();
+    }
+    Ok(())
+}
+
+/// Per-file target issue (aligned with `filename_numbers`), before the
+/// occupancy check. `None` for any file we can't confidently place — see
+/// [`annotate_suggestions`] for the rules. Pure, so the ambiguity rules are
+/// testable without a DB.
+fn propose_targets(
+    current_issue_id: i64,
+    filename_numbers: &[Option<String>],
+    series_issues: &[(String, i64)],
+) -> Vec<Option<i64>> {
+    let count_of = |target: &str| -> usize {
+        filename_numbers
+            .iter()
+            .filter(|n| n.as_deref().map(norm_num).as_deref() == Some(target))
+            .count()
+    };
+
+    filename_numbers
+        .iter()
+        .map(|number| {
+            let number = norm_num(number.as_deref()?);
+            // Two files claiming the same number: can't tell them apart.
+            if count_of(&number) > 1 {
+                return None;
+            }
+            let mut rows = series_issues
+                .iter()
+                .filter(|(n, _)| norm_num(n) == number)
+                .map(|(_, id)| *id);
+            let target = rows.next()?;
+            // Duplicate catalog rows for one number — refuse to guess.
+            if rows.next().is_some() {
+                return None;
+            }
+            // Already where it belongs (this is the file the group is
+            // *named* after) — nothing to correct.
+            if target == current_issue_id {
+                return None;
+            }
+            Some(target)
+        })
+        .collect()
+}
+
+/// May a file claiming issue number `number` be re-pointed at a target issue
+/// whose present files parse to `existing`? Only when every file already
+/// sitting there agrees on the number (or there are none) — an occupant with a
+/// different number means the target is *itself* mismatched, and moving a file
+/// in would tangle it further.
+fn target_accepts(number: &str, existing: &[Option<String>]) -> bool {
+    existing
+        .iter()
+        .all(|n| matches!(n, Some(x) if norm_num(x) == norm_num(number)))
 }
 
 // -------- POST: resolve --------
@@ -477,6 +641,16 @@ fn parse_candidate_number(
     ComicInfo::parse(xml.as_bytes()).ok()?.number
 }
 
+/// This file's issue number from its *filename alone* — the authority for a
+/// suggested correction, since the ComicInfo `<Number>` is the thing that
+/// lied. Uses the same normalizing cascade as the scanner's Tier 3, so a
+/// correction agrees with what a future scan re-derives instead of flapping
+/// against it.
+fn parse_filename_number(path_relative: &str, patterns: &[ParsingPattern]) -> Option<String> {
+    let basename = path_relative.rsplit('/').next().unwrap_or(path_relative);
+    parse_filename_with_normalization(basename, patterns).map(|p| p.number)
+}
+
 /// Normalise an issue number for equality: strip leading zeros from a
 /// pure-digit string (`001` == `1`), else lowercase+trim. Deliberately
 /// conservative — anything it can't confidently equate stays distinct, which
@@ -562,6 +736,7 @@ mod tests {
             size_bytes: size,
             format: derive_format(path).to_owned(),
             parsed_number: None,
+            suggested_issue_id: None,
             is_served: false,
             suspect_corrupt: suspect,
             under_unsorted: unsorted,

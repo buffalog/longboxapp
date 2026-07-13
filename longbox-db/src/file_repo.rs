@@ -515,6 +515,9 @@ where
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
 pub struct DuplicateFileCandidate {
     pub issue_id: i64,
+    /// The series the issue belongs to — the search space for a mismatched
+    /// file's correct issue row.
+    pub series_id: i64,
     pub series_title: String,
     pub issue_number: String,
     pub file_id: i64,
@@ -563,6 +566,7 @@ where
     let rows = sqlx::query_as!(
         DuplicateFileCandidate,
         r#"SELECT f.issue_id AS "issue_id!: i64",
+                  i.series_id AS "series_id!: i64",
                   s.title AS series_title,
                   i.number AS issue_number,
                   f.id AS "file_id!: i64",
