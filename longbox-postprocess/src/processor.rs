@@ -432,7 +432,19 @@ async fn try_folder_match(
     // history is accepted as Owned. The pull engine's indexer-time
     // series-title filter already cleared the title; the local
     // floor is redundant.
+    //
+    // The ambiguous arm mirrors `process_one` too, and is deliberately not
+    // omitted as dead code. It IS dead today — this path calls `match_file`
+    // with `comic_info: None`, and `ambiguous` is only ever set where BOTH
+    // tiers resolve, so Tier 2 returning None makes it structurally
+    // unreachable. But "unreachable" here is a property of one argument at one
+    // call site, not of this function. The day anyone threads ComicInfo into
+    // the folder match, the hole silently reopens — and it reopens onto
+    // `import_as_owned`, which MOVES the archive and REWRITES its metadata.
+    // A guess there is not a row you flip back. One line to make it
+    // unreachable for a reason instead of by luck.
     let trust_via_pull = match match_result.issue_id {
+        Some(_) if match_result.ambiguous => false,
         Some(id) => pull_attempt_repo::issue_has_attempt(db, id).await?,
         None => false,
     };
