@@ -174,6 +174,7 @@ pub async fn process_one(
         match_result.confidence,
         match_result.method,
         owned_threshold,
+        match_result.ambiguous,
     );
 
     // Pull-engine trust override: a sub-threshold match for an issue
@@ -404,6 +405,7 @@ async fn try_folder_match(
         match_result.confidence,
         match_result.method,
         owned_threshold,
+        match_result.ambiguous,
     );
     // Pull-engine trust override (mirrors Tier 2 in `process_one`):
     // a sub-threshold folder match for an issue with pull-attempt

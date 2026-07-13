@@ -47,6 +47,12 @@ pub struct MatchResult {
     pub issue_id: Option<i64>,
     pub method: MatchMethod,
     pub confidence: f64,
+    /// Tier 2 and Tier 3 both resolved an issue — and disagreed about which.
+    /// The file's own two sources of truth contradict each other, so no
+    /// confidence score is meaningful; a human has to look. Callers must
+    /// classify this as `needs_review` regardless of confidence (see
+    /// [`crate::classify_status`]).
+    pub ambiguous: bool,
 }
 
 /// Tier 2 → Tier 3 cascade against a pre-fetched candidate pool. Tier 1
@@ -55,21 +61,43 @@ pub struct MatchResult {
 ///
 /// Returns the strongest non-failing result. `Unmatched` (confidence 0.0)
 /// when neither tier produces a score ≥ [`NEEDS_REVIEW_FLOOR`].
+///
+/// **Tier 2 does not get to win unchallenged.** Real libraries contain files
+/// whose embedded ComicInfo `<Number>` is simply wrong — "Ferocious (2025)
+/// 002.cbz" is physically issue 2, correctly named and foldered, and its
+/// `<Number>` says 1. Tier 2 running first meant that lie was believed and
+/// the file was silently filed under issue 1, colliding with the real #1.
+/// So Tier 3 is always computed too, and when both tiers resolve an issue and
+/// name *different* ones, we neither trust Tier 2 nor guess: we take the
+/// filename's issue (in the failure mode we have actually observed, the
+/// filename is the one telling the truth) and mark the result `ambiguous`, so
+/// it lands in `needs_review` for a human instead of being quietly filed.
+///
+/// Tier 3 producing no parse, or agreeing with Tier 2, changes nothing —
+/// Tier 2's result stands, exactly as before.
 pub fn match_file(
     comic_info: Option<&ComicInfo>,
     filename_parse: Option<&ParsedFilename>,
     candidates: &[Candidate],
 ) -> MatchResult {
-    if let Some(result) = tier2_comicinfo(comic_info, candidates) {
-        return result;
+    let tier3 = tier3_filename(filename_parse, candidates);
+    if let Some(tier2) = tier2_comicinfo(comic_info, candidates) {
+        return match tier3 {
+            Some(tier3) if tier3.issue_id != tier2.issue_id => MatchResult {
+                ambiguous: true,
+                ..tier3
+            },
+            _ => tier2,
+        };
     }
-    if let Some(result) = tier3_filename(filename_parse, candidates) {
+    if let Some(result) = tier3 {
         return result;
     }
     MatchResult {
         issue_id: None,
         method: MatchMethod::Unmatched,
         confidence: 0.0,
+        ambiguous: false,
     }
 }
 
@@ -128,6 +156,7 @@ fn match_in_candidates(
         issue_id: Some(issue.id),
         method,
         confidence,
+        ambiguous: false,
     })
 }
 
@@ -618,8 +647,9 @@ mod tests {
             issue_id: Some(7),
             method: MatchMethod::ComicInfoXml,
             confidence: 0.85,
+            ambiguous: false,
         };
-        let s = classify_status(r.issue_id, r.confidence, r.method, 0.85);
+        let s = classify_status(r.issue_id, r.confidence, r.method, 0.85, r.ambiguous);
         assert_eq!(s, crate::FileStatus::Owned);
     }
 }
