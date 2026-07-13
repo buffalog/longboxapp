@@ -40,7 +40,10 @@ use std::path::Path;
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_core::{parse_filename, parse_filename_with_normalization, ComicInfo, ParsingPattern};
+use longbox_core::{
+    parse_filename, parse_filename_with_normalization, ComicInfo, FileStatus, MatchMethod,
+    ParsingPattern,
+};
 use longbox_db::{
     file_repo, issue_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
 };
@@ -54,6 +57,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/library/tidy/duplicate-files", get(list))
         .route("/library/tidy/duplicate-files/resolve", post(resolve))
+        .route("/library/tidy/duplicate-files/correct", post(correct))
 }
 
 /// A candidate whose size is below this absolute floor is treated as
@@ -92,7 +96,7 @@ struct DupCandidate {
     /// For a file in a `mismatch` group: the issue row in the SAME series
     /// whose number matches this file's *filename*-parsed number — i.e. where
     /// this file should have been pointed all along. `None` when the
-    /// suggestion isn't unambiguous (see [`propose_target`] /
+    /// suggestion isn't unambiguous (see [`propose_targets`] /
     /// [`target_accepts`]) — those files stay manual-review-only.
     ///
     /// Deliberately filename-only, not the [`parse_candidate_number`]
@@ -590,6 +594,147 @@ async fn delete_loser(
             "file deleted from disk but DB row removal failed: {e}"
         )),
     }
+}
+
+// -------- POST: correct (re-point a mismatched file) --------
+
+#[derive(Debug, Deserialize)]
+struct CorrectBody {
+    file_id: i64,
+    /// The issue this file should have been pointed at all along.
+    issue_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CorrectResult {
+    file_id: i64,
+    from_issue_id: i64,
+    to_issue_id: i64,
+}
+
+/// Re-point one file's `issue_id`. Nothing physical happens — the file stays
+/// on disk, the target issue row already exists; this is a plain FK fix.
+///
+/// One correction per request, explicitly confirmed by a human. Everything is
+/// re-derived server-side and the client's target is never taken on faith: the
+/// file's own filename has to independently agree that the target is where it
+/// belongs. Any doubt → 422, nothing written.
+///
+/// The corrected row is stamped `manual` / confidence 1.0. That's what makes
+/// the fix stick: the file's embedded ComicInfo `<Number>` is still wrong and
+/// still there, so without the manual marker the next scan's Tier 2 would
+/// happily re-point it back at the wrong issue.
+async fn correct(
+    State(state): State<AppState>,
+    Json(body): Json<CorrectBody>,
+) -> Result<Json<CorrectResult>, ApiError> {
+    // Share the resolver's lock: a concurrent delete-resolve reads the same
+    // present-file sets we validate against.
+    let _guard = resolve_lock().lock().await;
+    let patterns = load_patterns(&state).await?;
+
+    let refuse = |message: String| ApiError::Unprocessable {
+        code: "unprocessable.correction_refused",
+        message,
+    };
+
+    let file = file_repo::find_by_id(&state.db, body.file_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "file",
+            id: body.file_id.to_string(),
+        })?;
+    if !file.is_present {
+        return Err(refuse("file is not present on disk".to_owned()));
+    }
+    let Some(from_issue_id) = file.issue_id else {
+        return Err(refuse(
+            "file is not matched to any issue — nothing to correct".to_owned(),
+        ));
+    };
+    if from_issue_id == body.issue_id {
+        return Err(refuse("file already points at that issue".to_owned()));
+    }
+
+    let from_issue = issue_repo::find_by_id(&state.db, from_issue_id)
+        .await?
+        .ok_or_else(|| refuse("the file's current issue no longer exists".to_owned()))?;
+    let to_issue = issue_repo::find_by_id(&state.db, body.issue_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "issue",
+            id: body.issue_id.to_string(),
+        })?;
+    if to_issue.series_id != from_issue.series_id {
+        return Err(refuse(
+            "target issue belongs to a different series — this endpoint only re-points within one series".to_owned(),
+        ));
+    }
+
+    // The client's target must be independently corroborated by the file's
+    // own filename. This is the check that makes a blindly-POSTed issue_id
+    // harmless.
+    let Some(claimed) = parse_filename_number(&file.path_relative, &patterns) else {
+        return Err(refuse(
+            "cannot parse an issue number from this file's name — refusing to re-point on a number we can't confirm".to_owned(),
+        ));
+    };
+    if norm_num(&claimed) != norm_num(&to_issue.number) {
+        return Err(refuse(format!(
+            "filename parses to issue {claimed}, but the target issue is {} — refusing",
+            to_issue.number
+        )));
+    }
+
+    // The target must not already hold a present file with a *different*
+    // number: moving in would tangle a second mismatch.
+    let occupants: Vec<Option<String>> = file_repo::list_by_issue(&state.db, to_issue.id)
+        .await?
+        .iter()
+        .filter(|f| f.is_present && f.id != file.id)
+        .map(|f| parse_filename_number(&f.path_relative, &patterns))
+        .collect();
+    if !target_accepts(&claimed, &occupants) {
+        return Err(refuse(
+            "target issue already holds a present file for a different issue number — resolve that mismatch first".to_owned(),
+        ));
+    }
+
+    let now = crate::routes::reconcile::utc_now();
+    let patch = longbox_db::FileUpdate {
+        issue_id: Some(to_issue.id),
+        size_bytes: file.size_bytes,
+        mtime: file.mtime,
+        last_scanned_at: file.last_scanned_at,
+        match_method: MatchMethod::Manual.as_db_str().to_owned(),
+        match_confidence: 1.0,
+        status: FileStatus::Owned.as_db_str().to_owned(),
+        cached_comicinfo_xml: file.cached_comicinfo_xml.clone(),
+        cached_at: file.cached_at,
+        is_present: file.is_present,
+        last_seen_at: file.last_seen_at,
+        matched_at: file_repo::next_matched_at(
+            file.issue_id,
+            Some(to_issue.id),
+            file.matched_at,
+            now,
+        ),
+    };
+    file_repo::update(&state.db, file.id, patch).await?;
+
+    tracing::info!(
+        file_id = file.id,
+        path = %file.path_relative,
+        from_issue_id,
+        to_issue_id = to_issue.id,
+        "duplicate-files: re-pointed mismatched file"
+    );
+
+    Ok(Json(CorrectResult {
+        file_id: file.id,
+        from_issue_id,
+        to_issue_id: to_issue.id,
+    }))
 }
 
 // -------- pure helpers --------
