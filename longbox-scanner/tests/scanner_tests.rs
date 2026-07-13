@@ -1012,15 +1012,20 @@ async fn a_manual_pointer_survives_a_rescan() {
     let path = "Walking Dead (2003)/Walking Dead 002 (2003).cbz";
     let f = find_file(&pool, library_root_id, path).await;
     let issues = issue_repo::list_by_series(&pool, 1).await.unwrap();
-    let issue_2 = issues.iter().find(|i| i.number == "2").unwrap().id;
+    // Deliberately issue THREE — an issue neither tier would pick (ComicInfo
+    // says 1, the filename says 2). If we pinned it to 2, the matcher would
+    // land there on its own and the test would pass without the persist fix
+    // doing anything. Pointing somewhere only a human would choose is the only
+    // way to prove the scanner leaves a human's pointer alone.
+    let issue_3 = issues.iter().find(|i| i.number == "3").unwrap().id;
 
-    // A human confirms it: issue 2, manual, owned. (What POST /correct and the
-    // Accept Match flow both write.)
+    // A human confirms it: manual, owned. (What POST /correct and the Accept
+    // Match flow both write.)
     file_repo::update(
         &pool,
         f.id,
         longbox_db::FileUpdate {
-            issue_id: Some(issue_2),
+            issue_id: Some(issue_3),
             size_bytes: f.size_bytes,
             mtime: f.mtime,
             last_scanned_at: f.last_scanned_at,
@@ -1045,7 +1050,7 @@ async fn a_manual_pointer_survives_a_rescan() {
     let after = find_file(&pool, library_root_id, path).await;
     assert_eq!(
         after.issue_id,
-        Some(issue_2),
+        Some(issue_3),
         "the scanner must not re-point a row a human pointed by hand"
     );
     assert_eq!(

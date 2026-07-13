@@ -539,8 +539,12 @@ impl Scanner {
 
         let new_status = compute_status(Some(existing), &match_result, match_threshold);
 
-        // Only update if the status actually changed.
-        if existing.status != new_status.as_db_str() {
+        // Update when the status changed OR the pointer did. Status alone
+        // isn't enough: an ambiguous match is `needs_review`, and these rows
+        // are already `needs_review` — so a rematch that finally resolves an
+        // issue_id would compute it and throw it away, leaving the file
+        // pointed at nothing with no way to retry.
+        if existing.status != new_status.as_db_str() || existing.issue_id != match_result.issue_id {
             self.persist(
                 discovered,
                 existing.library_root_id,

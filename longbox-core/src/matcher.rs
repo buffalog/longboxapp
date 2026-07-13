@@ -62,16 +62,28 @@ pub struct MatchResult {
 /// Returns the strongest non-failing result. `Unmatched` (confidence 0.0)
 /// when neither tier produces a score ≥ [`NEEDS_REVIEW_FLOOR`].
 ///
-/// **Tier 2 does not get to win unchallenged.** Real libraries contain files
-/// whose embedded ComicInfo `<Number>` is simply wrong — "Ferocious (2025)
-/// 002.cbz" is physically issue 2, correctly named and foldered, and its
-/// `<Number>` says 1. Tier 2 running first meant that lie was believed and
-/// the file was silently filed under issue 1, colliding with the real #1.
-/// So Tier 3 is always computed too, and when both tiers resolve an issue and
-/// name *different* ones, we neither trust Tier 2 nor guess: we take the
-/// filename's issue (in the failure mode we have actually observed, the
-/// filename is the one telling the truth) and mark the result `ambiguous`, so
-/// it lands in `needs_review` for a human instead of being quietly filed.
+/// **Tier 2 does not get to win unchallenged — about the issue number.** Real
+/// libraries contain files whose embedded ComicInfo `<Number>` is simply wrong:
+/// "Ferocious (2025) 002.cbz" is physically issue 2, correctly named and
+/// foldered, and its `<Number>` says 1. Tier 2 running first meant that lie was
+/// believed and the file was silently filed under issue 1, colliding with the
+/// real #1. So Tier 3 is always computed too, and when both tiers land in the
+/// **same series** but name different issues, we neither trust Tier 2 nor
+/// guess: we take the filename's issue (in the failure mode we have actually
+/// observed, the filename is the one telling the truth) and mark the result
+/// `ambiguous`, so it lands in `needs_review` for a human instead of being
+/// quietly filed.
+///
+/// **The cross-check is deliberately confined to one series.** When the tiers
+/// pick *different series*, Tier 2 still wins outright and nothing is flagged.
+/// That isn't a contradiction — it's Tier 3 having less to go on. Two volumes
+/// of one title (Ultimate Spider-Man 2000 and 2024) score identically on title
+/// similarity, so the year hint decides, and a filename's year is very often
+/// absent while ComicInfo's `<Volume>` is right there. Letting a yearless
+/// filename overrule ComicInfo about *which volume* would drag correctly-tagged
+/// files onto the wrong series — manufacturing the very collisions this exists
+/// to prevent. The evidence is about wrong numbers inside the right series;
+/// this fix goes exactly that far and no further.
 ///
 /// Tier 3 producing no parse, or agreeing with Tier 2, changes nothing —
 /// Tier 2's result stands, exactly as before.
@@ -81,30 +93,35 @@ pub fn match_file(
     candidates: &[Candidate],
 ) -> MatchResult {
     let tier3 = tier3_filename(filename_parse, candidates);
-    if let Some(tier2) = tier2_comicinfo(comic_info, candidates) {
-        return match tier3 {
-            Some(tier3) if tier3.issue_id != tier2.issue_id => MatchResult {
-                ambiguous: true,
-                ..tier3
-            },
-            _ => tier2,
-        };
-    }
-    if let Some(result) = tier3 {
-        return result;
-    }
-    MatchResult {
-        issue_id: None,
-        method: MatchMethod::Unmatched,
-        confidence: 0.0,
-        ambiguous: false,
+    match (tier2_comicinfo(comic_info, candidates), tier3) {
+        (Some((tier2, series2)), Some((tier3, series3))) => {
+            if series2 == series3 && tier2.issue_id != tier3.issue_id {
+                MatchResult {
+                    ambiguous: true,
+                    ..tier3
+                }
+            } else {
+                tier2
+            }
+        }
+        (Some((tier2, _)), None) => tier2,
+        (None, Some((tier3, _))) => tier3,
+        (None, None) => MatchResult {
+            issue_id: None,
+            method: MatchMethod::Unmatched,
+            confidence: 0.0,
+            ambiguous: false,
+        },
     }
 }
 
-fn tier2_comicinfo(
-    comic_info: Option<&ComicInfo>,
-    candidates: &[Candidate],
-) -> Option<MatchResult> {
+/// Each tier returns its result **and the series it landed in**, so
+/// [`match_file`] can tell "these two disagree about the issue" (a real
+/// contradiction) from "these two are looking at different volumes entirely"
+/// (Tier 3 lacking a year hint, not evidence of anything).
+type TierMatch = (MatchResult, i64);
+
+fn tier2_comicinfo(comic_info: Option<&ComicInfo>, candidates: &[Candidate]) -> Option<TierMatch> {
     let ci = comic_info?;
     let series_text = ci.series.as_deref()?;
     let number_text = ci.number.as_deref()?;
@@ -122,7 +139,7 @@ fn tier2_comicinfo(
 fn tier3_filename(
     filename_parse: Option<&ParsedFilename>,
     candidates: &[Candidate],
-) -> Option<MatchResult> {
+) -> Option<TierMatch> {
     let fp = filename_parse?;
     match_in_candidates(
         &fp.series_title,
@@ -141,7 +158,7 @@ fn match_in_candidates(
     candidates: &[Candidate],
     confidence_ceiling: f64,
     method: MatchMethod,
-) -> Option<MatchResult> {
+) -> Option<TierMatch> {
     let (score, candidate) = best_candidate_match(title_text, year_hint, candidates)?;
     let confidence = score.min(confidence_ceiling);
     if confidence < NEEDS_REVIEW_FLOOR {
@@ -152,12 +169,15 @@ fn match_in_candidates(
         .issues
         .iter()
         .find(|i| i.number.matches(&needle))?;
-    Some(MatchResult {
-        issue_id: Some(issue.id),
-        method,
-        confidence,
-        ambiguous: false,
-    })
+    Some((
+        MatchResult {
+            issue_id: Some(issue.id),
+            method,
+            confidence,
+            ambiguous: false,
+        },
+        candidate.series.id,
+    ))
 }
 
 /// Score every candidate against `title_text` (after normalization), return
@@ -753,22 +773,60 @@ mod tests {
     }
 
     #[test]
-    fn disagreement_across_two_different_series_is_also_flagged() {
-        // The tiers can disagree about the *series*, not just the number:
-        // ComicInfo says Saga #1, the filename says Ferocious #1. Different
-        // issue rows → still a contradiction, still a human's call.
+    fn a_yearless_filename_never_drags_a_file_onto_the_wrong_volume() {
+        // Two volumes of one title — the relaunch case (Ultimate Spider-Man
+        // 2000 and 2024, Daredevil, X-Men, take your pick). They score
+        // identically on title similarity, so the year hint alone decides.
+        //
+        // ComicInfo knows the volume (2024) and is RIGHT. The filename carries
+        // no year, so Tier 3 falls back to a tiebreak and picks the 2000
+        // volume. That's not a contradiction — it's Tier 3 having strictly
+        // less information. Treating it as one would take a correctly-tagged,
+        // owned file, re-point it at the wrong volume's #1, and flag it for
+        // review — colliding with the real 2000 #1 and manufacturing a fresh
+        // mismatch group. The cure would be causing the disease.
+        //
+        // So: cross-series disagreement leaves Tier 2 standing, unflagged.
+        let mut old_volume_issues = Vec::new();
+        for n in 1..=20 {
+            old_volume_issues.push(issue(100 + n, 1, &n.to_string()));
+        }
         let candidates = vec![
-            candidate(series(1, "Saga", Some(2012)), vec![issue(10, 1, "1")]),
-            candidate(series(2, "Ferocious", Some(2025)), vec![issue(20, 2, "1")]),
+            candidate(
+                series(1, "Ultimate Spider-Man", Some(2000)),
+                old_volume_issues,
+            ),
+            candidate(
+                series(2, "Ultimate Spider-Man", Some(2024)),
+                vec![issue(201, 2, "1")],
+            ),
         ];
         let ci = ComicInfo {
-            series: Some("Saga".into()),
+            series: Some("Ultimate Spider-Man".into()),
             number: Some("1".into()),
+            year: Some(2024), // correct, and the only thing that knows
             ..Default::default()
         };
-        let r = match_file(Some(&ci), Some(&honest_filename("1")), &candidates);
-        assert!(r.ambiguous);
-        assert_eq!(r.issue_id, Some(20), "the filename's series wins");
+        let parsed = ParsedFilename {
+            series_title: "Ultimate Spider-Man".into(),
+            number: "1".into(),
+            volume: None,
+            year: None, // the common case
+            title: None,
+            pattern_id: 2,
+        };
+        let r = match_file(Some(&ci), Some(&parsed), &candidates);
+        assert_eq!(
+            r.issue_id,
+            Some(201),
+            "must stay on the 2024 volume ComicInfo names"
+        );
+        assert_eq!(r.method, MatchMethod::ComicInfoXml);
+        assert!(
+            !r.ambiguous,
+            "a missing year hint is not a contradiction — flagging it would \
+             bury the user in false positives on every multi-volume series"
+        );
     }
 
     #[test]
