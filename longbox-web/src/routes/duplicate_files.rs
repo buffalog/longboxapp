@@ -11,8 +11,9 @@
 //!    duplication but because distinct issues were wrongly matched to one
 //!    issue row (e.g. files for #1, #2, #5 all under one `issue_id`). Those
 //!    are NOT duplicates — deleting the "losers" would destroy distinct
-//!    issues. Every candidate's own issue number is parsed (filename, then
-//!    cached ComicInfo); a group is actionable only when they all agree.
+//!    issues. Every candidate's own issue number is parsed from its filename
+//!    (never from its ComicInfo — see `parse_filename_number`); a group is
+//!    actionable only when they all agree.
 //!    Mismatch groups get `kind = "mismatch"` and the delete resolver
 //!    independently re-validates and refuses them.
 //!
@@ -40,10 +41,7 @@ use std::path::Path;
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_core::{
-    parse_filename, parse_filename_with_normalization, ComicInfo, FileStatus, MatchMethod,
-    ParsingPattern,
-};
+use longbox_core::{parse_filename_with_normalization, FileStatus, ParsingPattern};
 use longbox_db::{
     file_repo, issue_repo, library_root_repo, parsing_pattern_repo, DuplicateFileCandidate, FileRow,
 };
@@ -90,19 +88,14 @@ struct DupCandidate {
     size_bytes: i64,
     /// `cbz` | `cbr` | `cb7` | `other`, from the path extension.
     format: String,
-    /// The issue number parsed from this file (filename, then cached
-    /// ComicInfo). `None` when neither yields a number.
+    /// The issue number parsed from this file's name. `None` when it doesn't
+    /// parse — which keeps the group out of the deletable `duplicate` bucket.
     parsed_number: Option<String>,
     /// For a file in a `mismatch` group: the issue row in the SAME series
     /// whose number matches this file's *filename*-parsed number — i.e. where
     /// this file should have been pointed all along. `None` when the
     /// suggestion isn't unambiguous (see [`propose_targets`] /
     /// [`target_accepts`]) — those files stay manual-review-only.
-    ///
-    /// Deliberately filename-only, not the [`parse_candidate_number`]
-    /// cascade: the whole failure mode is a file whose embedded ComicInfo
-    /// `<Number>` is *wrong*, so ComicInfo is the one source we must not
-    /// trust here.
     suggested_issue_id: Option<i64>,
     /// The copy the app currently serves (owned-preferred, then lowest id).
     is_served: bool,
@@ -210,11 +203,7 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
             path_relative: r.path_relative.clone(),
             size_bytes: r.size_bytes,
             format: derive_format(&r.path_relative).to_owned(),
-            parsed_number: parse_candidate_number(
-                &r.path_relative,
-                r.cached_comicinfo_xml.as_deref(),
-                patterns,
-            ),
+            parsed_number: parse_filename_number(&r.path_relative, patterns),
             // Filled in by `annotate_suggestions` (needs the DB).
             suggested_issue_id: None,
             is_served: Some(r.file_id) == served_id,
@@ -261,6 +250,10 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
 /// A target already holding a present file with the *same* number is fine: the
 /// re-point turns it into an honest duplicate group, which the delete resolver
 /// then handles as usual.
+// ponytail: one query per distinct series + one per distinct proposed target,
+// both cached per request. At the real ~28 mismatch groups that's trivial; the
+// ceiling is O(groups × files) round-trips at per_page=200. Collapse to two
+// `IN` queries if a library ever gets bad enough for that to bite.
 async fn annotate_suggestions(
     state: &AppState,
     patterns: &[ParsingPattern],
@@ -297,7 +290,11 @@ async fn annotate_suggestions(
                     .collect();
                 slot.insert(nums);
             }
-            let claimed = filename_numbers[idx].as_deref().unwrap_or_default();
+            // A `Some(target)` implies a `Some` number — but don't lean on
+            // that: an empty claim would vacuously satisfy `target_accepts`.
+            let Some(claimed) = filename_numbers[idx].as_deref() else {
+                continue;
+            };
             if target_accepts(claimed, &present_numbers[&target]) {
                 group.files[idx].suggested_issue_id = Some(target);
             }
@@ -363,9 +360,10 @@ fn propose_targets(
 /// different number means the target is *itself* mismatched, and moving a file
 /// in would tangle it further.
 fn target_accepts(number: &str, existing: &[Option<String>]) -> bool {
+    let number = norm_num(number);
     existing
         .iter()
-        .all(|n| matches!(n, Some(x) if norm_num(x) == norm_num(number)))
+        .all(|n| matches!(n, Some(x) if norm_num(x) == number))
 }
 
 // -------- POST: resolve --------
@@ -496,13 +494,7 @@ async fn resolve_one(
     }
     let numbers: Vec<Option<String>> = present
         .iter()
-        .map(|f| {
-            parse_candidate_number(
-                &f.path_relative,
-                f.cached_comicinfo_xml.as_deref(),
-                patterns,
-            )
-        })
+        .map(|f| parse_filename_number(&f.path_relative, patterns))
         .collect();
     if !classify_is_duplicate(&numbers) {
         return Ok(refuse(
@@ -647,6 +639,14 @@ async fn correct(
     if !file.is_present {
         return Err(refuse("file is not present on disk".to_owned()));
     }
+    // The user has explicitly disclaimed this file. The scanner is careful to
+    // preserve that; so are we. (Our write would stamp it `owned` and quietly
+    // un-ignore it.)
+    if file.status == FileStatus::Ignored.as_db_str() {
+        return Err(refuse(
+            "file is marked ignored — un-ignore it first if you want it filed".to_owned(),
+        ));
+    }
     let Some(from_issue_id) = file.issue_id else {
         return Err(refuse(
             "file is not matched to any issue — nothing to correct".to_owned(),
@@ -655,6 +655,11 @@ async fn correct(
     if from_issue_id == body.issue_id {
         return Err(refuse("file already points at that issue".to_owned()));
     }
+    // A row that's already `manual` IS re-pointable: this request is itself a
+    // human's explicit click, so a previous human decision can be superseded
+    // by a newer one. Refusing here would make a mis-correction unfixable
+    // through the UI — and the filename gate below still has to corroborate
+    // the new target either way.
 
     let from_issue = issue_repo::find_by_id(&state.db, from_issue_id)
         .await?
@@ -700,27 +705,18 @@ async fn correct(
         ));
     }
 
+    // Write only the match columns, and only if the row still points where we
+    // validated it. The scanner writes `files` rows outside our lock, so a
+    // whole-row write-back from the snapshot we read at the top could silently
+    // revert a concurrent scan's disk-state columns.
     let now = crate::routes::reconcile::utc_now();
-    let patch = longbox_db::FileUpdate {
-        issue_id: Some(to_issue.id),
-        size_bytes: file.size_bytes,
-        mtime: file.mtime,
-        last_scanned_at: file.last_scanned_at,
-        match_method: MatchMethod::Manual.as_db_str().to_owned(),
-        match_confidence: 1.0,
-        status: FileStatus::Owned.as_db_str().to_owned(),
-        cached_comicinfo_xml: file.cached_comicinfo_xml.clone(),
-        cached_at: file.cached_at,
-        is_present: file.is_present,
-        last_seen_at: file.last_seen_at,
-        matched_at: file_repo::next_matched_at(
-            file.issue_id,
-            Some(to_issue.id),
-            file.matched_at,
-            now,
-        ),
-    };
-    file_repo::update(&state.db, file.id, patch).await?;
+    let swapped =
+        file_repo::repoint_manual(&state.db, file.id, from_issue_id, to_issue.id, now).await?;
+    if !swapped {
+        return Err(refuse(
+            "this file was re-matched while you were deciding — reload and try again".to_owned(),
+        ));
+    }
 
     tracing::info!(
         file_id = file.id,
@@ -769,28 +765,25 @@ fn is_suspect_size(size: i64, largest_sibling: i64) -> bool {
     size < SUSPECT_ABS_FLOOR_BYTES || size.saturating_mul(SUSPECT_RATIO_DENOM) < largest_sibling
 }
 
-/// Parse this file's own issue number: filename via the enabled patterns
-/// first, cached ComicInfo `<Number>` as fallback. `None` when neither yields
-/// one — which forces the group to `mismatch` (we won't delete on a number we
-/// can't confirm).
-fn parse_candidate_number(
-    path_relative: &str,
-    cached_xml: Option<&str>,
-    patterns: &[ParsingPattern],
-) -> Option<String> {
-    let basename = path_relative.rsplit('/').next().unwrap_or(path_relative);
-    if let Some(p) = parse_filename(basename, patterns) {
-        return Some(p.number);
-    }
-    let xml = cached_xml?;
-    ComicInfo::parse(xml.as_bytes()).ok()?.number
-}
-
-/// This file's issue number from its *filename alone* — the authority for a
-/// suggested correction, since the ComicInfo `<Number>` is the thing that
-/// lied. Uses the same normalizing cascade as the scanner's Tier 3, so a
-/// correction agrees with what a future scan re-derives instead of flapping
-/// against it.
+/// This file's own issue number, from its **filename alone**. `None` when the
+/// name yields nothing — which forces the group to `mismatch` (we won't delete
+/// on a number we can't confirm).
+///
+/// The one and only authority for what a file *is*, everywhere in this module:
+/// the group classifier that gates deletion, the resolver's re-validation, and
+/// the suggested corrections. They must not be able to disagree.
+///
+/// It used to fall back to the cached ComicInfo `<Number>` when the filename
+/// didn't parse — i.e. to the exact source this whole feature exists because it
+/// lies. That was a live data-loss path: a scene-named file (`Foo.2025.002.cbz`,
+/// which the non-normalizing parser can't read) whose `<Number>` wrongly says 1
+/// would report "1", agree with the real issue-1 file it had been mis-matched
+/// onto, and the group would present as a deletable `duplicate` — offering to
+/// permanently delete one of two *distinct comics*. Two distinct issues can
+/// look like duplicates only if we ask a liar to identify them.
+///
+/// Uses the scanner's Tier-3 normalizing cascade, so this module's idea of a
+/// file's number is the same one a future scan will re-derive.
 fn parse_filename_number(path_relative: &str, patterns: &[ParsingPattern]) -> Option<String> {
     let basename = path_relative.rsplit('/').next().unwrap_or(path_relative);
     parse_filename_with_normalization(basename, patterns).map(|p| p.number)

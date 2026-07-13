@@ -507,11 +507,16 @@ where
 
 /// One present file belonging to an issue that has more than one present
 /// file — a candidate in a duplicate-file group. Carries the denormalized
-/// series title + issue number (for display) and everything the resolver
-/// needs: `library_root_id` (to resolve the absolute path for deletion) and
-/// `cached_comicinfo_xml` (issue-number fallback when the filename doesn't
-/// parse). Rows for one issue arrive contiguous and `id`-ascending, matching
-/// the app's served-file tiebreak.
+/// series title + issue number (for display) and what the resolver needs:
+/// `library_root_id`, to resolve the absolute path for deletion. Rows for one
+/// issue arrive contiguous and `id`-ascending, matching the app's served-file
+/// tiebreak.
+///
+/// Deliberately does NOT carry `cached_comicinfo_xml`. The web layer decides
+/// what each file *is* from its filename alone, because the embedded
+/// ComicInfo `<Number>` is the thing that mis-files these in the first place —
+/// and it gates a permanent delete. Not fetching it is the cheapest way to
+/// guarantee nobody reintroduces it as a fallback.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
 pub struct DuplicateFileCandidate {
     pub issue_id: i64,
@@ -526,7 +531,43 @@ pub struct DuplicateFileCandidate {
     /// FileStatus as TEXT; the served-file pick prefers `owned`.
     pub status: String,
     pub library_root_id: i64,
-    pub cached_comicinfo_xml: Option<String>,
+}
+
+/// Re-point one file at a different issue, as a human's explicit manual
+/// decision. Touches only the five match columns — never the disk-state ones
+/// (size/mtime/is_present/last_seen_at) — so it can't lose a concurrent scan's
+/// update by writing back a stale snapshot of the whole row.
+///
+/// Compare-and-swap on `expect_issue_id`: if a scan (or another request)
+/// re-pointed the row since the caller validated it, this matches zero rows
+/// and returns `false` rather than stomping the newer value. The caller turns
+/// that into a refusal.
+pub async fn repoint_manual<'e, E>(
+    executor: E,
+    file_id: i64,
+    expect_issue_id: i64,
+    new_issue_id: i64,
+    now: PrimitiveDateTime,
+) -> Result<bool>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE files
+              SET issue_id = ?,
+                  match_method = 'manual',
+                  match_confidence = 1.0,
+                  status = 'owned',
+                  matched_at = ?
+            WHERE id = ? AND issue_id = ?"#,
+        new_issue_id,
+        now,
+        file_id,
+        expect_issue_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Count of issues that have more than one `is_present = 1` file — the total
@@ -573,8 +614,7 @@ where
                   f.path_relative,
                   f.size_bytes AS "size_bytes!: i64",
                   f.status,
-                  f.library_root_id AS "library_root_id!: i64",
-                  f.cached_comicinfo_xml
+                  f.library_root_id AS "library_root_id!: i64"
            FROM files f
            JOIN issues i ON f.issue_id = i.id
            JOIN series s ON i.series_id = s.id

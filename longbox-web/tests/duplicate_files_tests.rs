@@ -807,3 +807,78 @@ async fn resolve_batch_mixes_resolved_and_refused_without_cross_contamination() 
         on_disk(&app, "Ferocious/Ferocious 1.cbz") && on_disk(&app, "Ferocious/Ferocious 2.cbz")
     );
 }
+
+/// Regression: a scene-named file must never let two DISTINCT comics present
+/// as a deletable duplicate.
+///
+/// `Ferocious.002.(2025).(Digital).cbz` is physically issue 2. The strict
+/// filename patterns can't read that shape at all (verified: the raw parser
+/// returns None), so the classifier used to fall back to the file's cached
+/// ComicInfo `<Number>` — which, in this exact failure mode, wrongly says 1.
+/// It would then "agree" with the genuine issue-1 file it had been mis-matched
+/// onto, and the group would be served as `kind: duplicate` with a pre-filled
+/// keep — one click from permanently deleting a real, distinct comic.
+///
+/// The number now comes from the filename alone, via the same normalizing
+/// cascade the scanner's Tier 3 uses. The group stays a mismatch, the stray
+/// gets a suggestion, and the delete resolver refuses it.
+#[tokio::test]
+async fn a_scene_named_file_is_never_mistaken_for_a_duplicate() {
+    let app = build_test_app().await;
+    let (_series, issues) = seed_ferocious(&app).await;
+    let real_one = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001 (2025).cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let scene = seed_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious.002.(2025).(Digital).cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = &body["groups"][0];
+    assert_eq!(
+        g["kind"], "mismatch",
+        "two distinct comics must not be offered for deletion"
+    );
+    assert_eq!(
+        g["suggested_keep_file_id"],
+        serde_json::Value::Null,
+        "and must not get a pre-filled keep"
+    );
+    let files = g["files"].as_array().unwrap();
+    let scene_row = files.iter().find(|f| f["file_id"] == scene).unwrap();
+    assert_eq!(scene_row["parsed_number"], "002");
+    assert_eq!(scene_row["suggested_issue_id"], issues[1]);
+
+    // The resolver independently refuses it too.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(
+                r#"{{"resolutions":[{{"issue_id":{},"keep_file_id":{real_one}}}]}}"#,
+                issues[0]
+            ),
+        ))
+        .await;
+    let r = &response_json(resp).await["results"][0];
+    assert_eq!(r["status"], "refused");
+    assert!(
+        db_row_exists(&app, scene).await
+            && on_disk(&app, "Ferocious/Ferocious.002.(2025).(Digital).cbz")
+    );
+}

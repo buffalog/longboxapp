@@ -1260,3 +1260,4 @@ mod tests {
         assert_eq!(a, b);
     }
 }
+
