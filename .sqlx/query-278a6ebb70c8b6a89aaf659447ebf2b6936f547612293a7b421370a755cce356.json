@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files\n              SET content_blake3 = ?, hashed_size_bytes = ?, hashed_mtime = ?\n            WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "278a6ebb70c8b6a89aaf659447ebf2b6936f547612293a7b421370a755cce356"
+}

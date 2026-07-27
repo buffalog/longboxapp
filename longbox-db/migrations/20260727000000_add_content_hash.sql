@@ -17,12 +17,14 @@
 -- 80 of 7102 on the library this was built against.
 --
 -- `hashed_size_bytes` / `hashed_mtime` record the file version the digest was
--- computed against. A digest is trusted only when they still equal the row's
--- current `size_bytes` / `mtime`; anything else means the file changed under us
--- and the digest is stale. That check is self-validating — it cannot be
--- defeated by a writer that forgets to invalidate, which matters because a
--- stale digest here would present two DIFFERENT files as identical and offer
--- the user a delete button.
+-- computed against. A digest is trusted only when they still equal the size and
+-- mtime observed by STAT-ING THE FILE at reuse time — never the row's own
+-- `size_bytes` / `mtime`, which are themselves only as current as the last
+-- scan, and scans run once a day. A file edited between two scans leaves the
+-- catalog agreeing with the stamp while the bytes underneath have changed;
+-- comparing the two catalog columns would call that digest fresh and present
+-- two DIFFERENT files as identical, with a delete button next to the claim.
+-- Disk is the authority here; these columns are the cache being validated.
 ALTER TABLE files ADD COLUMN content_blake3 TEXT;
 ALTER TABLE files ADD COLUMN hashed_size_bytes INTEGER;
 ALTER TABLE files ADD COLUMN hashed_mtime TIMESTAMP;

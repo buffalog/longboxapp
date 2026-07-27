@@ -635,10 +635,195 @@ where
     Ok(rows)
 }
 
+// -------- content-identity hashing --------
+
+/// A present file that shares its byte size with at least one other present
+/// file. Two files of differing size cannot be byte-identical, so this is the
+/// complete candidate set for content-duplicate detection — and on a healthy
+/// library it is a tiny fraction of the whole (80 of 7102 on the library this
+/// was built against).
+///
+/// Carries the stored digest and its version stamp so the caller can decide
+/// freshness without a second query — see [`HashCandidate::has_fresh_digest`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HashCandidate {
+    pub file_id: i64,
+    pub library_root_id: i64,
+    pub path_relative: String,
+    /// Size per the catalog. May lag the file on disk if a scan hasn't run.
+    pub size_bytes: i64,
+    /// mtime per the catalog. Same caveat.
+    pub mtime: PrimitiveDateTime,
+    pub content_blake3: Option<String>,
+    pub hashed_size_bytes: Option<i64>,
+    pub hashed_mtime: Option<PrimitiveDateTime>,
+}
+
+impl HashCandidate {
+    /// True when the stored digest can be trusted for the bytes currently on
+    /// disk: a digest exists AND the size/mtime it was computed against equal
+    /// what the caller just observed **by stat-ing the file**.
+    ///
+    /// The observed values are parameters, not the row's own `size_bytes` /
+    /// `mtime`, and that distinction is the whole point. Comparing the stamp
+    /// against sibling catalog columns would only prove "the catalog hasn't
+    /// changed since we hashed" — and the catalog is refreshed by a scan that
+    /// runs once a day. Any edit made between two scans leaves the catalog
+    /// agreeing with the stamp while the bytes underneath have changed, which
+    /// would report two DIFFERENT files as identical and put a delete button
+    /// next to that claim. Disk is the authority; the catalog is a cache.
+    ///
+    /// Deliberately conservative — any missing piece reads as stale and costs
+    /// only a re-hash.
+    pub fn has_fresh_digest(
+        &self,
+        observed_size: i64,
+        observed_mtime: PrimitiveDateTime,
+    ) -> bool {
+        match (
+            &self.content_blake3,
+            self.hashed_size_bytes,
+            self.hashed_mtime,
+        ) {
+            (Some(digest), Some(size), Some(mtime)) => {
+                !digest.is_empty() && size == observed_size && mtime == observed_mtime
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Every present file whose size is shared with another present file.
+///
+/// The whole candidate set, not a page: it is bounded by real duplication
+/// rather than library size, and the caller needs all of it at once to group
+/// by digest. Ordered `size_bytes, id` so same-size rows are contiguous.
+pub async fn size_collision_candidates<'e, E>(executor: E) -> Result<Vec<HashCandidate>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        HashCandidate,
+        r#"SELECT f.id AS "file_id!: i64",
+                  f.library_root_id AS "library_root_id!: i64",
+                  f.path_relative,
+                  f.size_bytes AS "size_bytes!: i64",
+                  f.mtime AS "mtime!: PrimitiveDateTime",
+                  f.content_blake3,
+                  f.hashed_size_bytes,
+                  f.hashed_mtime AS "hashed_mtime?: PrimitiveDateTime"
+           FROM files f
+           WHERE f.is_present = 1
+             AND f.size_bytes IN (
+                 SELECT ff.size_bytes FROM files ff
+                 WHERE ff.is_present = 1
+                 GROUP BY ff.size_bytes HAVING COUNT(*) > 1
+             )
+           ORDER BY f.size_bytes, f.id"#
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// Store a digest together with the file version it was computed against.
+///
+/// `size` and `mtime` must be what was observed on disk at hash time, NOT the
+/// catalog's values. If the two disagree the catalog is stale, and stamping
+/// the disk truth makes the row read as stale on the next pass (so it is
+/// re-hashed) instead of falsely claiming a digest for bytes it never saw.
+pub async fn set_content_hash<'e, E>(
+    executor: E,
+    file_id: i64,
+    digest: &str,
+    size: i64,
+    mtime: PrimitiveDateTime,
+) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    sqlx::query!(
+        r#"UPDATE files
+              SET content_blake3 = ?, hashed_size_bytes = ?, hashed_mtime = ?
+            WHERE id = ?"#,
+        digest,
+        size,
+        mtime,
+        file_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use time::macros::datetime;
+
+    fn candidate(
+        digest: Option<&str>,
+        hashed_size: Option<i64>,
+        hashed_mtime: Option<PrimitiveDateTime>,
+    ) -> HashCandidate {
+        HashCandidate {
+            file_id: 1,
+            library_root_id: 1,
+            path_relative: "S/S 001.cbz".into(),
+            size_bytes: 100,
+            mtime: datetime!(2026-07-01 10:00:00),
+            content_blake3: digest.map(str::to_owned),
+            hashed_size_bytes: hashed_size,
+            hashed_mtime,
+        }
+    }
+
+    const DISK_SIZE: i64 = 100;
+    const DISK_MTIME: PrimitiveDateTime = datetime!(2026-07-01 10:00:00);
+
+    #[test]
+    fn digest_is_fresh_when_stamp_matches_what_is_on_disk() {
+        let c = candidate(Some("abc"), Some(100), Some(datetime!(2026-07-01 10:00:00)));
+        assert!(c.has_fresh_digest(DISK_SIZE, DISK_MTIME));
+    }
+
+    #[test]
+    fn digest_is_stale_when_disk_size_or_mtime_moved() {
+        let c = candidate(Some("abc"), Some(100), Some(datetime!(2026-07-01 10:00:00)));
+        // Disk grew — same mtime is not enough.
+        assert!(!c.has_fresh_digest(101, DISK_MTIME));
+        // Disk mtime moved — same size is not enough.
+        assert!(!c.has_fresh_digest(DISK_SIZE, datetime!(2026-07-02 10:00:00)));
+    }
+
+    /// The regression that matters: a file edited between two nightly scans
+    /// leaves the CATALOG agreeing with the stamp while the bytes on disk have
+    /// changed. Freshness must follow disk, never the catalog, or the
+    /// integrity UI offers to delete a file that is no longer a duplicate.
+    #[test]
+    fn stale_catalog_does_not_make_a_stale_digest_look_fresh() {
+        // Row and stamp agree at 100 bytes — the catalog is simply out of date.
+        let c = candidate(Some("abc"), Some(100), Some(datetime!(2026-07-01 10:00:00)));
+        assert_eq!(c.size_bytes, 100, "catalog still says 100");
+        // Disk says otherwise. The digest describes bytes that are gone.
+        assert!(
+            !c.has_fresh_digest(60_000_000, datetime!(2026-07-22 10:00:00)),
+            "digest must be stale when disk disagrees, even though the catalog matches"
+        );
+    }
+
+    #[test]
+    fn digest_is_stale_when_any_piece_is_missing() {
+        assert!(!candidate(None, Some(100), Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME));
+        assert!(
+            !candidate(Some("abc"), None, Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME)
+        );
+        assert!(!candidate(Some("abc"), Some(100), None).has_fresh_digest(DISK_SIZE, DISK_MTIME));
+        // An empty digest is a write that went wrong, not a valid hash.
+        assert!(
+            !candidate(Some(""), Some(100), Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME)
+        );
+    }
 
     #[test]
     fn matched_at_first_match() {
