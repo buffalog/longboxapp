@@ -179,10 +179,12 @@
 
   <p class="mb-3 text-sm text-slate-600">
     Issues with more than one physical file on disk. Pick the copy to keep; the others are
-    permanently deleted from disk. Only groups whose files sit in the same series folder and agree
-    on the issue number can be deleted here. Groups flagged “not a duplicate” hold distinct issues
-    wrongly sharing one record, and groups flagged “wrong series match” hold files from different
-    series folders — both are fixed by re-pointing files, never by deleting them.
+    permanently deleted from disk. Deletion is offered only where the files are byte-for-byte
+    identical and sit in the same series folder — filenames are never enough on their own, since
+    a misnamed copy and a genuinely different issue look alike from the name. Groups flagged “not
+    a duplicate” hold different comics wrongly sharing one record, “wrong series match” holds
+    files from different series folders, and “not yet analyzed” simply hasn’t been compared yet.
+    All three are fixed by re-pointing files, never by deleting them.
   </p>
 
   {#if error}
@@ -214,6 +216,12 @@
               >
                 <AlertTriangle class="size-3" aria-hidden="true" /> Wrong series match
               </span>
+            {:else if g.kind === 'pending_analysis'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600"
+              >
+                Not yet analyzed
+              </span>
             {:else if g.kind === 'cross_folder_same_series'}
               <span
                 class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700"
@@ -238,6 +246,13 @@
               each have their own #{g.issue_number}, which is why the issue numbers agree. Deleting
               here would destroy a real issue, so there is no delete option; the fix is to re-match
               the stray file to its correct series.
+            </p>
+          {:else if g.kind === 'pending_analysis'}
+            <p class="mb-2 text-xs text-slate-600">
+              These files haven't been compared byte-for-byte yet, so it isn't known whether they
+              are copies of one comic or different issues. No action is offered until they are:
+              not knowing is not the same as knowing they match. They'll classify themselves after
+              the next library scan.
             </p>
           {:else if g.kind === 'cross_folder_same_series'}
             <p class="mb-2 text-xs text-slate-600">

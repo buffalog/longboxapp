@@ -531,6 +531,14 @@ pub struct DuplicateFileCandidate {
     /// FileStatus as TEXT; the served-file pick prefers `owned`.
     pub status: String,
     pub library_root_id: i64,
+    /// Stored content digest and the file version it was computed against.
+    /// The web layer must re-stat the file and confirm the stamp still
+    /// matches before believing the digest — see
+    /// [`HashCandidate::has_fresh_digest`] for why the catalog's own
+    /// size/mtime are not sufficient evidence.
+    pub content_blake3: Option<String>,
+    pub hashed_size_bytes: Option<i64>,
+    pub hashed_mtime: Option<PrimitiveDateTime>,
 }
 
 /// Re-point one file at a different issue, as a human's explicit manual
@@ -614,7 +622,10 @@ where
                   f.path_relative,
                   f.size_bytes AS "size_bytes!: i64",
                   f.status,
-                  f.library_root_id AS "library_root_id!: i64"
+                  f.library_root_id AS "library_root_id!: i64",
+                  f.content_blake3,
+                  f.hashed_size_bytes,
+                  f.hashed_mtime AS "hashed_mtime?: PrimitiveDateTime"
            FROM files f
            JOIN issues i ON f.issue_id = i.id
            JOIN series s ON i.series_id = s.id
@@ -691,6 +702,39 @@ impl HashCandidate {
             _ => false,
         }
     }
+}
+
+/// A file's stored digest and the file version it was computed against.
+///
+/// Fetched separately from [`FileRow`] rather than widening it: only the
+/// delete path needs this, and adding three columns to `FileRow` would change
+/// eight unrelated queries for one caller's benefit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContentStamp {
+    pub file_id: i64,
+    pub content_blake3: Option<String>,
+    pub hashed_size_bytes: Option<i64>,
+    pub hashed_mtime: Option<PrimitiveDateTime>,
+}
+
+/// Digest stamps for every present file on one issue.
+pub async fn content_stamps_by_issue<'e, E>(executor: E, issue_id: i64) -> Result<Vec<ContentStamp>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        ContentStamp,
+        r#"SELECT id AS "file_id!: i64",
+                  content_blake3,
+                  hashed_size_bytes,
+                  hashed_mtime AS "hashed_mtime?: PrimitiveDateTime"
+           FROM files
+           WHERE issue_id = ? AND is_present = 1"#,
+        issue_id
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
 }
 
 /// Every present file whose size is shared with another present file.

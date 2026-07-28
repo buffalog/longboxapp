@@ -34,7 +34,9 @@ pub use cv_volume_cache_repo::{CvVolumeCacheRow, CvVolumePending, CvVolumePublis
 pub use discovered_folders_repo::{DiscoveredFolder, DiscoveredFolderRow};
 pub use downloader_config_repo::{DownloaderConfigRow, NewDownloaderConfig};
 pub use error::{DbError, Result};
-pub use file_repo::{DuplicateFileCandidate, FileRow, FileUpdate, HashCandidate, NewFile};
+pub use file_repo::{
+    ContentStamp, DuplicateFileCandidate, FileRow, FileUpdate, HashCandidate, NewFile,
+};
 pub use indexer_config_repo::{IndexerConfigRow, IndexerConfigUpdate, NewIndexerConfig};
 pub use issue_repo::{IssueRow, IssueUpdate, NewIssue};
 pub use library_root_repo::{LibraryRootRow, NewLibraryRoot};
