@@ -179,9 +179,10 @@
 
   <p class="mb-3 text-sm text-slate-600">
     Issues with more than one physical file on disk. Pick the copy to keep; the others are
-    permanently deleted from disk. Groups flagged “not a duplicate” hold distinct issues wrongly
-    sharing one record — those are fixed by moving each file to its real issue, not by deleting
-    anything.
+    permanently deleted from disk. Only groups whose files sit in the same series folder and agree
+    on the issue number can be deleted here. Groups flagged “not a duplicate” hold distinct issues
+    wrongly sharing one record, and groups flagged “wrong series match” hold files from different
+    series folders — both are fixed by re-pointing files, never by deleting them.
   </p>
 
   {#if error}
@@ -207,6 +208,18 @@
               >
                 <AlertTriangle class="size-3" aria-hidden="true" /> Not a duplicate — needs review
               </span>
+            {:else if g.kind === 'cross_folder_wrong_series'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-red-50 px-1.5 py-0.5 text-xs font-medium text-red-800"
+              >
+                <AlertTriangle class="size-3" aria-hidden="true" /> Wrong series match
+              </span>
+            {:else if g.kind === 'cross_folder_same_series'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700"
+              >
+                <AlertTriangle class="size-3" aria-hidden="true" /> Same series, two folders
+              </span>
             {/if}
           </div>
 
@@ -216,6 +229,22 @@
               matched to one record — usually because a file’s embedded ComicInfo.xml carries the
               wrong issue number. Nothing here is deleted: move each stray file to the issue its
               filename says it is. Files with no suggestion need a manual call.
+            </p>
+          {:else if g.kind === 'cross_folder_wrong_series'}
+            <p class="mb-2 text-xs text-red-800">
+              These files live in different series folders, so they are <strong
+                >not copies of one comic</strong
+              > — they are separate books wrongly matched to the same record. Two volumes of a title
+              each have their own #{g.issue_number}, which is why the issue numbers agree. Deleting
+              here would destroy a real issue, so there is no delete option; the fix is to re-match
+              the stray file to its correct series.
+            </p>
+          {:else if g.kind === 'cross_folder_same_series'}
+            <p class="mb-2 text-xs text-slate-600">
+              These files are in different folders that appear to name the same series — usually one
+              series stored under two folder spellings. Nothing is deleted from here, because the
+              folder difference could also mean a wrong match. Consolidate the folders, or re-match
+              if one file belongs elsewhere.
             </p>
           {/if}
 

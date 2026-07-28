@@ -5,7 +5,22 @@
 //! different names/formats). This surfaces them and lets a human keep one
 //! copy and permanently delete the rest — file on disk AND catalog row.
 //!
-//! Two safety rails, because a bug here deletes real user files:
+//! Three safety rails, because a bug here deletes real user files:
+//!
+//! 0. **Cross-folder exclusion.** A group whose files live under different
+//!    series folders is never a duplicate group, whatever the parsed numbers
+//!    say — and in the failure mode that matters the numbers agree perfectly.
+//!    Two volumes of one title (`The Authority (1999)` and `(2008)`) have a #4
+//!    each; when the matcher binds both onto the 1999 series' issue #4 they
+//!    present as a textbook duplicate pair. 26 of the 28 groups this endpoint
+//!    surfaced on the live library were that shape, and resolving them would
+//!    have permanently deleted 26 distinct comics.
+//!
+//!    Folder comparison here is byte-exact, never normalized: deciding which
+//!    name differences are safe to ignore is a judgement call, and a
+//!    permanent-delete path is the wrong place for one. Normalization is used
+//!    only to word the finding (`cross_folder_same_series` vs
+//!    `cross_folder_wrong_series`), never to permit a delete.
 //!
 //! 1. **Mismatch exclusion.** Some issues have >1 present file not because of
 //!    duplication but because distinct issues were wrongly matched to one
@@ -212,20 +227,112 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
         })
         .collect();
 
+    // Cross-folder check runs FIRST and outranks everything. A group whose
+    // files live under different series folders is not a duplicate group no
+    // matter how well the parsed numbers agree — and agreement is exactly what
+    // the failure mode produces. Live case: `The Authority (1999)/…004.cbz`
+    // and `The Authority (2008)/…004.cbr` both parse to 4, both bound to the
+    // 1999 series' issue #4, and both are real, different comics. 26 of the 28
+    // groups Tidy showed were this shape; clicking through would have deleted
+    // 26 distinct issues.
+    let folders: Vec<&str> = files
+        .iter()
+        .map(|f| top_level_folder(&f.path_relative))
+        .collect();
+    let cross_folder = spans_multiple_folders(&folders);
+
     let numbers: Vec<Option<String>> = files.iter().map(|f| f.parsed_number.clone()).collect();
-    let is_dup = classify_is_duplicate(&numbers);
+    let is_dup = !cross_folder && classify_is_duplicate(&numbers);
     let suggested_keep_file_id = if is_dup { suggest_keep(&files) } else { None };
+
+    let kind = if cross_folder {
+        if folders_agree_on_series(&folders) {
+            "cross_folder_same_series"
+        } else {
+            "cross_folder_wrong_series"
+        }
+    } else if is_dup {
+        "duplicate"
+    } else {
+        "mismatch"
+    };
 
     DupGroup {
         issue_id: rows[0].issue_id,
         series_id: rows[0].series_id,
         series_title: rows[0].series_title.clone(),
         issue_number: rows[0].issue_number.clone(),
-        kind: if is_dup { "duplicate" } else { "mismatch" },
+        kind,
         suggested_keep_file_id,
         issue_options: Vec::new(),
         files,
     }
+}
+
+// -------- cross-folder detection --------
+
+/// The first path component — the series folder a file lives under.
+/// Root-level files (no separator) have no series folder and yield `""`,
+/// which compares unequal to any real folder and so is treated as its own
+/// location. That is the safe direction: it can only suppress a delete.
+fn top_level_folder(path_relative: &str) -> &str {
+    path_relative
+        .split('/')
+        .next()
+        .filter(|first| *first != path_relative)
+        .unwrap_or("")
+}
+
+/// Strict, byte-exact comparison of raw folder names. Deliberately not
+/// normalized: this decides whether the delete button exists at all, and any
+/// normalization is a rule about which differences are safe to ignore — a
+/// judgement that has no place on a permanent-delete path. Two folders whose
+/// names differ in any way are two locations.
+fn spans_multiple_folders(folders: &[&str]) -> bool {
+    folders.windows(2).any(|w| w[0] != w[1])
+}
+
+/// Whether differing folder names still describe the same series — used ONLY
+/// to choose wording, never to permit a delete.
+///
+/// Same series iff the titles normalize equal AND their years are compatible
+/// (equal, or at least one folder carries no year). The year test is what
+/// separates the benign case from the dangerous one, and dropping it would
+/// invert them: `Drifter` vs `Drifter (2014)` is one series stored under two
+/// folder names, while `The Authority (1999)` vs `The Authority (2008)` is two
+/// different comics whose titles normalize identically.
+///
+/// Errs toward "wrong series" when unsure. Over-warning on a group whose
+/// delete button is already suppressed costs a second look; under-warning
+/// tells someone their two distinct volumes are the same book.
+fn folders_agree_on_series(folders: &[&str]) -> bool {
+    let first = folder_identity(folders[0]);
+    folders.iter().skip(1).all(|f| {
+        let other = folder_identity(f);
+        first.0 == other.0 && (first.1 == other.1 || first.1.is_none() || other.1.is_none())
+    })
+}
+
+/// Split a series folder name into (normalized title, volume year).
+///
+/// The year must come off before normalizing: `normalize_title` drops the
+/// parentheses but keeps the digits as a token, so `Drifter (2014)` would
+/// normalize to `drifter 2014` and never match `drifter`.
+fn folder_identity(folder: &str) -> (String, Option<i32>) {
+    let trimmed = folder.trim_end();
+    let (title, year) = match trimmed.rfind('(') {
+        Some(open) if trimmed.ends_with(')') => {
+            let inner = &trimmed[open + 1..trimmed.len() - 1];
+            match inner.parse::<i32>() {
+                Ok(y) => (&trimmed[..open], Some(y)),
+                // Parenthesised but not a year (`Ultramega (Deluxe)`) — leave
+                // it in the title, it is part of how the folder is named.
+                Err(_) => (trimmed, None),
+            }
+        }
+        _ => (trimmed, None),
+    };
+    (longbox_core::normalize_title(title), year)
 }
 
 // -------- suggested corrections (mismatch groups) --------
@@ -492,6 +599,24 @@ async fn resolve_one(
             "keep_file_id is not one of this issue's present files",
         ));
     }
+    // Cross-folder refusal, re-derived here rather than trusted from the
+    // client's `kind`. This check must live on the write path, not just in the
+    // GET payload: the list response is a hint, and a delete that is only
+    // prevented by the UI is not prevented at all.
+    //
+    // It also has to come BEFORE the number check, because the dangerous case
+    // passes the number check — files from two volumes of one title parse to
+    // the same issue number and look like textbook duplicates.
+    let folders: Vec<&str> = present
+        .iter()
+        .map(|f| top_level_folder(&f.path_relative))
+        .collect();
+    if spans_multiple_folders(&folders) {
+        return Ok(refuse(
+            "present files span more than one series folder — a wrong-series match, not a duplicate; refusing to delete",
+        ));
+    }
+
     let numbers: Vec<Option<String>> = present
         .iter()
         .map(|f| parse_filename_number(&f.path_relative, patterns))
@@ -1058,5 +1183,151 @@ mod tests {
             cand(2, "x/b.cbz", 900, true, false),
         ];
         assert_eq!(suggest_keep(&files), Some(2));
+    }
+
+    // -------- cross-folder guard --------
+
+    fn row(file_id: i64, path: &str) -> DuplicateFileCandidate {
+        DuplicateFileCandidate {
+            issue_id: 500,
+            series_id: 1076,
+            series_title: "The Authority".to_owned(),
+            issue_number: "4".to_owned(),
+            file_id,
+            path_relative: path.to_owned(),
+            size_bytes: 50_000_000,
+            status: "owned".to_owned(),
+            library_root_id: 1,
+        }
+    }
+
+    #[test]
+    fn top_level_folder_extraction() {
+        assert_eq!(top_level_folder("Saga (2012)/Saga 001.cbz"), "Saga (2012)");
+        assert_eq!(top_level_folder("a/b/c.cbz"), "a");
+        // No folder at all — its own location, never equal to a real folder.
+        assert_eq!(top_level_folder("loose.cbz"), "");
+    }
+
+    /// The live failure this guard exists for. Both files parse to issue 4,
+    /// both are bound to the 1999 series' issue #4, and they are different
+    /// comics. Number agreement is what makes it dangerous, so the group must
+    /// be refused on folder evidence alone.
+    #[test]
+    fn two_volumes_of_one_title_are_never_a_deletable_duplicate() {
+        let rows = vec![
+            row(1, "The Authority (1999)/The Authority (1999) 004.cbz"),
+            row(2, "The Authority (2008)/The Authority 004 (2009) (Digital).cbr"),
+        ];
+        let g = build_one_group(&rows, &[]);
+        assert_eq!(g.kind, "cross_folder_wrong_series");
+        assert_eq!(
+            g.suggested_keep_file_id, None,
+            "a cross-folder group must never pre-select a file to keep"
+        );
+    }
+
+    #[test]
+    fn same_series_under_two_folder_names_is_labelled_as_such() {
+        // One series, two folder spellings — benign, but still not deletable.
+        let rows = vec![
+            row(1, "Drifter/Drifter 002.cbz"),
+            row(2, "Drifter (2014)/Drifter 002.cbz"),
+        ];
+        let g = build_one_group(&rows, &[]);
+        assert_eq!(g.kind, "cross_folder_same_series");
+        assert_eq!(g.suggested_keep_file_id, None);
+    }
+
+    #[test]
+    fn leading_article_difference_still_reads_as_one_series() {
+        let rows = vec![
+            row(1, "The Holy Roller/x 001.cbz"),
+            row(2, "Holy Roller (2024)/x 001.cbz"),
+        ];
+        assert_eq!(build_one_group(&rows, &[]).kind, "cross_folder_same_series");
+    }
+
+    /// A number-parsing pattern, so the duplicate path can actually be
+    /// reached — with no patterns nothing parses and every group degrades to
+    /// `mismatch`, which would make a "still a duplicate" assertion vacuous.
+    fn number_pattern() -> Vec<ParsingPattern> {
+        vec![ParsingPattern {
+            id: 1,
+            name: "test".to_owned(),
+            pattern: r"^(?P<series>[A-Za-z ]+?)\s+(?P<number>\d+).*\.(?i:cbz|cbr)$".to_owned(),
+            priority: 1,
+            enabled: true,
+        }]
+    }
+
+    #[test]
+    fn a_genuine_single_folder_duplicate_still_resolves_normally() {
+        // The guard must not swallow the case the feature exists to handle.
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Saga (2012)/Saga 001.cbz"),
+            row(2, "Saga (2012)/Saga 001 copy.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats);
+        assert_eq!(
+            g.files.iter().filter(|f| f.parsed_number.is_some()).count(),
+            2,
+            "both filenames must parse, or this test proves nothing"
+        );
+        assert_eq!(g.kind, "duplicate");
+        assert!(g.suggested_keep_file_id.is_some());
+    }
+
+    /// Number agreement must not rescue a cross-folder group — this is the
+    /// precise combination that made the Authority groups look deletable.
+    #[test]
+    fn agreeing_numbers_do_not_override_the_folder_guard() {
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Authority A/Authority 004.cbz"),
+            row(2, "Authority B/Authority 004.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats);
+        assert_eq!(
+            g.files.iter().filter(|f| f.parsed_number.is_some()).count(),
+            2,
+            "both numbers parse and agree"
+        );
+        assert!(
+            g.kind.starts_with("cross_folder"),
+            "agreeing numbers must not make a cross-folder group deletable, got {}",
+            g.kind
+        );
+        assert_eq!(g.suggested_keep_file_id, None);
+    }
+
+    #[test]
+    fn folder_identity_splits_title_from_volume_year() {
+        assert_eq!(folder_identity("Drifter (2014)"), ("drifter".into(), Some(2014)));
+        assert_eq!(folder_identity("Drifter"), ("drifter".into(), None));
+        assert_eq!(
+            folder_identity("The Authority (1999)"),
+            ("authority".into(), Some(1999))
+        );
+        // Parenthesised non-year stays part of the title.
+        assert_eq!(
+            folder_identity("Ultramega (Deluxe)"),
+            ("ultramega deluxe".into(), None)
+        );
+    }
+
+    #[test]
+    fn same_title_different_years_is_not_the_same_series() {
+        // The inversion this test guards: strip the year naively and these
+        // two normalize identically, turning the single most dangerous case
+        // into a reassuring "same series" label.
+        assert!(!folders_agree_on_series(&[
+            "The Authority (1999)",
+            "The Authority (2008)"
+        ]));
+        // A missing year is compatible with any year — one folder simply
+        // wasn't named with one.
+        assert!(folders_agree_on_series(&["Drifter", "Drifter (2014)"]));
     }
 }

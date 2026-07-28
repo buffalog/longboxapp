@@ -24,7 +24,16 @@ export interface DupGroup {
   series_id: number;
   series_title: string;
   issue_number: string;
-  kind: 'duplicate' | 'mismatch';
+  /**
+   * `duplicate` — same folder, numbers agree; the only deletable kind.
+   * `mismatch` — numbers disagree; distinct issues merged onto one record.
+   * `cross_folder_*` — files span more than one series folder, so they are
+   * never duplicates however well the numbers agree. `wrong_series` means the
+   * folders name different series or different volume years; `same_series`
+   * means one series stored under two folder spellings. Neither is deletable;
+   * the distinction only changes the wording.
+   */
+  kind: 'duplicate' | 'mismatch' | 'cross_folder_same_series' | 'cross_folder_wrong_series';
   suggested_keep_file_id: number | null;
   /** Every issue in the series — the override list for a mismatch group. */
   issue_options: IssueOption[];

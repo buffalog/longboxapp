@@ -212,9 +212,9 @@ async fn resolve_deletes_losers_on_disk_and_in_db_keeps_chosen() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Saga", "1").await;
     let keep = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let loser = seed_file(&app, issue, "Saga (dup)/Saga 1.cbr", true, 80_000_000, true).await;
+    let loser = seed_file(&app, issue, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
     assert!(on_disk(&app, "Saga/Saga 1.cbz"));
-    assert!(on_disk(&app, "Saga (dup)/Saga 1.cbr"));
+    assert!(on_disk(&app, "Saga/Saga 1.cbr"));
 
     let resp = app
         .request(json_request(
@@ -232,7 +232,7 @@ async fn resolve_deletes_losers_on_disk_and_in_db_keeps_chosen() {
 
     // Loser: gone from disk AND DB. Keeper: both intact.
     assert!(
-        !on_disk(&app, "Saga (dup)/Saga 1.cbr"),
+        !on_disk(&app, "Saga/Saga 1.cbr"),
         "loser file must be deleted"
     );
     assert!(
@@ -272,7 +272,7 @@ async fn resolve_refuses_when_keep_is_not_a_candidate() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Saga", "1").await;
     let f1 = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let f2 = seed_file(&app, issue, "Saga (dup)/Saga 1.cbr", true, 80_000_000, true).await;
+    let f2 = seed_file(&app, issue, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
 
     // keep_file_id 999999 is not one of this issue's files.
     let resp = app
@@ -286,7 +286,7 @@ async fn resolve_refuses_when_keep_is_not_a_candidate() {
     assert_eq!(r["status"], "refused");
     assert!(r["reason"].as_str().unwrap().contains("keep_file_id"));
     // Nothing deleted, on disk or in DB.
-    assert!(on_disk(&app, "Saga/Saga 1.cbz") && on_disk(&app, "Saga (dup)/Saga 1.cbr"));
+    assert!(on_disk(&app, "Saga/Saga 1.cbz") && on_disk(&app, "Saga/Saga 1.cbr"));
     assert!(db_row_exists(&app, f1).await && db_row_exists(&app, f2).await);
 }
 
@@ -344,6 +344,74 @@ async fn resolve_refuses_mismatched_issue_numbers() {
     assert!(db_row_exists(&app, f1).await && db_row_exists(&app, f2).await);
 }
 
+/// The live data-loss bug, end to end.
+///
+/// Two volumes of "The Authority" each have a #4. The matcher bound both onto
+/// the 1999 series' issue #4, and because both filenames parse to 4 the group
+/// passed every guard that existed and presented as a textbook duplicate with
+/// a "Delete 1 other" button. 26 of the 28 groups on the live library were
+/// this shape.
+///
+/// The refusal has to hold on the WRITE path, not just in the GET payload — a
+/// delete prevented only by the UI is not prevented.
+#[tokio::test]
+async fn resolve_refuses_two_volumes_of_one_title_even_though_numbers_agree() {
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "The Authority", "4").await;
+    let v1999 = seed_file(
+        &app,
+        issue,
+        "The Authority (1999)/The Authority 4.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let v2008 = seed_file(
+        &app,
+        issue,
+        "The Authority (2008)/The Authority 4.cbr",
+        true,
+        80_000_000,
+        true,
+    )
+    .await;
+
+    // Detection refuses to call it a duplicate and offers no keep.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(body["groups"][0]["kind"], "cross_folder_wrong_series");
+    assert_eq!(
+        body["groups"][0]["suggested_keep_file_id"],
+        serde_json::Value::Null
+    );
+
+    // And a hand-rolled POST — bypassing the UI entirely — is refused too.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{v1999}}}]}}"#),
+        ))
+        .await;
+    let r = &response_json(resp).await["results"][0];
+    assert_eq!(r["status"], "refused");
+    assert!(r["reason"]
+        .as_str()
+        .unwrap()
+        .contains("more than one series folder"));
+
+    // Both comics survive, on disk and in the catalog.
+    assert!(
+        on_disk(&app, "The Authority (1999)/The Authority 4.cbz")
+            && on_disk(&app, "The Authority (2008)/The Authority 4.cbr"),
+        "neither volume may be deleted"
+    );
+    assert!(db_row_exists(&app, v1999).await && db_row_exists(&app, v2008).await);
+}
+
 #[tokio::test]
 async fn resolve_refuses_group_with_fewer_than_two_present_files() {
     let app = build_test_app().await;
@@ -368,8 +436,8 @@ async fn resolve_deletes_all_losers_in_a_multi_copy_group() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Saga", "1").await;
     let keep = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let l1 = seed_file(&app, issue, "dup-a/Saga 1.cbr", true, 80_000_000, true).await;
-    let l2 = seed_file(&app, issue, "dup-b/Saga 1.cb7", true, 70_000_000, true).await;
+    let l1 = seed_file(&app, issue, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
+    let l2 = seed_file(&app, issue, "Saga/Saga 1.cb7", true, 70_000_000, true).await;
 
     let resp = app
         .request(json_request(
@@ -392,8 +460,8 @@ async fn resolve_deletes_all_losers_in_a_multi_copy_group() {
     assert_eq!(r["failed"].as_array().unwrap().len(), 0);
 
     // Both losers gone from disk AND DB; keeper fully intact.
-    assert!(!on_disk(&app, "dup-a/Saga 1.cbr") && !db_row_exists(&app, l1).await);
-    assert!(!on_disk(&app, "dup-b/Saga 1.cb7") && !db_row_exists(&app, l2).await);
+    assert!(!on_disk(&app, "Saga/Saga 1.cbr") && !db_row_exists(&app, l1).await);
+    assert!(!on_disk(&app, "Saga/Saga 1.cb7") && !db_row_exists(&app, l2).await);
     assert!(on_disk(&app, "Saga/Saga 1.cbz") && db_row_exists(&app, keep).await);
 }
 
@@ -406,7 +474,7 @@ async fn resolve_refuses_to_delete_a_non_contained_loser_path() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Saga", "1").await;
     let keep = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let evil = seed_file(&app, issue, "../Saga 1.cbr", true, 80_000_000, false).await;
+    let evil = seed_file(&app, issue, "Saga/../../Saga 1.cbr", true, 80_000_000, false).await;
 
     let resp = app
         .request(json_request(
@@ -686,7 +754,7 @@ async fn correct_allows_a_target_whose_occupant_agrees_on_the_number() {
     seed_file(
         &app,
         issues[1],
-        "backup/Ferocious 002.cbr",
+        "Ferocious/Ferocious 2.cbr",
         true,
         80_000_000,
         true,
@@ -764,7 +832,7 @@ async fn resolve_batch_mixes_resolved_and_refused_without_cross_contamination() 
     // Issue 1: a clean duplicate.
     let dup = seed_series_issue(&app, "Saga", "1").await;
     let keep = seed_file(&app, dup, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let loser = seed_file(&app, dup, "dup/Saga 1.cbr", true, 80_000_000, true).await;
+    let loser = seed_file(&app, dup, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
     // Issue 2: a mismatch (distinct issues).
     let mism = seed_series_issue(&app, "Ferocious", "1").await;
     let m1 = seed_file(
@@ -800,7 +868,7 @@ async fn resolve_batch_mixes_resolved_and_refused_without_cross_contamination() 
     // neither affects the other.
     assert_eq!(results[0]["status"], "resolved");
     assert_eq!(results[1]["status"], "refused");
-    assert!(!on_disk(&app, "dup/Saga 1.cbr") && !db_row_exists(&app, loser).await);
+    assert!(!on_disk(&app, "Saga/Saga 1.cbr") && !db_row_exists(&app, loser).await);
     assert!(db_row_exists(&app, keep).await);
     assert!(db_row_exists(&app, m1).await && db_row_exists(&app, m2).await);
     assert!(
