@@ -11,7 +11,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use longbox_db::{
-    issue_repo, library_root_repo, series_repo, NewIssue, NewLibraryRoot, NewSeries, Pool,
+    file_repo, issue_repo, library_root_repo, series_repo, NewIssue, NewLibraryRoot, NewSeries,
+    Pool,
 };
 use longbox_postprocess::processor::{self, Outcome};
 use longbox_postprocess::PendingInterventionsCache;
@@ -583,6 +584,65 @@ async fn imports_owned_cbr_converting_to_cbz() {
     let xml = read_cbz_entry(&target, "ComicInfo.xml").expect("ComicInfo.xml missing");
     assert!(xml.contains("<Series>Saga</Series>"));
     assert!(xml.contains("<Web>https://comicvine.gamespot.com/issue/4000-364354/</Web>"));
+}
+
+/// The catalogued size must describe the file that actually landed in the
+/// library, not the watch-folder source it was built from.
+///
+/// CBR is the case that makes the gap unmissable: the source is RAR, the
+/// import decompresses every entry and recompresses it as a deflated ZIP, and
+/// two metadata documents are injected. Nothing about the source's byte count
+/// survives that. Duplicate detection groups by size before comparing content,
+/// so a row carrying its source's size can never be grouped with its true twin.
+#[tokio::test]
+async fn catalogs_post_rewrite_size_not_source_size_for_cbr() {
+    let f = seed_basic_fixture().await;
+
+    let source = f._watch.path().join("Saga 001.cbr");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-rar5.cbr");
+    std::fs::copy(&fixture, &source).unwrap();
+    let source_size = std::fs::metadata(&source).unwrap().len() as i64;
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    filetime::set_file_mtime(&source, filetime::FileTime::from_system_time(earlier)).ok();
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let (target, file_id) = match outcome {
+        Outcome::Imported {
+            target, file_id, ..
+        } => (target, file_id),
+        other => panic!("expected Imported, got {other:?}"),
+    };
+
+    let on_disk_size = std::fs::metadata(&target).unwrap().len() as i64;
+    let row = file_repo::find_by_id(&f.db, file_id)
+        .await
+        .unwrap()
+        .expect("imported row");
+
+    assert_eq!(
+        row.size_bytes, on_disk_size,
+        "catalogued size must equal the file on disk after RAR->ZIP rewrite"
+    );
+    // Guard against the assertion passing by coincidence: if the transcode
+    // happened to be size-neutral the test would prove nothing.
+    assert_ne!(
+        on_disk_size, source_size,
+        "fixture no longer exercises a size delta; this test would be vacuous"
+    );
+    assert_ne!(
+        row.size_bytes, source_size,
+        "catalogued the watch-folder source's size instead of the library file's"
+    );
 }
 
 #[tokio::test]

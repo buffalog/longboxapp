@@ -622,6 +622,39 @@ async fn import_as_owned(
         .to_string_lossy()
         .into_owned();
 
+    // Re-stat AFTER the rewrite. `size` / `mtime` describe the file in the
+    // watch folder, and the file that just landed in the library is not that
+    // file: ComicInfo.xml and MetronInfo.xml were injected, and a CBR source
+    // was decompressed and recompressed as a CBZ — a large delta, not a
+    // rounding error. Cataloguing the source's numbers records metadata for
+    // bytes that no longer exist anywhere.
+    //
+    // That matters beyond tidiness. Duplicate detection groups files by size
+    // before comparing content, so a row carrying its source's size never
+    // lands in the same group as its true twin and the duplicate is never
+    // found — blinding the detector precisely where new duplicates enter the
+    // library, since Phase B import is how they get here.
+    //
+    // A stat failure on a file we just wrote successfully is strange but not
+    // worth turning into an orphan: returning early here would leave the file
+    // on disk with no catalog row at all. Fall back to the source values,
+    // loudly, and let the next scan correct them.
+    let (size, mtime) = match std::fs::metadata(&target_abs) {
+        Ok(m) => (
+            i64::try_from(m.len()).unwrap_or(i64::MAX),
+            m.modified().map(OffsetDateTime::from).unwrap_or(mtime),
+        ),
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_postprocess",
+                path = %target_abs.display(),
+                error = %e,
+                "phase_b.post_rewrite_stat_failed"
+            );
+            (size, mtime)
+        }
+    };
+
     // Pull-engine attribution: a file whose (series, issue) has an
     // in-flight `pull_attempt` was auto-downloaded by the Step 6 pull
     // engine — catalogue it `pull_list` and settle the attempt(s).

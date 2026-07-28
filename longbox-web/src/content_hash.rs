@@ -252,6 +252,18 @@ fn hash_file(path: &Path) -> Result<Option<Observed>, std::io::Error> {
         return Ok(None);
     }
 
+    // Non-unix has no stable inode identity, so this check cannot be written
+    // portably — and letting it compile out silently would quietly restore the
+    // atomic-replace hole on that target while every test still passed. Fail
+    // at build time instead. LongBox ships as a Linux container and is
+    // developed on macOS; if a third target ever appears, this is a decision
+    // to make deliberately, not to inherit.
+    #[cfg(not(unix))]
+    compile_error!(
+        "content_hash::hash_file needs inode identity to detect atomic replace; \
+         port the check before building for a non-unix target"
+    );
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
