@@ -543,3 +543,150 @@ async fn a_failed_file_is_explained_not_just_counted() {
         "nothing failed, so nothing is explained"
     );
 }
+
+// -------- class (b): disk/DB reconciliation --------
+
+/// Seed a `files` row with a caller-chosen `is_present`, optionally writing
+/// the file. The two are deliberately independent so a fixture can make the
+/// catalog DISAGREE with disk — which is the entire subject of this class.
+async fn seed_row(app: &TestApp, rel: &str, is_present: bool, write: bool) -> i64 {
+    if write {
+        let full = app.library_path().join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, b"PK\x03\x04 not really a zip, never opened here").unwrap();
+    }
+    let now = {
+        let n = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(n.date(), n.time())
+    };
+    file_repo::insert(
+        &app.state.db,
+        NewFile {
+            issue_id: None,
+            library_root_id: app.library_root_id,
+            path_relative: rel.into(),
+            // Deliberately absurd: a catalog size no file here has. Any code
+            // path that reads this instead of stat-ing fails loudly.
+            size_bytes: 999_000_000,
+            mtime: now,
+            last_scanned_at: now,
+            match_method: "test".into(),
+            match_confidence: 0.0,
+            status: "unmatched".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present,
+            last_seen_at: now,
+            matched_at: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// The class exists to find disagreement, so the fixture manufactures every
+/// kind of disagreement at once. A fixture where catalog and disk agree would
+/// pass against an implementation that simply returned empty lists.
+#[tokio::test]
+async fn reconciliation_finds_each_kind_of_disagreement() {
+    let app = build_test_app().await;
+
+    // Agrees: row says present, file is there. Must appear in nothing.
+    seed_row(&app, "Saga (2012)/Saga 001.cbz", true, true).await;
+    // Ghost: row insists it is present, nothing on disk.
+    seed_row(&app, "Saga (2012)/Saga 002.cbz", true, false).await;
+    // Drift: row says absent, file is right there.
+    seed_row(&app, "Saga (2012)/Saga 003.cbz", false, true).await;
+    // Orphan: on disk, no row at all.
+    let orphan = app.library_path().join("Saga (2012)/Saga 004.cbz");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, b"orphaned").unwrap();
+
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/library/integrity/reconciliation",
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+
+    let list = |k: &str| -> Vec<String> {
+        body[k]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(list("orphans"), vec!["Saga (2012)/Saga 004.cbz"]);
+    assert_eq!(list("ghosts"), vec!["Saga (2012)/Saga 002.cbz"]);
+    assert_eq!(
+        list("present_but_marked_absent"),
+        vec!["Saga (2012)/Saga 003.cbz"]
+    );
+
+    // Provenance turns the counts into a measurement.
+    assert_eq!(body["provenance"]["files_seen"], 3, "three files on disk");
+    assert_eq!(
+        body["provenance"]["rows_compared"], 2,
+        "two rows claim to be present"
+    );
+    assert_eq!(
+        body["provenance"]["unreadable"].as_array().unwrap().len(),
+        0
+    );
+    assert!(body["provenance"]["root"].as_str().unwrap().len() > 1);
+}
+
+/// A clean library must report zero AND say it looked. Zero without
+/// provenance is indistinguishable from a walk that never ran.
+#[tokio::test]
+async fn a_clean_library_reports_zero_as_a_measurement() {
+    let app = build_test_app().await;
+    seed_row(&app, "Saga (2012)/Saga 001.cbz", true, true).await;
+
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/library/integrity/reconciliation",
+        ))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(body["orphans"].as_array().unwrap().len(), 0);
+    assert_eq!(body["ghosts"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        body["provenance"]["files_seen"], 1,
+        "zero findings only mean something if the walk saw the library"
+    );
+}
+
+/// The reconciler must classify exactly what the scanner would catalogue.
+/// A second walker with its own rules turns every disagreement about what
+/// counts as a comic into a permanent false orphan — `.cb7`, dotfiles and
+/// stray non-comics are all skipped by `longbox_scanner::walk_library`.
+#[tokio::test]
+async fn files_the_scanner_ignores_are_not_orphans() {
+    let app = build_test_app().await;
+    let dir = app.library_path().join("Saga (2012)");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in [".hidden.cbz", "notes.txt", "archive.cb7", "Thumbs.db"] {
+        std::fs::write(dir.join(name), b"x").unwrap();
+    }
+
+    let resp = app
+        .request(empty_request(
+            "GET",
+            "/api/library/integrity/reconciliation",
+        ))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["orphans"].as_array().unwrap().len(),
+        0,
+        "non-comics must not be reported as orphans: {}",
+        body["orphans"]
+    );
+    assert_eq!(body["provenance"]["files_seen"], 0);
+}

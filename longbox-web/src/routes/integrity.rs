@@ -39,6 +39,8 @@ use axum::routing::{get, post, MethodRouter};
 use axum::{Json, Router};
 use serde::Serialize;
 
+use longbox_db::library_root_repo;
+
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -76,6 +78,11 @@ fn route_table() -> Vec<(&'static str, MethodRouter<AppState>, Surface)> {
         (
             "/library/integrity/analyze/status",
             get(analyze_status),
+            Surface::ReadOnly,
+        ),
+        (
+            "/library/integrity/reconciliation",
+            get(reconciliation),
             Surface::ReadOnly,
         ),
     ]
@@ -193,6 +200,29 @@ async fn start_analyze(
     Ok((
         StatusCode::ACCEPTED,
         Json(StartAnalyzeResponse { status: "started" }),
+    ))
+}
+
+// -------- GET findings: disk/DB reconciliation --------
+
+/// Files on disk the catalog has never seen, and rows claiming a file that
+/// is not there.
+///
+/// Expected to be empty on a healthy library, which is exactly why the
+/// response carries `provenance`: a section rendering "0 problems" because
+/// the walk failed would be indistinguishable from one rendering it because
+/// the library is clean. `is_conclusive` says which.
+async fn reconciliation(
+    State(state): State<AppState>,
+) -> Result<Json<crate::integrity_scan::Reconciliation>, ApiError> {
+    let root = library_root_repo::find_by_id(&state.db, state.library_root_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "library_root",
+            id: state.library_root_id.to_string(),
+        })?;
+    Ok(Json(
+        crate::integrity_scan::reconcile(&state.db, state.library_root_id, &root.path).await?,
     ))
 }
 

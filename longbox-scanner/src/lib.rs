@@ -12,8 +12,13 @@ pub mod error;
 pub mod report;
 pub mod scanner;
 
-mod walker;
+/// Public so Library Integrity's disk/DB reconciliation can walk with the
+/// SAME rules the scanner catalogues by. Reimplementing the walk elsewhere
+/// would drift — a file the scanner skips but the reconciler sees becomes a
+/// permanent false "orphan".
+pub mod walker;
 
 pub use error::ScanError;
 pub use report::{ScanFileError, ScanReport};
 pub use scanner::{Scanner, ScannerConfig};
+pub use walker::{walk_library, DiscoveredFile};
