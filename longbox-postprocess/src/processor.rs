@@ -163,7 +163,11 @@ pub async fn process_one(
         .or_else(|| filename_parse.as_ref().and_then(|p| p.year));
 
     let candidates = find_candidates(db, &hint, year_hint).await?;
-    let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), &candidates);
+    // No folder-year evidence here: a watch-folder file sits in a download
+    // job folder, not a library series folder, so its parent declares nothing
+    // about which volume the comic belongs to. Passing it would be inventing
+    // evidence.
+    let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), None, &candidates);
 
     // Phase B owned-classification uses the live
     // `match_confidence_threshold` from settings (the same row the
@@ -419,7 +423,9 @@ async fn try_folder_match(
     // No ComicInfo passed — Tier 1 is explicitly folder-driven; the
     // file's embedded metadata gets a chance in Tier 2 if the
     // folder doesn't carry us home.
-    let match_result = match_file(None, Some(&folder_parse), &candidates);
+    // The job folder's year already arrives as the year hint via
+    // `folder_parse.year`; it is not a library series folder.
+    let match_result = match_file(None, Some(&folder_parse), None, &candidates);
     let status = classify_status(
         match_result.issue_id,
         match_result.confidence,

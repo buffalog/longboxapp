@@ -90,10 +90,11 @@ pub struct MatchResult {
 pub fn match_file(
     comic_info: Option<&ComicInfo>,
     filename_parse: Option<&ParsedFilename>,
+    folder_year: Option<i32>,
     candidates: &[Candidate],
 ) -> MatchResult {
-    let tier3 = tier3_filename(filename_parse, candidates);
-    match (tier2_comicinfo(comic_info, candidates), tier3) {
+    let tier3 = tier3_filename(filename_parse, folder_year, candidates);
+    match (tier2_comicinfo(comic_info, folder_year, candidates), tier3) {
         (Some((tier2, series2)), Some((tier3, series3))) => {
             if series2 == series3 && tier2.issue_id != tier3.issue_id {
                 MatchResult {
@@ -121,7 +122,11 @@ pub fn match_file(
 /// (Tier 3 lacking a year hint, not evidence of anything).
 type TierMatch = (MatchResult, i64);
 
-fn tier2_comicinfo(comic_info: Option<&ComicInfo>, candidates: &[Candidate]) -> Option<TierMatch> {
+fn tier2_comicinfo(
+    comic_info: Option<&ComicInfo>,
+    folder_year: Option<i32>,
+    candidates: &[Candidate],
+) -> Option<TierMatch> {
     let ci = comic_info?;
     let series_text = ci.series.as_deref()?;
     let number_text = ci.number.as_deref()?;
@@ -129,6 +134,7 @@ fn tier2_comicinfo(comic_info: Option<&ComicInfo>, candidates: &[Candidate]) -> 
         series_text,
         number_text,
         ci.year,
+        folder_year,
         candidates,
         // No ceiling for ComicInfo matches — they go up to 1.0.
         f64::INFINITY,
@@ -138,6 +144,7 @@ fn tier2_comicinfo(comic_info: Option<&ComicInfo>, candidates: &[Candidate]) -> 
 
 fn tier3_filename(
     filename_parse: Option<&ParsedFilename>,
+    folder_year: Option<i32>,
     candidates: &[Candidate],
 ) -> Option<TierMatch> {
     let fp = filename_parse?;
@@ -145,6 +152,7 @@ fn tier3_filename(
         &fp.series_title,
         &fp.number,
         fp.year,
+        folder_year,
         candidates,
         FILENAME_CONFIDENCE_CEILING,
         MatchMethod::FilenameRegex,
@@ -155,17 +163,19 @@ fn match_in_candidates(
     title_text: &str,
     number_text: &str,
     year_hint: Option<i32>,
+    folder_year: Option<i32>,
     candidates: &[Candidate],
     confidence_ceiling: f64,
     method: MatchMethod,
 ) -> Option<TierMatch> {
-    let (score, candidate) = best_candidate_match(title_text, year_hint, candidates)?;
-    let confidence = score.min(confidence_ceiling);
+    let pick = best_candidate_match(title_text, year_hint, folder_year, candidates)?;
+    let confidence = pick.score.min(confidence_ceiling);
     if confidence < NEEDS_REVIEW_FLOOR {
         return None;
     }
     let needle = IssueNumber::new(number_text);
-    let issue = candidate
+    let issue = pick
+        .candidate
         .issues
         .iter()
         .find(|i| i.number.matches(&needle))?;
@@ -174,21 +184,59 @@ fn match_in_candidates(
             issue_id: Some(issue.id),
             method,
             confidence,
-            ambiguous: false,
+            // An unearned volume pick is flagged here, not confidence-clamped.
+            // Lowering confidence would only move the silent failure below a
+            // threshold; the flag makes a human look.
+            ambiguous: pick.ambiguous,
         },
-        candidate.series.id,
+        pick.candidate.series.id,
     ))
 }
 
+/// The winning candidate, plus whether the win was actually earned.
+struct Pick<'a> {
+    score: f64,
+    candidate: &'a Candidate,
+    /// True when several same-titled volumes remained tied after every
+    /// signal was spent, so the winner was decided by `series.id` order.
+    ambiguous: bool,
+}
+
 /// Score every candidate against `title_text` (after normalization), return
-/// the highest-scoring one. Tie-break: prefer candidates whose
-/// `series.start_year` equals `year_hint` (only on bit-equal scores, per the
-/// agreed rule). Final tie-break: lower `series.id` (first-added wins).
+/// the highest-scoring one.
+///
+/// Tie-breaks, in order: exact `folder_year` match, exact `year_hint` match,
+/// larger issue count, lower `series.id`.
+///
+/// **`folder_year` outranks `year_hint` deliberately.** Two volumes of one
+/// title score identically on title similarity, so the year decides — and the
+/// two years available are not equally trustworthy. A scene filename carries
+/// the RELEASE year while the folder carries the VOLUME year. Live evidence:
+/// 26 files in `The Authority (2008)/` are named `... 004 (2009) ...` because
+/// 2009 is when the digital edition shipped. Feeding 2009 matched no candidate
+/// (the volumes start 1999/2003/2008), so the year rung silently no-opped, the
+/// issue-count rung tied 29-to-29, and the decision fell to lower-id — which
+/// picked the 1999 volume, wrongly, 26 times out of 26. Every one of those
+/// files sits in a folder that names 2008 exactly.
+///
+/// **When same-titled volumes survive every rung, we abstain.** `series.id`
+/// order carries no information about which volume a file belongs to; it
+/// records which one the user happened to add first. Letting it decide a
+/// volume question at 0.9 confidence is how the Authority files were bound
+/// silently and wrongly. The result is flagged `ambiguous`, which
+/// [`crate::classify_status`] turns into `needs_review` — visible, instead of
+/// a confident guess.
+///
+/// The abstention replaces ONLY the id rung. Issue count still decides, and
+/// deliberately so: it is weak evidence but it is evidence, added for a live
+/// bug where a 1-issue stub kept stealing files from a 24-issue catalog entry.
+/// Abstaining there would strand those files in `/watch/` again.
 fn best_candidate_match<'a>(
     title_text: &str,
     year_hint: Option<i32>,
+    folder_year: Option<i32>,
     candidates: &'a [Candidate],
-) -> Option<(f64, &'a Candidate)> {
+) -> Option<Pick<'a>> {
     if candidates.is_empty() {
         return None;
     }
@@ -216,6 +264,13 @@ fn best_candidate_match<'a>(
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(Ordering::Equal)
+            // Folder year first: it names the volume, where a filename year
+            // often names the release.
+            .then_with(|| {
+                let a_f = folder_year.is_some() && a.1.series.start_year == folder_year;
+                let b_f = folder_year.is_some() && b.1.series.start_year == folder_year;
+                b_f.cmp(&a_f)
+            })
             .then_with(|| {
                 let a_year = year_hint.is_some() && a.1.series.start_year == year_hint;
                 let b_year = year_hint.is_some() && b.1.series.start_year == year_hint;
@@ -238,7 +293,48 @@ fn best_candidate_match<'a>(
             .then_with(|| a.1.series.id.cmp(&b.1.series.id))
     });
 
-    scored.into_iter().next()
+    let (score, candidate) = scored.first().copied()?;
+
+    // Did anything actually pick this winner, or did id order?
+    //
+    // Only same-titled candidates can be confused for each other — everything
+    // else already lost on similarity. Note that a shared normalized title
+    // means an identical similarity score by construction, so this set is
+    // exactly the top tie group whenever a collision exists.
+    let key = normalize_title(&candidate.series.sort_title);
+    let rivals: Vec<&Candidate> = scored
+        .iter()
+        .map(|(_, c)| *c)
+        .filter(|c| normalize_title(&c.series.sort_title) == key)
+        .collect();
+
+    let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, year_hint, folder_year);
+
+    Some(Pick {
+        score,
+        candidate,
+        ambiguous,
+    })
+}
+
+/// Whether any signal uniquely selects one of several same-titled volumes.
+/// Each rung must pick exactly one: two rows sharing the winning year, or
+/// tying on issue count, decide nothing.
+fn decided_by_evidence(
+    rivals: &[&Candidate],
+    year_hint: Option<i32>,
+    folder_year: Option<i32>,
+) -> bool {
+    let uniquely_matches = |year: Option<i32>| {
+        year.is_some() && rivals.iter().filter(|c| c.series.start_year == year).count() == 1
+    };
+    if uniquely_matches(folder_year) || uniquely_matches(year_hint) {
+        return true;
+    }
+    let most = rivals.iter().map(|c| c.issues.len()).max().unwrap_or(0);
+    // A single clear leader on catalog size still counts as evidence; a tie
+    // leaves only `series.id`, which is not evidence at all.
+    most > 0 && rivals.iter().filter(|c| c.issues.len() == most).count() == 1
 }
 
 #[cfg(test)]
@@ -281,7 +377,7 @@ mod tests {
             year: Some(2003),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(r.confidence >= DEFAULT_MATCH_THRESHOLD);
@@ -296,7 +392,7 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -323,7 +419,7 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        let r = match_file(Some(&ci), Some(&parsed), &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
     }
@@ -337,7 +433,7 @@ mod tests {
             number: Some("99".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
     }
@@ -354,7 +450,7 @@ mod tests {
             year: Some(2014),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(
             r.issue_id,
             Some(20),
@@ -373,8 +469,146 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(r.issue_id, Some(10), "lower-id wins when no year hint");
+    }
+
+    // -------- volume disambiguation by folder year --------
+
+    /// The three real `sort_title = "authority"` rows, with their real issue
+    /// counts. 1076 and 1078 tie at 29, which is what made the old chain fall
+    /// all the way through to `series.id`.
+    fn authority_volumes() -> Vec<Candidate> {
+        [(1076i64, 1999i32, 29), (1077, 2003, 15), (1078, 2008, 29)]
+            .into_iter()
+            .map(|(id, year, n)| {
+                let issues = (1..=n).map(|k| issue(id * 1000 + k, id, &k.to_string())).collect();
+                candidate(series(id, "The Authority", Some(year)), issues)
+            })
+            .collect()
+    }
+
+    /// `The Authority (2008)/The Authority 004 (2009) (Digital)...cbr` — the
+    /// filename's 2009 is the digital RELEASE year and matches no volume.
+    fn authority_filename() -> ParsedFilename {
+        ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "004".into(),
+            volume: None,
+            year: Some(2009),
+            title: None,
+            pattern_id: 10,
+        }
+    }
+
+    /// The live bug, exactly: 26 files bound to the 1999 volume because the
+    /// filename year matched nothing and `series.id` broke the tie.
+    #[test]
+    fn folder_year_picks_the_right_volume_when_the_filename_year_is_a_release_year() {
+        let candidates = authority_volumes();
+        let fp = authority_filename();
+
+        // Without folder evidence the chain still exhausts itself — and now
+        // says so instead of silently picking the oldest volume.
+        let blind = match_file(None, Some(&fp), None, &candidates);
+        assert!(
+            blind.ambiguous,
+            "three tied volumes and nothing to separate them must abstain"
+        );
+
+        // With the folder's 2008 the answer is unambiguous.
+        let seeing = match_file(None, Some(&fp), Some(2008), &candidates);
+        assert_eq!(
+            seeing.issue_id,
+            Some(1078 * 1000 + 4),
+            "must bind to the 2008 volume's issue 4"
+        );
+        assert!(!seeing.ambiguous, "folder year earned the pick");
+    }
+
+    /// Folder year must outrank the filename's year, not merely supplement
+    /// it: here they name two different real volumes.
+    #[test]
+    fn folder_year_outranks_a_conflicting_filename_year() {
+        let mut candidates = authority_volumes();
+        // Give 1999 a start_year the filename names, so the two hints
+        // genuinely disagree about which volume is right.
+        candidates[0].series.start_year = Some(2009);
+        let r = match_file(None, Some(&authority_filename()), Some(2008), &candidates);
+        assert_eq!(
+            r.issue_id,
+            Some(1078 * 1000 + 4),
+            "the folder names the volume; the filename names the release"
+        );
+        assert!(!r.ambiguous);
+    }
+
+    #[test]
+    fn abstains_when_a_title_collision_has_no_folder_year_at_all() {
+        let mut fp = authority_filename();
+        fp.year = None;
+        let r = match_file(None, Some(&fp), None, &authority_volumes());
+        assert!(r.ambiguous, "no year anywhere, two 29-issue volumes → abstain");
+    }
+
+    #[test]
+    fn abstains_when_the_folder_year_matches_no_volume() {
+        let r = match_file(None, Some(&authority_filename()), Some(2011), &authority_volumes());
+        assert!(
+            r.ambiguous,
+            "a folder year naming no volume is not evidence for any of them"
+        );
+    }
+
+    /// The gate is strictly for collisions. A library with no same-titled
+    /// volumes must behave exactly as before, folder year or not.
+    #[test]
+    fn a_single_matching_series_is_never_ambiguous() {
+        let candidates = vec![candidate(
+            series(1, "Saga", Some(2012)),
+            vec![issue(10, 1, "1")],
+        )];
+        let fp = ParsedFilename {
+            series_title: "Saga".into(),
+            number: "1".into(),
+            volume: None,
+            year: Some(2099),
+            title: None,
+            pattern_id: 1,
+        };
+        for folder_year in [None, Some(1999), Some(2012)] {
+            let r = match_file(None, Some(&fp), folder_year, &candidates);
+            assert_eq!(r.issue_id, Some(10), "folder_year={folder_year:?}");
+            assert!(!r.ambiguous, "no collision → no abstention");
+        }
+    }
+
+    /// Abstention replaces ONLY the `series.id` rung. Issue count is weak
+    /// evidence but it is evidence, added for a live bug where a 1-issue stub
+    /// stole files from a 24-issue catalog entry; abstaining there would
+    /// strand those files in /watch/ again.
+    #[test]
+    fn a_decisive_issue_count_still_resolves_a_collision() {
+        let stub = candidate(
+            series(381, "Sam and Twitch Case Files", Some(2025)),
+            vec![issue(10, 381, "1")],
+        );
+        let real = candidate(
+            series(918, "Sam and Twitch Case Files", Some(2024)),
+            (1..=24).map(|n| issue(100 + n, 918, &n.to_string())).collect(),
+        );
+        let ci = ComicInfo {
+            series: Some("Sam and Twitch Case Files".into()),
+            number: Some("23".into()),
+            year: Some(2026), // matches neither
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), None, None, &[stub, real]);
+        assert_eq!(r.issue_id, Some(123), "the 24-issue entry still wins");
+        assert!(
+            !r.ambiguous,
+            "a clear catalog-size leader is evidence, so this must not abstain"
+        );
     }
 
     #[test]
@@ -405,7 +639,7 @@ mod tests {
             year: Some(2026), // matches neither start_year
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         // The 24-issue series carries #23; the 1-issue stub does
         // not. Pre-fix this returned Unmatched (lower-id won,
         // didn't have #23); post-fix issue_id is the catalog #23.
@@ -439,7 +673,7 @@ mod tests {
             year: Some(2025), // matches start_year=2025 only
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(
             r.issue_id,
             Some(10),
@@ -456,7 +690,7 @@ mod tests {
             number: Some("001".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, &candidates);
+        let r = match_file(Some(&ci), None, None, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -474,7 +708,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), &candidates);
+        let r = match_file(None, Some(&parsed), None, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -494,7 +728,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), &[]);
+        let r = match_file(None, Some(&parsed), None, &[]);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
     }
@@ -511,7 +745,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), &candidates);
+        let r = match_file(None, Some(&parsed), None, &candidates);
         assert_eq!(r.method, MatchMethod::Unmatched);
     }
 
@@ -519,7 +753,7 @@ mod tests {
 
     #[test]
     fn no_match_when_both_inputs_are_none() {
-        let r = match_file(None, None, &[]);
+        let r = match_file(None, None, None, &[]);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert_eq!(r.confidence, 0.0);
     }
@@ -544,7 +778,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(Some(&ci), Some(&parsed), &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert!(
             r.confidence < FILENAME_CONFIDENCE_CEILING,
@@ -585,7 +819,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), &candidates);
+        let r = match_file(None, Some(&parsed), None, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -623,7 +857,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), &candidates);
+        let r = match_file(None, Some(&parsed), None, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -654,7 +888,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), &candidates);
+        let r = match_file(None, Some(&parsed), None, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -699,6 +933,7 @@ mod tests {
         let r = match_file(
             Some(&lying_comicinfo()),
             Some(&honest_filename("2")),
+            None,
             &ferocious(),
         );
         assert!(r.ambiguous, "tier2/tier3 disagreement must be flagged");
@@ -727,7 +962,7 @@ mod tests {
             year: Some(2025),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), Some(&honest_filename("2")), &ferocious());
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), None, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.issue_id, Some(8469));
         // Tier 2 still owns the result (uncapped confidence, ComicInfo method).
@@ -738,7 +973,7 @@ mod tests {
     #[test]
     fn tier3_no_parse_leaves_tier2_standing() {
         // Nothing to cross-check against — Tier 2's word is all we have.
-        let r = match_file(Some(&lying_comicinfo()), None, &ferocious());
+        let r = match_file(Some(&lying_comicinfo()), None, None, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.issue_id, Some(8468));
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
@@ -751,6 +986,7 @@ mod tests {
         let r = match_file(
             Some(&lying_comicinfo()),
             Some(&honest_filename("9")),
+            None,
             &ferocious(),
         );
         assert!(!r.ambiguous);
@@ -766,7 +1002,7 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), Some(&honest_filename("2")), &ferocious());
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), None, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(8469));
@@ -815,7 +1051,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(Some(&ci), Some(&parsed), &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
         assert_eq!(
             r.issue_id,
             Some(201),

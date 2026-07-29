@@ -1059,3 +1059,164 @@ async fn a_manual_pointer_survives_a_rescan() {
     );
     assert_eq!(after.status, "owned");
 }
+
+// -------- volume disambiguation by folder year --------
+
+/// Seed two volumes of one title, each carrying the given issue number.
+/// Returns `(old_volume_issue_id, new_volume_issue_id)`.
+async fn seed_two_authority_volumes(pool: &longbox_db::Pool, number: &str) -> (i64, i64) {
+    let mut ids = Vec::new();
+    for year in [1999, 2008] {
+        let s = longbox_db::series_repo::insert(
+            pool,
+            NewSeries {
+                cv_id: None,
+                metron_id: None,
+                title: "The Authority".into(),
+                sort_title: "authority".into(),
+                start_year: Some(year),
+                publisher: None,
+                description: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Equal issue counts, so catalog size cannot break the tie either —
+        // this is what made the live data fall through to series.id order.
+        let mut target = 0;
+        for n in 1..=3 {
+            let issue = issue_repo::insert(
+                pool,
+                longbox_db::NewIssue {
+                    series_id: s.id,
+                    cv_issue_id: None,
+                    metron_issue_id: None,
+                    number: n.to_string(),
+                    title: None,
+                    cover_date: None,
+                    summary: None,
+                    cover_url: None,
+                },
+            )
+            .await
+            .unwrap();
+            if n.to_string() == number {
+                target = issue.id;
+            }
+        }
+        ids.push(target);
+    }
+    (ids[0], ids[1])
+}
+
+/// End to end, through a real scan: the live Authority failure.
+///
+/// The filename's year is the digital RELEASE year and matches no volume;
+/// the folder's year is the VOLUME year and matches exactly one. Before this
+/// fix the year rung no-opped, the issue-count rung tied, and `series.id`
+/// order silently bound the file to the 1999 volume — 26 times out of 26.
+#[tokio::test]
+async fn scan_binds_to_the_volume_its_folder_names_not_the_lower_id() {
+    let tmp = TempDir::new().unwrap();
+    let path = "The Authority (2008)/The Authority 002 (2009) (Digital) (Li'l DR).cbz";
+    // No ComicInfo — the real files are untagged CBRs, which is why the
+    // matcher had nothing but the filename and the folder to go on.
+    write_cbz(&tmp.path().join(path), None);
+
+    let pool = fresh_pool().await;
+    let (old_volume, new_volume) = seed_two_authority_volumes(&pool, "2").await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let row = find_file(&pool, library_root_id, path).await;
+    assert_eq!(
+        row.issue_id,
+        Some(new_volume),
+        "must bind to the 2008 volume the folder names, not the 1999 one"
+    );
+    assert_ne!(row.issue_id, Some(old_volume));
+    assert_eq!(row.status, "owned", "an earned pick is not needs_review");
+}
+
+/// A folder with no year leaves two equally-sized volumes genuinely
+/// indistinguishable. The scanner must say so rather than pick by id order.
+#[tokio::test]
+async fn scan_abstains_when_a_title_collision_has_no_folder_year() {
+    let tmp = TempDir::new().unwrap();
+    let path = "The Authority/The Authority 002.cbz";
+    write_cbz(&tmp.path().join(path), None);
+
+    let pool = fresh_pool().await;
+    seed_two_authority_volumes(&pool, "2").await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let row = find_file(&pool, library_root_id, path).await;
+    assert_eq!(
+        row.status, "needs_review",
+        "an unearned volume pick must be visible, not silently owned"
+    );
+}
+
+/// The interaction that decides whether the one-time repair sticks.
+///
+/// After the 26 Authority files are relinked to the 2008 volume by hand, the
+/// next scan must leave them alone — even where the matcher, seeing a folder
+/// that names nothing, would otherwise abstain and drop them to needs_review.
+/// A repair that a nightly scan undoes is not a repair.
+#[tokio::test]
+async fn a_rescan_leaves_a_hand_relinked_file_on_its_volume() {
+    let tmp = TempDir::new().unwrap();
+    // Deliberately yearless: the matcher gets no folder evidence, so if the
+    // manual marker were ignored this file would land in needs_review.
+    let path = "The Authority/The Authority 002.cbz";
+    write_cbz(&tmp.path().join(path), None);
+
+    let pool = fresh_pool().await;
+    let (_old_volume, new_volume) = seed_two_authority_volumes(&pool, "2").await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    // Stand in for the relink action: re-point by hand, stamped manual.
+    let before = find_file(&pool, library_root_id, path).await;
+    let now = time::OffsetDateTime::now_utc();
+    file_repo::repoint_manual(
+        &pool,
+        before.id,
+        before.issue_id.unwrap(),
+        new_volume,
+        time::PrimitiveDateTime::new(now.date(), now.time()),
+    )
+    .await
+    .unwrap();
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let after = find_file(&pool, library_root_id, path).await;
+    assert_eq!(
+        after.issue_id,
+        Some(new_volume),
+        "a rescan must not undo a hand-made volume correction"
+    );
+    assert_eq!(after.match_method, "manual");
+    assert_eq!(
+        after.status, "owned",
+        "and must not demote it to needs_review by abstaining over it"
+    );
+}

@@ -157,9 +157,60 @@ fn format_issue_number(raw: &str) -> String {
     trimmed.to_string()
 }
 
+/// The volume year a series folder declares, from a root-relative file path.
+///
+/// This is the inverse of the naming convention above: `The Authority (2008)/
+/// The Authority 004 (2009) (Digital).cbr` declares volume year 2008. The
+/// distinction from the filename's year is the whole point — a scene filename
+/// carries the RELEASE year (2009, when the digital edition shipped) while the
+/// folder carries the VOLUME year (2008, when the run started). Only the
+/// latter identifies which volume a file belongs to.
+///
+/// `None` when the file is at the root, or the folder declares no year. A
+/// trailing parenthesised group that isn't a plain 4-digit year (`(Deluxe)`)
+/// is not a year.
+pub fn folder_volume_year(path_relative: &str) -> Option<i32> {
+    let folder = path_relative.split('/').next()?;
+    if folder == path_relative {
+        return None; // no folder component at all
+    }
+    let trimmed = folder.trim_end();
+    let open = trimmed.rfind('(')?;
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+    let inner = &trimmed[open + 1..trimmed.len() - 1];
+    if inner.len() != 4 || !inner.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    inner.parse::<i32>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_year_reads_the_volume_year_not_the_filename_year() {
+        // The live Authority case: folder says 2008, filename says 2009.
+        assert_eq!(
+            folder_volume_year(
+                "The Authority (2008)/The Authority 004 (2009) (Digital) (Li'l DR & Quinch).cbr"
+            ),
+            Some(2008)
+        );
+    }
+
+    #[test]
+    fn folder_year_is_none_when_absent_or_not_a_year() {
+        assert_eq!(folder_volume_year("Drifter/Drifter 002.cbz"), None);
+        assert_eq!(folder_volume_year("Ultramega (Deluxe)/x 001.cbz"), None);
+        // No folder component — a file sitting at the library root.
+        assert_eq!(folder_volume_year("loose.cbz"), None);
+        assert_eq!(folder_volume_year(""), None);
+        // Only the SERIES folder counts, not a nested one.
+        assert_eq!(folder_volume_year("Saga/sub (2012)/x.cbz"), None);
+    }
     use std::path::Path;
 
     // ----- happy path / full composition -----
