@@ -5,7 +5,22 @@
 //! different names/formats). This surfaces them and lets a human keep one
 //! copy and permanently delete the rest — file on disk AND catalog row.
 //!
-//! Two safety rails, because a bug here deletes real user files:
+//! Three safety rails, because a bug here deletes real user files:
+//!
+//! 0. **Cross-folder exclusion.** A group whose files live under different
+//!    series folders is never a duplicate group, whatever the parsed numbers
+//!    say — and in the failure mode that matters the numbers agree perfectly.
+//!    Two volumes of one title (`The Authority (1999)` and `(2008)`) have a #4
+//!    each; when the matcher binds both onto the 1999 series' issue #4 they
+//!    present as a textbook duplicate pair. 26 of the 28 groups this endpoint
+//!    surfaced on the live library were that shape, and resolving them would
+//!    have permanently deleted 26 distinct comics.
+//!
+//!    Folder comparison here is byte-exact, never normalized: deciding which
+//!    name differences are safe to ignore is a judgement call, and a
+//!    permanent-delete path is the wrong place for one. Normalization is used
+//!    only to word the finding (`cross_folder_same_series` vs
+//!    `cross_folder_wrong_series`), never to permit a delete.
 //!
 //! 1. **Mismatch exclusion.** Some issues have >1 present file not because of
 //!    duplication but because distinct issues were wrongly matched to one
@@ -104,6 +119,17 @@ struct DupCandidate {
     suspect_corrupt: bool,
     /// Lives under a `_unsorted/` staging path (less canonical).
     under_unsorted: bool,
+    /// The issue number this file's own filename names, when this series has
+    /// NO catalog record for it — e.g. a file parsing to #5 in a series whose
+    /// catalog stops at #4.
+    ///
+    /// A distinct, first-class state, NOT a confidence problem. The old UI
+    /// reported it as "no confident suggestion — your call" while instructing
+    /// the user to "move each stray file to the issue its filename says it
+    /// is", which is an instruction to do something impossible. The catalog
+    /// is simply missing the issue; the fix is to refresh the series from
+    /// ComicVine, not to make a judgement call.
+    missing_target_number: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -153,8 +179,15 @@ async fn list(
     let total = file_repo::count_duplicate_file_groups(&state.db).await?;
     let candidates = file_repo::duplicate_file_candidates_page(&state.db, per_page, offset).await?;
     let patterns = load_patterns(&state).await?;
+    let roots: HashMap<i64, String> = library_root_repo::list_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.path))
+        .collect();
+    let digests = validated_digests(&state, &roots, &candidates).await;
 
-    let mut groups = build_groups(candidates, &patterns);
+    let mut groups = build_groups(candidates, &patterns, &digests);
+    relabel_cross_folder_groups(&state, &mut groups).await?;
     annotate_suggestions(&state, &patterns, &mut groups).await?;
     Ok(Json(ListResponse {
         groups,
@@ -171,6 +204,7 @@ async fn list(
 fn build_groups(
     candidates: Vec<DuplicateFileCandidate>,
     patterns: &[ParsingPattern],
+    digests: Digests<'_>,
 ) -> Vec<DupGroup> {
     let mut groups: Vec<DupGroup> = Vec::new();
     // Rows arrive contiguous per issue_id (repo ORDER BY issue_id, id).
@@ -181,14 +215,136 @@ fn build_groups(
         while j < candidates.len() && candidates[j].issue_id == issue_id {
             j += 1;
         }
-        let rows = &candidates[i..j];
-        groups.push(build_one_group(rows, patterns));
+        groups.push(build_one_group(&candidates[i..j], patterns, &digests[i..j]));
         i = j;
     }
     groups
 }
 
-fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern]) -> DupGroup {
+/// Validate each candidate's stored digest against the file on disk.
+///
+/// The stored digest is only meaningful for the bytes it was computed from,
+/// and the catalog's `size_bytes`/`mtime` are themselves only as fresh as the
+/// last scan — which runs once a day. So this stats each file and compares the
+/// digest's own stamp against what disk reports right now. A file that has
+/// changed since it was hashed yields `None` and its group falls to
+/// `pending_analysis` rather than being classified from a digest describing
+/// bytes that are gone.
+///
+/// Stats only, never hashes: this is a request path. Populating digests is the
+/// background job's job.
+async fn validated_digests(
+    state: &AppState,
+    roots: &HashMap<i64, String>,
+    candidates: &[DuplicateFileCandidate],
+) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(candidates.len());
+    for c in candidates {
+        out.push(validate_one_digest(state, roots, c).await);
+    }
+    out
+}
+
+async fn validate_one_digest(
+    _state: &AppState,
+    roots: &HashMap<i64, String>,
+    c: &DuplicateFileCandidate,
+) -> Option<String> {
+    validate_digest(
+        roots,
+        c.library_root_id,
+        &c.path_relative,
+        c.content_blake3.as_deref(),
+        c.hashed_size_bytes,
+        c.hashed_mtime,
+    )
+    .await
+    .1
+}
+
+/// Stat the file and decide whether its stored digest still describes it.
+/// Returns (file exists on disk, trustworthy digest).
+async fn validate_digest(
+    roots: &HashMap<i64, String>,
+    library_root_id: i64,
+    path_relative: &str,
+    digest: Option<&str>,
+    stamp_size: Option<i64>,
+    stamp_mtime: Option<time::PrimitiveDateTime>,
+) -> (bool, Option<String>) {
+    if !is_contained(path_relative) {
+        return (false, None);
+    }
+    let Some(root) = roots.get(&library_root_id) else {
+        return (false, None);
+    };
+    let Ok(meta) = tokio::fs::metadata(Path::new(root).join(path_relative)).await else {
+        return (false, None);
+    };
+    let Some(digest) = digest.filter(|d| !d.is_empty()) else {
+        return (true, None);
+    };
+    let (Some(stamp_size), Some(stamp_mtime)) = (stamp_size, stamp_mtime) else {
+        return (true, None);
+    };
+    let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    let Ok(modified) = meta.modified() else {
+        return (true, None);
+    };
+    let off = time::OffsetDateTime::from(modified).to_offset(time::UtcOffset::UTC);
+    let observed_mtime = time::PrimitiveDateTime::new(off.date(), off.time());
+    let fresh = stamp_size == observed_size && stamp_mtime == observed_mtime;
+    (true, fresh.then(|| digest.to_owned()))
+}
+
+/// The content verdict for a resolve, computed over the files that actually
+/// exist on disk.
+struct ContentJudgement {
+    verdict: ContentVerdict,
+    on_disk_count: usize,
+    on_disk_ids: Vec<i64>,
+}
+
+async fn judge_content(
+    roots: &HashMap<i64, String>,
+    present: &[FileRow],
+    stamps: &HashMap<i64, longbox_db::ContentStamp>,
+) -> ContentJudgement {
+    let mut on_disk_ids = Vec::new();
+    let mut digests = Vec::new();
+    for f in present {
+        let stamp = stamps.get(&f.id);
+        let (exists, digest) = validate_digest(
+            roots,
+            f.library_root_id,
+            &f.path_relative,
+            stamp.and_then(|s| s.content_blake3.as_deref()),
+            stamp.and_then(|s| s.hashed_size_bytes),
+            stamp.and_then(|s| s.hashed_mtime),
+        )
+        .await;
+        if exists {
+            on_disk_ids.push(f.id);
+            digests.push(digest);
+        }
+    }
+    ContentJudgement {
+        verdict: classify_content(&digests),
+        on_disk_count: on_disk_ids.len(),
+        on_disk_ids,
+    }
+}
+
+/// Per-file content digest, already validated against disk by the caller.
+/// `None` means "no trustworthy digest for these bytes" — either never hashed
+/// or hashed against a version that has since changed.
+type Digests<'a> = &'a [Option<String>];
+
+fn build_one_group(
+    rows: &[DuplicateFileCandidate],
+    patterns: &[ParsingPattern],
+    digests: Digests<'_>,
+) -> DupGroup {
     let largest = rows.iter().map(|r| r.size_bytes).max().unwrap_or(0);
     // Served pick: owned-preferred, then lowest id — mirrors opds_repo.
     let served_id = rows
@@ -209,23 +365,145 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
             is_served: Some(r.file_id) == served_id,
             suspect_corrupt: is_suspect_size(r.size_bytes, largest),
             under_unsorted: under_unsorted(&r.path_relative),
+            // Filled in by `annotate_suggestions` (needs the series catalog).
+            missing_target_number: None,
         })
         .collect();
 
-    let numbers: Vec<Option<String>> = files.iter().map(|f| f.parsed_number.clone()).collect();
-    let is_dup = classify_is_duplicate(&numbers);
+    // Cross-folder check runs FIRST and outranks everything. A group whose
+    // files live under different series folders is not a duplicate group no
+    // matter how well the parsed numbers agree — and agreement is exactly what
+    // the failure mode produces. Live case: `The Authority (1999)/…004.cbz`
+    // and `The Authority (2008)/…004.cbr` both parse to 4, both bound to the
+    // 1999 series' issue #4, and both are real, different comics. 26 of the 28
+    // groups Tidy showed were this shape; clicking through would have deleted
+    // 26 distinct issues.
+    let folders: Vec<&str> = files
+        .iter()
+        .map(|f| top_level_folder(&f.path_relative))
+        .collect();
+    let cross_folder = spans_multiple_folders(&folders);
+
+    // Content identity replaces filename-number agreement as the thing that
+    // decides deletability. Filenames describe what someone *called* a file;
+    // only the bytes say whether two files are the same comic. Both live
+    // failure modes came from believing the names:
+    //   - Hello Darkness 001/002 are byte-identical and were classified
+    //     `mismatch`, so Tidy offered to "move" them to issues #1 and #2 —
+    //     marking #2 owned while it holds #1's content.
+    //   - Death Fight Forever 003/005 are byte-identical; 005 is a misnamed
+    //     copy. The correct action is delete, not move.
+    let content = classify_content(digests);
+
+    let is_dup = !cross_folder && content == ContentVerdict::Identical;
     let suggested_keep_file_id = if is_dup { suggest_keep(&files) } else { None };
+
+    let kind = if cross_folder {
+        // Conservative default; `relabel_cross_folder_groups` downgrades it
+        // to `cross_folder_same_series` when the catalog shows there is only
+        // one series by that name. Over-warning on a group whose delete
+        // button is already gone costs a second look; under-warning tells
+        // someone two volumes are the same book.
+        "cross_folder_wrong_series"
+    } else {
+        match content {
+            // No trustworthy digest for at least one file. Absence of a hash
+            // is not evidence of sameness OR difference, so this must not
+            // fall through to a verdict that renders a delete button — the
+            // same reasoning as the stale-digest guard in `content_hash`.
+            ContentVerdict::Unknown => "pending_analysis",
+            ContentVerdict::Identical => "duplicate",
+            ContentVerdict::Distinct => "mismatch",
+        }
+    };
 
     DupGroup {
         issue_id: rows[0].issue_id,
         series_id: rows[0].series_id,
         series_title: rows[0].series_title.clone(),
         issue_number: rows[0].issue_number.clone(),
-        kind: if is_dup { "duplicate" } else { "mismatch" },
+        kind,
         suggested_keep_file_id,
         issue_options: Vec::new(),
         files,
     }
+}
+
+// -------- content identity --------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentVerdict {
+    /// Every file has a trustworthy digest and they all agree.
+    Identical,
+    /// Every file has a trustworthy digest and at least two differ.
+    Distinct,
+    /// At least one file has no digest we can trust right now.
+    Unknown,
+}
+
+/// Decide content identity from per-file digests that the caller has already
+/// validated against disk.
+///
+/// `Unknown` is returned whenever ANY file is missing a trustworthy digest,
+/// not just when all are. A group of three where two match and the third is
+/// unhashed is not "two duplicates plus an unknown" — it is a group we cannot
+/// classify, because the unhashed file might be identical to the others (so
+/// deleting a "duplicate" loses nothing) or might be a distinct issue (so
+/// deleting it loses a comic). Partial evidence is not partial permission.
+fn classify_content(digests: Digests<'_>) -> ContentVerdict {
+    if digests.len() < 2 || digests.iter().any(|d| d.is_none()) {
+        return ContentVerdict::Unknown;
+    }
+    if digests.windows(2).all(|w| w[0] == w[1]) {
+        ContentVerdict::Identical
+    } else {
+        ContentVerdict::Distinct
+    }
+}
+
+// -------- cross-folder detection --------
+
+/// The first path component — the series folder a file lives under.
+/// Root-level files (no separator) have no series folder and yield `""`,
+/// which compares unequal to any real folder and so is treated as its own
+/// location. That is the safe direction: it can only suppress a delete.
+fn top_level_folder(path_relative: &str) -> &str {
+    path_relative
+        .split('/')
+        .next()
+        .filter(|first| *first != path_relative)
+        .unwrap_or("")
+}
+
+/// Strict, byte-exact comparison of raw folder names. Deliberately not
+/// normalized: this decides whether the delete button exists at all, and any
+/// normalization is a rule about which differences are safe to ignore — a
+/// judgement that has no place on a permanent-delete path. Two folders whose
+/// names differ in any way are two locations.
+fn spans_multiple_folders(folders: &[&str]) -> bool {
+    folders.windows(2).any(|w| w[0] != w[1])
+}
+
+/// Split a series folder name into (normalized title, volume year).
+///
+/// The year must come off before normalizing: `normalize_title` drops the
+/// parentheses but keeps the digits as a token, so `Drifter (2014)` would
+/// normalize to `drifter 2014` and never match `drifter`.
+fn folder_identity(folder: &str) -> (String, Option<i32>) {
+    let trimmed = folder.trim_end();
+    let (title, year) = match trimmed.rfind('(') {
+        Some(open) if trimmed.ends_with(')') => {
+            let inner = &trimmed[open + 1..trimmed.len() - 1];
+            match inner.parse::<i32>() {
+                Ok(y) => (&trimmed[..open], Some(y)),
+                // Parenthesised but not a year (`Ultramega (Deluxe)`) — leave
+                // it in the title, it is part of how the folder is named.
+                Err(_) => (trimmed, None),
+            }
+        }
+        _ => (trimmed, None),
+    };
+    (longbox_core::normalize_title(title), year)
 }
 
 // -------- suggested corrections (mismatch groups) --------
@@ -254,6 +532,58 @@ fn build_one_group(rows: &[DuplicateFileCandidate], patterns: &[ParsingPattern])
 // both cached per request. At the real ~28 mismatch groups that's trivial; the
 // ceiling is O(groups × files) round-trips at per_page=200. Collapse to two
 // `IN` queries if a library ever gets bad enough for that to bite.
+/// Downgrade `cross_folder_wrong_series` to `cross_folder_same_series` when
+/// the catalog shows the folders name ONE series.
+///
+/// The folder-name heuristic alone cannot tell these apart. Both
+/// `The Authority (1999)` / `(2008)` and `Hello Darkness (2024)` / `(2025)`
+/// are "same normalized title, different year" — but the catalog holds three
+/// Authority rows and exactly one Hello Darkness row. Only in the first case
+/// does the differing year mean a different volume; in the second it is one
+/// series stored under two folder spellings, and saying "Wrong series match"
+/// there is a false statement that sends the user hunting for a duplicate
+/// series that does not exist.
+///
+/// This changes WORDING ONLY. The delete guard is `spans_multiple_folders`,
+/// re-derived independently in `resolve_one`, and is not consulted here.
+async fn relabel_cross_folder_groups(
+    state: &AppState,
+    groups: &mut [DupGroup],
+) -> Result<(), ApiError> {
+    if !groups.iter().any(|g| g.kind.starts_with("cross_folder")) {
+        return Ok(());
+    }
+    // One load for the page; only paid when a cross-folder group is on it.
+    let mut by_title: HashMap<String, usize> = HashMap::new();
+    for row in longbox_db::series_repo::find_all(&state.db).await? {
+        *by_title
+            .entry(longbox_core::normalize_title(&row.title))
+            .or_insert(0) += 1;
+    }
+
+    for group in groups
+        .iter_mut()
+        .filter(|g| g.kind.starts_with("cross_folder"))
+    {
+        let folders: Vec<&str> = group
+            .files
+            .iter()
+            .map(|f| top_level_folder(&f.path_relative))
+            .collect();
+        let mut titles = folders.iter().map(|f| folder_identity(f).0);
+        let Some(first) = titles.next() else { continue };
+        if !titles.all(|t| t == first) {
+            continue; // folders name genuinely different titles
+        }
+        // One catalog series by that name → the differing folder years are
+        // spelling, not volumes.
+        if by_title.get(&first).copied().unwrap_or(0) <= 1 {
+            group.kind = "cross_folder_same_series";
+        }
+    }
+    Ok(())
+}
+
 async fn annotate_suggestions(
     state: &AppState,
     patterns: &[ParsingPattern],
@@ -275,6 +605,20 @@ async fn annotate_suggestions(
             .iter()
             .map(|f| parse_filename_number(&f.path_relative, patterns))
             .collect();
+
+        // Flag every stray whose filename names an issue this series simply
+        // does not have. That is an absence in the catalog, not a failure of
+        // nerve, and it gets said plainly instead of being folded into the
+        // "no confident suggestion" bucket with genuinely ambiguous files.
+        for (idx, number) in filename_numbers.iter().enumerate() {
+            let Some(number) = number.as_deref() else {
+                continue;
+            };
+            let known = issues.iter().any(|(n, _)| norm_num(n) == norm_num(number));
+            if !known {
+                group.files[idx].missing_target_number = Some(norm_num(number));
+            }
+        }
 
         for (idx, target) in propose_targets(group.issue_id, &filename_numbers, issues)
             .into_iter()
@@ -427,7 +771,9 @@ async fn resolve(
     // Serialize against concurrent resolves so a group's re-validation and
     // deletes are atomic w.r.t. another resolve touching the same issue.
     let _guard = resolve_lock().lock().await;
-    let patterns = load_patterns(&state).await?;
+    // No parsing patterns here any more: the delete decision is made from
+    // content digests, not filenames. Loading them would only invite a
+    // filename-based fallback back onto the permanent-delete path.
     let roots: HashMap<i64, String> = library_root_repo::list_all(&state.db)
         .await?
         .into_iter()
@@ -436,8 +782,7 @@ async fn resolve(
 
     let mut results = Vec::with_capacity(body.resolutions.len());
     for r in body.resolutions {
-        let result = match resolve_one(&state, &patterns, &roots, r.issue_id, r.keep_file_id).await
-        {
+        let result = match resolve_one(&state, &roots, r.issue_id, r.keep_file_id).await {
             Ok(res) => res,
             // A DB read failure mid-preflight becomes a per-group refusal
             // rather than failing the whole batch (matches reconcile's bulk
@@ -462,7 +807,6 @@ async fn resolve(
 /// — distinct issues, not a duplicate).
 async fn resolve_one(
     state: &AppState,
-    patterns: &[ParsingPattern],
     roots: &HashMap<i64, String>,
     issue_id: i64,
     keep_file_id: i64,
@@ -492,13 +836,67 @@ async fn resolve_one(
             "keep_file_id is not one of this issue's present files",
         ));
     }
-    let numbers: Vec<Option<String>> = present
+    // Cross-folder refusal, re-derived here rather than trusted from the
+    // client's `kind`. This check must live on the write path, not just in the
+    // GET payload: the list response is a hint, and a delete that is only
+    // prevented by the UI is not prevented at all.
+    //
+    // It also has to come BEFORE the number check, because the dangerous case
+    // passes the number check — files from two volumes of one title parse to
+    // the same issue number and look like textbook duplicates.
+    let folders: Vec<&str> = present
         .iter()
-        .map(|f| parse_filename_number(&f.path_relative, patterns))
+        .map(|f| top_level_folder(&f.path_relative))
         .collect();
-    if !classify_is_duplicate(&numbers) {
+    if spans_multiple_folders(&folders) {
         return Ok(refuse(
-            "present files have mismatched issue numbers — distinct issues wrongly merged, not duplicates; refusing to delete",
+            "present files span more than one series folder — a wrong-series match, not a duplicate; refusing to delete",
+        ));
+    }
+
+    // Content identity, re-derived from disk, is now the authority on whether
+    // a delete is safe. It REPLACES the filename-number check rather than
+    // supplementing it: byte-identical files with disagreeing numbers are
+    // precisely the case this endpoint must now allow (Hello Darkness 001 and
+    // 002 are the same bytes; Death Fight Forever 005 is a misnamed copy of
+    // 003). Keeping the old check would refuse exactly what content identity
+    // exists to permit.
+    //
+    // Only files that actually exist on disk take part in the verdict. A row
+    // whose file is already gone cannot be a content participant, and
+    // deleting it cannot lose anything — that stays a safe cleanup.
+    let stamps: HashMap<i64, longbox_db::ContentStamp> =
+        file_repo::content_stamps_by_issue(&state.db, issue_id)
+            .await?
+            .into_iter()
+            .map(|s| (s.file_id, s))
+            .collect();
+    let judged = judge_content(roots, &present, &stamps).await;
+
+    if judged.on_disk_count >= 2 {
+        match judged.verdict {
+            ContentVerdict::Identical => {}
+            ContentVerdict::Distinct => {
+                return Ok(refuse(
+                    "present files have different content — distinct issues wrongly merged, not duplicates; refusing to delete",
+                ));
+            }
+            // Refusing on Unknown is the whole point. An unhashed or
+            // stale-hashed group has produced no evidence, and no evidence
+            // must never read as permission to delete.
+            ContentVerdict::Unknown => {
+                return Ok(refuse(
+                    "present files have not been content-analyzed yet — refusing to delete without knowing whether they are the same comic",
+                ));
+            }
+        }
+    }
+
+    // Never keep a ghost while deleting real files: if anything is on disk,
+    // the survivor has to be one of those.
+    if judged.on_disk_count > 0 && !judged.on_disk_ids.contains(&keep_file_id) {
+        return Ok(refuse(
+            "keep_file_id names a file that is missing from disk while other copies exist; refusing to delete the real ones",
         ));
     }
 
@@ -676,6 +1074,67 @@ async fn correct(
         ));
     }
 
+    // CONTENT IDENTITY DOMINATES TARGET AVAILABILITY.
+    //
+    // A file that is byte-identical to another file on its current issue is a
+    // duplicate, not a stray, and the correct action is to delete it — never
+    // to re-point it. The hazard is specifically a refresh: pulling new issue
+    // records from ComicVine CREATES move targets, and without this a
+    // freshly-created issue would become a legal destination for a copy of a
+    // book we already hold. Taking that move marks the new issue owned while
+    // it holds another issue's content — the exact phantom-ownership pattern
+    // this whole feature exists to eliminate, manufactured by the repair
+    // action for it.
+    //
+    // Checked here rather than only in the list payload because the list is a
+    // hint. `annotate_suggestions` already withholds move UI from a
+    // content-identical group, but a hand-rolled POST bypasses the UI
+    // entirely, and this endpoint is the thing that actually writes.
+    let siblings: Vec<FileRow> = file_repo::list_by_issue(&state.db, from_issue_id)
+        .await?
+        .into_iter()
+        .filter(|f| f.is_present)
+        .collect();
+    if siblings.len() > 1 {
+        let roots: HashMap<i64, String> = library_root_repo::list_all(&state.db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.path))
+            .collect();
+        let stamps: HashMap<i64, longbox_db::ContentStamp> =
+            file_repo::content_stamps_by_issue(&state.db, from_issue_id)
+                .await?
+                .into_iter()
+                .map(|s| (s.file_id, s))
+                .collect();
+        let mut mine = None;
+        let mut others = Vec::new();
+        for f in &siblings {
+            let stamp = stamps.get(&f.id);
+            let (_, digest) = validate_digest(
+                &roots,
+                f.library_root_id,
+                &f.path_relative,
+                stamp.and_then(|s| s.content_blake3.as_deref()),
+                stamp.and_then(|s| s.hashed_size_bytes),
+                stamp.and_then(|s| s.hashed_mtime),
+            )
+            .await;
+            if f.id == file.id {
+                mine = digest;
+            } else if let Some(d) = digest {
+                others.push(d);
+            }
+        }
+        if let Some(mine) = mine {
+            if others.contains(&mine) {
+                return Err(refuse(
+                    "this file is byte-identical to another copy on the same issue — it is a duplicate, not a stray. Delete the redundant copy instead of moving it; moving it would mark the target issue owned while it holds this issue's content".to_owned(),
+                ));
+            }
+        }
+    }
+
     // The client's target must be independently corroborated by the file's
     // own filename. This is the check that makes a blindly-POSTed issue_id
     // harmless.
@@ -807,20 +1266,6 @@ fn norm_num(n: &str) -> String {
     t.to_ascii_lowercase()
 }
 
-/// A group is a true duplicate only when every candidate parsed a number and
-/// they all agree. Any unparsed number, or any disagreement, → not a
-/// duplicate (mismatch).
-fn classify_is_duplicate(numbers: &[Option<String>]) -> bool {
-    let mut it = numbers.iter();
-    let first = match it.next() {
-        Some(Some(n)) => norm_num(n),
-        _ => return false,
-    };
-    numbers
-        .iter()
-        .all(|n| matches!(n, Some(x) if norm_num(x) == first))
-}
-
 /// The default keep suggestion. Never a suspect-size candidate unless every
 /// candidate is suspect (then the largest, as least-bad). Among the eligible
 /// pool the precedence is: NOT under `_unsorted/` first, then `.cbz` over
@@ -878,6 +1323,7 @@ mod tests {
             is_served: false,
             suspect_corrupt: suspect,
             under_unsorted: unsorted,
+            missing_target_number: None,
         }
     }
 
@@ -907,29 +1353,6 @@ mod tests {
         assert!(!is_suspect_size(101_500_000, 101_500_000));
         // A modest-but-fine file next to a same-size sibling.
         assert!(!is_suspect_size(5_000_000, 6_000_000));
-    }
-
-    #[test]
-    fn classify_true_duplicate_when_numbers_agree() {
-        let nums = vec![Some("001".to_owned()), Some("1".to_owned())];
-        assert!(classify_is_duplicate(&nums)); // 001 == 1
-    }
-
-    #[test]
-    fn classify_mismatch_when_numbers_disagree() {
-        // The real "Ferocious" case: 001, 002, 005 under one issue_id.
-        let nums = vec![
-            Some("1".to_owned()),
-            Some("2".to_owned()),
-            Some("5".to_owned()),
-        ];
-        assert!(!classify_is_duplicate(&nums));
-    }
-
-    #[test]
-    fn classify_mismatch_when_any_unparsed() {
-        let nums = vec![Some("1".to_owned()), None];
-        assert!(!classify_is_duplicate(&nums));
     }
 
     #[test]
@@ -1058,5 +1481,232 @@ mod tests {
             cand(2, "x/b.cbz", 900, true, false),
         ];
         assert_eq!(suggest_keep(&files), Some(2));
+    }
+
+    // -------- cross-folder guard --------
+
+    fn row(file_id: i64, path: &str) -> DuplicateFileCandidate {
+        DuplicateFileCandidate {
+            issue_id: 500,
+            series_id: 1076,
+            series_title: "The Authority".to_owned(),
+            issue_number: "4".to_owned(),
+            file_id,
+            path_relative: path.to_owned(),
+            size_bytes: 50_000_000,
+            status: "owned".to_owned(),
+            library_root_id: 1,
+            // Unused by build_one_group — it takes validated digests as a
+            // separate argument, precisely so classification can't read an
+            // unvalidated stamp straight off the row.
+            content_blake3: None,
+            hashed_size_bytes: None,
+            hashed_mtime: None,
+        }
+    }
+
+    /// n files that are byte-identical.
+    fn same(n: usize) -> Vec<Option<String>> {
+        vec![Some("same-digest".to_owned()); n]
+    }
+
+    /// n files with distinct content.
+    fn differing(n: usize) -> Vec<Option<String>> {
+        (0..n).map(|i| Some(format!("digest-{i}"))).collect()
+    }
+
+    // -------- content identity --------
+
+    #[test]
+    fn identical_digests_are_a_duplicate_and_differing_ones_are_not() {
+        assert_eq!(classify_content(&same(2)), ContentVerdict::Identical);
+        assert_eq!(classify_content(&same(3)), ContentVerdict::Identical);
+        assert_eq!(classify_content(&differing(2)), ContentVerdict::Distinct);
+        assert_eq!(classify_content(&differing(3)), ContentVerdict::Distinct);
+    }
+
+    /// Absence of a digest is not evidence of sameness OR difference. This is
+    /// the same principle as the stale-digest guard: no evidence must never
+    /// read as permission to delete.
+    #[test]
+    fn a_missing_digest_makes_the_whole_group_unknown() {
+        assert_eq!(classify_content(&[None, None]), ContentVerdict::Unknown);
+        // One unhashed file among matching ones is still Unknown — partial
+        // evidence is not partial permission. The unhashed file might be a
+        // distinct issue, and deleting it would lose a comic.
+        let partial = vec![Some("d".to_owned()), Some("d".to_owned()), None];
+        assert_eq!(classify_content(&partial), ContentVerdict::Unknown);
+        // Fewer than two files is nothing to compare.
+        assert_eq!(classify_content(&same(1)), ContentVerdict::Unknown);
+    }
+
+    /// The live Hello Darkness case: byte-identical files whose filenames
+    /// parse to DIFFERENT issue numbers. Under the old filename-number
+    /// classifier this was `mismatch`, so Tidy offered to "move" them to
+    /// issues #1 and #2 — marking #2 owned while it holds #1's content.
+    #[test]
+    fn identical_bytes_beat_disagreeing_filenames() {
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Hello Darkness/Hello Darkness 001.cbz"),
+            row(2, "Hello Darkness/Hello Darkness 002.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats, &same(2));
+        let parsed: Vec<_> = g.files.iter().map(|f| f.parsed_number.clone()).collect();
+        assert_eq!(
+            parsed,
+            vec![Some("001".to_owned()), Some("002".to_owned())],
+            "filenames must genuinely disagree, or this proves nothing"
+        );
+        assert_eq!(g.kind, "duplicate", "identical bytes are a duplicate");
+        assert!(g.suggested_keep_file_id.is_some());
+    }
+
+    /// The inverse: filenames agree but the bytes differ. Agreement on a name
+    /// is not evidence about content.
+    #[test]
+    fn differing_bytes_beat_agreeing_filenames() {
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Saga (2012)/Saga 001.cbz"),
+            row(2, "Saga (2012)/Saga 001 alt.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats, &differing(2));
+        assert_eq!(g.kind, "mismatch");
+        assert_eq!(g.suggested_keep_file_id, None);
+    }
+
+    #[test]
+    fn an_unanalyzed_group_is_pending_not_deletable() {
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Saga (2012)/Saga 001.cbz"),
+            row(2, "Saga (2012)/Saga 001 copy.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats, &[None, None]);
+        assert_eq!(g.kind, "pending_analysis");
+        assert_eq!(
+            g.suggested_keep_file_id, None,
+            "an unanalyzed group must never pre-select a keep"
+        );
+    }
+
+    #[test]
+    fn top_level_folder_extraction() {
+        assert_eq!(top_level_folder("Saga (2012)/Saga 001.cbz"), "Saga (2012)");
+        assert_eq!(top_level_folder("a/b/c.cbz"), "a");
+        // No folder at all — its own location, never equal to a real folder.
+        assert_eq!(top_level_folder("loose.cbz"), "");
+    }
+
+    /// The live failure this guard exists for. Both files parse to issue 4,
+    /// both are bound to the 1999 series' issue #4, and they are different
+    /// comics. Number agreement is what makes it dangerous, so the group must
+    /// be refused on folder evidence alone.
+    #[test]
+    fn two_volumes_of_one_title_are_never_a_deletable_duplicate() {
+        let rows = vec![
+            row(1, "The Authority (1999)/The Authority (1999) 004.cbz"),
+            row(
+                2,
+                "The Authority (2008)/The Authority 004 (2009) (Digital).cbr",
+            ),
+        ];
+        let g = build_one_group(&rows, &[], &same(2));
+        assert_eq!(g.kind, "cross_folder_wrong_series");
+        assert_eq!(
+            g.suggested_keep_file_id, None,
+            "a cross-folder group must never pre-select a file to keep"
+        );
+    }
+
+    /// The pure classifier always takes the cautious label; only the
+    /// catalog can tell "two volumes" from "one series, two folder
+    /// spellings", and it isn't reachable from here. The downgrade is
+    /// covered end-to-end in `duplicate_files_tests`.
+    #[test]
+    fn cross_folder_defaults_to_the_cautious_label_without_catalog_context() {
+        let rows = vec![
+            row(1, "Drifter/Drifter 002.cbz"),
+            row(2, "Drifter (2014)/Drifter 002.cbz"),
+        ];
+        let g = build_one_group(&rows, &[], &same(2));
+        assert_eq!(g.kind, "cross_folder_wrong_series");
+        assert_eq!(
+            g.suggested_keep_file_id, None,
+            "and either label suppresses the keep"
+        );
+    }
+
+    /// A number-parsing pattern, so the duplicate path can actually be
+    /// reached — with no patterns nothing parses and every group degrades to
+    /// `mismatch`, which would make a "still a duplicate" assertion vacuous.
+    fn number_pattern() -> Vec<ParsingPattern> {
+        vec![ParsingPattern {
+            id: 1,
+            name: "test".to_owned(),
+            pattern: r"^(?P<series>[A-Za-z ]+?)\s+(?P<number>\d+).*\.(?i:cbz|cbr)$".to_owned(),
+            priority: 1,
+            enabled: true,
+        }]
+    }
+
+    #[test]
+    fn a_genuine_single_folder_duplicate_still_resolves_normally() {
+        // The guard must not swallow the case the feature exists to handle.
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Saga (2012)/Saga 001.cbz"),
+            row(2, "Saga (2012)/Saga 001 copy.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats, &same(2));
+        assert_eq!(
+            g.files.iter().filter(|f| f.parsed_number.is_some()).count(),
+            2,
+            "both filenames must parse, or this test proves nothing"
+        );
+        assert_eq!(g.kind, "duplicate");
+        assert!(g.suggested_keep_file_id.is_some());
+    }
+
+    /// Number agreement must not rescue a cross-folder group — this is the
+    /// precise combination that made the Authority groups look deletable.
+    #[test]
+    fn agreeing_numbers_do_not_override_the_folder_guard() {
+        let pats = number_pattern();
+        let rows = vec![
+            row(1, "Authority A/Authority 004.cbz"),
+            row(2, "Authority B/Authority 004.cbz"),
+        ];
+        let g = build_one_group(&rows, &pats, &same(2));
+        assert_eq!(
+            g.files.iter().filter(|f| f.parsed_number.is_some()).count(),
+            2,
+            "both numbers parse and agree"
+        );
+        assert!(
+            g.kind.starts_with("cross_folder"),
+            "agreeing numbers must not make a cross-folder group deletable, got {}",
+            g.kind
+        );
+        assert_eq!(g.suggested_keep_file_id, None);
+    }
+
+    #[test]
+    fn folder_identity_splits_title_from_volume_year() {
+        assert_eq!(
+            folder_identity("Drifter (2014)"),
+            ("drifter".into(), Some(2014))
+        );
+        assert_eq!(folder_identity("Drifter"), ("drifter".into(), None));
+        assert_eq!(
+            folder_identity("The Authority (1999)"),
+            ("authority".into(), Some(1999))
+        );
+        // Parenthesised non-year stays part of the title.
+        assert_eq!(
+            folder_identity("Ultramega (Deluxe)"),
+            ("ultramega deluxe".into(), None)
+        );
     }
 }

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.id AS \"file_id!: i64\",\n                  f.library_root_id AS \"library_root_id!: i64\",\n                  f.path_relative,\n                  f.size_bytes AS \"size_bytes!: i64\",\n                  f.mtime AS \"mtime!: PrimitiveDateTime\",\n                  f.content_blake3,\n                  f.hashed_size_bytes,\n                  f.hashed_mtime AS \"hashed_mtime?: PrimitiveDateTime\"\n           FROM files f\n           WHERE f.is_present = 1\n             AND f.size_bytes IN (\n                 SELECT ff.size_bytes FROM files ff\n                 WHERE ff.is_present = 1\n                 GROUP BY ff.size_bytes HAVING COUNT(*) > 1\n             )\n           ORDER BY f.size_bytes, f.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "library_root_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "path_relative",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "size_bytes!: i64",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "mtime!: PrimitiveDateTime",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "content_blake3",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "hashed_size_bytes",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "hashed_mtime?: PrimitiveDateTime",
+        "ordinal": 7,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "0bf3f32c5ceeb3e8a1173cebd132761bae91f5c0de9b62452431419f4233a91e"
+}

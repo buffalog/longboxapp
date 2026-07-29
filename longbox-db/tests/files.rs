@@ -830,3 +830,145 @@ async fn upsert_imported_with_invalid_issue_id_errors() {
     // silently succeed.
     assert!(matches!(err, DbError::Other(_)), "got {err:?}");
 }
+
+/// The unlink must select by BINDING, not by path.
+///
+/// `files.issue_id` is the only record of the association and
+/// `ON DELETE SET NULL` destroys it, so the unlink has to run BEFORE the
+/// issues are deleted. The version this replaces ran after, and could
+/// therefore only match on a folder-name prefix — which silently missed every
+/// file of the series living anywhere else. On the live catalog that left 186
+/// rows at `issue_id = NULL, status = 'owned'`: owned, pointing at nothing,
+/// and skipped by `rematch_for_series`, which only selects `needs_review`.
+/// 109 of those 186 sit outside any current series folder, so no prefix could
+/// ever have reached them.
+#[tokio::test]
+async fn unlink_by_series_reaches_files_outside_the_series_folder() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, issue_id) = seed(&pool).await;
+
+    // Inside the folder a prefix match would have found.
+    let inside = file_repo::insert(
+        &pool,
+        new_file(
+            library_root_id,
+            "Saga (2012)/Saga (2012) 001.cbz",
+            "owned",
+            Some(issue_id),
+        ),
+    )
+    .await
+    .unwrap()
+    .id;
+    // Outside it — moved, re-foldered, or staged. Bound to the same issue,
+    // and invisible to any prefix built from the series folder name.
+    let outside = file_repo::insert(
+        &pool,
+        new_file(
+            library_root_id,
+            "_unsorted/Saga 001 (2012).cbz",
+            "owned",
+            Some(issue_id),
+        ),
+    )
+    .await
+    .unwrap()
+    .id;
+    // A different series' file must not be touched.
+    let other_series = series_repo::insert(
+        &pool,
+        NewSeries {
+            cv_id: Some(2),
+            metron_id: None,
+            title: "Nailbiter".into(),
+            sort_title: "nailbiter".into(),
+            start_year: Some(2014),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let other_issue = issue_repo::insert(
+        &pool,
+        NewIssue {
+            series_id: other_series,
+            cv_issue_id: Some(201),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let untouched = file_repo::insert(
+        &pool,
+        new_file(
+            library_root_id,
+            "Nailbiter (2014)/Nailbiter 001.cbz",
+            "owned",
+            Some(other_issue),
+        ),
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let n = file_repo::unlink_by_series(&pool, series_id).await.unwrap();
+    assert_eq!(n, 2, "both of the series' files, wherever they live");
+
+    for id in [inside, outside] {
+        let row = file_repo::find_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.issue_id, None, "file {id} must be unlinked");
+        assert_eq!(
+            row.status, "needs_review",
+            "file {id} must land where rematch_for_series will actually select it"
+        );
+    }
+    let row = file_repo::find_by_id(&pool, untouched)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.issue_id, Some(other_issue), "other series untouched");
+    assert_eq!(row.status, "owned");
+}
+
+/// The impossible state, asserted as an invariant: after unlinking, no row is
+/// left `owned` with no issue. That combination is what `classify_status`
+/// can never produce and no consumer can reach.
+#[tokio::test]
+async fn unlink_leaves_no_owned_row_without_an_issue() {
+    let pool = fresh_pool().await;
+    let (library_root_id, series_id, issue_id) = seed(&pool).await;
+    for path in ["Saga (2012)/Saga 001.cbz", "elsewhere/Saga 002.cbz"] {
+        file_repo::insert(
+            &pool,
+            new_file(library_root_id, path, "owned", Some(issue_id)),
+        )
+        .await
+        .unwrap();
+    }
+
+    file_repo::unlink_by_series(&pool, series_id).await.unwrap();
+    // Now delete the issues, as the caller does immediately after.
+    issue_repo::delete_by_series(&pool, series_id)
+        .await
+        .unwrap();
+
+    let trapped = file_repo::list_by_library_root(&pool, library_root_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.issue_id.is_none() && f.status == "owned")
+        .count();
+    assert_eq!(
+        trapped, 0,
+        "no row may be left owned and pointing at nothing"
+    );
+}
