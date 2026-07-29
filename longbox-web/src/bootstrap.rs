@@ -136,6 +136,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //    the scheduler crate can't depend on without a cycle; the
     //    generic scheduler just fires the closure daily.
     let scan_status = Arc::new(RwLock::new(ScanStatus::default()));
+    let analyze_status = Arc::new(RwLock::new(crate::state::AnalyzeStatus::default()));
     let scan_scheduler = longbox_scan_scheduler::start(
         longbox_scan_scheduler::ScanSchedulerConfig {
             daily_time: config.scan_schedule_time,
@@ -226,6 +227,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         scanner,
         config: Arc::new(config),
         scan_status,
+        analyze_status,
         library_root_id,
         pending_cache,
         pull,

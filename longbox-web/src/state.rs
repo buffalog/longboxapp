@@ -24,6 +24,9 @@ pub struct AppState {
     pub scanner: Arc<longbox_scanner::Scanner>,
     pub config: Arc<AppConfig>,
     pub scan_status: Arc<RwLock<ScanStatus>>,
+    /// Live state of the content-analysis pass (Library Integrity). In-memory
+    /// only, like `scan_status` — there is no analysis history to render.
+    pub analyze_status: Arc<RwLock<AnalyzeStatus>>,
     /// The library root row id created or matched at bootstrap. Phase A
     /// has exactly one; cached here so handlers don't re-query.
     pub library_root_id: i64,
@@ -113,6 +116,28 @@ pub struct SubscribeStatus {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ScanStatus {
     pub current: Option<CurrentScan>,
+}
+
+/// State of the Library Integrity content-analysis pass.
+///
+/// The analysis reads files and writes digests; this tracks whether it is
+/// in flight and what the last pass did. Nothing here is persisted — a
+/// restart mid-analysis simply means the next pass re-hashes whatever has no
+/// fresh digest, which is the same self-correcting behaviour that governs
+/// staleness.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct AnalyzeStatus {
+    pub running: bool,
+    #[serde(with = "time::serde::iso8601::option")]
+    pub started_at: Option<time::OffsetDateTime>,
+    #[serde(with = "time::serde::iso8601::option")]
+    pub finished_at: Option<time::OffsetDateTime>,
+    /// Stats from the most recent completed pass.
+    pub last: Option<crate::content_hash::HashStats>,
+    /// Set when the last pass failed outright (a DB error reading the
+    /// candidate set). Per-file failures are counted in `last.failed`
+    /// instead — one bad archive never sinks a pass.
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
