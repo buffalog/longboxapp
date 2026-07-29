@@ -690,3 +690,389 @@ async fn files_the_scanner_ignores_are_not_orphans() {
     );
     assert_eq!(body["provenance"]["files_seen"], 0);
 }
+
+// -------- classes (a) (c) (d) (e) (f) --------
+
+/// Content duplicates read 0 before analysis has run, and that zero means
+/// "not looked at yet", not "none". `unanalyzed_candidates` is what makes the
+/// difference visible — the same problem as class (b)'s provenance and
+/// `pending_analysis`, in a third place.
+#[tokio::test]
+async fn content_duplicates_report_how_much_is_still_unanalyzed() {
+    let app = build_test_app().await;
+    common_seed_three_files(&app).await;
+
+    let before = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    assert_eq!(before["content_duplicates"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        before["unanalyzed_candidates"], 2,
+        "two size-colliding files have no digest yet, so 0 groups is a floor"
+    );
+
+    app.request(request(Method::POST, "/api/library/integrity/analyze"))
+        .await;
+    wait_for_idle(&app).await;
+
+    let after = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        after["content_duplicates"].as_array().unwrap().len(),
+        1,
+        "the identical pair is now a group"
+    );
+    assert_eq!(
+        after["unanalyzed_candidates"], 0,
+        "and nothing is left unexamined, so 0 groups would now mean 0"
+    );
+    let g = &after["content_duplicates"][0];
+    assert_eq!(g["files"].as_array().unwrap().len(), 2);
+    assert_eq!(g["spans_multiple_series"], false);
+    assert!(g["redundant_bytes"].as_i64().unwrap() > 0);
+}
+
+/// Identical bytes under two different series — the Blood Train shape, and
+/// the one Tidy structurally cannot see because the copies share no issue_id.
+#[tokio::test]
+async fn identical_content_under_two_series_is_flagged() {
+    use std::io::Write;
+    let app = build_test_app().await;
+
+    let write = |rel: &str| {
+        let full = app.library_path().join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(&full).unwrap();
+        let mut zip = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("Blood Train (one-shot)/001.jpg", opts)
+            .unwrap();
+        zip.write_all(&vec![3u8; 4096]).unwrap();
+        zip.finish().unwrap();
+        std::fs::metadata(&full).unwrap().len() as i64
+    };
+    // One comic, filed under two different series.
+    let sa = write("Blood Train/Blood Train 001.cbz");
+    let sb = write("Book of Cutter/Book of Cutter 001.cbz");
+    assert_eq!(sa, sb);
+
+    let now = {
+        let n = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(n.date(), n.time())
+    };
+    for (title, rel) in [
+        ("Blood Train", "Blood Train/Blood Train 001.cbz"),
+        ("Book of Cutter", "Book of Cutter/Book of Cutter 001.cbz"),
+    ] {
+        let series = series_repo::insert(
+            &app.state.db,
+            NewSeries {
+                cv_id: None,
+                metron_id: None,
+                title: title.into(),
+                sort_title: title.to_lowercase(),
+                start_year: Some(2025),
+                publisher: None,
+                description: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let issue = issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: series,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: "1".into(),
+                title: None,
+                cover_date: None,
+                summary: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let mtime = {
+            let m = std::fs::metadata(app.library_path().join(rel)).unwrap();
+            let off =
+                time::OffsetDateTime::from(m.modified().unwrap()).to_offset(time::UtcOffset::UTC);
+            time::PrimitiveDateTime::new(off.date(), off.time())
+        };
+        file_repo::insert(
+            &app.state.db,
+            NewFile {
+                issue_id: Some(issue),
+                library_root_id: app.library_root_id,
+                path_relative: rel.into(),
+                size_bytes: sa,
+                mtime,
+                last_scanned_at: now,
+                match_method: "filename_regex".into(),
+                match_confidence: 0.9,
+                status: "owned".into(),
+                cached_comicinfo_xml: None,
+                cached_at: None,
+                is_present: true,
+                last_seen_at: now,
+                matched_at: Some(now),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    app.request(request(Method::POST, "/api/library/integrity/analyze"))
+        .await;
+    wait_for_idle(&app).await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    let groups = body["content_duplicates"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0]["spans_multiple_series"], true,
+        "one comic filed under two series is its own finding"
+    );
+    // The archive's own label names which series it really is.
+    let labels: Vec<&str> = groups[0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["archive_series"].as_str())
+        .collect();
+    assert!(
+        labels.iter().all(|l| *l == "blood train"),
+        "the archive says what it is, whatever folder it sits in: {labels:?}"
+    );
+}
+
+/// Cross-folder splits three ways, and the empty category stays visible: an
+/// empty `wrong_volume` that CAN populate is a regression indicator, while
+/// deleting it would let the next wrong-volume binding land in
+/// `benign_variant` and be dismissed as cosmetic.
+#[tokio::test]
+async fn cross_folder_splits_into_three_categories() {
+    let app = build_test_app().await;
+
+    // Two catalog volumes of one title, so a stray folder naming the other
+    // year is a genuine wrong-volume binding.
+    let v1999 = seed_series_with_year(&app, "The Authority", 1999).await;
+    let _v2008 = seed_series_with_year(&app, "The Authority", 2008).await;
+    // Majority in the 1999 folder, one stray in the 2008 folder.
+    for n in ["1", "2", "3"] {
+        seed_bound(
+            &app,
+            v1999,
+            n,
+            &format!("The Authority (1999)/The Authority {n}.cbz"),
+        )
+        .await;
+    }
+    seed_bound(&app, v1999, "4", "The Authority (2008)/The Authority 4.cbz").await;
+
+    // Benign: one series, folder spelled without its year.
+    let drifter = seed_series_with_year(&app, "Drifter", 2014).await;
+    for n in ["1", "2"] {
+        seed_bound(&app, drifter, n, &format!("Drifter (2014)/Drifter {n}.cbz")).await;
+    }
+    seed_bound(&app, drifter, "3", "Drifter/Drifter 3.cbz").await;
+
+    // Trade: a differently-titled folder holding this series' issues.
+    let fp = seed_series_with_year(&app, "Fire Power", 2020).await;
+    for n in ["1", "2"] {
+        seed_bound(
+            &app,
+            fp,
+            n,
+            &format!("Fire Power (2020)/Fire Power {n}.cbz"),
+        )
+        .await;
+    }
+    seed_bound(
+        &app,
+        fp,
+        "3",
+        "Fire Power By Kirkman And Samnee (2023)/vol 1.cbz",
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    let cats: Vec<&str> = body["cross_folder"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["category"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cats.iter().filter(|c| **c == "wrong_volume").count(),
+        1,
+        "a stray folder naming another catalog volume is wrong_volume: {cats:?}"
+    );
+    assert_eq!(cats.iter().filter(|c| **c == "benign_variant").count(), 1);
+    assert_eq!(
+        cats.iter().filter(|c| **c == "trade_or_collection").count(),
+        1
+    );
+}
+
+/// (d) uses the PRODUCTION parser and the live patterns. A local
+/// reimplementation would report every difference between itself and
+/// production as a finding, measuring the parsers rather than the library.
+#[tokio::test]
+async fn filename_disagreement_uses_the_production_parser() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Death Fight Forever", 2026).await;
+    // Bound to issue 3, named 005 — the live shape.
+    seed_bound(
+        &app,
+        series,
+        "3",
+        "Death Fight Forever (2026)/Death Fight Forever (2026) 005.cbz",
+    )
+    .await;
+    // Agrees; must not be reported.
+    seed_bound(
+        &app,
+        series,
+        "1",
+        "Death Fight Forever (2026)/Death Fight Forever (2026) 001.cbz",
+    )
+    .await;
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    let d = body["filename_disagreements"].as_array().unwrap();
+    assert_eq!(d.len(), 1, "only the disagreeing file: {d:?}");
+    assert_eq!(d[0]["filename_says"], "005");
+    assert_eq!(d[0]["bound_to"], "3");
+}
+
+/// (f) surfaces the trapped rows with no action attached.
+#[tokio::test]
+async fn orphaned_owned_rows_are_surfaced() {
+    let app = build_test_app().await;
+    let now = {
+        let n = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(n.date(), n.time())
+    };
+    file_repo::insert(
+        &app.state.db,
+        NewFile {
+            issue_id: None,
+            library_root_id: app.library_root_id,
+            path_relative: "Gone/Gone 001.cbz".into(),
+            size_bytes: 1,
+            mtime: now,
+            last_scanned_at: now,
+            match_method: "filename_regex".into(),
+            match_confidence: 0.9,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: false,
+            last_seen_at: now,
+            matched_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    let rows = body["orphaned_owned_rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["path_relative"], "Gone/Gone 001.cbz");
+    assert_eq!(rows[0]["is_present"], false);
+}
+
+async fn seed_series_with_year(app: &TestApp, title: &str, year: i32) -> i64 {
+    series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: title.into(),
+            sort_title: longbox_core::normalize_title(title),
+            start_year: Some(year),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// A present, bound file. Catalog size is deliberately absurd relative to
+/// what is written, so any path substituting it for a disk read fails loudly.
+async fn seed_bound(app: &TestApp, series_id: i64, number: &str, rel: &str) -> i64 {
+    let full = app.library_path().join(rel);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, format!("stub for {rel}")).unwrap();
+    let issue = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: number.into(),
+            title: None,
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let now = {
+        let n = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(n.date(), n.time())
+    };
+    file_repo::insert(
+        &app.state.db,
+        NewFile {
+            issue_id: Some(issue),
+            library_root_id: app.library_root_id,
+            path_relative: rel.into(),
+            size_bytes: 888_000_000,
+            mtime: now,
+            last_scanned_at: now,
+            match_method: "filename_regex".into(),
+            match_confidence: 0.9,
+            status: "owned".into(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present: true,
+            last_seen_at: now,
+            matched_at: Some(now),
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}

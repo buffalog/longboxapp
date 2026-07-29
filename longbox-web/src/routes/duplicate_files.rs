@@ -594,28 +594,6 @@ fn spans_multiple_folders(folders: &[&str]) -> bool {
     folders.windows(2).any(|w| w[0] != w[1])
 }
 
-/// Split a series folder name into (normalized title, volume year).
-///
-/// The year must come off before normalizing: `normalize_title` drops the
-/// parentheses but keeps the digits as a token, so `Drifter (2014)` would
-/// normalize to `drifter 2014` and never match `drifter`.
-fn folder_identity(folder: &str) -> (String, Option<i32>) {
-    let trimmed = folder.trim_end();
-    let (title, year) = match trimmed.rfind('(') {
-        Some(open) if trimmed.ends_with(')') => {
-            let inner = &trimmed[open + 1..trimmed.len() - 1];
-            match inner.parse::<i32>() {
-                Ok(y) => (&trimmed[..open], Some(y)),
-                // Parenthesised but not a year (`Ultramega (Deluxe)`) — leave
-                // it in the title, it is part of how the folder is named.
-                Err(_) => (trimmed, None),
-            }
-        }
-        _ => (trimmed, None),
-    };
-    (longbox_core::normalize_title(title), year)
-}
-
 // -------- suggested corrections (mismatch groups) --------
 
 /// For every `mismatch` group, fill in each stray file's `suggested_issue_id`
@@ -680,7 +658,9 @@ async fn relabel_cross_folder_groups(
             .iter()
             .map(|f| top_level_folder(&f.path_relative))
             .collect();
-        let mut titles = folders.iter().map(|f| folder_identity(f).0);
+        let mut titles = folders
+            .iter()
+            .map(|f| longbox_core::library_path::folder_identity(f).0);
         let Some(first) = titles.next() else { continue };
         if !titles.all(|t| t == first) {
             continue; // folders name genuinely different titles
@@ -1875,17 +1855,20 @@ mod tests {
     #[test]
     fn folder_identity_splits_title_from_volume_year() {
         assert_eq!(
-            folder_identity("Drifter (2014)"),
+            longbox_core::library_path::folder_identity("Drifter (2014)"),
             ("drifter".into(), Some(2014))
         );
-        assert_eq!(folder_identity("Drifter"), ("drifter".into(), None));
         assert_eq!(
-            folder_identity("The Authority (1999)"),
+            longbox_core::library_path::folder_identity("Drifter"),
+            ("drifter".into(), None)
+        );
+        assert_eq!(
+            longbox_core::library_path::folder_identity("The Authority (1999)"),
             ("authority".into(), Some(1999))
         );
         // Parenthesised non-year stays part of the title.
         assert_eq!(
-            folder_identity("Ultramega (Deluxe)"),
+            longbox_core::library_path::folder_identity("Ultramega (Deluxe)"),
             ("ultramega deluxe".into(), None)
         );
     }

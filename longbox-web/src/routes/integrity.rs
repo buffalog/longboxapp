@@ -85,6 +85,11 @@ fn route_table() -> Vec<(&'static str, MethodRouter<AppState>, Surface)> {
             get(reconciliation),
             Surface::ReadOnly,
         ),
+        (
+            "/library/integrity/findings",
+            get(findings),
+            Surface::ReadOnly,
+        ),
     ]
 }
 
@@ -223,6 +228,27 @@ async fn reconciliation(
         })?;
     Ok(Json(
         crate::integrity_scan::reconcile(&state.db, state.library_root_id, &root.path).await?,
+    ))
+}
+
+/// All six finding classes, computed live.
+///
+/// One endpoint rather than six because the classes overlap and the view
+/// renders them together: Blood Train is both a content duplicate and a
+/// two-series finding, and a file appearing in more than one class is a
+/// stronger signal than one appearing in a single class. Splitting them
+/// across endpoints would hide that.
+async fn findings(
+    State(state): State<AppState>,
+) -> Result<Json<crate::integrity_scan::Findings>, ApiError> {
+    let root = library_root_repo::find_by_id(&state.db, state.library_root_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "library_root",
+            id: state.library_root_id.to_string(),
+        })?;
+    Ok(Json(
+        crate::integrity_scan::findings(&state.db, state.library_root_id, &root.path).await?,
     ))
 }
 
