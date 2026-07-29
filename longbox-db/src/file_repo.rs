@@ -704,6 +704,35 @@ impl HashCandidate {
     }
 }
 
+/// Unlink every file pointing at any issue of `series_id`, leaving each at
+/// `issue_id = NULL, status = 'needs_review'`. Returns the row count.
+///
+/// MUST be called BEFORE the series' issues are deleted. `files.issue_id` is
+/// the only record of the association and `ON DELETE SET NULL` destroys it;
+/// afterwards the affected rows cannot be identified at all, which is why the
+/// caller that ran this after the delete had to fall back to matching a
+/// folder-name prefix — and missed every file living anywhere else.
+///
+/// `needs_review` is the correct destination: it is what `rematch_for_series`
+/// selects, so the rows heal on the next pass. Leaving them `owned` with no
+/// issue produces a state `classify_status` cannot generate and no consumer
+/// can reach.
+pub async fn unlink_by_series<'e, E>(executor: E, series_id: i64) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE files
+             SET issue_id = NULL,
+                 status = 'needs_review'
+           WHERE issue_id IN (SELECT id FROM issues WHERE series_id = ?)"#,
+        series_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// A file's stored digest and the file version it was computed against.
 ///
 /// Fetched separately from [`FileRow`] rather than widening it: only the

@@ -6,7 +6,8 @@ use axum::{Json, Router};
 use futures::stream::{self, StreamExt};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
-    downloader_config_repo, indexer_config_repo, issue_repo, library_root_repo, series_repo,
+    downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
+    series_repo,
     settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
 };
 use serde::{Deserialize, Serialize};
@@ -619,7 +620,10 @@ async fn set_cv_id(
             message: "cv_id must be > 0".into(),
         });
     }
-    let existing = series_repo::find_by_id(&state.db, id)
+    // Existence check only — the pre-PATCH title/start_year used to be needed
+    // to build a folder prefix, and the precise unlink below made that
+    // obsolete.
+    series_repo::find_by_id(&state.db, id)
         .await?
         .ok_or_else(|| ApiError::NotFound {
             resource: "series",
@@ -679,6 +683,25 @@ async fn set_cv_id(
     };
     let updated = series_repo::update(&mut *tx, id, update_input).await?;
 
+    // Unlink BEFORE deleting the issues, by the exact set of rows that point
+    // at them. This has to happen first: `files.issue_id` is the only record
+    // of the association, and `ON DELETE SET NULL` destroys it, after which
+    // the affected rows cannot be identified at all.
+    //
+    // The previous version ran AFTER the delete and matched on a path prefix
+    // built from the pre-PATCH folder name, because by then that was the only
+    // handle left. It missed every file of the series living anywhere else —
+    // moved, re-foldered, under `_unsorted/`, or absent — and those rows were
+    // left at `issue_id = NULL, status = 'owned'`: owned, pointing at
+    // nothing, and invisible to `rematch_for_series`, which only selects
+    // `needs_review`. The live catalog carries 186 such rows, and 109 of them
+    // sit outside any current series folder, so no prefix could ever have
+    // reached them.
+    //
+    // Deterministic beats heuristic. This removes the heuristic rather than
+    // widening it.
+    file_repo::unlink_by_series(&mut *tx, id).await?;
+
     issue_repo::delete_by_series(&mut *tx, id).await?;
     let new_issues: Vec<NewIssue> = cv_issues
         .into_iter()
@@ -696,45 +719,6 @@ async fn set_cv_id(
     if !new_issues.is_empty() {
         issue_repo::bulk_insert(&mut *tx, new_issues).await?;
     }
-
-    // Reset every file under the pre-PATCH series folder so the
-    // rematch step (below) actually finds them. Without this step
-    // the rematch is a no-op for this surface: `issues` was deleted,
-    // and the `files.issue_id ON DELETE SET NULL` cascade left every
-    // formerly-linked file at `issue_id = NULL, status = 'owned'` —
-    // an orphan state where `rematch_for_series` skips them because
-    // it only scans `needs_review`. Path-based filter using the PRE-
-    // PATCH title + start_year because the folder on disk is named
-    // whatever the catalog had when the files were attached; the
-    // PATCH just updated the catalog title to the new CV volume's
-    // name, but the on-disk folder is unchanged.
-    //
-    // `substr(path_relative, 1, N) = prefix` is byte-exact prefix
-    // matching (no LIKE wildcards, no escape gymnastics). Length is
-    // SQLite's `length(prefix)` — which counts characters for TEXT,
-    // matching `prefix.chars().count()` in Rust.
-    let folder_prefix = match existing.start_year {
-        Some(year) => format!("{} ({})/", existing.title, year),
-        None => format!("{}/", existing.title),
-    };
-    let prefix_chars = i64::try_from(folder_prefix.chars().count()).unwrap_or(i64::MAX);
-    let library_root_id = state.library_root_id;
-    sqlx::query!(
-        r#"UPDATE files
-             SET issue_id = NULL,
-                 status = 'needs_review'
-           WHERE library_root_id = ?
-             AND substr(path_relative, 1, ?) = ?"#,
-        library_root_id,
-        prefix_chars,
-        folder_prefix
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ApiError::Internal {
-        message: format!("file rematch reset failed: {e}"),
-        source: anyhow::anyhow!(e),
-    })?;
 
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
@@ -985,19 +969,7 @@ pub(crate) async fn force_delete_series(db: &longbox_db::Pool, id: i64) -> Resul
         });
     }
     let mut tx = db.begin().await.map_err(longbox_db::DbError::from)?;
-    sqlx::query!(
-        r#"UPDATE files
-             SET issue_id = NULL,
-                 status = 'needs_review'
-           WHERE issue_id IN (SELECT id FROM issues WHERE series_id = ?)"#,
-        id
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ApiError::Internal {
-        message: format!("file-unlink failed: {e}"),
-        source: anyhow::anyhow!(e),
-    })?;
+    file_repo::unlink_by_series(&mut *tx, id).await?;
     sqlx::query!(r#"DELETE FROM series WHERE id = ?"#, id)
         .execute(&mut *tx)
         .await
