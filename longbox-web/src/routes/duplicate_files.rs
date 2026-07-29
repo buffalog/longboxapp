@@ -215,11 +215,7 @@ fn build_groups(
         while j < candidates.len() && candidates[j].issue_id == issue_id {
             j += 1;
         }
-        groups.push(build_one_group(
-            &candidates[i..j],
-            patterns,
-            &digests[i..j],
-        ));
+        groups.push(build_one_group(&candidates[i..j], patterns, &digests[i..j]));
         i = j;
     }
     groups
@@ -488,7 +484,6 @@ fn spans_multiple_folders(folders: &[&str]) -> bool {
     folders.windows(2).any(|w| w[0] != w[1])
 }
 
-
 /// Split a series folder name into (normalized title, volume year).
 ///
 /// The year must come off before normalizing: `normalize_title` drops the
@@ -566,7 +561,10 @@ async fn relabel_cross_folder_groups(
             .or_insert(0) += 1;
     }
 
-    for group in groups.iter_mut().filter(|g| g.kind.starts_with("cross_folder")) {
+    for group in groups
+        .iter_mut()
+        .filter(|g| g.kind.starts_with("cross_folder"))
+    {
         let folders: Vec<&str> = group
             .files
             .iter()
@@ -613,7 +611,9 @@ async fn annotate_suggestions(
         // nerve, and it gets said plainly instead of being folded into the
         // "no confident suggestion" bucket with genuinely ambiguous files.
         for (idx, number) in filename_numbers.iter().enumerate() {
-            let Some(number) = number.as_deref() else { continue };
+            let Some(number) = number.as_deref() else {
+                continue;
+            };
             let known = issues.iter().any(|(n, _)| norm_num(n) == norm_num(number));
             if !known {
                 group.files[idx].missing_target_number = Some(norm_num(number));
@@ -782,8 +782,7 @@ async fn resolve(
 
     let mut results = Vec::with_capacity(body.resolutions.len());
     for r in body.resolutions {
-        let result = match resolve_one(&state, &roots, r.issue_id, r.keep_file_id).await
-        {
+        let result = match resolve_one(&state, &roots, r.issue_id, r.keep_file_id).await {
             Ok(res) => res,
             // A DB read failure mid-preflight becomes a per-group refusal
             // rather than failing the whole batch (matches reconcile's bulk
@@ -1535,11 +1534,7 @@ mod tests {
         // One unhashed file among matching ones is still Unknown — partial
         // evidence is not partial permission. The unhashed file might be a
         // distinct issue, and deleting it would lose a comic.
-        let partial = vec![
-            Some("d".to_owned()),
-            Some("d".to_owned()),
-            None,
-        ];
+        let partial = vec![Some("d".to_owned()), Some("d".to_owned()), None];
         assert_eq!(classify_content(&partial), ContentVerdict::Unknown);
         // Fewer than two files is nothing to compare.
         assert_eq!(classify_content(&same(1)), ContentVerdict::Unknown);
@@ -1612,7 +1607,10 @@ mod tests {
     fn two_volumes_of_one_title_are_never_a_deletable_duplicate() {
         let rows = vec![
             row(1, "The Authority (1999)/The Authority (1999) 004.cbz"),
-            row(2, "The Authority (2008)/The Authority 004 (2009) (Digital).cbr"),
+            row(
+                2,
+                "The Authority (2008)/The Authority 004 (2009) (Digital).cbr",
+            ),
         ];
         let g = build_one_group(&rows, &[], &same(2));
         assert_eq!(g.kind, "cross_folder_wrong_series");
@@ -1696,7 +1694,10 @@ mod tests {
 
     #[test]
     fn folder_identity_splits_title_from_volume_year() {
-        assert_eq!(folder_identity("Drifter (2014)"), ("drifter".into(), Some(2014)));
+        assert_eq!(
+            folder_identity("Drifter (2014)"),
+            ("drifter".into(), Some(2014))
+        );
         assert_eq!(folder_identity("Drifter"), ("drifter".into(), None));
         assert_eq!(
             folder_identity("The Authority (1999)"),
@@ -1708,5 +1709,4 @@ mod tests {
             ("ultramega deluxe".into(), None)
         );
     }
-
 }

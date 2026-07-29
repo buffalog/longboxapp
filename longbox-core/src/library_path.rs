@@ -215,7 +215,10 @@ mod tests {
         );
         // A series folder that names no year is SILENT — it exists and
         // declined to say, which is informative.
-        assert_eq!(folder_evidence("Drifter/Drifter 002.cbz"), FolderEvidence::Silent);
+        assert_eq!(
+            folder_evidence("Drifter/Drifter 002.cbz"),
+            FolderEvidence::Silent
+        );
         assert_eq!(
             folder_evidence("Ultramega (Deluxe)/x.cbz"),
             FolderEvidence::Silent

@@ -931,7 +931,10 @@ async fn unlink_by_series_reaches_files_outside_the_series_folder() {
             "file {id} must land where rematch_for_series will actually select it"
         );
     }
-    let row = file_repo::find_by_id(&pool, untouched).await.unwrap().unwrap();
+    let row = file_repo::find_by_id(&pool, untouched)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.issue_id, Some(other_issue), "other series untouched");
     assert_eq!(row.status, "owned");
 }
@@ -944,14 +947,19 @@ async fn unlink_leaves_no_owned_row_without_an_issue() {
     let pool = fresh_pool().await;
     let (library_root_id, series_id, issue_id) = seed(&pool).await;
     for path in ["Saga (2012)/Saga 001.cbz", "elsewhere/Saga 002.cbz"] {
-        file_repo::insert(&pool, new_file(library_root_id, path, "owned", Some(issue_id)))
-            .await
-            .unwrap();
+        file_repo::insert(
+            &pool,
+            new_file(library_root_id, path, "owned", Some(issue_id)),
+        )
+        .await
+        .unwrap();
     }
 
     file_repo::unlink_by_series(&pool, series_id).await.unwrap();
     // Now delete the issues, as the caller does immediately after.
-    issue_repo::delete_by_series(&pool, series_id).await.unwrap();
+    issue_repo::delete_by_series(&pool, series_id)
+        .await
+        .unwrap();
 
     let trapped = file_repo::list_by_library_root(&pool, library_root_id)
         .await
@@ -959,5 +967,8 @@ async fn unlink_leaves_no_owned_row_without_an_issue() {
         .into_iter()
         .filter(|f| f.issue_id.is_none() && f.status == "owned")
         .count();
-    assert_eq!(trapped, 0, "no row may be left owned and pointing at nothing");
+    assert_eq!(
+        trapped, 0,
+        "no row may be left owned and pointing at nothing"
+    );
 }

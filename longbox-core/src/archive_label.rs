@@ -146,7 +146,9 @@ pub fn parse_label(label: &str, kind: LabelKind) -> ArchiveIdentity {
     // guess is the same rule as everywhere else here.
     if kind == LabelKind::Page && numbers.len() >= 3 {
         let series = {
-            let head = cleaned[..numbers[0].0].trim().trim_end_matches(['-', '_', '.']);
+            let head = cleaned[..numbers[0].0]
+                .trim()
+                .trim_end_matches(['-', '_', '.']);
             let n = normalize_title(head);
             (!n.is_empty()).then_some(n)
         };
@@ -168,7 +170,9 @@ pub fn parse_label(label: &str, kind: LabelKind) -> ArchiveIdentity {
         None => (None, page_number_at.unwrap_or(cleaned.len())),
     };
 
-    let series_text = cleaned[..series_end].trim().trim_end_matches(['-', '_', '.']);
+    let series_text = cleaned[..series_end]
+        .trim()
+        .trim_end_matches(['-', '_', '.']);
     let series = {
         let normalized = normalize_title(series_text.trim());
         (!normalized.is_empty()).then_some(normalized)
@@ -235,9 +239,7 @@ fn number_tokens(s: &str) -> Vec<(usize, &str)> {
 }
 
 fn looks_like_year(tok: &str) -> bool {
-    tok.len() == 4
-        && !tok.contains('.')
-        && (tok.starts_with("19") || tok.starts_with("20"))
+    tok.len() == 4 && !tok.contains('.') && (tok.starts_with("19") || tok.starts_with("20"))
 }
 
 /// `029` → `29`, `029.5` → `29.5`, `000` → `0`. Only the integer part is
@@ -320,7 +322,9 @@ mod tests {
         assert_eq!(id.issue.as_deref(), Some("1"));
         // Read as a Dir label the same string would give the page number.
         assert_eq!(
-            parse_label("Void Rivals 001-000", LabelKind::Dir).issue.as_deref(),
+            parse_label("Void Rivals 001-000", LabelKind::Dir)
+                .issue
+                .as_deref(),
             Some("0"),
             "this is exactly the misreading LabelKind exists to prevent"
         );
@@ -329,7 +333,10 @@ mod tests {
     #[test]
     fn two_digit_issue_with_page_suffix() {
         // Real: Carmen Red Claw.
-        let id = parse_label("Carmen Red Claw - Belly of the Beast 02-0000", LabelKind::Page);
+        let id = parse_label(
+            "Carmen Red Claw - Belly of the Beast 02-0000",
+            LabelKind::Page,
+        );
         assert_eq!(id.issue.as_deref(), Some("2"));
         assert_eq!(
             id.series.as_deref(),
@@ -494,7 +501,11 @@ mod tests {
             "__MACOSX/My Little Warlord 008/._008-0000.jpg",
         ]);
         let (label, kind) = label_from_entries(&names).unwrap();
-        assert_eq!(kind, LabelKind::Dir, "resource forks must not split the tree");
+        assert_eq!(
+            kind,
+            LabelKind::Dir,
+            "resource forks must not split the tree"
+        );
         assert_eq!(label, "My Little Warlord 008");
     }
 

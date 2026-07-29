@@ -7,8 +7,8 @@ use futures::stream::{self, StreamExt};
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
     downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
-    series_repo,
-    settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate, SeriesWithCounts,
+    series_repo, settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate,
+    SeriesWithCounts,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;

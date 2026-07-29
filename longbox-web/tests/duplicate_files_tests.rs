@@ -145,8 +145,8 @@ async fn seed_file_with_bytes(
         hasher
             .update_reader(std::fs::File::open(&full).unwrap())
             .unwrap();
-        let off = time::OffsetDateTime::from(meta.modified().unwrap())
-            .to_offset(time::UtcOffset::UTC);
+        let off =
+            time::OffsetDateTime::from(meta.modified().unwrap()).to_offset(time::UtcOffset::UTC);
         file_repo::set_content_hash(
             &app.state.db,
             id,
@@ -196,15 +196,7 @@ async fn detection_lists_only_multi_present_groups() {
     seed_file(&app, a, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
     // Issue B: a single present file → not a group.
     let b = seed_series_issue(&app, "Nailbiter", "1").await;
-    seed_file(
-        &app,
-        b,
-        "Nailbiter/Nailbiter 1.cbz",
-        true,
-        50_000_000,
-        true,
-    )
-    .await;
+    seed_file(&app, b, "Nailbiter/Nailbiter 1.cbz", true, 50_000_000, true).await;
     // Issue C: two files but one is absent → not a group (present count 1).
     let c = seed_series_issue(&app, "Paper Girls", "1").await;
     seed_file(
@@ -362,10 +354,8 @@ async fn resolve_refuses_mismatched_issue_numbers() {
     // Distinct issues (#1 and #2) wrongly matched to one issue row — the real
     // "Ferocious"/"Void Rivals" case. Filenames parse to different numbers.
     let issue = seed_series_issue(&app, "Ferocious", "1").await;
-    let f1 = seed_distinct_file(&app, issue, "Ferocious/Ferocious 1.cbz", true, 90_000_000)
-    .await;
-    let f2 = seed_distinct_file(&app, issue, "Ferocious/Ferocious 2.cbz", true, 90_000_000)
-    .await;
+    let f1 = seed_distinct_file(&app, issue, "Ferocious/Ferocious 1.cbz", true, 90_000_000).await;
+    let f2 = seed_distinct_file(&app, issue, "Ferocious/Ferocious 2.cbz", true, 90_000_000).await;
 
     // Detection classifies it as a mismatch (read-only).
     let resp = app
@@ -534,7 +524,15 @@ async fn resolve_refuses_to_delete_a_non_contained_loser_path() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Saga", "1").await;
     let keep = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
-    let evil = seed_file(&app, issue, "Saga/../../Saga 1.cbr", true, 80_000_000, false).await;
+    let evil = seed_file(
+        &app,
+        issue,
+        "Saga/../../Saga 1.cbr",
+        true,
+        80_000_000,
+        false,
+    )
+    .await;
 
     let resp = app
         .request(json_request(
@@ -573,9 +571,21 @@ async fn seed_ferocious(app: &TestApp) -> (i64, Vec<i64>) {
 async fn correct_repoints_a_mismatched_file_and_pins_it_against_rescan() {
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    let home = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    let home = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let stray = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 002.cbz", true, 90_000_000)
+    let stray = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+    )
     .await;
 
     // Detection surfaces it as a mismatch AND names the target for the stray.
@@ -631,9 +641,21 @@ async fn correct_refuses_a_target_the_filename_does_not_agree_with() {
     // harmless.
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let stray = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 002.cbz", true, 90_000_000)
+    let stray = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+    )
     .await;
 
     let resp = app
@@ -655,9 +677,21 @@ async fn correct_refuses_a_target_the_filename_does_not_agree_with() {
 async fn correct_refuses_a_target_in_a_different_series() {
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let stray = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 002.cbz", true, 90_000_000)
+    let stray = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+    )
     .await;
     // A #2 in a different series — same number, wrong book.
     let other = seed_series_issue(&app, "Saga", "2").await;
@@ -683,9 +717,21 @@ async fn correct_refuses_when_the_target_already_holds_a_different_issue() {
     // our #2 in there would tangle it further — refuse, and don't suggest it.
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let stray = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 002.cbz", true, 90_000_000)
+    let stray = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+    )
     .await;
     seed_file(
         &app,
@@ -737,9 +783,21 @@ async fn correct_allows_a_target_whose_occupant_agrees_on_the_number() {
     // the delete resolver then handles.
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let stray = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 002.cbz", true, 90_000_000)
+    let stray = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 002.cbz",
+        true,
+        90_000_000,
+    )
     .await;
     // Same BYTES as the stray: this is a genuine second copy of #2, which is
     // what makes re-pointing produce an honest, resolvable duplicate group.
@@ -777,7 +835,13 @@ async fn correct_allows_a_target_whose_occupant_agrees_on_the_number() {
 async fn correct_refuses_a_no_op_and_404s_an_unknown_file() {
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    let f = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001.cbz", true, 90_000_000)
+    let f = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001.cbz",
+        true,
+        90_000_000,
+    )
     .await;
 
     // Already there.
@@ -820,10 +884,8 @@ async fn resolve_batch_mixes_resolved_and_refused_without_cross_contamination() 
     let loser = seed_file(&app, dup, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
     // Issue 2: a mismatch (distinct issues).
     let mism = seed_series_issue(&app, "Ferocious", "1").await;
-    let m1 = seed_distinct_file(&app, mism, "Ferocious/Ferocious 1.cbz", true, 90_000_000)
-    .await;
-    let m2 = seed_distinct_file(&app, mism, "Ferocious/Ferocious 2.cbz", true, 90_000_000)
-    .await;
+    let m1 = seed_distinct_file(&app, mism, "Ferocious/Ferocious 1.cbz", true, 90_000_000).await;
+    let m2 = seed_distinct_file(&app, mism, "Ferocious/Ferocious 2.cbz", true, 90_000_000).await;
 
     let resp = app
         .request(json_request(
@@ -865,9 +927,21 @@ async fn resolve_batch_mixes_resolved_and_refused_without_cross_contamination() 
 async fn a_scene_named_file_is_never_mistaken_for_a_duplicate() {
     let app = build_test_app().await;
     let (_series, issues) = seed_ferocious(&app).await;
-    let real_one = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious 001 (2025).cbz", true, 90_000_000)
+    let real_one = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious 001 (2025).cbz",
+        true,
+        90_000_000,
+    )
     .await;
-    let scene = seed_distinct_file(&app, issues[0], "Ferocious/Ferocious.002.(2025).(Digital).cbz", true, 90_000_000)
+    let scene = seed_distinct_file(
+        &app,
+        issues[0],
+        "Ferocious/Ferocious.002.(2025).(Digital).cbz",
+        true,
+        90_000_000,
+    )
     .await;
 
     let resp = app

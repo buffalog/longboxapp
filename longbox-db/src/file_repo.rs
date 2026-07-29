@@ -686,11 +686,7 @@ impl HashCandidate {
     ///
     /// Deliberately conservative — any missing piece reads as stale and costs
     /// only a re-hash.
-    pub fn has_fresh_digest(
-        &self,
-        observed_size: i64,
-        observed_mtime: PrimitiveDateTime,
-    ) -> bool {
+    pub fn has_fresh_digest(&self, observed_size: i64, observed_mtime: PrimitiveDateTime) -> bool {
         match (
             &self.content_blake3,
             self.hashed_size_bytes,
@@ -915,15 +911,16 @@ mod tests {
 
     #[test]
     fn digest_is_stale_when_any_piece_is_missing() {
-        assert!(!candidate(None, Some(100), Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME));
+        assert!(
+            !candidate(None, Some(100), Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME)
+        );
         assert!(
             !candidate(Some("abc"), None, Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME)
         );
         assert!(!candidate(Some("abc"), Some(100), None).has_fresh_digest(DISK_SIZE, DISK_MTIME));
         // An empty digest is a write that went wrong, not a valid hash.
-        assert!(
-            !candidate(Some(""), Some(100), Some(DISK_MTIME)).has_fresh_digest(DISK_SIZE, DISK_MTIME)
-        );
+        assert!(!candidate(Some(""), Some(100), Some(DISK_MTIME))
+            .has_fresh_digest(DISK_SIZE, DISK_MTIME));
     }
 
     #[test]
