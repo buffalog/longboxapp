@@ -240,10 +240,10 @@ fn build_groups(
 async fn validated_observations(
     roots: &HashMap<i64, String>,
     candidates: &[DuplicateFileCandidate],
-) -> Vec<(Option<i64>, Option<String>)> {
+) -> Vec<DiskObservation> {
     let mut out = Vec::with_capacity(candidates.len());
     for c in candidates {
-        let (_, size, digest) = validate_digest(
+        let (_, obs) = DiskObservation::stat(
             roots,
             c.library_root_id,
             &c.path_relative,
@@ -252,7 +252,7 @@ async fn validated_observations(
             c.hashed_mtime,
         )
         .await;
-        out.push((size, digest));
+        out.push(obs);
     }
     out
 }
@@ -313,7 +313,7 @@ async fn judge_content(
     let mut observed = Vec::new();
     for f in present {
         let stamp = stamps.get(&f.id);
-        let (exists, observed_size, digest) = validate_digest(
+        let (exists, obs) = DiskObservation::stat(
             roots,
             f.library_root_id,
             &f.path_relative,
@@ -324,7 +324,7 @@ async fn judge_content(
         .await;
         if exists {
             on_disk_ids.push(f.id);
-            observed.push((observed_size, digest));
+            observed.push(obs);
         }
     }
     ContentJudgement {
@@ -334,18 +334,60 @@ async fn judge_content(
     }
 }
 
-/// Per-file evidence about content, all of it observed from DISK by the
-/// caller — never taken from the catalog.
+/// Evidence about a file's CONTENT, obtained by looking at the file.
 ///
-/// `.0` is the size the file actually has right now; `None` when it is not on
-/// disk. `.1` is a digest that has been validated against that same stat;
-/// `None` when there is no trustworthy one.
+/// A newtype with exactly one production constructor — [`DiskObservation::stat`],
+/// which performs the stat itself — so a catalog value cannot be substituted
+/// for a disk value here even by accident. That mistake has been made four
+/// separate times on this codebase (digest freshness, post-process import
+/// size, the detector's grouping key, and this classifier), always because
+/// `files.size_bytes` is the nearest thing to hand: already loaded, no
+/// syscall, usually correct. Discipline lost to that gradient every time, so
+/// the value is made unavailable rather than discouraged.
 ///
-/// Size is read from disk for the same reason the digest's freshness is: the
-/// catalog's `size_bytes` is only as current as the last scan, and a stale
-/// value would let two identical files be reported as different — hiding a
-/// real duplicate rather than inventing one, but wrong either way.
-type Observed<'a> = &'a [(Option<i64>, Option<String>)];
+/// Catalog `size_bytes` remains perfectly good for display, for sorting, and
+/// for the corruption floor. It is only illegitimate as proof about bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiskObservation {
+    /// Size the file has right now. `None` when it is not on disk at all.
+    size: Option<i64>,
+    /// A digest validated against that same stat. `None` when there is no
+    /// trustworthy one.
+    digest: Option<String>,
+}
+
+impl DiskObservation {
+    /// The only way production code obtains one: by stat-ing the file.
+    async fn stat(
+        roots: &HashMap<i64, String>,
+        library_root_id: i64,
+        path_relative: &str,
+        digest: Option<&str>,
+        stamp_size: Option<i64>,
+        stamp_mtime: Option<time::PrimitiveDateTime>,
+    ) -> (bool, Self) {
+        let (exists, size, digest) = validate_digest(
+            roots,
+            library_root_id,
+            path_relative,
+            digest,
+            stamp_size,
+            stamp_mtime,
+        )
+        .await;
+        (exists, Self { size, digest })
+    }
+
+    /// Test-only constructor. Deliberately absent from production builds:
+    /// the point of the newtype is that the only other way to get one is to
+    /// look at a real file.
+    #[cfg(test)]
+    fn from_parts(size: Option<i64>, digest: Option<String>) -> Self {
+        Self { size, digest }
+    }
+}
+
+type Observed<'a> = &'a [DiskObservation];
 
 fn build_one_group(
     rows: &[DuplicateFileCandidate],
@@ -495,17 +537,17 @@ fn classify_content(observed: Observed<'_>) -> ContentVerdict {
         return ContentVerdict::Unknown;
     }
     // A file we could not stat tells us nothing about content.
-    if observed.iter().any(|(size, _)| size.is_none()) {
+    if observed.iter().any(|o| o.size.is_none()) {
         return ContentVerdict::Unknown;
     }
     // Proof of difference, available without reading a byte.
-    if observed.windows(2).any(|w| w[0].0 != w[1].0) {
+    if observed.windows(2).any(|w| w[0].size != w[1].size) {
         return ContentVerdict::Distinct;
     }
-    if observed.iter().any(|(_, d)| d.is_none()) {
+    if observed.iter().any(|o| o.digest.is_none()) {
         return ContentVerdict::Unknown;
     }
-    if observed.windows(2).all(|w| w[0].1 == w[1].1) {
+    if observed.windows(2).all(|w| w[0].digest == w[1].digest) {
         ContentVerdict::Identical
     } else {
         ContentVerdict::Distinct
@@ -1574,25 +1616,28 @@ mod tests {
     }
 
     /// n files on disk, same size, byte-identical.
-    fn same(n: usize) -> Vec<(Option<i64>, Option<String>)> {
-        vec![(Some(9_000), Some("same-digest".to_owned())); n]
+    fn same(n: usize) -> Vec<DiskObservation> {
+        vec![DiskObservation::from_parts(Some(9_000), Some("same-digest".to_owned())); n]
     }
 
     /// n files on disk, same size, different content.
-    fn differing(n: usize) -> Vec<(Option<i64>, Option<String>)> {
+    fn differing(n: usize) -> Vec<DiskObservation> {
         (0..n)
-            .map(|i| (Some(9_000), Some(format!("digest-{i}"))))
+            .map(|i| DiskObservation::from_parts(Some(9_000), Some(format!("digest-{i}"))))
             .collect()
     }
 
     /// n files on disk, same size, none hashed yet.
-    fn unhashed(n: usize) -> Vec<(Option<i64>, Option<String>)> {
-        vec![(Some(9_000), None); n]
+    fn unhashed(n: usize) -> Vec<DiskObservation> {
+        vec![DiskObservation::from_parts(Some(9_000), None); n]
     }
 
     /// Files on disk with the given distinct sizes and no digests.
-    fn sized(sizes: &[i64]) -> Vec<(Option<i64>, Option<String>)> {
-        sizes.iter().map(|s| (Some(*s), None)).collect()
+    fn sized(sizes: &[i64]) -> Vec<DiskObservation> {
+        sizes
+            .iter()
+            .map(|s| DiskObservation::from_parts(Some(*s), None))
+            .collect()
     }
 
     // -------- content identity --------
@@ -1615,9 +1660,9 @@ mod tests {
         // evidence is not partial permission. The unhashed file might be a
         // distinct issue, and deleting it would lose a comic.
         let partial = vec![
-            (Some(9_000), Some("d".to_owned())),
-            (Some(9_000), Some("d".to_owned())),
-            (Some(9_000), None),
+            DiskObservation::from_parts(Some(9_000), Some("d".to_owned())),
+            DiskObservation::from_parts(Some(9_000), Some("d".to_owned())),
+            DiskObservation::from_parts(Some(9_000), None),
         ];
         assert_eq!(classify_content(&partial), ContentVerdict::Unknown);
         // Fewer than two files is nothing to compare.
