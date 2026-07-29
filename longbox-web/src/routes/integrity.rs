@@ -178,6 +178,7 @@ async fn start_analyze(
                     failed = stats.failed,
                     labelled = stats.labelled,
                     bytes = stats.bytes_hashed,
+                    first_failure = stats.first_failure.as_deref().unwrap_or("-"),
                     "integrity.analyze completed"
                 );
                 status.last = Some(stats);

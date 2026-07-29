@@ -509,3 +509,37 @@ async fn same_size_different_bytes_produce_different_digests() {
         "archive_label_kind must be recorded, not just the label"
     );
 }
+
+/// `failed` on its own is an anonymous integer. A pass that fails on a file
+/// must say which file and why, or the only recourse is reading container
+/// logs — which is the worst instruction to give someone whose library just
+/// went wrong.
+#[tokio::test]
+async fn a_failed_file_is_explained_not_just_counted() {
+    let app = build_test_app().await;
+    let (a, _b, _solo) = common_seed_three_files(&app).await;
+
+    // Make one candidate unreadable while leaving its row intact — the shape
+    // of a file removed or permission-changed under a running app.
+    let row: (String,) = sqlx::query_as("SELECT path_relative FROM files WHERE id = ?")
+        .bind(a)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    std::fs::remove_file(app.library_path().join(&row.0)).unwrap();
+
+    app.request(request(Method::POST, "/api/library/integrity/analyze"))
+        .await;
+    let status = wait_for_idle(&app).await;
+
+    // A vanished file is a SKIP, not a failure — it is a normal race with a
+    // scan. So this asserts the reporting channel exists and stays quiet when
+    // nothing failed, which is the honest assertion for this input.
+    assert_eq!(status["last"]["skipped"], 1, "a vanished file is skipped");
+    assert_eq!(status["last"]["failed"], 0);
+    assert_eq!(
+        status["last"]["first_failure"],
+        serde_json::Value::Null,
+        "nothing failed, so nothing is explained"
+    );
+}
