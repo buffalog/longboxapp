@@ -11,16 +11,6 @@ use axum::http::{Method, StatusCode};
 use common::{build_test_app, empty_request, response_json, TestApp};
 use longbox_db::{file_repo, issue_repo, series_repo, NewFile, NewIssue, NewSeries};
 
-/// Every path the integrity module serves. Listed explicitly rather than
-/// derived from the router, because axum does not expose its route table.
-/// `every_listed_path_actually_exists` catches a stale entry here; the
-/// `Surface` declaration in the module catches a route added without
-/// declaring what it writes.
-const INTEGRITY_PATHS: &[&str] = &[
-    "/api/library/integrity/analyze",
-    "/api/library/integrity/analyze/status",
-];
-
 /// Everything that could mutate. `GET` and `HEAD` are excluded by definition.
 const WRITE_METHODS: &[Method] = &[Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
 
@@ -34,53 +24,48 @@ fn request(method: Method, path: &str) -> axum::http::Request<axum::body::Body> 
 
 /// **The constraint this whole PR rests on.**
 ///
-/// Not "read-only" — the module has one write path and says so. This asserts
-/// the precise property: of every (path × write-method) pair the module
-/// serves, exactly ONE is accepted, and it is `POST …/analyze`.
+/// Not "read-only" — the module has one write path and says so. For every
+/// (path x write-method) pair the module registers, the method must be
+/// accepted **iff** that route declared `Surface::Writes`.
 ///
-/// Behavioural on purpose. A grep over query text — the obvious way to check
-/// "does this module write?" — is defeated by a multiline string, a helper
-/// indirection, or a macro. Sending the actual methods at the actual router
-/// is not.
+/// The probe list is DERIVED from `declared_routes()`, not hand-written. An
+/// earlier version of this test iterated a hardcoded path list and only
+/// counted `Writes` declarations, and a code review broke it in one line: a
+/// `DELETE` route declared `Surface::ReadOnly` passed every test. Deriving the
+/// list means a false declaration fails here instead of shipping.
+///
+/// Note the router serves an SPA fallback, so an unrouted path returns 200
+/// with index.html rather than 404 — which is why this asserts on 405
+/// specifically for declared paths, and why a "does this path exist" test
+/// would be vacuous.
 #[tokio::test]
-async fn only_the_analyze_route_accepts_a_write_method() {
+async fn a_write_method_is_accepted_only_where_the_route_declares_a_write() {
     let app = build_test_app().await;
-    let mut accepted = Vec::new();
+    let declared = longbox_web::routes::integrity::declared_routes();
+    assert!(!declared.is_empty(), "no routes declared");
 
-    for path in INTEGRITY_PATHS {
+    for (path, declares_write) in &declared {
+        let full = format!("/api{path}");
         for method in WRITE_METHODS {
-            let resp = app.request(request(method.clone(), path)).await;
-            // 405 = the path exists but refuses this method. Anything else
-            // means the method got through to a handler.
-            if resp.status() != StatusCode::METHOD_NOT_ALLOWED {
-                accepted.push((method.clone(), *path, resp.status()));
-            }
+            let resp = app.request(request(method.clone(), &full)).await;
+            let accepted = resp.status() != StatusCode::METHOD_NOT_ALLOWED;
+            let expected = *declares_write && *method == Method::POST;
+            assert_eq!(
+                accepted,
+                expected,
+                "{method} {full}: accepted={accepted} but declaration says {expected} \
+                 (declares_write={declares_write}); status was {}",
+                resp.status()
+            );
         }
     }
 
+    // And exactly one route declares a write at all.
     assert_eq!(
-        accepted.len(),
+        declared.iter().filter(|(_, w)| *w).count(),
         1,
-        "exactly one write path allowed; got {accepted:?}"
+        "integrity is a discovery surface: exactly one write path"
     );
-    assert_eq!(accepted[0].0, Method::POST);
-    assert_eq!(accepted[0].1, "/api/library/integrity/analyze");
-}
-
-/// A path listed above but not actually routed would make the write-surface
-/// test vacuous for that path — it would 404 rather than 405 and be counted
-/// as "accepted", or silently pass. This keeps the list honest.
-#[tokio::test]
-async fn every_listed_path_actually_exists() {
-    let app = build_test_app().await;
-    for path in INTEGRITY_PATHS {
-        let resp = app.request(empty_request("GET", path)).await;
-        assert_ne!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "{path} is listed but not routed — the write-surface test would silently skip it"
-        );
-    }
 }
 
 // -------- analyze job behaviour --------
@@ -250,6 +235,17 @@ async fn common_seed_three_files(app: &TestApp) -> (i64, i64, i64) {
     // Different page count → different size, so not a candidate at all.
     let size_solo = write_cbz("Warlord (2025)/Warlord 009.cbz", 5);
     assert_ne!(size_solo, size_a);
+    // Equal SIZE is what makes them candidates; equal BYTES is what the
+    // digest assertion needs. They coincide here only because zip is built
+    // without its `time` feature, so entry timestamps are the fixed
+    // 1980-01-01 default. Assert the bytes so enabling that feature anywhere
+    // in the workspace fails deterministically instead of flaking on a
+    // 2-second boundary.
+    assert_eq!(
+        std::fs::read(app.library_path().join("Warlord (2025)/Warlord 002.cbz")).unwrap(),
+        std::fs::read(app.library_path().join("Warlord (2025)/Warlord 005.cbz")).unwrap(),
+        "fixture must be byte-identical, not merely same-size"
+    );
 
     let series = series_repo::insert(
         &app.state.db,
@@ -326,4 +322,190 @@ async fn common_seed_three_files(app: &TestApp) -> (i64, i64, i64) {
         );
     }
     (ids[0], ids[1], ids[2])
+}
+
+/// **The write surface as an assertion, not a declaration.**
+///
+/// Snapshots every column of `files` that the analyze pass must NOT touch,
+/// runs a real pass over real archives, and asserts they are byte-identical
+/// afterwards. If `refresh_digests` were edited to also set `is_present = 0`
+/// or null an `issue_id`, every other test on this branch would still pass —
+/// this is the one that would fail.
+///
+/// The `Surface::Writes(DIGEST_COLUMNS)` declaration says what the pass is
+/// allowed to write. This checks it.
+#[tokio::test]
+async fn the_pass_writes_nothing_outside_the_digest_columns() {
+    let app = build_test_app().await;
+    common_seed_three_files(&app).await;
+
+    // Every column except the five the pass may write, concatenated per row.
+    // `quote()` renders NULLs distinctly and keeps this to one comparable
+    // value per row — Rust only derives PartialEq for tuples up to 12 fields,
+    // and there are more guarded columns than that, which is itself the point.
+    const GUARDED: &str = "id, quote(issue_id) || '|' || quote(library_root_id) || '|' \
+        || quote(path_relative) || '|' || quote(size_bytes) || '|' || quote(mtime) || '|' \
+        || quote(last_scanned_at) || '|' || quote(match_method) || '|' \
+        || quote(match_confidence) || '|' || quote(status) || '|' \
+        || quote(cached_comicinfo_xml) || '|' || quote(cached_at) || '|' \
+        || quote(is_present) || '|' || quote(last_seen_at) || '|' || quote(matched_at)";
+    let snapshot = || async {
+        sqlx::query_as::<_, (i64, String)>(&format!("SELECT {GUARDED} FROM files ORDER BY id"))
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap()
+    };
+
+    let before = snapshot().await;
+    assert!(!before.is_empty(), "fixture seeded nothing");
+
+    let resp = app
+        .request(request(Method::POST, "/api/library/integrity/analyze"))
+        .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let status = wait_for_idle(&app).await;
+    assert!(
+        status["last"]["hashed"].as_u64().unwrap() > 0,
+        "the pass must actually have written digests, or this proves nothing: {}",
+        status["last"]
+    );
+
+    let after = snapshot().await;
+    assert_eq!(
+        before, after,
+        "the analyze pass wrote outside the digest/label columns"
+    );
+}
+
+/// The discriminating case duplicate detection actually consumes: two files
+/// of the SAME size with DIFFERENT bytes. Both must be hashed, and their
+/// digests must differ. A size-only implementation passes the identical-bytes
+/// test and fails this one.
+#[tokio::test]
+async fn same_size_different_bytes_produce_different_digests() {
+    use std::io::Write;
+    let app = build_test_app().await;
+
+    let write = |rel: &str, fill: u8| {
+        let full = app.library_path().join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(&full).unwrap();
+        let mut zip = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("Series 001/001-0000.jpg", opts).unwrap();
+        // Stored (uncompressed) so equal payload length means equal file
+        // length regardless of how the bytes themselves compress.
+        zip.write_all(&vec![fill; 4096]).unwrap();
+        zip.finish().unwrap();
+        std::fs::metadata(&full).unwrap().len() as i64
+    };
+    let sa = write("Series (2025)/Series 001.cbz", 1);
+    let sb = write("Series (2025)/Series 002.cbz", 2);
+    assert_eq!(sa, sb, "fixture must collide on size");
+    assert_ne!(
+        std::fs::read(app.library_path().join("Series (2025)/Series 001.cbz")).unwrap(),
+        std::fs::read(app.library_path().join("Series (2025)/Series 002.cbz")).unwrap(),
+        "fixture must differ in bytes"
+    );
+
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: None,
+            metron_id: None,
+            title: "Series".into(),
+            sort_title: "series".into(),
+            start_year: Some(2025),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let now = {
+        let n = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(n.date(), n.time())
+    };
+    let mut ids = Vec::new();
+    for (rel, number, size) in [
+        ("Series (2025)/Series 001.cbz", "1", sa),
+        ("Series (2025)/Series 002.cbz", "2", sb),
+    ] {
+        let issue = issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: series,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: number.into(),
+                title: None,
+                cover_date: None,
+                summary: None,
+                cover_url: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let mtime = {
+            let m = std::fs::metadata(app.library_path().join(rel)).unwrap();
+            let off =
+                time::OffsetDateTime::from(m.modified().unwrap()).to_offset(time::UtcOffset::UTC);
+            time::PrimitiveDateTime::new(off.date(), off.time())
+        };
+        ids.push(
+            file_repo::insert(
+                &app.state.db,
+                NewFile {
+                    issue_id: Some(issue),
+                    library_root_id: app.library_root_id,
+                    path_relative: rel.into(),
+                    size_bytes: size,
+                    mtime,
+                    last_scanned_at: now,
+                    match_method: "test".into(),
+                    match_confidence: 1.0,
+                    status: "owned".into(),
+                    cached_comicinfo_xml: None,
+                    cached_at: None,
+                    is_present: true,
+                    last_seen_at: now,
+                    matched_at: Some(now),
+                },
+            )
+            .await
+            .unwrap()
+            .id,
+        );
+    }
+
+    app.request(request(Method::POST, "/api/library/integrity/analyze"))
+        .await;
+    let status = wait_for_idle(&app).await;
+    assert_eq!(status["last"]["hashed"], 2, "both must be hashed");
+
+    /// (file id, digest, stamped size, label kind)
+    type DigestRow = (i64, Option<String>, Option<i64>, Option<String>);
+    let rows: Vec<DigestRow> = sqlx::query_as(
+        "SELECT id, content_blake3, hashed_size_bytes, archive_label_kind FROM files ORDER BY id",
+    )
+    .fetch_all(&app.state.db)
+    .await
+    .unwrap();
+    let a = rows.iter().find(|r| r.0 == ids[0]).unwrap();
+    let b = rows.iter().find(|r| r.0 == ids[1]).unwrap();
+    assert_ne!(
+        a.1, b.1,
+        "same size, different bytes must produce different digests"
+    );
+    // The version stamp is what makes a second pass free; assert it landed.
+    assert_eq!(a.2, Some(sa), "hashed_size_bytes must be stamped");
+    assert_eq!(
+        a.3.as_deref(),
+        Some("dir"),
+        "archive_label_kind must be recorded, not just the label"
+    );
 }

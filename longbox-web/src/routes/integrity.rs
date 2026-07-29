@@ -12,13 +12,20 @@
 //! That property is enforced two ways, because the obvious way is not enough:
 //!
 //! 1. [`route_table`] declares, per route, whether it writes and what it
-//!    writes to. The router is built from the same list, so a new route cannot
-//!    be registered without declaring its surface, and a test asserts exactly
-//!    one `Surface::Writes`. A false declaration is visible in review.
-//! 2. A behavioural test sends every write method at every path and asserts
-//!    405 everywhere except the analyze POST. That one cannot be defeated by
-//!    string formatting, a helper indirection, or a macro — which a grep over
-//!    query text can.
+//!    writes to. The router is built from that same list, so a route cannot be
+//!    registered without declaring a surface.
+//! 2. A behavioural test derives its probe list from [`declared_routes`] and
+//!    asserts, for every path x write-method pair, that the method is accepted
+//!    IFF the route declared a write. A `Surface::ReadOnly` declaration on a
+//!    `DELETE` route therefore fails loudly rather than shipping green — which
+//!    is exactly what an earlier version of this did, because it only counted
+//!    `Writes` declarations and probed a hand-written path list.
+//! 3. An integration test snapshots every non-digest column of `files` around
+//!    a real pass and asserts nothing else moved, turning the declaration from
+//!    documentation into an assertion.
+//!
+//! A grep over query text is deliberately NOT one of these: it is defeated by
+//! a multiline string, a helper indirection, or a macro.
 //!
 //! Resolution — delete, relink, revert-to-missing, keeper selection — is
 //! deliberately absent. It ships separately, designed against this module's
@@ -74,10 +81,27 @@ fn route_table() -> Vec<(&'static str, MethodRouter<AppState>, Surface)> {
     ]
 }
 
-/// The declared surfaces, for the enforcement test.
-#[cfg(test)]
+/// The declared surfaces, for the enforcement tests.
 fn route_surfaces() -> Vec<(&'static str, Surface)> {
     route_table().into_iter().map(|(p, _, s)| (p, s)).collect()
+}
+
+/// Every route and whether it declares a write, for the integration test that
+/// probes the real router.
+///
+/// The probe list MUST be derived from this rather than hand-written: a
+/// hand-written list silently skips any route missing from it, so a `DELETE`
+/// route declared `ReadOnly` would ship green. Asserting "accepted iff
+/// declared as writing" makes a false declaration fail loudly.
+///
+/// Scope note: this covers routes registered by THIS module. A path under
+/// `/library/integrity/...` registered elsewhere is invisible to both tests —
+/// the constraint is module-scoped.
+pub fn declared_routes() -> Vec<(&'static str, bool)> {
+    route_surfaces()
+        .into_iter()
+        .map(|(p, s)| (p, matches!(s, Surface::Writes(_))))
+        .collect()
 }
 
 pub fn router() -> Router<AppState> {
@@ -119,12 +143,27 @@ async fn start_analyze(
         status.started_at = Some(time::OffsetDateTime::now_utc());
         status.finished_at = None;
         status.last_error = None;
+        // Clear the previous pass's stats too. Leaving them would let the
+        // endpoint serve `finished_at` from THIS pass alongside `last` from
+        // the previous one — reporting work that never happened, most visibly
+        // when a pass fails outright and the old success numbers survive.
+        status.last = None;
     }
 
     let db = state.db.clone();
     let slot: Arc<_> = state.analyze_status.clone();
     tokio::spawn(async move {
-        let outcome = crate::content_hash::refresh_digests(&db).await;
+        // Inner task so a panic becomes a JoinError instead of killing the
+        // flag reset. Without it, a panic anywhere in the pass strands
+        // `running = true` and every later POST 409s until the process
+        // restarts — recoverable only by restarting the container.
+        let inner = tokio::spawn(async move { crate::content_hash::refresh_digests(&db).await });
+        let outcome: Result<crate::content_hash::HashStats, String> = match inner.await {
+            Ok(Ok(stats)) => Ok(stats),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(join) => Err(format!("analysis task panicked: {join}")),
+        };
+
         let mut status = slot.write().await;
         status.running = false;
         status.finished_at = Some(time::OffsetDateTime::now_utc());
@@ -145,7 +184,7 @@ async fn start_analyze(
             }
             Err(e) => {
                 tracing::warn!(target: "longbox_web", error = %e, "integrity.analyze failed");
-                status.last_error = Some(e.to_string());
+                status.last_error = Some(e);
             }
         }
     });
