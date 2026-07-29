@@ -234,6 +234,12 @@
               >
                 <AlertTriangle class="size-3" aria-hidden="true" /> Wrong series match
               </span>
+            {:else if g.kind === 'same_number_different_bytes'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700"
+              >
+                Same issue, different files
+              </span>
             {:else if g.kind === 'pending_analysis'}
               <span
                 class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600"
@@ -265,12 +271,20 @@
               here would destroy a real issue, so there is no delete option; the fix is to re-match
               the stray file to its correct series.
             </p>
+          {:else if g.kind === 'same_number_different_bytes'}
+            <p class="mb-2 text-xs text-slate-600">
+              These files are not byte-identical, but every filename claims the same issue —
+              usually one issue in two container formats (.cbr and .cbz), or two different
+              encodings of it. There is nothing to move, and nothing is deleted from here:
+              confirming two containers hold the same comic would mean comparing their pages,
+              which this tool doesn't do. Compare them yourself and remove the one you don't want.
+            </p>
           {:else if g.kind === 'pending_analysis'}
             <p class="mb-2 text-xs text-slate-600">
-              These files haven't been compared byte-for-byte yet, so it isn't known whether they
-              are copies of one comic or different issues. No action is offered until they are:
-              not knowing is not the same as knowing they match. They'll classify themselves after
-              the next library scan.
+              These files are the same size but haven't been compared byte-for-byte yet, so it
+              isn't known whether they're copies of one comic or two different ones. No action is
+              offered until they are — not knowing is not the same as knowing they match. Run
+              content analysis from Library Integrity and this will resolve itself.
             </p>
           {:else if g.kind === 'cross_folder_same_series'}
             <p class="mb-2 text-xs text-slate-600">

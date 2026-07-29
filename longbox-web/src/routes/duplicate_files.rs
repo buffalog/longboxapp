@@ -184,9 +184,9 @@ async fn list(
         .into_iter()
         .map(|r| (r.id, r.path))
         .collect();
-    let digests = validated_digests(&state, &roots, &candidates).await;
+    let observed = validated_observations(&roots, &candidates).await;
 
-    let mut groups = build_groups(candidates, &patterns, &digests);
+    let mut groups = build_groups(candidates, &patterns, &observed);
     relabel_cross_folder_groups(&state, &mut groups).await?;
     annotate_suggestions(&state, &patterns, &mut groups).await?;
     Ok(Json(ListResponse {
@@ -204,7 +204,7 @@ async fn list(
 fn build_groups(
     candidates: Vec<DuplicateFileCandidate>,
     patterns: &[ParsingPattern],
-    digests: Digests<'_>,
+    observed: Observed<'_>,
 ) -> Vec<DupGroup> {
     let mut groups: Vec<DupGroup> = Vec::new();
     // Rows arrive contiguous per issue_id (repo ORDER BY issue_id, id).
@@ -215,7 +215,11 @@ fn build_groups(
         while j < candidates.len() && candidates[j].issue_id == issue_id {
             j += 1;
         }
-        groups.push(build_one_group(&candidates[i..j], patterns, &digests[i..j]));
+        groups.push(build_one_group(
+            &candidates[i..j],
+            patterns,
+            &observed[i..j],
+        ));
         i = j;
     }
     groups
@@ -233,37 +237,32 @@ fn build_groups(
 ///
 /// Stats only, never hashes: this is a request path. Populating digests is the
 /// background job's job.
-async fn validated_digests(
-    state: &AppState,
+async fn validated_observations(
     roots: &HashMap<i64, String>,
     candidates: &[DuplicateFileCandidate],
-) -> Vec<Option<String>> {
+) -> Vec<(Option<i64>, Option<String>)> {
     let mut out = Vec::with_capacity(candidates.len());
     for c in candidates {
-        out.push(validate_one_digest(state, roots, c).await);
+        let (_, size, digest) = validate_digest(
+            roots,
+            c.library_root_id,
+            &c.path_relative,
+            c.content_blake3.as_deref(),
+            c.hashed_size_bytes,
+            c.hashed_mtime,
+        )
+        .await;
+        out.push((size, digest));
     }
     out
 }
 
-async fn validate_one_digest(
-    _state: &AppState,
-    roots: &HashMap<i64, String>,
-    c: &DuplicateFileCandidate,
-) -> Option<String> {
-    validate_digest(
-        roots,
-        c.library_root_id,
-        &c.path_relative,
-        c.content_blake3.as_deref(),
-        c.hashed_size_bytes,
-        c.hashed_mtime,
-    )
-    .await
-    .1
-}
-
 /// Stat the file and decide whether its stored digest still describes it.
-/// Returns (file exists on disk, trustworthy digest).
+///
+/// Returns (exists on disk, observed size, trustworthy digest). The size comes
+/// from the stat, never from the catalog — on the delete path, differing sizes
+/// are proof of differing content, and proof must come from disk for the same
+/// reason the digest's freshness does.
 async fn validate_digest(
     roots: &HashMap<i64, String>,
     library_root_id: i64,
@@ -271,30 +270,30 @@ async fn validate_digest(
     digest: Option<&str>,
     stamp_size: Option<i64>,
     stamp_mtime: Option<time::PrimitiveDateTime>,
-) -> (bool, Option<String>) {
+) -> (bool, Option<i64>, Option<String>) {
     if !is_contained(path_relative) {
-        return (false, None);
+        return (false, None, None);
     }
     let Some(root) = roots.get(&library_root_id) else {
-        return (false, None);
+        return (false, None, None);
     };
     let Ok(meta) = tokio::fs::metadata(Path::new(root).join(path_relative)).await else {
-        return (false, None);
-    };
-    let Some(digest) = digest.filter(|d| !d.is_empty()) else {
-        return (true, None);
-    };
-    let (Some(stamp_size), Some(stamp_mtime)) = (stamp_size, stamp_mtime) else {
-        return (true, None);
+        return (false, None, None);
     };
     let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    let Some(digest) = digest.filter(|d| !d.is_empty()) else {
+        return (true, Some(observed_size), None);
+    };
+    let (Some(stamp_size), Some(stamp_mtime)) = (stamp_size, stamp_mtime) else {
+        return (true, Some(observed_size), None);
+    };
     let Ok(modified) = meta.modified() else {
-        return (true, None);
+        return (true, Some(observed_size), None);
     };
     let off = time::OffsetDateTime::from(modified).to_offset(time::UtcOffset::UTC);
     let observed_mtime = time::PrimitiveDateTime::new(off.date(), off.time());
     let fresh = stamp_size == observed_size && stamp_mtime == observed_mtime;
-    (true, fresh.then(|| digest.to_owned()))
+    (true, Some(observed_size), fresh.then(|| digest.to_owned()))
 }
 
 /// The content verdict for a resolve, computed over the files that actually
@@ -311,10 +310,10 @@ async fn judge_content(
     stamps: &HashMap<i64, longbox_db::ContentStamp>,
 ) -> ContentJudgement {
     let mut on_disk_ids = Vec::new();
-    let mut digests = Vec::new();
+    let mut observed = Vec::new();
     for f in present {
         let stamp = stamps.get(&f.id);
-        let (exists, digest) = validate_digest(
+        let (exists, observed_size, digest) = validate_digest(
             roots,
             f.library_root_id,
             &f.path_relative,
@@ -325,25 +324,33 @@ async fn judge_content(
         .await;
         if exists {
             on_disk_ids.push(f.id);
-            digests.push(digest);
+            observed.push((observed_size, digest));
         }
     }
     ContentJudgement {
-        verdict: classify_content(&digests),
+        verdict: classify_content(&observed),
         on_disk_count: on_disk_ids.len(),
         on_disk_ids,
     }
 }
 
-/// Per-file content digest, already validated against disk by the caller.
-/// `None` means "no trustworthy digest for these bytes" — either never hashed
-/// or hashed against a version that has since changed.
-type Digests<'a> = &'a [Option<String>];
+/// Per-file evidence about content, all of it observed from DISK by the
+/// caller — never taken from the catalog.
+///
+/// `.0` is the size the file actually has right now; `None` when it is not on
+/// disk. `.1` is a digest that has been validated against that same stat;
+/// `None` when there is no trustworthy one.
+///
+/// Size is read from disk for the same reason the digest's freshness is: the
+/// catalog's `size_bytes` is only as current as the last scan, and a stale
+/// value would let two identical files be reported as different — hiding a
+/// real duplicate rather than inventing one, but wrong either way.
+type Observed<'a> = &'a [(Option<i64>, Option<String>)];
 
 fn build_one_group(
     rows: &[DuplicateFileCandidate],
     patterns: &[ParsingPattern],
-    digests: Digests<'_>,
+    observed: Observed<'_>,
 ) -> DupGroup {
     let largest = rows.iter().map(|r| r.size_bytes).max().unwrap_or(0);
     // Served pick: owned-preferred, then lowest id — mirrors opds_repo.
@@ -393,7 +400,8 @@ fn build_one_group(
     //     marking #2 owned while it holds #1's content.
     //   - Death Fight Forever 003/005 are byte-identical; 005 is a misnamed
     //     copy. The correct action is delete, not move.
-    let content = classify_content(digests);
+    let numbers: Vec<Option<String>> = files.iter().map(|f| f.parsed_number.clone()).collect();
+    let content = classify_content(observed);
 
     let is_dup = !cross_folder && content == ContentVerdict::Identical;
     let suggested_keep_file_id = if is_dup { suggest_keep(&files) } else { None };
@@ -413,7 +421,29 @@ fn build_one_group(
             // same reasoning as the stale-digest guard in `content_hash`.
             ContentVerdict::Unknown => "pending_analysis",
             ContentVerdict::Identical => "duplicate",
-            ContentVerdict::Distinct => "mismatch",
+            // Different content splits two ways, and conflating them put a
+            // false label on real data. `mismatch` means "distinct issues
+            // wrongly merged onto one record — move the stray", which is
+            // wrong for `The Authority (1999) 017.cbr` next to `017.cbz`:
+            // that is ONE issue in two container formats. This module was
+            // built knowing that shape — its own header calls out "same
+            // folder under different names/formats", and `suggest_keep`
+            // prefers cbz — and content-identity classification narrowed
+            // `duplicate` from "same comic" to "same bytes", dropping it into
+            // the mismatch bucket by accident.
+            //
+            // Proving two containers hold the same comic needs page-level
+            // comparison, which this feature deliberately does not do. So
+            // neither sub-kind is deletable here; they differ only in what
+            // they tell the user, and in whether "move the stray" is even a
+            // coherent instruction.
+            ContentVerdict::Distinct => {
+                if numbers_agree(&numbers) {
+                    "same_number_different_bytes"
+                } else {
+                    "mismatch"
+                }
+            }
         }
     };
 
@@ -441,24 +471,62 @@ enum ContentVerdict {
     Unknown,
 }
 
-/// Decide content identity from per-file digests that the caller has already
-/// validated against disk.
+/// Decide content identity from per-file sizes and digests.
 ///
-/// `Unknown` is returned whenever ANY file is missing a trustworthy digest,
-/// not just when all are. A group of three where two match and the third is
-/// unhashed is not "two duplicates plus an unknown" — it is a group we cannot
-/// classify, because the unhashed file might be identical to the others (so
-/// deleting a "duplicate" loses nothing) or might be a distinct issue (so
-/// deleting it loses a comic). Partial evidence is not partial permission.
-fn classify_content(digests: Digests<'_>) -> ContentVerdict {
-    if digests.len() < 2 || digests.iter().any(|d| d.is_none()) {
+/// **Differing sizes are proof, not a hint.** Two files of different byte
+/// length cannot be byte-identical, so that answer is final and needs no
+/// digest. Without this, a group whose files have library-wide unique sizes
+/// is never selected for hashing (see `size_collision_candidates`) and reads
+/// `pending_analysis` FOREVER — telling the user to run an analysis that by
+/// construction can never reach it. That is the same defect as reporting a
+/// missing issue as "no confident suggestion": an absence dressed up as
+/// uncertainty when the answer is knowable.
+///
+/// `Unknown` is therefore reserved for its one real meaning: same size, not
+/// yet hashed — where running the analysis genuinely helps.
+///
+/// Still one-sided about permission. Any file missing a trustworthy digest
+/// among same-sized files yields `Unknown`, including when two of three
+/// match: the unhashed one might be identical (so deleting loses nothing) or
+/// distinct (so deleting loses a comic). Partial evidence is not partial
+/// permission.
+fn classify_content(observed: Observed<'_>) -> ContentVerdict {
+    if observed.len() < 2 {
         return ContentVerdict::Unknown;
     }
-    if digests.windows(2).all(|w| w[0] == w[1]) {
+    // A file we could not stat tells us nothing about content.
+    if observed.iter().any(|(size, _)| size.is_none()) {
+        return ContentVerdict::Unknown;
+    }
+    // Proof of difference, available without reading a byte.
+    if observed.windows(2).any(|w| w[0].0 != w[1].0) {
+        return ContentVerdict::Distinct;
+    }
+    if observed.iter().any(|(_, d)| d.is_none()) {
+        return ContentVerdict::Unknown;
+    }
+    if observed.windows(2).all(|w| w[0].1 == w[1].1) {
         ContentVerdict::Identical
     } else {
         ContentVerdict::Distinct
     }
+}
+
+/// Do every file's filename claim the same issue number?
+///
+/// This is what separates "one issue in two containers" from "two issues on
+/// one record". It is NOT used to decide deletability — filename agreement is
+/// circular evidence for that, since most bindings were derived from the
+/// filename in the first place. It only chooses which true thing to say.
+fn numbers_agree(numbers: &[Option<String>]) -> bool {
+    let mut it = numbers.iter();
+    let Some(Some(first)) = it.next() else {
+        return false;
+    };
+    let first = norm_num(first);
+    numbers
+        .iter()
+        .all(|n| matches!(n, Some(x) if norm_num(x) == first))
 }
 
 // -------- cross-folder detection --------
@@ -1111,7 +1179,7 @@ async fn correct(
         let mut others = Vec::new();
         for f in &siblings {
             let stamp = stamps.get(&f.id);
-            let (_, digest) = validate_digest(
+            let (_, _, digest) = validate_digest(
                 &roots,
                 f.library_root_id,
                 &f.path_relative,
@@ -1505,14 +1573,26 @@ mod tests {
         }
     }
 
-    /// n files that are byte-identical.
-    fn same(n: usize) -> Vec<Option<String>> {
-        vec![Some("same-digest".to_owned()); n]
+    /// n files on disk, same size, byte-identical.
+    fn same(n: usize) -> Vec<(Option<i64>, Option<String>)> {
+        vec![(Some(9_000), Some("same-digest".to_owned())); n]
     }
 
-    /// n files with distinct content.
-    fn differing(n: usize) -> Vec<Option<String>> {
-        (0..n).map(|i| Some(format!("digest-{i}"))).collect()
+    /// n files on disk, same size, different content.
+    fn differing(n: usize) -> Vec<(Option<i64>, Option<String>)> {
+        (0..n)
+            .map(|i| (Some(9_000), Some(format!("digest-{i}"))))
+            .collect()
+    }
+
+    /// n files on disk, same size, none hashed yet.
+    fn unhashed(n: usize) -> Vec<(Option<i64>, Option<String>)> {
+        vec![(Some(9_000), None); n]
+    }
+
+    /// Files on disk with the given distinct sizes and no digests.
+    fn sized(sizes: &[i64]) -> Vec<(Option<i64>, Option<String>)> {
+        sizes.iter().map(|s| (Some(*s), None)).collect()
     }
 
     // -------- content identity --------
@@ -1530,11 +1610,15 @@ mod tests {
     /// read as permission to delete.
     #[test]
     fn a_missing_digest_makes_the_whole_group_unknown() {
-        assert_eq!(classify_content(&[None, None]), ContentVerdict::Unknown);
+        assert_eq!(classify_content(&unhashed(2)), ContentVerdict::Unknown);
         // One unhashed file among matching ones is still Unknown — partial
         // evidence is not partial permission. The unhashed file might be a
         // distinct issue, and deleting it would lose a comic.
-        let partial = vec![Some("d".to_owned()), Some("d".to_owned()), None];
+        let partial = vec![
+            (Some(9_000), Some("d".to_owned())),
+            (Some(9_000), Some("d".to_owned())),
+            (Some(9_000), None),
+        ];
         assert_eq!(classify_content(&partial), ContentVerdict::Unknown);
         // Fewer than two files is nothing to compare.
         assert_eq!(classify_content(&same(1)), ContentVerdict::Unknown);
@@ -1562,18 +1646,69 @@ mod tests {
         assert!(g.suggested_keep_file_id.is_some());
     }
 
-    /// The inverse: filenames agree but the bytes differ. Agreement on a name
-    /// is not evidence about content.
+    /// Filenames agree but the bytes differ. Agreement on a name is not
+    /// evidence about content, so this is never deletable — but it is also
+    /// not a `mismatch`: nothing here is a "stray" to move, because both
+    /// files claim the same issue. This is the format/encoding-variant shape.
     #[test]
-    fn differing_bytes_beat_agreeing_filenames() {
+    fn agreeing_numbers_with_differing_bytes_is_not_a_mismatch() {
         let pats = number_pattern();
         let rows = vec![
             row(1, "Saga (2012)/Saga 001.cbz"),
             row(2, "Saga (2012)/Saga 001 alt.cbz"),
         ];
         let g = build_one_group(&rows, &pats, &differing(2));
-        assert_eq!(g.kind, "mismatch");
+        assert_eq!(g.kind, "same_number_different_bytes");
+        assert_eq!(g.suggested_keep_file_id, None, "still not deletable");
+    }
+
+    /// The live Authority #17 shape: one issue in two container formats,
+    /// same folder, DIFFERENT sizes so neither file is ever a hashing
+    /// candidate. Before this it read `pending_analysis` forever, pointing
+    /// the user at an analysis that by construction could never reach it.
+    #[test]
+    fn a_format_pair_with_unique_sizes_is_classified_without_hashing() {
+        let pats = number_pattern();
+        let mut a = row(1, "The Authority (1999)/The Authority 017.cbr");
+        let mut b = row(2, "The Authority (1999)/The Authority 017.cbz");
+        a.size_bytes = 12_054_528;
+        b.size_bytes = 28_297_222;
+        // No digests at all — differing size is the whole proof.
+        let g = build_one_group(&[a, b], &pats, &sized(&[12_054_528, 28_297_222]));
+        assert_eq!(
+            g.kind, "same_number_different_bytes",
+            "differing sizes prove differing content without any hashing"
+        );
         assert_eq!(g.suggested_keep_file_id, None);
+    }
+
+    /// `pending_analysis` must mean only what it says: same size, not yet
+    /// hashed, and running the analysis genuinely helps.
+    #[test]
+    fn pending_analysis_requires_equal_sizes() {
+        let pats = number_pattern();
+        let mut a = row(1, "Saga (2012)/Saga 001.cbz");
+        let mut b = row(2, "Saga (2012)/Saga 001 copy.cbz");
+        a.size_bytes = 5_000;
+        b.size_bytes = 5_000;
+        let g = build_one_group(&[a.clone(), b.clone()], &pats, &unhashed(2));
+        assert_eq!(g.kind, "pending_analysis", "same size + unhashed = unknown");
+
+        // Change one size and the answer becomes knowable immediately.
+        b.size_bytes = 6_000;
+        let g = build_one_group(&[a, b], &pats, &sized(&[12_054_528, 28_297_222]));
+        assert_ne!(g.kind, "pending_analysis");
+    }
+
+    #[test]
+    fn size_difference_is_proof_and_needs_no_digest() {
+        assert_eq!(
+            classify_content(&sized(&[10, 11])),
+            ContentVerdict::Distinct,
+            "different lengths cannot be the same bytes"
+        );
+        // Equal sizes with no digests is the only genuine Unknown.
+        assert_eq!(classify_content(&unhashed(2)), ContentVerdict::Unknown);
     }
 
     #[test]
@@ -1583,7 +1718,7 @@ mod tests {
             row(1, "Saga (2012)/Saga 001.cbz"),
             row(2, "Saga (2012)/Saga 001 copy.cbz"),
         ];
-        let g = build_one_group(&rows, &pats, &[None, None]);
+        let g = build_one_group(&rows, &pats, &unhashed(2));
         assert_eq!(g.kind, "pending_analysis");
         assert_eq!(
             g.suggested_keep_file_id, None,
