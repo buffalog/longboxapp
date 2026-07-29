@@ -119,6 +119,17 @@ struct DupCandidate {
     suspect_corrupt: bool,
     /// Lives under a `_unsorted/` staging path (less canonical).
     under_unsorted: bool,
+    /// The issue number this file's own filename names, when this series has
+    /// NO catalog record for it — e.g. a file parsing to #5 in a series whose
+    /// catalog stops at #4.
+    ///
+    /// A distinct, first-class state, NOT a confidence problem. The old UI
+    /// reported it as "no confident suggestion — your call" while instructing
+    /// the user to "move each stray file to the issue its filename says it
+    /// is", which is an instruction to do something impossible. The catalog
+    /// is simply missing the issue; the fix is to refresh the series from
+    /// ComicVine, not to make a judgement call.
+    missing_target_number: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -357,6 +368,8 @@ fn build_one_group(
             is_served: Some(r.file_id) == served_id,
             suspect_corrupt: is_suspect_size(r.size_bytes, largest),
             under_unsorted: under_unsorted(&r.path_relative),
+            // Filled in by `annotate_suggestions` (needs the series catalog).
+            missing_target_number: None,
         })
         .collect();
 
@@ -563,6 +576,18 @@ async fn annotate_suggestions(
             .iter()
             .map(|f| parse_filename_number(&f.path_relative, patterns))
             .collect();
+
+        // Flag every stray whose filename names an issue this series simply
+        // does not have. That is an absence in the catalog, not a failure of
+        // nerve, and it gets said plainly instead of being folded into the
+        // "no confident suggestion" bucket with genuinely ambiguous files.
+        for (idx, number) in filename_numbers.iter().enumerate() {
+            let Some(number) = number.as_deref() else { continue };
+            let known = issues.iter().any(|(n, _)| norm_num(n) == norm_num(number));
+            if !known {
+                group.files[idx].missing_target_number = Some(norm_num(number));
+            }
+        }
 
         for (idx, target) in propose_targets(group.issue_id, &filename_numbers, issues)
             .into_iter()
@@ -1019,6 +1044,67 @@ async fn correct(
         ));
     }
 
+    // CONTENT IDENTITY DOMINATES TARGET AVAILABILITY.
+    //
+    // A file that is byte-identical to another file on its current issue is a
+    // duplicate, not a stray, and the correct action is to delete it — never
+    // to re-point it. The hazard is specifically a refresh: pulling new issue
+    // records from ComicVine CREATES move targets, and without this a
+    // freshly-created issue would become a legal destination for a copy of a
+    // book we already hold. Taking that move marks the new issue owned while
+    // it holds another issue's content — the exact phantom-ownership pattern
+    // this whole feature exists to eliminate, manufactured by the repair
+    // action for it.
+    //
+    // Checked here rather than only in the list payload because the list is a
+    // hint. `annotate_suggestions` already withholds move UI from a
+    // content-identical group, but a hand-rolled POST bypasses the UI
+    // entirely, and this endpoint is the thing that actually writes.
+    let siblings: Vec<FileRow> = file_repo::list_by_issue(&state.db, from_issue_id)
+        .await?
+        .into_iter()
+        .filter(|f| f.is_present)
+        .collect();
+    if siblings.len() > 1 {
+        let roots: HashMap<i64, String> = library_root_repo::list_all(&state.db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.path))
+            .collect();
+        let stamps: HashMap<i64, longbox_db::ContentStamp> =
+            file_repo::content_stamps_by_issue(&state.db, from_issue_id)
+                .await?
+                .into_iter()
+                .map(|s| (s.file_id, s))
+                .collect();
+        let mut mine = None;
+        let mut others = Vec::new();
+        for f in &siblings {
+            let stamp = stamps.get(&f.id);
+            let (_, digest) = validate_digest(
+                &roots,
+                f.library_root_id,
+                &f.path_relative,
+                stamp.and_then(|s| s.content_blake3.as_deref()),
+                stamp.and_then(|s| s.hashed_size_bytes),
+                stamp.and_then(|s| s.hashed_mtime),
+            )
+            .await;
+            if f.id == file.id {
+                mine = digest;
+            } else if let Some(d) = digest {
+                others.push(d);
+            }
+        }
+        if let Some(mine) = mine {
+            if others.contains(&mine) {
+                return Err(refuse(
+                    "this file is byte-identical to another copy on the same issue — it is a duplicate, not a stray. Delete the redundant copy instead of moving it; moving it would mark the target issue owned while it holds this issue's content".to_owned(),
+                ));
+            }
+        }
+    }
+
     // The client's target must be independently corroborated by the file's
     // own filename. This is the check that makes a blindly-POSTed issue_id
     // harmless.
@@ -1207,6 +1293,7 @@ mod tests {
             is_served: false,
             suspect_corrupt: suspect,
             under_unsorted: unsorted,
+            missing_target_number: None,
         }
     }
 

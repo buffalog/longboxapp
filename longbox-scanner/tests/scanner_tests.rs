@@ -1220,3 +1220,59 @@ async fn a_rescan_leaves_a_hand_relinked_file_on_its_volume() {
         "and must not demote it to needs_review by abstaining over it"
     );
 }
+
+/// `POST /series/:id/refresh` spawns `rematch_for_series`. A hand-relinked
+/// file must survive that too — otherwise relinking the 26 Authority files
+/// and then clicking Refresh on the series would undo the repair.
+///
+/// Two independent layers hold here, and this asserts the outcome of both:
+/// the selection is `needs_review`-only so a manual row is never even
+/// considered, and `persist`'s preserve-manual branch would protect it if it
+/// were.
+#[tokio::test]
+async fn refresh_driven_rematch_leaves_a_hand_relinked_file_alone() {
+    let tmp = TempDir::new().unwrap();
+    let path = "The Authority/The Authority 002.cbz";
+    write_cbz(&tmp.path().join(path), None);
+
+    let pool = fresh_pool().await;
+    let (_old, new_volume) = seed_two_authority_volumes(&pool, "2").await;
+    let library_root_id = seed_library_root(&pool, tmp.path().to_str().unwrap()).await;
+
+    scanner_for(pool.clone())
+        .scan_full(library_root_id)
+        .await
+        .unwrap();
+
+    let before = find_file(&pool, library_root_id, path).await;
+    let now = time::OffsetDateTime::now_utc();
+    file_repo::repoint_manual(
+        &pool,
+        before.id,
+        before.issue_id.unwrap(),
+        new_volume,
+        time::PrimitiveDateTime::new(now.date(), now.time()),
+    )
+    .await
+    .unwrap();
+
+    // Exactly what the refresh endpoint spawns.
+    let series_id = issue_repo::find_by_id(&pool, new_volume)
+        .await
+        .unwrap()
+        .unwrap()
+        .series_id;
+    scanner_for(pool.clone())
+        .rematch_for_series(series_id)
+        .await
+        .unwrap();
+
+    let after = find_file(&pool, library_root_id, path).await;
+    assert_eq!(
+        after.issue_id,
+        Some(new_volume),
+        "a refresh must not undo a hand-made volume correction"
+    );
+    assert_eq!(after.match_method, "manual");
+    assert_eq!(after.status, "owned");
+}

@@ -9,6 +9,7 @@
     type DupGroup,
     type Resolution
   } from '$lib/api/duplicateFiles';
+  import { refreshSeries } from '$lib/api/series';
   import { formatBytes } from '$lib/format';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -37,6 +38,23 @@
   let moveTo = $state<Record<number, number>>({});
   // file_id currently being corrected, so only its own button spins.
   let correcting = $state<number | null>(null);
+  // series_id currently refreshing from ComicVine.
+  let refreshing = $state<number | null>(null);
+
+  // Pull the series again so a missing issue record can appear. Purely
+  // additive — it creates catalog rows, it never moves or deletes a file.
+  async function refreshFromComicVine(g: DupGroup): Promise<void> {
+    refreshing = g.series_id;
+    try {
+      await refreshSeries(g.series_id);
+      toast.success(`Refreshed ${g.series_title} from ComicVine.`);
+      await loadPage(page);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      refreshing = null;
+    }
+  }
 
   const pageCount = $derived(Math.max(1, Math.ceil(total / PER_PAGE)));
   const duplicateGroups = $derived(groups.filter((g) => g.kind === 'duplicate'));
@@ -324,6 +342,22 @@
                         <span class="text-slate-500">
                           suggested: #{numberOf(g, f.suggested_issue_id)}
                         </span>
+                      {:else if f.missing_target_number}
+                        <!-- Say what is true, not what is uncertain: the
+                             catalog has no such issue. This is not a
+                             confidence problem and must not read like one. -->
+                        <span class="text-slate-700">
+                          Issue #{f.missing_target_number} is not in this series’ catalog
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={refreshing !== null || correcting !== null}
+                          loading={refreshing === g.series_id}
+                          onclick={() => refreshFromComicVine(g)}
+                        >
+                          Refresh metadata
+                        </Button>
                       {:else}
                         <span class="text-amber-800">no confident suggestion — your call</span>
                       {/if}

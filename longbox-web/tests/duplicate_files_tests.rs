@@ -903,3 +903,156 @@ async fn a_scene_named_file_is_never_mistaken_for_a_duplicate() {
             && on_disk(&app, "Ferocious/Ferocious.002.(2025).(Digital).cbz")
     );
 }
+
+// -------- "the target issue does not exist" --------
+
+/// The originating bug report, as a state rather than a shrug.
+///
+/// A file parsing to #5 in a series whose catalog stops at #4 has no move
+/// target. The old UI reported that as "no confident suggestion — your call"
+/// while instructing the user to "move each stray file to the issue its
+/// filename says it is": an instruction to do something impossible. It is an
+/// absence in the catalog, and it says so.
+#[tokio::test]
+async fn a_stray_naming_an_issue_the_series_lacks_is_reported_as_missing() {
+    let app = build_test_app().await;
+    let series = seed_series(&app, "Death Fight Forever").await;
+    let issue_3 = seed_issue(&app, series, "3").await;
+    for n in ["1", "2", "4"] {
+        seed_issue(&app, series, n).await;
+    }
+    // Two DIFFERENT comics wrongly sharing issue 3, so the group is a
+    // mismatch and the move path is live. One of them names #5, which the
+    // catalog does not have.
+    seed_distinct_file(
+        &app,
+        issue_3,
+        "Death Fight Forever/Death Fight Forever 003.cbz",
+        true,
+        90_000_000,
+    )
+    .await;
+    let stray = seed_distinct_file(
+        &app,
+        issue_3,
+        "Death Fight Forever/Death Fight Forever 005.cbz",
+        true,
+        80_000_000,
+    )
+    .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = &body["groups"][0];
+    assert_eq!(g["kind"], "mismatch");
+    let row = g["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["file_id"] == stray)
+        .unwrap();
+    assert_eq!(
+        row["missing_target_number"], "5",
+        "must name the issue the catalog lacks, not shrug"
+    );
+    assert_eq!(
+        row["suggested_issue_id"],
+        serde_json::Value::Null,
+        "and there is genuinely nowhere to move it"
+    );
+}
+
+/// THE REFRESH HAZARD.
+///
+/// Refresh Metadata creates issue records, and issue records are move
+/// targets. A byte-identical copy must never be promoted into a move
+/// candidate just because its number finally exists — taking that move would
+/// mark the new issue owned while it holds another issue's content, which is
+/// the phantom-ownership pattern this feature exists to eliminate, produced
+/// by the repair action for it.
+#[tokio::test]
+async fn creating_the_missing_issue_does_not_make_an_identical_copy_movable() {
+    let app = build_test_app().await;
+    let series = seed_series(&app, "Death Fight Forever").await;
+    let issue_3 = seed_issue(&app, series, "3").await;
+
+    // The real shape: 005.cbz is a byte-identical copy of 003.cbz.
+    let keep = seed_file(
+        &app,
+        issue_3,
+        "Death Fight Forever/Death Fight Forever 003.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let copy = seed_file(
+        &app,
+        issue_3,
+        "Death Fight Forever/Death Fight Forever 005.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    // Identical content → duplicate, delete-only, no move UI.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(body["groups"][0]["kind"], "duplicate");
+
+    // Now ComicVine gains issue 5 and a refresh creates the record — exactly
+    // what the "Refresh Metadata" action does.
+    let issue_5 = seed_issue(&app, series, "5").await;
+
+    // The group must NOT reclassify: content identity outranks the fact that
+    // a target now exists.
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = &body["groups"][0];
+    assert_eq!(
+        g["kind"], "duplicate",
+        "a new issue record must not promote a duplicate into a move candidate"
+    );
+    for f in g["files"].as_array().unwrap() {
+        assert_eq!(
+            f["suggested_issue_id"],
+            serde_json::Value::Null,
+            "no move may be suggested for byte-identical files"
+        );
+    }
+
+    // And the write path refuses a hand-rolled POST that bypasses the UI.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/correct",
+            format!(r#"{{"file_id":{copy},"issue_id":{issue_5}}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("byte-identical"),
+        "refusal must cite content identity: {}",
+        body["error"]["message"]
+    );
+
+    // Nothing moved: both rows still on issue 3.
+    for id in [keep, copy] {
+        let row = file_repo::find_by_id(&app.state.db, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.issue_id, Some(issue_3), "file {id} must not have moved");
+    }
+}

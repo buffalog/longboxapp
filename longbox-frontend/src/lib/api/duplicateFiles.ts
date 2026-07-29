@@ -12,6 +12,10 @@ export interface DupCandidate {
   is_served: boolean;
   suspect_corrupt: boolean;
   under_unsorted: boolean;
+  /** The issue number this file's filename names, when the series has no
+   * catalog record for it. An absence, not a confidence problem — the fix is
+   * to refresh the series, not to make a judgement call. */
+  missing_target_number: string | null;
 }
 
 export interface IssueOption {
