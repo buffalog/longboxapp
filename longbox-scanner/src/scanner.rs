@@ -499,10 +499,10 @@ impl Scanner {
         // The series folder this file sits in declares the VOLUME year;
         // a scene filename's year is usually the RELEASE year. Where two
         // volumes share a title, only the former identifies which one.
-        let folder_year = longbox_core::library_path::folder_volume_year(&discovered.path_relative);
+        let folder = longbox_core::library_path::folder_evidence(&discovered.path_relative);
 
         let match_result = self
-            .run_match_cascade(&comic_info, filename_parse.as_ref(), folder_year)
+            .run_match_cascade(&comic_info, filename_parse.as_ref(), folder)
             .await?;
 
         let new_status = compute_status(existing.as_ref(), &match_result, match_threshold);
@@ -540,11 +540,11 @@ impl Scanner {
 
         // Skip Tier 1 (the new series wouldn't help if Web URL pointed
         // elsewhere). Run only Tier 2/3 against the single-candidate pool.
-        let folder_year = longbox_core::library_path::folder_volume_year(&discovered.path_relative);
+        let folder = longbox_core::library_path::folder_evidence(&discovered.path_relative);
         let match_result = match_file(
             comic_info.as_ref(),
             filename_parse.as_ref(),
-            folder_year,
+            folder,
             candidates,
         );
 
@@ -575,7 +575,7 @@ impl Scanner {
         &self,
         comic_info: &Option<ComicInfo>,
         filename_parse: Option<&ParsedFilename>,
-        folder_year: Option<i32>,
+        folder: longbox_core::matcher::FolderEvidence,
     ) -> Result<MatchResult, ScanError> {
         // Tier 1: Web URL extraction with direct DB lookups.
         if let Some(ci) = comic_info {
@@ -623,7 +623,7 @@ impl Scanner {
         Ok(match_file(
             comic_info.as_ref(),
             filename_parse,
-            folder_year,
+            folder,
             &candidates,
         ))
     }

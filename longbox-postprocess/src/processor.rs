@@ -163,11 +163,18 @@ pub async fn process_one(
         .or_else(|| filename_parse.as_ref().and_then(|p| p.year));
 
     let candidates = find_candidates(db, &hint, year_hint).await?;
-    // No folder-year evidence here: a watch-folder file sits in a download
-    // job folder, not a library series folder, so its parent declares nothing
-    // about which volume the comic belongs to. Passing it would be inventing
-    // evidence.
-    let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), None, &candidates);
+    // A watch-folder file has no library series folder, so there is nothing
+    // there to be silent — its absence carries no information and must not
+    // trigger the volume abstention. The SAB job folder is NOT a substitute:
+    // it mirrors a scene release name and is parsed with the very same
+    // filename patterns (see `try_folder_match`), so its year is a release
+    // year, on the wrong side of the volume-evidence line.
+    let match_result = match_file(
+        comic_info.as_ref(),
+        filename_parse.as_ref(),
+        longbox_core::matcher::FolderEvidence::NoFolder,
+        &candidates,
+    );
 
     // Phase B owned-classification uses the live
     // `match_confidence_threshold` from settings (the same row the
@@ -425,7 +432,12 @@ async fn try_folder_match(
     // folder doesn't carry us home.
     // The job folder's year already arrives as the year hint via
     // `folder_parse.year`; it is not a library series folder.
-    let match_result = match_file(None, Some(&folder_parse), None, &candidates);
+    let match_result = match_file(
+        None,
+        Some(&folder_parse),
+        longbox_core::matcher::FolderEvidence::NoFolder,
+        &candidates,
+    );
     let status = classify_status(
         match_result.issue_id,
         match_result.confidence,

@@ -186,9 +186,44 @@ pub fn folder_volume_year(path_relative: &str) -> Option<i32> {
     inner.parse::<i32>().ok()
 }
 
+/// Classify what a root-relative path's series folder says about the volume.
+///
+/// Distinguishes a folder that declares nothing from no folder at all — the
+/// difference between evidence of absence and absence of evidence. See
+/// [`crate::matcher::FolderEvidence`].
+pub fn folder_evidence(path_relative: &str) -> crate::matcher::FolderEvidence {
+    use crate::matcher::FolderEvidence;
+    match path_relative.split_once('/') {
+        None => FolderEvidence::NoFolder,
+        Some(_) => match folder_volume_year(path_relative) {
+            Some(y) => FolderEvidence::Year(y),
+            None => FolderEvidence::Silent,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matcher::FolderEvidence;
+
+    #[test]
+    fn folder_evidence_separates_silent_from_absent() {
+        assert_eq!(
+            folder_evidence("The Authority (2008)/x.cbr"),
+            FolderEvidence::Year(2008)
+        );
+        // A series folder that names no year is SILENT — it exists and
+        // declined to say, which is informative.
+        assert_eq!(folder_evidence("Drifter/Drifter 002.cbz"), FolderEvidence::Silent);
+        assert_eq!(
+            folder_evidence("Ultramega (Deluxe)/x.cbz"),
+            FolderEvidence::Silent
+        );
+        // No folder at all — nothing there to be silent.
+        assert_eq!(folder_evidence("loose.cbz"), FolderEvidence::NoFolder);
+        assert_eq!(folder_evidence(""), FolderEvidence::NoFolder);
+    }
 
     #[test]
     fn folder_year_reads_the_volume_year_not_the_filename_year() {

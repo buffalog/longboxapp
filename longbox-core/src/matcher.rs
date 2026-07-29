@@ -90,11 +90,11 @@ pub struct MatchResult {
 pub fn match_file(
     comic_info: Option<&ComicInfo>,
     filename_parse: Option<&ParsedFilename>,
-    folder_year: Option<i32>,
+    folder: FolderEvidence,
     candidates: &[Candidate],
 ) -> MatchResult {
-    let tier3 = tier3_filename(filename_parse, folder_year, candidates);
-    match (tier2_comicinfo(comic_info, folder_year, candidates), tier3) {
+    let tier3 = tier3_filename(filename_parse, folder, candidates);
+    match (tier2_comicinfo(comic_info, folder, candidates), tier3) {
         (Some((tier2, series2)), Some((tier3, series3))) => {
             if series2 == series3 && tier2.issue_id != tier3.issue_id {
                 MatchResult {
@@ -124,7 +124,7 @@ type TierMatch = (MatchResult, i64);
 
 fn tier2_comicinfo(
     comic_info: Option<&ComicInfo>,
-    folder_year: Option<i32>,
+    folder: FolderEvidence,
     candidates: &[Candidate],
 ) -> Option<TierMatch> {
     let ci = comic_info?;
@@ -133,8 +133,13 @@ fn tier2_comicinfo(
     match_in_candidates(
         series_text,
         number_text,
-        ci.year,
-        folder_year,
+        YearEvidence {
+            hint: ci.year,
+            // ComicInfo's `year` is parsed from `<Volume>`, so it is genuine
+            // volume metadata — the one year hint that may select a volume.
+            volume: ci.year,
+            folder,
+        },
         candidates,
         // No ceiling for ComicInfo matches — they go up to 1.0.
         f64::INFINITY,
@@ -144,15 +149,20 @@ fn tier2_comicinfo(
 
 fn tier3_filename(
     filename_parse: Option<&ParsedFilename>,
-    folder_year: Option<i32>,
+    folder: FolderEvidence,
     candidates: &[Candidate],
 ) -> Option<TierMatch> {
     let fp = filename_parse?;
     match_in_candidates(
         &fp.series_title,
         &fp.number,
-        fp.year,
-        folder_year,
+        YearEvidence {
+            hint: fp.year,
+            // A filename's year is the RELEASE year far more often than the
+            // volume year. It may order the sort; it may never select.
+            volume: None,
+            folder,
+        },
         candidates,
         FILENAME_CONFIDENCE_CEILING,
         MatchMethod::FilenameRegex,
@@ -162,13 +172,12 @@ fn tier3_filename(
 fn match_in_candidates(
     title_text: &str,
     number_text: &str,
-    year_hint: Option<i32>,
-    folder_year: Option<i32>,
+    years: YearEvidence,
     candidates: &[Candidate],
     confidence_ceiling: f64,
     method: MatchMethod,
 ) -> Option<TierMatch> {
-    let pick = best_candidate_match(title_text, year_hint, folder_year, candidates)?;
+    let pick = best_candidate_match(title_text, years, candidates)?;
     let confidence = pick.score.min(confidence_ceiling);
     if confidence < NEEDS_REVIEW_FLOOR {
         return None;
@@ -191,6 +200,48 @@ fn match_in_candidates(
         },
         pick.candidate.series.id,
     ))
+}
+
+/// What a file's location says about which volume it belongs to.
+///
+/// The distinction between "the folder said nothing" and "there is no folder"
+/// is load-bearing, and it is the same one that governs digest freshness: a
+/// folder that is silent is evidence, a folder that does not exist is not.
+///
+/// A library file always sits in a series folder that LongBox itself named
+/// `{title} ({start_year})`, so that folder's silence is informative — it
+/// means the volume genuinely wasn't recorded. A watch-folder import has no
+/// series folder at all; there is nothing there to be silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderEvidence {
+    /// Not in a library series folder — a watch-folder import. Says nothing,
+    /// and its silence is not evidence of anything.
+    NoFolder,
+    /// In a series folder that declares no year.
+    Silent,
+    /// In a series folder declaring this volume year.
+    Year(i32),
+}
+
+impl FolderEvidence {
+    fn year(self) -> Option<i32> {
+        match self {
+            FolderEvidence::Year(y) => Some(y),
+            _ => None,
+        }
+    }
+}
+
+/// The year signals a tier can offer, and what each is allowed to do.
+///
+/// Splitting these is the whole point: `hint` may ORDER the sort but may be a
+/// release year; only `volume` may SELECT a volume, and only genuine volume
+/// metadata goes there.
+#[derive(Debug, Clone, Copy)]
+struct YearEvidence {
+    hint: Option<i32>,
+    volume: Option<i32>,
+    folder: FolderEvidence,
 }
 
 /// The winning candidate, plus whether the win was actually earned.
@@ -233,8 +284,7 @@ struct Pick<'a> {
 /// Abstaining there would strand those files in `/watch/` again.
 fn best_candidate_match<'a>(
     title_text: &str,
-    year_hint: Option<i32>,
-    folder_year: Option<i32>,
+    years: YearEvidence,
     candidates: &'a [Candidate],
 ) -> Option<Pick<'a>> {
     if candidates.is_empty() {
@@ -270,13 +320,15 @@ fn best_candidate_match<'a>(
             // Folder year first: it names the volume, where a filename year
             // often names the release.
             .then_with(|| {
-                let a_f = folder_year.is_some() && a.1.series.start_year == folder_year;
-                let b_f = folder_year.is_some() && b.1.series.start_year == folder_year;
+                let fy = years.folder.year();
+                let a_f = fy.is_some() && a.1.series.start_year == fy;
+                let b_f = fy.is_some() && b.1.series.start_year == fy;
                 b_f.cmp(&a_f)
             })
             .then_with(|| {
-                let a_year = year_hint.is_some() && a.1.series.start_year == year_hint;
-                let b_year = year_hint.is_some() && b.1.series.start_year == year_hint;
+                let yh = years.hint;
+                let a_year = yh.is_some() && a.1.series.start_year == yh;
+                let b_year = yh.is_some() && b.1.series.start_year == yh;
                 b_year.cmp(&a_year)
             })
             // Prefer the candidate with more issues. When two series
@@ -311,7 +363,7 @@ fn best_candidate_match<'a>(
         .filter(|c| normalize_title(&c.series.title) == key)
         .collect();
 
-    let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, year_hint, folder_year);
+    let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, years);
 
     Some(Pick {
         score,
@@ -320,63 +372,75 @@ fn best_candidate_match<'a>(
     })
 }
 
-/// Whether any signal uniquely selects one of several same-titled volumes.
+/// Whether VOLUME evidence uniquely selects one of several same-titled
+/// volumes.
 ///
-/// Mirrors the comparator by NARROWING as it goes, rather than asking each
-/// rung about the whole field. Asking globally produces false abstentions:
-/// with rivals (2008, 29 issues), (2008, 15) and (1999, 29) and a folder year
-/// of 2008, the sort correctly picks the first — folder year, then issue count
-/// among the year's matchers — but a global issue-count check sees 29 twice
-/// and reports the pick as unearned.
+/// The axis is volume evidence vs release year, not folder vs everything
+/// else. Two sources genuinely name a volume:
 ///
-/// **A filename year only counts when the folder said nothing.** The filename
-/// usually carries the RELEASE year, which is the entire reason this guard
-/// exists; when it coincidentally equals some sibling volume's start year,
-/// that is not evidence about which volume the file belongs to. And when the
-/// folder DID name a year that matches no candidate, that is a disagreement
-/// between folder and catalog — not licence for the release year to settle it.
-fn decided_by_evidence(
-    rivals: &[&Candidate],
-    year_hint: Option<i32>,
-    folder_year: Option<i32>,
-) -> bool {
-    fn narrow<'a>(set: &[&'a Candidate], year: Option<i32>) -> Option<Vec<&'a Candidate>> {
+///   * the series folder's year — LongBox names those folders itself as
+///     `{title} ({start_year})`, so the year in one IS the volume year;
+///   * ComicInfo `<Volume>` — volume metadata by definition (the field is
+///     called `year` in [`ComicInfo`] only for readability).
+///
+/// A filename-parsed year is NOT volume evidence. It usually carries the
+/// release year: the 26 misbound Authority files are named `... 004 (2009)`
+/// because that is when the digital edition of the 2008 volume shipped. The
+/// same goes for a SABnzbd job folder, which mirrors a scene release name and
+/// is parsed with the very same filename patterns.
+///
+/// **Issue count may break a tie between candidates volume evidence SELECTED.
+/// It may not substitute for volume evidence that is absent or contradictory.**
+/// Two rows sharing a title AND a start year have no remaining discriminator
+/// but catalog completeness, which is the real-vs-stub shape that rung exists
+/// for. With no volume evidence at all, the largest catalog simply wins a
+/// volume question it has no bearing on — the same objection as `series.id`
+/// order, one rung up.
+///
+/// The one exemption is [`FolderEvidence::NoFolder`]. A watch-folder import
+/// has no series folder to be silent, so its absence carries no information
+/// and the prior behaviour stands. That path is also where abstaining is most
+/// expensive: `ambiguous` routes to `needs_review`, which
+/// `longbox-postprocess` refuses to import, so the file stays in `/watch/`.
+fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence) -> bool {
+    let hits = |year: Option<i32>| -> Option<Vec<&Candidate>> {
         let year = year?;
-        let hits: Vec<&Candidate> = set
+        let v: Vec<&Candidate> = rivals
             .iter()
             .copied()
             .filter(|c| c.series.start_year == Some(year))
             .collect();
-        (!hits.is_empty()).then_some(hits)
-    }
+        (!v.is_empty()).then_some(v)
+    };
+    // A clear leader on catalog size, among an already-selected set.
+    let leader = |set: &[&Candidate]| {
+        let most = set.iter().map(|c| c.issues.len()).max().unwrap_or(0);
+        most > 0 && set.iter().filter(|c| c.issues.len() == most).count() == 1
+    };
 
-    let mut set: Vec<&Candidate> = rivals.to_vec();
-    match narrow(&set, folder_year) {
-        Some(hits) => {
-            if hits.len() == 1 {
-                return true;
-            }
-            set = hits;
-        }
-        // No folder year at all → the filename's year is the only year we
-        // have, so let it speak. A folder year that matched nothing (the
-        // `Some(_)` case that produced no hits) deliberately does NOT fall
-        // through to it.
-        None if folder_year.is_none() => {
-            if let Some(hits) = narrow(&set, year_hint) {
-                if hits.len() == 1 {
-                    return true;
-                }
-                set = hits;
-            }
-        }
-        None => {}
+    match years.folder {
+        // No series folder exists — nothing to be silent. Prior behaviour.
+        FolderEvidence::NoFolder => match hits(years.hint) {
+            Some(set) if set.len() == 1 => true,
+            Some(set) => leader(&set),
+            None => leader(rivals),
+        },
+        // The folder named a volume year.
+        FolderEvidence::Year(_) => match hits(years.folder.year()) {
+            Some(set) if set.len() == 1 => true,
+            Some(set) => leader(&set),
+            // It named a year no candidate has: the folder and the catalog
+            // disagree. That is not licence for a release year, or for the
+            // biggest catalog, to settle a volume question.
+            None => false,
+        },
+        // The folder said nothing. Only ComicInfo `<Volume>` can still speak.
+        FolderEvidence::Silent => match hits(years.volume) {
+            Some(set) if set.len() == 1 => true,
+            Some(set) => leader(&set),
+            None => false,
+        },
     }
-
-    let most = set.iter().map(|c| c.issues.len()).max().unwrap_or(0);
-    // A single clear leader on catalog size still counts as evidence; a tie
-    // leaves only `series.id`, which is not evidence at all.
-    most > 0 && set.iter().filter(|c| c.issues.len() == most).count() == 1
 }
 
 #[cfg(test)]
@@ -419,7 +483,7 @@ mod tests {
             year: Some(2003),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(r.confidence >= DEFAULT_MATCH_THRESHOLD);
@@ -434,7 +498,7 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -461,7 +525,7 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
     }
@@ -475,7 +539,7 @@ mod tests {
             number: Some("99".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
     }
@@ -492,7 +556,7 @@ mod tests {
             year: Some(2014),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(
             r.issue_id,
             Some(20),
@@ -511,7 +575,7 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.issue_id, Some(10), "lower-id wins when no year hint");
     }
 
@@ -552,14 +616,14 @@ mod tests {
 
         // Without folder evidence the chain still exhausts itself — and now
         // says so instead of silently picking the oldest volume.
-        let blind = match_file(None, Some(&fp), None, &candidates);
+        let blind = match_file(None, Some(&fp), FolderEvidence::NoFolder, &candidates);
         assert!(
             blind.ambiguous,
             "three tied volumes and nothing to separate them must abstain"
         );
 
         // With the folder's 2008 the answer is unambiguous.
-        let seeing = match_file(None, Some(&fp), Some(2008), &candidates);
+        let seeing = match_file(None, Some(&fp), FolderEvidence::Year(2008), &candidates);
         assert_eq!(
             seeing.issue_id,
             Some(1078 * 1000 + 4),
@@ -576,7 +640,7 @@ mod tests {
         // Give 1999 a start_year the filename names, so the two hints
         // genuinely disagree about which volume is right.
         candidates[0].series.start_year = Some(2009);
-        let r = match_file(None, Some(&authority_filename()), Some(2008), &candidates);
+        let r = match_file(None, Some(&authority_filename()), FolderEvidence::Year(2008), &candidates);
         assert_eq!(
             r.issue_id,
             Some(1078 * 1000 + 4),
@@ -589,13 +653,13 @@ mod tests {
     fn abstains_when_a_title_collision_has_no_folder_year_at_all() {
         let mut fp = authority_filename();
         fp.year = None;
-        let r = match_file(None, Some(&fp), None, &authority_volumes());
+        let r = match_file(None, Some(&fp), FolderEvidence::NoFolder, &authority_volumes());
         assert!(r.ambiguous, "no year anywhere, two 29-issue volumes → abstain");
     }
 
     #[test]
     fn abstains_when_the_folder_year_matches_no_volume() {
-        let r = match_file(None, Some(&authority_filename()), Some(2011), &authority_volumes());
+        let r = match_file(None, Some(&authority_filename()), FolderEvidence::Year(2011), &authority_volumes());
         assert!(
             r.ambiguous,
             "a folder year naming no volume is not evidence for any of them"
@@ -618,9 +682,14 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        for folder_year in [None, Some(1999), Some(2012)] {
-            let r = match_file(None, Some(&fp), folder_year, &candidates);
-            assert_eq!(r.issue_id, Some(10), "folder_year={folder_year:?}");
+        for folder in [
+            FolderEvidence::NoFolder,
+            FolderEvidence::Silent,
+            FolderEvidence::Year(1999),
+            FolderEvidence::Year(2012),
+        ] {
+            let r = match_file(None, Some(&fp), folder, &candidates);
+            assert_eq!(r.issue_id, Some(10), "folder={folder:?}");
             assert!(!r.ambiguous, "no collision → no abstention");
         }
     }
@@ -645,7 +714,7 @@ mod tests {
             year: Some(2026), // matches neither
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &[stub, real]);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &[stub, real]);
         assert_eq!(r.issue_id, Some(123), "the 24-issue entry still wins");
         assert!(
             !r.ambiguous,
@@ -674,16 +743,16 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        let r = match_file(None, Some(&fp), Some(2000), &candidates);
+        let r = match_file(None, Some(&fp), FolderEvidence::Year(2000), &candidates);
         assert!(
             r.ambiguous,
             "folder named a year the catalog does not have — must not resolve on the release year"
         );
 
-        // With no folder evidence at all, the filename's year is the only
-        // year there is, so it may still speak.
-        let r = match_file(None, Some(&fp), None, &candidates);
-        assert!(!r.ambiguous, "a lone year hint is still evidence");
+        // A watch-folder import has no series folder to be silent, so the
+        // exemption applies and prior behaviour stands.
+        let r = match_file(None, Some(&fp), FolderEvidence::NoFolder, &candidates);
+        assert!(!r.ambiguous, "no series folder → nothing to abstain over");
         assert_eq!(r.issue_id, Some(20));
     }
 
@@ -713,7 +782,7 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        let r = match_file(None, Some(&fp), Some(2008), &candidates);
+        let r = match_file(None, Some(&fp), FolderEvidence::Year(2008), &candidates);
         assert_eq!(r.issue_id, Some(1004), "the 29-issue 2008 volume wins");
         assert!(
             !r.ambiguous,
@@ -746,12 +815,91 @@ mod tests {
             title: None,
             pattern_id: 1,
         };
-        let r = match_file(None, Some(&fp), Some(2008), &[old, new]);
+        let r = match_file(None, Some(&fp), FolderEvidence::Year(2008), &[old, new]);
         assert_eq!(
             r.issue_id,
             Some(2004),
             "the drifted row must still be reachable and still win on folder year"
         );
+        assert!(!r.ambiguous);
+    }
+
+    /// Row 3, the case that killed the strict rule: a correctly-tagged file
+    /// in a yearless series folder. ComicInfo `<Volume>` is real volume
+    /// metadata and must still select — otherwise every multi-volume series
+    /// with a yearless folder floods needs_review.
+    #[test]
+    fn a_silent_folder_still_defers_to_comicinfo_volume() {
+        let candidates = vec![
+            candidate(
+                series(1, "Ultimate Spider-Man", Some(2000)),
+                vec![issue(101, 1, "1")],
+            ),
+            candidate(
+                series(2, "Ultimate Spider-Man", Some(2024)),
+                vec![issue(201, 2, "1")],
+            ),
+        ];
+        let ci = ComicInfo {
+            series: Some("Ultimate Spider-Man".into()),
+            number: Some("1".into()),
+            year: Some(2024), // <Volume> — genuine volume metadata
+            ..Default::default()
+        };
+        let r = match_file(Some(&ci), None, FolderEvidence::Silent, &candidates);
+        assert_eq!(r.issue_id, Some(201), "ComicInfo <Volume> names the volume");
+        assert!(!r.ambiguous, "volume metadata is evidence, so this is earned");
+    }
+
+    /// Row 3 with nothing to defer to. The folder exists and declined to say;
+    /// a filename year is a release year and may not stand in for it.
+    #[test]
+    fn a_silent_folder_with_only_a_filename_year_abstains() {
+        let fp = ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "4".into(),
+            volume: None,
+            year: Some(1999), // coincides with a real volume — still not evidence
+            title: None,
+            pattern_id: 1,
+        };
+        let r = match_file(None, Some(&fp), FolderEvidence::Silent, &authority_volumes());
+        assert!(
+            r.ambiguous,
+            "a release year must not select a volume just because it happens to match one"
+        );
+    }
+
+    /// Issue count may break a tie among candidates volume evidence SELECTED,
+    /// but may not substitute for volume evidence that is absent.
+    #[test]
+    fn issue_count_cannot_substitute_for_missing_volume_evidence() {
+        let candidates = vec![
+            candidate(
+                series(1, "The Authority", Some(1999)),
+                (1..=29).map(|n| issue(1000 + n, 1, &n.to_string())).collect(),
+            ),
+            candidate(
+                series(2, "The Authority", Some(2008)),
+                vec![issue(2004, 2, "4")],
+            ),
+        ];
+        let fp = ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "4".into(),
+            volume: None,
+            year: None,
+            title: None,
+            pattern_id: 1,
+        };
+        // Silent folder: the 29-issue catalog must NOT win a volume question.
+        let r = match_file(None, Some(&fp), FolderEvidence::Silent, &candidates);
+        assert!(r.ambiguous, "catalog size has no bearing on which volume this is");
+
+        // Same pool, same file, but volume evidence selects — then the pick
+        // is earned even though it is the smaller catalog.
+        let r = match_file(None, Some(&fp), FolderEvidence::Year(2008), &candidates);
+        assert_eq!(r.issue_id, Some(2004));
         assert!(!r.ambiguous);
     }
 
@@ -783,12 +931,21 @@ mod tests {
             year: Some(2026), // matches neither start_year
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         // The 24-issue series carries #23; the 1-issue stub does
         // not. Pre-fix this returned Unmatched (lower-id won,
         // didn't have #23); post-fix issue_id is the catalog #23.
         assert_eq!(r.issue_id, Some(100 + 23));
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
+        // ASSERT THE FLAG, not just the pointer. Without this the test passes
+        // while the behaviour it protects regresses: `ambiguous` routes to
+        // needs_review, which longbox-postprocess refuses to import, so the
+        // file goes straight back to sitting in /watch/ — the exact bug this
+        // rung was added to fix, returning invisibly past its own guard.
+        assert!(
+            !r.ambiguous,
+            "a clear catalog-size leader with no series folder must import, not abstain"
+        );
     }
 
     #[test]
@@ -817,7 +974,7 @@ mod tests {
             year: Some(2025), // matches start_year=2025 only
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(
             r.issue_id,
             Some(10),
@@ -834,7 +991,7 @@ mod tests {
             number: Some("001".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), None, None, &candidates);
+        let r = match_file(Some(&ci), None, FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -852,7 +1009,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), None, &candidates);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -872,7 +1029,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), None, &[]);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &[]);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert!(r.issue_id.is_none());
     }
@@ -889,7 +1046,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(None, Some(&parsed), None, &candidates);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::Unmatched);
     }
 
@@ -897,7 +1054,7 @@ mod tests {
 
     #[test]
     fn no_match_when_both_inputs_are_none() {
-        let r = match_file(None, None, None, &[]);
+        let r = match_file(None, None, FolderEvidence::NoFolder, &[]);
         assert_eq!(r.method, MatchMethod::Unmatched);
         assert_eq!(r.confidence, 0.0);
     }
@@ -922,7 +1079,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
         assert!(
             r.confidence < FILENAME_CONFIDENCE_CEILING,
@@ -963,7 +1120,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), None, &candidates);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(10));
         assert!(
@@ -1001,7 +1158,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), None, &candidates);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -1032,7 +1189,7 @@ mod tests {
             title: None,
             pattern_id: 4,
         };
-        let r = match_file(None, Some(&parsed), None, &candidates);
+        let r = match_file(None, Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(r.issue_id, Some(10));
     }
 
@@ -1077,7 +1234,7 @@ mod tests {
         let r = match_file(
             Some(&lying_comicinfo()),
             Some(&honest_filename("2")),
-            None,
+            FolderEvidence::NoFolder,
             &ferocious(),
         );
         assert!(r.ambiguous, "tier2/tier3 disagreement must be flagged");
@@ -1106,7 +1263,7 @@ mod tests {
             year: Some(2025),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), Some(&honest_filename("2")), None, &ferocious());
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), FolderEvidence::NoFolder, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.issue_id, Some(8469));
         // Tier 2 still owns the result (uncapped confidence, ComicInfo method).
@@ -1117,7 +1274,7 @@ mod tests {
     #[test]
     fn tier3_no_parse_leaves_tier2_standing() {
         // Nothing to cross-check against — Tier 2's word is all we have.
-        let r = match_file(Some(&lying_comicinfo()), None, None, &ferocious());
+        let r = match_file(Some(&lying_comicinfo()), None, FolderEvidence::NoFolder, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.issue_id, Some(8468));
         assert_eq!(r.method, MatchMethod::ComicInfoXml);
@@ -1130,7 +1287,7 @@ mod tests {
         let r = match_file(
             Some(&lying_comicinfo()),
             Some(&honest_filename("9")),
-            None,
+            FolderEvidence::NoFolder,
             &ferocious(),
         );
         assert!(!r.ambiguous);
@@ -1146,7 +1303,7 @@ mod tests {
             number: Some("1".into()),
             ..Default::default()
         };
-        let r = match_file(Some(&ci), Some(&honest_filename("2")), None, &ferocious());
+        let r = match_file(Some(&ci), Some(&honest_filename("2")), FolderEvidence::NoFolder, &ferocious());
         assert!(!r.ambiguous);
         assert_eq!(r.method, MatchMethod::FilenameRegex);
         assert_eq!(r.issue_id, Some(8469));
@@ -1195,7 +1352,7 @@ mod tests {
             title: None,
             pattern_id: 2,
         };
-        let r = match_file(Some(&ci), Some(&parsed), None, &candidates);
+        let r = match_file(Some(&ci), Some(&parsed), FolderEvidence::NoFolder, &candidates);
         assert_eq!(
             r.issue_id,
             Some(201),
