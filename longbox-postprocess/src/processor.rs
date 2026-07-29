@@ -163,7 +163,18 @@ pub async fn process_one(
         .or_else(|| filename_parse.as_ref().and_then(|p| p.year));
 
     let candidates = find_candidates(db, &hint, year_hint).await?;
-    let match_result = match_file(comic_info.as_ref(), filename_parse.as_ref(), &candidates);
+    // A watch-folder file has no library series folder, so there is nothing
+    // there to be silent — its absence carries no information and must not
+    // trigger the volume abstention. The SAB job folder is NOT a substitute:
+    // it mirrors a scene release name and is parsed with the very same
+    // filename patterns (see `try_folder_match`), so its year is a release
+    // year, on the wrong side of the volume-evidence line.
+    let match_result = match_file(
+        comic_info.as_ref(),
+        filename_parse.as_ref(),
+        longbox_core::matcher::FolderEvidence::NoFolder,
+        &candidates,
+    );
 
     // Phase B owned-classification uses the live
     // `match_confidence_threshold` from settings (the same row the
@@ -419,7 +430,14 @@ async fn try_folder_match(
     // No ComicInfo passed — Tier 1 is explicitly folder-driven; the
     // file's embedded metadata gets a chance in Tier 2 if the
     // folder doesn't carry us home.
-    let match_result = match_file(None, Some(&folder_parse), &candidates);
+    // The job folder's year already arrives as the year hint via
+    // `folder_parse.year`; it is not a library series folder.
+    let match_result = match_file(
+        None,
+        Some(&folder_parse),
+        longbox_core::matcher::FolderEvidence::NoFolder,
+        &candidates,
+    );
     let status = classify_status(
         match_result.issue_id,
         match_result.confidence,
@@ -621,6 +639,39 @@ async fn import_as_owned(
         })?
         .to_string_lossy()
         .into_owned();
+
+    // Re-stat AFTER the rewrite. `size` / `mtime` describe the file in the
+    // watch folder, and the file that just landed in the library is not that
+    // file: ComicInfo.xml and MetronInfo.xml were injected, and a CBR source
+    // was decompressed and recompressed as a CBZ — a large delta, not a
+    // rounding error. Cataloguing the source's numbers records metadata for
+    // bytes that no longer exist anywhere.
+    //
+    // That matters beyond tidiness. Duplicate detection groups files by size
+    // before comparing content, so a row carrying its source's size never
+    // lands in the same group as its true twin and the duplicate is never
+    // found — blinding the detector precisely where new duplicates enter the
+    // library, since Phase B import is how they get here.
+    //
+    // A stat failure on a file we just wrote successfully is strange but not
+    // worth turning into an orphan: returning early here would leave the file
+    // on disk with no catalog row at all. Fall back to the source values,
+    // loudly, and let the next scan correct them.
+    let (size, mtime) = match std::fs::metadata(&target_abs) {
+        Ok(m) => (
+            i64::try_from(m.len()).unwrap_or(i64::MAX),
+            m.modified().map(OffsetDateTime::from).unwrap_or(mtime),
+        ),
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_postprocess",
+                path = %target_abs.display(),
+                error = %e,
+                "phase_b.post_rewrite_stat_failed"
+            );
+            (size, mtime)
+        }
+    };
 
     // Pull-engine attribution: a file whose (series, issue) has an
     // in-flight `pull_attempt` was auto-downloaded by the Step 6 pull

@@ -7,6 +7,7 @@
 
 pub mod bootstrap;
 pub mod config;
+pub mod content_hash;
 pub mod error;
 pub mod frontend;
 pub mod metron_link;

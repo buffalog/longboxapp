@@ -6,6 +6,7 @@
 //! slice; Tier 1 (`<Web>` URL → issue ID) is the caller's responsibility,
 //! built from the per-URL extraction helpers in [`comicinfo`].
 
+pub mod archive_label;
 pub mod comicinfo;
 pub mod comicinfo_writer;
 pub mod error;

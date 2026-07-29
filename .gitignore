@@ -21,3 +21,12 @@ longbox-web/frontend-dist/favicon.ico
 # Session-bridge / handoff docs — local working notes between Claude Code
 # sessions, not project files.
 longbox-handoff-*.md
+
+# Databases and backups - never commit these to a public repo
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+longbox-backup-*
+docs/progress-*.md

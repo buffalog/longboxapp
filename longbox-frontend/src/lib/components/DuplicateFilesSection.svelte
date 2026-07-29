@@ -9,6 +9,7 @@
     type DupGroup,
     type Resolution
   } from '$lib/api/duplicateFiles';
+  import { refreshSeries } from '$lib/api/series';
   import { formatBytes } from '$lib/format';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -37,6 +38,23 @@
   let moveTo = $state<Record<number, number>>({});
   // file_id currently being corrected, so only its own button spins.
   let correcting = $state<number | null>(null);
+  // series_id currently refreshing from ComicVine.
+  let refreshing = $state<number | null>(null);
+
+  // Pull the series again so a missing issue record can appear. Purely
+  // additive — it creates catalog rows, it never moves or deletes a file.
+  async function refreshFromComicVine(g: DupGroup): Promise<void> {
+    refreshing = g.series_id;
+    try {
+      await refreshSeries(g.series_id);
+      toast.success(`Refreshed ${g.series_title} from ComicVine.`);
+      await loadPage(page);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      refreshing = null;
+    }
+  }
 
   const pageCount = $derived(Math.max(1, Math.ceil(total / PER_PAGE)));
   const duplicateGroups = $derived(groups.filter((g) => g.kind === 'duplicate'));
@@ -179,9 +197,12 @@
 
   <p class="mb-3 text-sm text-slate-600">
     Issues with more than one physical file on disk. Pick the copy to keep; the others are
-    permanently deleted from disk. Groups flagged “not a duplicate” hold distinct issues wrongly
-    sharing one record — those are fixed by moving each file to its real issue, not by deleting
-    anything.
+    permanently deleted from disk. Deletion is offered only where the files are byte-for-byte
+    identical and sit in the same series folder — filenames are never enough on their own, since
+    a misnamed copy and a genuinely different issue look alike from the name. Groups flagged “not
+    a duplicate” hold different comics wrongly sharing one record, “wrong series match” holds
+    files from different series folders, and “not yet analyzed” simply hasn’t been compared yet.
+    All three are fixed by re-pointing files, never by deleting them.
   </p>
 
   {#if error}
@@ -207,6 +228,24 @@
               >
                 <AlertTriangle class="size-3" aria-hidden="true" /> Not a duplicate — needs review
               </span>
+            {:else if g.kind === 'cross_folder_wrong_series'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-red-50 px-1.5 py-0.5 text-xs font-medium text-red-800"
+              >
+                <AlertTriangle class="size-3" aria-hidden="true" /> Wrong series match
+              </span>
+            {:else if g.kind === 'pending_analysis'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600"
+              >
+                Not yet analyzed
+              </span>
+            {:else if g.kind === 'cross_folder_same_series'}
+              <span
+                class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700"
+              >
+                <AlertTriangle class="size-3" aria-hidden="true" /> Same series, two folders
+              </span>
             {/if}
           </div>
 
@@ -216,6 +255,29 @@
               matched to one record — usually because a file’s embedded ComicInfo.xml carries the
               wrong issue number. Nothing here is deleted: move each stray file to the issue its
               filename says it is. Files with no suggestion need a manual call.
+            </p>
+          {:else if g.kind === 'cross_folder_wrong_series'}
+            <p class="mb-2 text-xs text-red-800">
+              These files live in different series folders, so they are <strong
+                >not copies of one comic</strong
+              > — they are separate books wrongly matched to the same record. Two volumes of a title
+              each have their own #{g.issue_number}, which is why the issue numbers agree. Deleting
+              here would destroy a real issue, so there is no delete option; the fix is to re-match
+              the stray file to its correct series.
+            </p>
+          {:else if g.kind === 'pending_analysis'}
+            <p class="mb-2 text-xs text-slate-600">
+              These files haven't been compared byte-for-byte yet, so it isn't known whether they
+              are copies of one comic or different issues. No action is offered until they are:
+              not knowing is not the same as knowing they match. They'll classify themselves after
+              the next library scan.
+            </p>
+          {:else if g.kind === 'cross_folder_same_series'}
+            <p class="mb-2 text-xs text-slate-600">
+              These files are in different folders that appear to name the same series — usually one
+              series stored under two folder spellings. Nothing is deleted from here, because the
+              folder difference could also mean a wrong match. Consolidate the folders, or re-match
+              if one file belongs elsewhere.
             </p>
           {/if}
 
@@ -280,6 +342,22 @@
                         <span class="text-slate-500">
                           suggested: #{numberOf(g, f.suggested_issue_id)}
                         </span>
+                      {:else if f.missing_target_number}
+                        <!-- Say what is true, not what is uncertain: the
+                             catalog has no such issue. This is not a
+                             confidence problem and must not read like one. -->
+                        <span class="text-slate-700">
+                          Issue #{f.missing_target_number} is not in this series’ catalog
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={refreshing !== null || correcting !== null}
+                          loading={refreshing === g.series_id}
+                          onclick={() => refreshFromComicVine(g)}
+                        >
+                          Refresh metadata
+                        </Button>
                       {:else}
                         <span class="text-amber-800">no confident suggestion — your call</span>
                       {/if}

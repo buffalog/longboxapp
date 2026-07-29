@@ -43,7 +43,12 @@ pub async fn find_candidates(
     let mut scored: Vec<(f64, SeriesRow)> = all
         .into_iter()
         .map(|row| {
-            let score = similarity(&normalized_hint, &normalize_title(&row.sort_title));
+            // Same reasoning as `matcher::best_candidate_match`: normalize the
+            // stored TITLE, not the stored `sort_title`. A row whose
+            // sort_title drifted can otherwise score low enough to miss the
+            // candidate pool entirely, which disables the volume guard one
+            // layer before it ever runs.
+            let score = similarity(&normalized_hint, &normalize_title(&row.title));
             (score, row)
         })
         .collect();

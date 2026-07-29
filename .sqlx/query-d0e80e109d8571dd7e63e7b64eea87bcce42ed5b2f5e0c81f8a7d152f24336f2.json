@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE files SET archive_label = ?, archive_label_kind = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d0e80e109d8571dd7e63e7b64eea87bcce42ed5b2f5e0c81f8a7d152f24336f2"
+}
