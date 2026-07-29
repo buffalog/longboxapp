@@ -51,7 +51,17 @@ pub struct ArchiveIdentity {
 const IMAGE_EXTS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "gif"];
 
 fn is_image(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    // macOS resource forks are not pages. They shadow every real image under
+    // a `__MACOSX/` tree, which breaks the single-top-directory rule and
+    // demotes a good `Dir` label to a weaker `Page` one for free.
+    if name.starts_with("__MACOSX/") || name.contains("/__MACOSX/") {
+        return false;
+    }
+    let base = name.rsplit('/').next().unwrap_or(name);
+    if base.starts_with("._") {
+        return false;
+    }
+    let lower = base.to_ascii_lowercase();
     IMAGE_EXTS
         .iter()
         .any(|ext| lower.ends_with(&format!(".{ext}")))
@@ -129,6 +139,23 @@ pub fn parse_label(label: &str, kind: LabelKind) -> ArchiveIdentity {
     // it started: with no issue number left, the series text has to stop
     // there, or the page counter ends up glued onto the series name
     // (`Blood Train - 001` → series `blood train - 001`).
+    // A page label with three or more numbers is a shape we cannot read
+    // confidently. Double-page spreads are named `<issue>-<page>-<page>`, so
+    // popping exactly one trailing number leaves a PAGE number standing where
+    // the issue should be — `008-014-015` would report issue 14. Refusing to
+    // guess is the same rule as everywhere else here.
+    if kind == LabelKind::Page && numbers.len() >= 3 {
+        let series = {
+            let head = cleaned[..numbers[0].0].trim().trim_end_matches(['-', '_', '.']);
+            let n = normalize_title(head);
+            (!n.is_empty()).then_some(n)
+        };
+        return ArchiveIdentity {
+            series,
+            issue: None,
+        };
+    }
+
     let mut page_number_at = None;
     if kind == LabelKind::Page {
         if let Some((idx, _)) = numbers.pop() {
@@ -437,6 +464,38 @@ mod tests {
         // Junk from generic page naming resolves to nothing.
         assert!(!series_matches("page", "Hello Darkness"));
         assert!(!series_matches("", "Anything"));
+    }
+
+    /// Double-page spreads are named `<issue>-<page>-<page>`, so popping one
+    /// trailing number would leave a PAGE number standing where the issue
+    /// belongs and report issue 14 for an issue-8 archive.
+    #[test]
+    fn a_spread_page_name_yields_no_issue_rather_than_a_wrong_one() {
+        let id = parse_label("008-014-015", LabelKind::Page);
+        assert_eq!(id.issue, None, "must refuse rather than report page 14");
+        // Two numbers is the ordinary `<issue>-<page>` shape and still works.
+        assert_eq!(
+            parse_label("008-0000", LabelKind::Page).issue.as_deref(),
+            Some("8")
+        );
+        // The series half survives a refusal.
+        let id = parse_label("My Little Warlord 008-014-015", LabelKind::Page);
+        assert_eq!(id.issue, None);
+        assert_eq!(id.series.as_deref(), Some("my little warlord"));
+    }
+
+    #[test]
+    fn macos_resource_forks_are_not_pages() {
+        // Without filtering, the `__MACOSX` shadow tree adds a second top
+        // level and demotes a perfectly good Dir label to Page.
+        let names = v(&[
+            "My Little Warlord 008/008-0000.jpg",
+            "My Little Warlord 008/008-0001.jpg",
+            "__MACOSX/My Little Warlord 008/._008-0000.jpg",
+        ]);
+        let (label, kind) = label_from_entries(&names).unwrap();
+        assert_eq!(kind, LabelKind::Dir, "resource forks must not split the tree");
+        assert_eq!(label, "My Little Warlord 008");
     }
 
     #[test]

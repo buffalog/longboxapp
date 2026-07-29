@@ -251,14 +251,17 @@ fn best_candidate_match<'a>(
     // ~0.71 against the stored `Y The Last Man` sort_title (case
     // mismatch destroys jaccard), falling below the 0.65 needs-review
     // floor and dead-ending as unmatched.
+    // Normalize the stored TITLE rather than the stored `sort_title`. Every
+    // insert path sets `sort_title = normalize_title(title)`, so for a
+    // hygienic row this is identical — but ~50% of catalog rows historically
+    // carried un-normalized sort_titles, and a row whose sort_title
+    // normalizes differently from its sibling's ("Authority, The" vs
+    // "authority") would both score lower AND drop out of the rival set,
+    // silently disabling the volume guard for exactly the rows most likely to
+    // need it.
     let mut scored: Vec<(f64, &Candidate)> = candidates
         .iter()
-        .map(|c| {
-            (
-                similarity(&normalized, &normalize_title(&c.series.sort_title)),
-                c,
-            )
-        })
+        .map(|c| (similarity(&normalized, &normalize_title(&c.series.title)), c))
         .collect();
 
     scored.sort_by(|a, b| {
@@ -301,11 +304,11 @@ fn best_candidate_match<'a>(
     // else already lost on similarity. Note that a shared normalized title
     // means an identical similarity score by construction, so this set is
     // exactly the top tie group whenever a collision exists.
-    let key = normalize_title(&candidate.series.sort_title);
+    let key = normalize_title(&candidate.series.title);
     let rivals: Vec<&Candidate> = scored
         .iter()
         .map(|(_, c)| *c)
-        .filter(|c| normalize_title(&c.series.sort_title) == key)
+        .filter(|c| normalize_title(&c.series.title) == key)
         .collect();
 
     let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, year_hint, folder_year);
@@ -318,23 +321,62 @@ fn best_candidate_match<'a>(
 }
 
 /// Whether any signal uniquely selects one of several same-titled volumes.
-/// Each rung must pick exactly one: two rows sharing the winning year, or
-/// tying on issue count, decide nothing.
+///
+/// Mirrors the comparator by NARROWING as it goes, rather than asking each
+/// rung about the whole field. Asking globally produces false abstentions:
+/// with rivals (2008, 29 issues), (2008, 15) and (1999, 29) and a folder year
+/// of 2008, the sort correctly picks the first — folder year, then issue count
+/// among the year's matchers — but a global issue-count check sees 29 twice
+/// and reports the pick as unearned.
+///
+/// **A filename year only counts when the folder said nothing.** The filename
+/// usually carries the RELEASE year, which is the entire reason this guard
+/// exists; when it coincidentally equals some sibling volume's start year,
+/// that is not evidence about which volume the file belongs to. And when the
+/// folder DID name a year that matches no candidate, that is a disagreement
+/// between folder and catalog — not licence for the release year to settle it.
 fn decided_by_evidence(
     rivals: &[&Candidate],
     year_hint: Option<i32>,
     folder_year: Option<i32>,
 ) -> bool {
-    let uniquely_matches = |year: Option<i32>| {
-        year.is_some() && rivals.iter().filter(|c| c.series.start_year == year).count() == 1
-    };
-    if uniquely_matches(folder_year) || uniquely_matches(year_hint) {
-        return true;
+    fn narrow<'a>(set: &[&'a Candidate], year: Option<i32>) -> Option<Vec<&'a Candidate>> {
+        let year = year?;
+        let hits: Vec<&Candidate> = set
+            .iter()
+            .copied()
+            .filter(|c| c.series.start_year == Some(year))
+            .collect();
+        (!hits.is_empty()).then_some(hits)
     }
-    let most = rivals.iter().map(|c| c.issues.len()).max().unwrap_or(0);
+
+    let mut set: Vec<&Candidate> = rivals.to_vec();
+    match narrow(&set, folder_year) {
+        Some(hits) => {
+            if hits.len() == 1 {
+                return true;
+            }
+            set = hits;
+        }
+        // No folder year at all → the filename's year is the only year we
+        // have, so let it speak. A folder year that matched nothing (the
+        // `Some(_)` case that produced no hits) deliberately does NOT fall
+        // through to it.
+        None if folder_year.is_none() => {
+            if let Some(hits) = narrow(&set, year_hint) {
+                if hits.len() == 1 {
+                    return true;
+                }
+                set = hits;
+            }
+        }
+        None => {}
+    }
+
+    let most = set.iter().map(|c| c.issues.len()).max().unwrap_or(0);
     // A single clear leader on catalog size still counts as evidence; a tie
     // leaves only `series.id`, which is not evidence at all.
-    most > 0 && rivals.iter().filter(|c| c.issues.len() == most).count() == 1
+    most > 0 && set.iter().filter(|c| c.issues.len() == most).count() == 1
 }
 
 #[cfg(test)]
@@ -609,6 +651,108 @@ mod tests {
             !r.ambiguous,
             "a clear catalog-size leader is evidence, so this must not abstain"
         );
+    }
+
+    /// A filename year that happens to equal a sibling volume's start year is
+    /// NOT proof of which volume a file belongs to — the filename usually
+    /// carries the release year, which is the entire premise of this guard.
+    /// Accepting it as decisive bound the wrong volume at `owned`, silently.
+    #[test]
+    fn a_folder_year_naming_no_volume_does_not_let_the_filename_year_decide() {
+        // Folder says 2000; no volume starts in 2000 (catalog has 2001/2004).
+        // The filename's 2004 matches one — but the folder just contradicted
+        // the catalog, which is not licence for the release year to settle it.
+        let candidates = vec![
+            candidate(series(1, "Powers", Some(2001)), vec![issue(10, 1, "30")]),
+            candidate(series(2, "Powers", Some(2004)), vec![issue(20, 2, "30")]),
+        ];
+        let fp = ParsedFilename {
+            series_title: "Powers".into(),
+            number: "30".into(),
+            volume: None,
+            year: Some(2004),
+            title: None,
+            pattern_id: 1,
+        };
+        let r = match_file(None, Some(&fp), Some(2000), &candidates);
+        assert!(
+            r.ambiguous,
+            "folder named a year the catalog does not have — must not resolve on the release year"
+        );
+
+        // With no folder evidence at all, the filename's year is the only
+        // year there is, so it may still speak.
+        let r = match_file(None, Some(&fp), None, &candidates);
+        assert!(!r.ambiguous, "a lone year hint is still evidence");
+        assert_eq!(r.issue_id, Some(20));
+    }
+
+    /// The evidence test must narrow as the comparator does. Asking each rung
+    /// about the whole field reports a correctly-earned pick as unearned.
+    #[test]
+    fn issue_count_is_judged_among_the_year_matchers_not_the_whole_field() {
+        let candidates = vec![
+            candidate(
+                series(1, "The Authority", Some(2008)),
+                (1..=29).map(|n| issue(1000 + n, 1, &n.to_string())).collect(),
+            ),
+            candidate(
+                series(2, "The Authority", Some(2008)),
+                (1..=15).map(|n| issue(2000 + n, 2, &n.to_string())).collect(),
+            ),
+            candidate(
+                series(3, "The Authority", Some(1999)),
+                (1..=29).map(|n| issue(3000 + n, 3, &n.to_string())).collect(),
+            ),
+        ];
+        let fp = ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "4".into(),
+            volume: None,
+            year: None,
+            title: None,
+            pattern_id: 1,
+        };
+        let r = match_file(None, Some(&fp), Some(2008), &candidates);
+        assert_eq!(r.issue_id, Some(1004), "the 29-issue 2008 volume wins");
+        assert!(
+            !r.ambiguous,
+            "folder year narrowed to the 2008 pair, and 29 beats 15 within it"
+        );
+    }
+
+    /// A sort_title whose normalization drifts from its sibling's would both
+    /// score lower AND fall out of the rival set — disabling the guard for
+    /// exactly the rows most likely to be wrong.
+    #[test]
+    fn a_drifted_sort_title_does_not_disable_the_volume_guard() {
+        let mut old = candidate(
+            series(1, "The Authority", Some(1999)),
+            (1..=29).map(|n| issue(1000 + n, 1, &n.to_string())).collect(),
+        );
+        let mut new = candidate(
+            series(2, "The Authority", Some(2008)),
+            (1..=29).map(|n| issue(2000 + n, 2, &n.to_string())).collect(),
+        );
+        // Historical drift: same title, differently-shaped stored sort_title.
+        old.series.sort_title = "authority".into();
+        new.series.sort_title = "Authority, The".into();
+
+        let fp = ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "4".into(),
+            volume: None,
+            year: Some(2009),
+            title: None,
+            pattern_id: 1,
+        };
+        let r = match_file(None, Some(&fp), Some(2008), &[old, new]);
+        assert_eq!(
+            r.issue_id,
+            Some(2004),
+            "the drifted row must still be reachable and still win on folder year"
+        );
+        assert!(!r.ambiguous);
     }
 
     #[test]

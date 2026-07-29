@@ -64,8 +64,19 @@ pub(crate) fn read_entries(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveErro
     Ok(entries)
 }
 
+/// ZIP stores whatever separator the writer used, and archives written on
+/// Windows tooling really do carry `\`. The RAR reader has always normalized;
+/// this one did not, so a backslash CBZ produced entry names that no consumer
+/// could split into directory and basename — which reads to the archive-label
+/// parser as one long filename, gluing the folder onto the series text and
+/// manufacturing a "filed under the wrong series" claim out of a separator.
+fn normalize_separators(name: &str) -> String {
+    name.replace('\\', "/")
+}
+
 /// List the names of every file entry (directories skipped), in archive
-/// order. Only the central directory is read — no entry data is decompressed.
+/// order, with `/` separators. Only the central directory is read — no entry
+/// data is decompressed.
 pub(crate) fn list_entry_names(path: &Path) -> Result<Vec<String>, ArchiveError> {
     let file = std::fs::File::open(path).map_err(|source| io_err(path, source))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| zip_err(path, e))?;
@@ -76,22 +87,35 @@ pub(crate) fn list_entry_names(path: &Path) -> Result<Vec<String>, ArchiveError>
         if entry.is_dir() {
             continue;
         }
-        names.push(entry.name().to_owned());
+        names.push(normalize_separators(entry.name()));
     }
     Ok(names)
 }
 
-/// Extract one entry's bytes by exact name. `by_name` matches the same stored
-/// name `list_entry_names` returns. `Ok(None)` when no such entry exists.
+/// Extract one entry's bytes by name. `Ok(None)` when no such entry exists.
+///
+/// Matches on the SEPARATOR-NORMALIZED name, not the raw stored one, so a
+/// name handed back by [`list_entry_names`] always round-trips. Normalizing
+/// only the listing side would have broken page serving for backslash
+/// archives: the reader lists names and then asks for one of them back.
 pub(crate) fn extract_entry(path: &Path, name: &str) -> Result<Option<Vec<u8>>, ArchiveError> {
     let file = std::fs::File::open(path).map_err(|source| io_err(path, source))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| zip_err(path, e))?;
 
-    let mut entry = match archive.by_name(name) {
-        Ok(entry) => entry,
-        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(e) => return Err(zip_err(path, e)),
+    let wanted = normalize_separators(name);
+    let mut found = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| zip_err(path, e))?;
+        if !entry.is_dir() && normalize_separators(entry.name()) == wanted {
+            found = Some(i);
+            break;
+        }
+    }
+    let Some(idx) = found else {
+        return Ok(None);
     };
+
+    let mut entry = archive.by_index(idx).map_err(|e| zip_err(path, e))?;
     let mut data = Vec::with_capacity(entry.size() as usize);
     entry
         .read_to_end(&mut data)
