@@ -41,6 +41,32 @@ pub struct HashStats {
     /// fails to hash is invisible to duplicate detection forever.
     pub failed: usize,
     pub bytes_hashed: u64,
+    /// Of the files hashed this pass, how many yielded a usable internal
+    /// label. Not every archive has one — it exists only because a release
+    /// group put it there.
+    pub labelled: usize,
+}
+
+/// Read the archive's internal identity label. `None` for anything we cannot
+/// confidently read: a non-archive extension, an unlistable file, or entry
+/// names that yield no label.
+///
+/// Central-directory / header listing only. No entry is decompressed, no image
+/// is decoded, nothing is fetched.
+async fn read_archive_label(path: &Path) -> Option<(String, &'static str)> {
+    let owned = path.to_path_buf();
+    let names = tokio::task::spawn_blocking(move || longbox_archive::list_entry_names(&owned))
+        .await
+        .ok()?
+        .ok()?;
+    let (label, kind) = longbox_core::archive_label::label_from_entries(&names)?;
+    Some((
+        label,
+        match kind {
+            longbox_core::archive_label::LabelKind::Dir => "dir",
+            longbox_core::archive_label::LabelKind::Page => "page",
+        },
+    ))
 }
 
 /// Bring every size-collision candidate's digest up to date.
@@ -100,6 +126,15 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
             continue;
         }
 
+        // Read the archive's internal label in the same pass. This file is
+        // already being opened and read end to end for the digest, so listing
+        // its central directory is the cheapest possible moment to learn what
+        // the archive says it is. Listing only — no entry is decompressed.
+        //
+        // Best-effort: a label is evidence, not a precondition. An archive we
+        // cannot list still gets its digest, and simply has no label.
+        let label = read_archive_label(&on_disk.path).await;
+
         match digest_one(on_disk.path).await {
             Ok(Some(observed)) => {
                 // A DB failure here must not discard the whole pass — the
@@ -114,6 +149,26 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
                 .await
                 {
                     Ok(()) => {
+                        // Written after the digest, so a label can never be
+                        // stored against a file whose digest failed to persist
+                        // — the stamp that validates the label lives on the
+                        // digest write.
+                        let (label, kind) = match &label {
+                            Some((l, k)) => (Some(l.as_str()), Some(*k)),
+                            None => (None, None),
+                        };
+                        if let Err(e) =
+                            file_repo::set_archive_label(db, candidate.file_id, label, kind).await
+                        {
+                            tracing::warn!(
+                                file_id = candidate.file_id,
+                                error = %e,
+                                "content-hash: failed to persist archive label"
+                            );
+                        }
+                        if label.is_some() {
+                            stats.labelled += 1;
+                        }
                         stats.hashed += 1;
                         stats.bytes_hashed += observed.size.max(0) as u64;
                     }
@@ -299,6 +354,48 @@ mod tests {
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(bytes).unwrap();
         p
+    }
+
+    /// The label must survive the real archive round-trip: a CBZ written to
+    /// disk, listed through longbox-archive, and read by the parser. The unit
+    /// tests in `longbox_core::archive_label` cover parsing; this covers the
+    /// plumbing between them, which is where a wrong `LabelKind` would turn a
+    /// page counter into an issue number.
+    #[tokio::test]
+    async fn reads_the_internal_label_out_of_a_real_archive() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whatever-the-user-renamed-it.cbz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        // A scene-style single top-level folder naming the real issue.
+        for page in ["000", "001"] {
+            zip.start_file(format!("My Little Warlord 008/008-{page}.jpg"), opts)
+                .unwrap();
+            zip.write_all(b"\xFF\xD8\xFF").unwrap();
+        }
+        zip.finish().unwrap();
+
+        let (label, kind) = read_archive_label(&path).await.expect("label");
+        assert_eq!(label, "My Little Warlord 008");
+        assert_eq!(kind, "dir");
+
+        // And it says 8 — not the page number, and regardless of the
+        // filename on disk, which names nothing at all.
+        let id = longbox_core::archive_label::parse_label(
+            &label,
+            longbox_core::archive_label::LabelKind::Dir,
+        );
+        assert_eq!(id.issue.as_deref(), Some("8"));
+        assert_eq!(id.series.as_deref(), Some("my little warlord"));
+    }
+
+    #[tokio::test]
+    async fn a_non_archive_yields_no_label_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "not-a-comic.cbz", b"definitely not a zip");
+        assert!(read_archive_label(&path).await.is_none());
     }
 
     #[test]

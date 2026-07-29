@@ -1,0 +1,34 @@
+-- The identity a comic's own archive claims, read from its internal paths.
+--
+-- Scene releases bake a label into the archive — either one top-level folder
+-- (`My Little Warlord 008/`) or the page filenames (`Void Rivals 001-000.jpg`).
+-- It is written once at release time and never touched again, which makes it
+-- the only identity evidence independent of everything else we hold:
+--
+--   * independent of the FILENAME, which users and tools rename freely, and
+--     which produced most of the wrong bindings in the first place — 54 of 80
+--     duplicate-group bindings came from filename_regex, so "the filename
+--     agrees with the binding" merely restates the mechanism that made the
+--     error;
+--   * independent of the CATALOG BINDING, which is the thing under audit;
+--   * independent of COMICINFO, which is separately known to lie (the
+--     Ferocious file whose <Number> says 1 while the comic is #2).
+--
+-- Measured on the live library's 38 identical-content groups: the label names
+-- one of the bound issues in 28 groups and names an issue NO copy is bound to
+-- in 2 more — 30 of 38 actionable, against 10 groups carrying any ComicInfo at
+-- all. Where both sources exist and both parse, they agree 6 of 7.
+--
+-- Stored raw, not pre-parsed, so improving the parser never requires reopening
+-- 80 archives. `archive_label_kind` is 'dir' or 'page' and is NOT cosmetic:
+-- a page filename's trailing number counts pages, so reading it as an issue
+-- number is the mistake that makes this technique look like it works while
+-- being wrong.
+--
+-- Freshness piggybacks on the digest's stamp. The label is derived from the
+-- same bytes as content_blake3 and written in the same pass, so
+-- hashed_size_bytes / hashed_mtime validate both; a file that changed since
+-- hashing has an untrustworthy label for exactly the same reason it has an
+-- untrustworthy digest.
+ALTER TABLE files ADD COLUMN archive_label TEXT;
+ALTER TABLE files ADD COLUMN archive_label_kind TEXT;

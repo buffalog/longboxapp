@@ -770,6 +770,34 @@ where
     Ok(rows)
 }
 
+/// Store the identity label read from inside the archive, alongside the
+/// digest pass that opened it. `kind` is `"dir"` or `"page"`.
+///
+/// Written in the same pass as the digest and validated by the same stamp:
+/// both are derived from the same bytes, so a file that changed since hashing
+/// has an untrustworthy label for the same reason it has an untrustworthy
+/// digest. `None` clears a previously-stored label when the archive no longer
+/// yields one, so a stale label can never outlive the evidence for it.
+pub async fn set_archive_label<'e, E>(
+    executor: E,
+    file_id: i64,
+    label: Option<&str>,
+    kind: Option<&str>,
+) -> Result<()>
+where
+    E: SqliteExecutor<'e>,
+{
+    sqlx::query!(
+        r#"UPDATE files SET archive_label = ?, archive_label_kind = ? WHERE id = ?"#,
+        label,
+        kind,
+        file_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Store a digest together with the file version it was computed against.
 ///
 /// `size` and `mtime` must be what was observed on disk at hash time, NOT the
