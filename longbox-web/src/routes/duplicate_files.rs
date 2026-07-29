@@ -187,6 +187,7 @@ async fn list(
     let digests = validated_digests(&state, &roots, &candidates).await;
 
     let mut groups = build_groups(candidates, &patterns, &digests);
+    relabel_cross_folder_groups(&state, &mut groups).await?;
     annotate_suggestions(&state, &patterns, &mut groups).await?;
     Ok(Json(ListResponse {
         groups,
@@ -402,11 +403,12 @@ fn build_one_group(
     let suggested_keep_file_id = if is_dup { suggest_keep(&files) } else { None };
 
     let kind = if cross_folder {
-        if folders_agree_on_series(&folders) {
-            "cross_folder_same_series"
-        } else {
-            "cross_folder_wrong_series"
-        }
+        // Conservative default; `relabel_cross_folder_groups` downgrades it
+        // to `cross_folder_same_series` when the catalog shows there is only
+        // one series by that name. Over-warning on a group whose delete
+        // button is already gone costs a second look; under-warning tells
+        // someone two volumes are the same book.
+        "cross_folder_wrong_series"
     } else {
         match content {
             // No trustworthy digest for at least one file. Absence of a hash
@@ -486,26 +488,6 @@ fn spans_multiple_folders(folders: &[&str]) -> bool {
     folders.windows(2).any(|w| w[0] != w[1])
 }
 
-/// Whether differing folder names still describe the same series — used ONLY
-/// to choose wording, never to permit a delete.
-///
-/// Same series iff the titles normalize equal AND their years are compatible
-/// (equal, or at least one folder carries no year). The year test is what
-/// separates the benign case from the dangerous one, and dropping it would
-/// invert them: `Drifter` vs `Drifter (2014)` is one series stored under two
-/// folder names, while `The Authority (1999)` vs `The Authority (2008)` is two
-/// different comics whose titles normalize identically.
-///
-/// Errs toward "wrong series" when unsure. Over-warning on a group whose
-/// delete button is already suppressed costs a second look; under-warning
-/// tells someone their two distinct volumes are the same book.
-fn folders_agree_on_series(folders: &[&str]) -> bool {
-    let first = folder_identity(folders[0]);
-    folders.iter().skip(1).all(|f| {
-        let other = folder_identity(f);
-        first.0 == other.0 && (first.1 == other.1 || first.1.is_none() || other.1.is_none())
-    })
-}
 
 /// Split a series folder name into (normalized title, volume year).
 ///
@@ -555,6 +537,55 @@ fn folder_identity(folder: &str) -> (String, Option<i32>) {
 // both cached per request. At the real ~28 mismatch groups that's trivial; the
 // ceiling is O(groups × files) round-trips at per_page=200. Collapse to two
 // `IN` queries if a library ever gets bad enough for that to bite.
+/// Downgrade `cross_folder_wrong_series` to `cross_folder_same_series` when
+/// the catalog shows the folders name ONE series.
+///
+/// The folder-name heuristic alone cannot tell these apart. Both
+/// `The Authority (1999)` / `(2008)` and `Hello Darkness (2024)` / `(2025)`
+/// are "same normalized title, different year" — but the catalog holds three
+/// Authority rows and exactly one Hello Darkness row. Only in the first case
+/// does the differing year mean a different volume; in the second it is one
+/// series stored under two folder spellings, and saying "Wrong series match"
+/// there is a false statement that sends the user hunting for a duplicate
+/// series that does not exist.
+///
+/// This changes WORDING ONLY. The delete guard is `spans_multiple_folders`,
+/// re-derived independently in `resolve_one`, and is not consulted here.
+async fn relabel_cross_folder_groups(
+    state: &AppState,
+    groups: &mut [DupGroup],
+) -> Result<(), ApiError> {
+    if !groups.iter().any(|g| g.kind.starts_with("cross_folder")) {
+        return Ok(());
+    }
+    // One load for the page; only paid when a cross-folder group is on it.
+    let mut by_title: HashMap<String, usize> = HashMap::new();
+    for row in longbox_db::series_repo::find_all(&state.db).await? {
+        *by_title
+            .entry(longbox_core::normalize_title(&row.title))
+            .or_insert(0) += 1;
+    }
+
+    for group in groups.iter_mut().filter(|g| g.kind.starts_with("cross_folder")) {
+        let folders: Vec<&str> = group
+            .files
+            .iter()
+            .map(|f| top_level_folder(&f.path_relative))
+            .collect();
+        let mut titles = folders.iter().map(|f| folder_identity(f).0);
+        let Some(first) = titles.next() else { continue };
+        if !titles.all(|t| t == first) {
+            continue; // folders name genuinely different titles
+        }
+        // One catalog series by that name → the differing folder years are
+        // spelling, not volumes.
+        if by_title.get(&first).copied().unwrap_or(0) <= 1 {
+            group.kind = "cross_folder_same_series";
+        }
+    }
+    Ok(())
+}
+
 async fn annotate_suggestions(
     state: &AppState,
     patterns: &[ParsingPattern],
@@ -1591,27 +1622,21 @@ mod tests {
         );
     }
 
+    /// The pure classifier always takes the cautious label; only the
+    /// catalog can tell "two volumes" from "one series, two folder
+    /// spellings", and it isn't reachable from here. The downgrade is
+    /// covered end-to-end in `duplicate_files_tests`.
     #[test]
-    fn same_series_under_two_folder_names_is_labelled_as_such() {
-        // One series, two folder spellings — benign, but still not deletable.
+    fn cross_folder_defaults_to_the_cautious_label_without_catalog_context() {
         let rows = vec![
             row(1, "Drifter/Drifter 002.cbz"),
             row(2, "Drifter (2014)/Drifter 002.cbz"),
         ];
         let g = build_one_group(&rows, &[], &same(2));
-        assert_eq!(g.kind, "cross_folder_same_series");
-        assert_eq!(g.suggested_keep_file_id, None);
-    }
-
-    #[test]
-    fn leading_article_difference_still_reads_as_one_series() {
-        let rows = vec![
-            row(1, "The Holy Roller/x 001.cbz"),
-            row(2, "Holy Roller (2024)/x 001.cbz"),
-        ];
+        assert_eq!(g.kind, "cross_folder_wrong_series");
         assert_eq!(
-            build_one_group(&rows, &[], &same(2)).kind,
-            "cross_folder_same_series"
+            g.suggested_keep_file_id, None,
+            "and either label suppresses the keep"
         );
     }
 
@@ -1684,17 +1709,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn same_title_different_years_is_not_the_same_series() {
-        // The inversion this test guards: strip the year naively and these
-        // two normalize identically, turning the single most dangerous case
-        // into a reassuring "same series" label.
-        assert!(!folders_agree_on_series(&[
-            "The Authority (1999)",
-            "The Authority (2008)"
-        ]));
-        // A missing year is compatible with any year — one folder simply
-        // wasn't named with one.
-        assert!(folders_agree_on_series(&["Drifter", "Drifter (2014)"]));
-    }
 }

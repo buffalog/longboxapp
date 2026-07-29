@@ -413,7 +413,11 @@ async fn resolve_refuses_mismatched_issue_numbers() {
 #[tokio::test]
 async fn resolve_refuses_two_volumes_of_one_title_even_though_numbers_agree() {
     let app = build_test_app().await;
+    // TWO catalog rows share this title, as the live catalog has three. The
+    // second row is what makes the differing folder years name different
+    // volumes rather than one series spelled two ways.
     let issue = seed_series_issue(&app, "The Authority", "4").await;
+    seed_series(&app, "The Authority").await;
     let v1999 = seed_file(
         &app,
         issue,
@@ -1055,4 +1059,103 @@ async fn creating_the_missing_issue_does_not_make_an_identical_copy_movable() {
             .unwrap();
         assert_eq!(row.issue_id, Some(issue_3), "file {id} must not have moved");
     }
+}
+
+// -------- cross-folder LABEL, resolved against the catalog --------
+
+/// The live Hello Darkness case. Two folders, `(2024)` and `(2025)`, but the
+/// catalog holds exactly ONE series by that name — so the differing year is
+/// spelling, not a second volume.
+///
+/// Labelling it "Wrong series match" is a false statement, and a dangerous
+/// one: it sends the user hunting for a duplicate series that does not exist,
+/// and something destructive could come out of trying to reconcile it.
+#[tokio::test]
+async fn one_catalog_series_across_two_folders_is_labelled_same_series() {
+    let app = build_test_app().await;
+    let series = seed_series(&app, "Hello Darkness").await;
+    let issue = seed_issue(&app, series, "1").await;
+    let a = seed_file(
+        &app,
+        issue,
+        "Hello Darkness (2024)/Hello Darkness 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    let b = seed_file(
+        &app,
+        issue,
+        "Hello Darkness (2025)/Hello Darkness 001.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    let g = &body["groups"][0];
+    assert_eq!(
+        g["kind"], "cross_folder_same_series",
+        "one catalog series → the folder difference is spelling, not a volume"
+    );
+
+    // The guard is unchanged: still not deletable, even byte-identical.
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{a}}}]}}"#),
+        ))
+        .await;
+    let r = &response_json(resp).await["results"][0];
+    assert_eq!(r["status"], "refused", "wording changed; the guard did not");
+    assert!(r["reason"]
+        .as_str()
+        .unwrap()
+        .contains("more than one series folder"));
+    assert!(db_row_exists(&app, a).await && db_row_exists(&app, b).await);
+}
+
+/// The Authority case, same folder shape, opposite catalog. Three rows share
+/// the title, so the differing folder year DOES name a different volume and
+/// the strong wording is correct.
+#[tokio::test]
+async fn several_catalog_volumes_across_two_folders_keeps_the_wrong_series_label() {
+    let app = build_test_app().await;
+    // Two catalog rows sharing a normalized title.
+    let old = seed_series(&app, "The Authority").await;
+    let _new = seed_series(&app, "The Authority").await;
+    let issue = seed_issue(&app, old, "4").await;
+    seed_file(
+        &app,
+        issue,
+        "The Authority (1999)/The Authority 004.cbz",
+        true,
+        90_000_000,
+        true,
+    )
+    .await;
+    seed_file(
+        &app,
+        issue,
+        "The Authority (2008)/The Authority 004.cbr",
+        true,
+        80_000_000,
+        true,
+    )
+    .await;
+
+    let resp = app
+        .request(empty_request("GET", "/api/library/tidy/duplicate-files"))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["groups"][0]["kind"], "cross_folder_wrong_series",
+        "more than one catalog volume by this name → the year names a volume"
+    );
 }
