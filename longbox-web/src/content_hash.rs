@@ -26,7 +26,7 @@ use time::{OffsetDateTime, PrimitiveDateTime};
 
 /// What a hashing pass did. Every candidate lands in exactly one bucket, so
 /// `candidates == fresh + hashed + skipped + failed` always holds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct HashStats {
     /// Files sharing a size with at least one other present file.
     pub candidates: usize,
@@ -45,6 +45,23 @@ pub struct HashStats {
     /// label. Not every archive has one — it exists only because a release
     /// group put it there.
     pub labelled: usize,
+    /// The first failure's path and reason, verbatim.
+    ///
+    /// `failed` on its own is an anonymous integer, and the moment it stops
+    /// reading 0 the user is by definition in a situation where "go read the
+    /// container logs" is the worst possible instruction. One example costs a
+    /// String and turns "40 failed" into something actionable.
+    pub first_failure: Option<String>,
+}
+
+impl HashStats {
+    /// Count a failure, keeping the first explanation.
+    fn fail(&mut self, path: &str, reason: impl std::fmt::Display) {
+        self.failed += 1;
+        if self.first_failure.is_none() {
+            self.first_failure = Some(format!("{path}: {reason}"));
+        }
+    }
 }
 
 /// Read the archive's internal identity label. `None` for anything we cannot
@@ -94,7 +111,10 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
                 library_root_id = candidate.library_root_id,
                 "content-hash: unknown library root"
             );
-            stats.failed += 1;
+            stats.fail(
+                &candidate.path_relative,
+                format!("unknown library_root_id {}", candidate.library_root_id),
+            );
             continue;
         };
 
@@ -116,7 +136,7 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
                     error = %e,
                     "content-hash: cannot stat file"
                 );
-                stats.failed += 1;
+                stats.fail(&candidate.path_relative, format!("cannot stat: {e}"));
                 continue;
             }
         };
@@ -178,7 +198,10 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
                             error = %e,
                             "content-hash: failed to persist digest"
                         );
-                        stats.failed += 1;
+                        stats.fail(
+                            &candidate.path_relative,
+                            format!("cannot persist digest: {e}"),
+                        );
                     }
                 }
             }
@@ -190,7 +213,7 @@ pub async fn refresh_digests(db: &Pool) -> Result<HashStats, longbox_db::DbError
                     error = %e,
                     "content-hash: failed to digest file"
                 );
-                stats.failed += 1;
+                stats.fail(&candidate.path_relative, format!("cannot read: {e}"));
             }
         }
     }
