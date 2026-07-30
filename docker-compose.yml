@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+      - "8096:8096"
     volumes:
       # The SQLite catalog lives on a Docker-managed named volume,
       # NOT a host bind mount. macOS Docker Desktop's virtiofs +
