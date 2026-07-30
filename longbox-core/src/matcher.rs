@@ -177,12 +177,12 @@ fn match_in_candidates(
     confidence_ceiling: f64,
     method: MatchMethod,
 ) -> Option<TierMatch> {
-    let pick = best_candidate_match(title_text, years, candidates)?;
+    let needle = IssueNumber::new(number_text);
+    let pick = best_candidate_match(title_text, years, &needle, candidates)?;
     let confidence = pick.score.min(confidence_ceiling);
     if confidence < NEEDS_REVIEW_FLOOR {
         return None;
     }
-    let needle = IssueNumber::new(number_text);
     let issue = pick
         .candidate
         .issues
@@ -285,6 +285,7 @@ struct Pick<'a> {
 fn best_candidate_match<'a>(
     title_text: &str,
     years: YearEvidence,
+    needle: &IssueNumber,
     candidates: &'a [Candidate],
 ) -> Option<Pick<'a>> {
     if candidates.is_empty() {
@@ -336,6 +337,20 @@ fn best_candidate_match<'a>(
                 let b_year = yh.is_some() && b.1.series.start_year == yh;
                 b_year.cmp(&a_year)
             })
+            // The catalog itself knows which volume has this issue.
+            //
+            // This must be a SORT rung and not only an evidence check: with
+            // it only in `decided_by_evidence`, the sort still picks by
+            // catalog size, and `match_in_candidates` then fails to find the
+            // issue inside that winner and returns None — no match at all.
+            // That is the observed live failure. Four Copra files sat in
+            // /watch unimportable because issue 50 exists only in the 15-row
+            // 2019 volume while the 31-row 2012 volume won on size.
+            .then_with(|| {
+                let a_has = a.1.issues.iter().any(|i| i.number.matches(needle));
+                let b_has = b.1.issues.iter().any(|i| i.number.matches(needle));
+                b_has.cmp(&a_has)
+            })
             // Prefer the candidate with more issues. When two series
             // share a title and neither matches the year hint (common:
             // NZB filenames carry the scan year, not the series
@@ -368,7 +383,7 @@ fn best_candidate_match<'a>(
         .filter(|c| normalize_title(&c.series.title) == key)
         .collect();
 
-    let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, years);
+    let ambiguous = rivals.len() > 1 && !decided_by_evidence(&rivals, years, needle);
 
     Some(Pick {
         score,
@@ -407,7 +422,7 @@ fn best_candidate_match<'a>(
 /// and the prior behaviour stands. That path is also where abstaining is most
 /// expensive: `ambiguous` routes to `needs_review`, which
 /// `longbox-postprocess` refuses to import, so the file stays in `/watch/`.
-fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence) -> bool {
+fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence, needle: &IssueNumber) -> bool {
     let hits = |year: Option<i32>| -> Option<Vec<&Candidate>> {
         let year = year?;
         let v: Vec<&Candidate> = rivals
@@ -417,23 +432,42 @@ fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence) -> bool {
             .collect();
         (!v.is_empty()).then_some(v)
     };
+    // Exactly one candidate in the set actually has this issue on record.
+    //
+    // Real evidence about which volume a file belongs to, and stronger than
+    // catalog size, which has no semantic content at all. Evidence, not
+    // proof: zero or several matches decide nothing and fall through
+    // untouched. Uses `IssueNumber::matches`, the same comparison that
+    // actually binds the issue further down — a second numeric comparison
+    // would disagree with the one that does the work.
+    let contains_uniquely = |set: &[&Candidate]| {
+        set.iter()
+            .filter(|c| c.issues.iter().any(|i| i.number.matches(needle)))
+            .count()
+            == 1
+    };
     // A clear leader on catalog size, among an already-selected set.
     let leader = |set: &[&Candidate]| {
         let most = set.iter().map(|c| c.issues.len()).max().unwrap_or(0);
         most > 0 && set.iter().filter(|c| c.issues.len() == most).count() == 1
     };
+    // Containment sits ABOVE issue count, wherever issue count would run.
+    // Defined by rung rather than by path, so it is uniform everywhere — and
+    // rule C is untouched, because its abstentions return before either rung
+    // is reached.
+    let resolve = |set: &[&Candidate]| contains_uniquely(set) || leader(set);
 
     match years.folder {
         // No series folder exists — nothing to be silent. Prior behaviour.
         FolderEvidence::NoFolder => match hits(years.hint) {
             Some(set) if set.len() == 1 => true,
-            Some(set) => leader(&set),
-            None => leader(rivals),
+            Some(set) => resolve(&set),
+            None => resolve(rivals),
         },
         // The folder named a volume year.
         FolderEvidence::Year(_) => match hits(years.folder.year()) {
             Some(set) if set.len() == 1 => true,
-            Some(set) => leader(&set),
+            Some(set) => resolve(&set),
             // It named a year no candidate has: the folder and the catalog
             // disagree. That is not licence for a release year, or for the
             // biggest catalog, to settle a volume question.
@@ -442,7 +476,7 @@ fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence) -> bool {
         // The folder said nothing. Only ComicInfo `<Volume>` can still speak.
         FolderEvidence::Silent => match hits(years.volume) {
             Some(set) if set.len() == 1 => true,
-            Some(set) => leader(&set),
+            Some(set) => resolve(&set),
             None => false,
         },
     }
@@ -956,6 +990,130 @@ mod tests {
         let r = match_file(None, Some(&fp), FolderEvidence::Year(2008), &candidates);
         assert_eq!(r.issue_id, Some(2004));
         assert!(!r.ambiguous);
+    }
+
+    // -------- issue-number containment --------
+
+    /// The live Copra failure. Two volumes share the title; the filename's
+    /// year is a RELEASE year matching neither start_year; and the 2012
+    /// volume has MORE issues (31 vs 15) so it won on catalog size — after
+    /// which issue 50 was not found inside it and the match failed entirely.
+    /// Four files sat in /watch unimportable.
+    ///
+    /// The catalog itself knows: 959's records run 1-6, 38-45, 50.
+    fn copra_volumes() -> Vec<Candidate> {
+        let v2012 = candidate(
+            series(958, "Copra", Some(2012)),
+            (1..=31)
+                .map(|n| issue(9580 + n, 958, &n.to_string()))
+                .collect(),
+        );
+        let v2019 = candidate(
+            series(959, "Copra", Some(2019)),
+            [1, 2, 3, 4, 5, 6, 38, 39, 40, 41, 42, 43, 44, 45, 50]
+                .iter()
+                .map(|n| issue(9590 + n, 959, &n.to_string()))
+                .collect(),
+        );
+        vec![v2012, v2019]
+    }
+
+    fn copra_filename(number: &str, year: i32) -> ParsedFilename {
+        ParsedFilename {
+            series_title: "Copra".into(),
+            number: number.to_owned(),
+            volume: None,
+            year: Some(year),
+            title: None,
+            pattern_id: 10,
+        }
+    }
+
+    #[test]
+    fn the_only_volume_holding_the_issue_wins_over_the_bigger_catalog() {
+        for (number, year) in [("039", 2021), ("041", 2021), ("042", 2023), ("050", 2025)] {
+            let fp = copra_filename(number, year);
+            let r = match_file(None, Some(&fp), FolderEvidence::NoFolder, &copra_volumes());
+            assert_eq!(
+                r.issue_id,
+                Some(9590 + number.parse::<i64>().unwrap()),
+                "Copra {number} belongs to the only volume that has it"
+            );
+            assert!(
+                !r.ambiguous,
+                "the catalog naming exactly one holder is evidence"
+            );
+        }
+    }
+
+    /// Containment is evidence, not proof. An issue present in SEVERAL
+    /// candidates decides nothing and must fall through untouched — which is
+    /// the live Authority 10/12 shape, where all three volumes have that
+    /// issue and two of them tie at 29 records.
+    #[test]
+    fn an_issue_present_in_several_volumes_decides_nothing() {
+        let fp = ParsedFilename {
+            series_title: "The Authority".into(),
+            number: "010".into(),
+            volume: None,
+            year: Some(2009), // release year, matches no volume
+            title: None,
+            pattern_id: 10,
+        };
+        let r = match_file(
+            None,
+            Some(&fp),
+            FolderEvidence::NoFolder,
+            &authority_volumes(),
+        );
+        assert!(
+            r.ambiguous,
+            "issue 10 exists in all three volumes, so containment resolves nothing \
+             and the 29-vs-29 tie must still abstain"
+        );
+    }
+
+    /// An issue in NO candidate is equally uninformative — fall through to
+    /// the existing rungs rather than treating zero holders as a signal.
+    #[test]
+    fn an_issue_in_no_volume_falls_through_unchanged() {
+        let fp = copra_filename("099", 2025);
+        let r = match_file(None, Some(&fp), FolderEvidence::NoFolder, &copra_volumes());
+        // Neither volume has #99, so nothing resolves and no issue is found.
+        assert_eq!(r.issue_id, None);
+    }
+
+    /// Containment must not outrank volume evidence. Rule C stands: the
+    /// folder names the volume, even when the OTHER volume is the only one
+    /// holding that issue number.
+    #[test]
+    fn volume_evidence_still_outranks_containment() {
+        let mut vols = copra_volumes();
+        // Give the 2012 volume issue 50 as well, then point the folder at 2012.
+        vols[0].issues.push(issue(95850, 958, "50"));
+        let fp = copra_filename("050", 2025);
+        let r = match_file(None, Some(&fp), FolderEvidence::Year(2012), &vols);
+        assert_eq!(r.issue_id, Some(95850), "the folder names the volume");
+        assert!(!r.ambiguous);
+    }
+
+    /// Rule C's abstentions return before either rung is reached, so
+    /// containment cannot reopen them.
+    #[test]
+    fn containment_does_not_weaken_rule_c() {
+        // Folder names a year no volume has. Only the 2019 volume holds #50,
+        // but the folder/catalog disagreement still abstains.
+        let fp = copra_filename("050", 2025);
+        let r = match_file(
+            None,
+            Some(&fp),
+            FolderEvidence::Year(2031),
+            &copra_volumes(),
+        );
+        assert!(
+            r.ambiguous,
+            "a folder naming a volume the catalog lacks abstains, containment or not"
+        );
     }
 
     #[test]
