@@ -112,7 +112,7 @@ describe('Settings page — Tunable settings', () => {
     expect(screen.getByLabelText('Pull exclusion keywords value')).toHaveValue(
       'infinity comic'
     );
-    expect(screen.getByLabelText('Minimum file size MB value')).toHaveValue('50');
+    expect(screen.getByLabelText('Minimum file size MiB value')).toHaveValue('50');
   });
 
   it('Save on match threshold PUTs the new value and invalidates the page', async () => {
@@ -187,14 +187,14 @@ describe('Settings page — Tunable settings', () => {
     );
   });
 
-  it('min_file_size_mb saves an integer MB count', async () => {
+  it('min_file_size_mb saves an integer MiB count', async () => {
     vi.mocked(updateSetting).mockResolvedValue({
       key: 'min_file_size_mb',
       value: '50'
     });
     render(Page, pageData());
 
-    const input = screen.getByLabelText('Minimum file size MB value');
+    const input = screen.getByLabelText('Minimum file size MiB value');
     await fireEvent.input(input, { target: { value: '50' } });
     // Order: match, pull indexer, enrich-known, enrich-unknown,
     // keywords, host path, min file size → 7th Save button.
@@ -208,7 +208,7 @@ describe('Settings page — Tunable settings', () => {
 
   it('min_file_size_mb rejects fractional values client-side', async () => {
     render(Page, pageData());
-    const input = screen.getByLabelText('Minimum file size MB value');
+    const input = screen.getByLabelText('Minimum file size MiB value');
     await fireEvent.input(input, { target: { value: '35.5' } });
     const saveButtons = screen.getAllByRole('button', { name: 'Save' });
     await fireEvent.click(saveButtons[6]!);
