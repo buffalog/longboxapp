@@ -193,6 +193,7 @@ pub async fn build_test_app() -> TestApp {
         scanner: Arc::new(scanner),
         config: Arc::new(config),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
+        analyze_status: Arc::new(RwLock::new(Default::default())),
         library_root_id,
         pending_cache: Arc::new(longbox_postprocess::PendingInterventionsCache::new()),
         pull,

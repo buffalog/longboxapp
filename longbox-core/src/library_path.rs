@@ -186,6 +186,34 @@ pub fn folder_volume_year(path_relative: &str) -> Option<i32> {
     inner.parse::<i32>().ok()
 }
 
+/// Split a series folder name into (normalized title, volume year).
+///
+/// Shared by Library Tidy's cross-folder labelling and Library Integrity's
+/// cross-folder finding, deliberately. Two definitions of "what series does
+/// this folder name" would manufacture findings out of their disagreement
+/// with each other rather than reporting anything about the library — the
+/// same reason reconciliation walks with the scanner's own walker.
+///
+/// The year must come off before normalizing: `normalize_title` drops the
+/// parentheses but keeps the digits as a token, so `Drifter (2014)` would
+/// normalize to `drifter 2014` and never match `drifter`.
+pub fn folder_identity(folder: &str) -> (String, Option<i32>) {
+    let trimmed = folder.trim_end();
+    let (title, year) = match trimmed.rfind('(') {
+        Some(open) if trimmed.ends_with(')') => {
+            let inner = &trimmed[open + 1..trimmed.len() - 1];
+            match inner.parse::<i32>() {
+                Ok(y) => (&trimmed[..open], Some(y)),
+                // Parenthesised but not a year (`Ultramega (Deluxe)`) — leave
+                // it in the title, it is part of how the folder is named.
+                Err(_) => (trimmed, None),
+            }
+        }
+        _ => (trimmed, None),
+    };
+    (crate::normalize_title(title), year)
+}
+
 /// Classify what a root-relative path's series folder says about the volume.
 ///
 /// Distinguishes a folder that declares nothing from no folder at all — the

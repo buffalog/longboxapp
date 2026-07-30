@@ -33,7 +33,13 @@ export interface DupGroup {
    * `pending_analysis` — not content-analyzed yet, so nothing is known about
    * whether these are the same comic. Never deletable: absence of a hash is
    * not evidence of sameness or of difference.
-   * `mismatch` — content differs; distinct issues merged onto one record.
+   * `mismatch` — content differs AND the filenames claim different issues:
+   * distinct issues wrongly merged onto one record, fixed by moving a stray.
+   * `same_number_different_bytes` — content differs but every filename claims
+   * the SAME issue. Usually one issue in two container formats (.cbr/.cbz) or
+   * two encodings of it. Nothing to move, and not provably a duplicate either:
+   * proving two containers hold the same comic needs page-level comparison,
+   * which this feature does not do. Never deletable.
    * `cross_folder_*` — files span more than one series folder, so they are
    * never duplicates however well the numbers agree. `wrong_series` means the
    * folders name different series or different volume years; `same_series`
@@ -43,6 +49,7 @@ export interface DupGroup {
   kind:
     | 'duplicate'
     | 'mismatch'
+    | 'same_number_different_bytes'
     | 'pending_analysis'
     | 'cross_folder_same_series'
     | 'cross_folder_wrong_series';

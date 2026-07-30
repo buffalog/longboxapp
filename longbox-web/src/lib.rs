@@ -10,6 +10,7 @@ pub mod config;
 pub mod content_hash;
 pub mod error;
 pub mod frontend;
+pub mod integrity_scan;
 pub mod metron_link;
 pub(crate) mod pathsafe;
 pub mod routes;

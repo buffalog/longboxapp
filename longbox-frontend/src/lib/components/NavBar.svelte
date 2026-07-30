@@ -23,6 +23,7 @@
         { href: '/missing', label: 'Missing' },
         { href: '/scans', label: 'Scans' },
         { href: '/library/tidy', label: 'Library tidy' },
+        { href: '/library/integrity', label: 'Library integrity' },
         { href: '/needs-attention', label: 'Needs attention' }
       ]
     },

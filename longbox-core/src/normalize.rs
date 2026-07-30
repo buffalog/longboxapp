@@ -30,6 +30,24 @@ pub fn normalize_title(input: &str) -> String {
     collapse_whitespace(&cleaned)
 }
 
+/// Did [`normalize_title`] drop a trailing `" by <authors>"` from this title?
+///
+/// Exposed so callers can distinguish "same series, differently spelled" from
+/// "a collected edition named after its creators" — `Fire Power By Kirkman
+/// And Samnee (2023)` normalizes to the same thing as `Fire Power (2020)`
+/// precisely BECAUSE this strip fires, so the strip firing is the signal.
+///
+/// Reuses the same predicate normalization uses rather than re-deriving it: a
+/// second definition of "is this an author attribution" would disagree with
+/// production somewhere, and every disagreement would become a misfiled
+/// finding.
+pub fn has_author_attribution(title: &str) -> bool {
+    let nfc: String = title.nfc().collect();
+    let lower = nfc.to_lowercase();
+    let stripped = strip_leading_article(&lower);
+    strip_author_attribution(stripped).len() != stripped.len()
+}
+
 fn strip_leading_article(s: &str) -> &str {
     for prefix in ["the ", "a ", "an "] {
         if let Some(rest) = s.strip_prefix(prefix) {
@@ -88,6 +106,17 @@ fn collapse_whitespace(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn author_attribution_is_detectable_by_the_same_rule_that_strips_it() {
+        assert!(has_author_attribution("Fire Power By Kirkman And Samnee"));
+        assert!(has_author_attribution("Stillwater by Zdarsky & Pérez"));
+        // The conservative cases normalization deliberately leaves alone.
+        assert!(!has_author_attribution("Step By Bloody Step"));
+        assert!(!has_author_attribution("The Nice House by the Sea"));
+        assert!(!has_author_attribution("Series by Brian Wood"));
+        assert!(!has_author_attribution("Fire Power"));
+    }
 
     #[test]
     fn lowercase_only() {

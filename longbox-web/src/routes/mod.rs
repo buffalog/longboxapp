@@ -19,6 +19,7 @@ pub mod enrichment;
 pub mod files;
 pub mod health;
 pub mod indexers;
+pub mod integrity;
 pub mod interactive_search;
 pub mod library_roots;
 pub mod missing;
@@ -71,6 +72,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(reader::router())
         .merge(reconcile::router())
         .merge(duplicate_files::router())
+        .merge(integrity::router())
         .merge(calendar::router())
         .merge(needs_attention::router())
         .merge(enrichment::router())
