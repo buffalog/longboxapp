@@ -80,12 +80,12 @@
   /// disables the size floor entirely (Phase B accepts everything).
   function validateMegabytes(raw: string): string | null {
     const trimmed = raw.trim();
-    if (trimmed === '') return 'Enter a whole number of MB (use 0 to disable the floor).';
+    if (trimmed === '') return 'Enter a whole number of MiB (use 0 to disable the floor).';
     if (!/^\d+$/.test(trimmed))
-      return `'${raw}' must be a whole number — fractional MB aren't accepted.`;
+      return `'${raw}' must be a whole number — fractional MiB aren't accepted.`;
     const n = Number(trimmed);
     if (!Number.isFinite(n)) return `'${raw}' is not a valid number.`;
-    if (n > 10240) return `Must be ≤ 10240 MB (10 GB); got ${n}.`;
+    if (n > 10240) return `Must be ≤ 10240 MiB (10 GiB); got ${n}.`;
     return null;
   }
 
@@ -536,14 +536,14 @@
       </div>
 
       <div class="border-t border-slate-100 pt-4">
-        <h3 class="text-sm font-semibold text-slate-800">Minimum file size (MB)</h3>
+        <h3 class="text-sm font-semibold text-slate-800">Minimum file size (MiB)</h3>
         <p class="mb-2 text-xs text-slate-500">
           Phase B size floor. Any CBR/CBZ/CB7 arriving in the watch folder smaller than this gets
           rejected with a WARN log and stays in <code class="font-mono">/watch/</code> — catches
-          partial/corrupt SAB deliveries (e.g. an Absolute Batman issue that should be ~50 MB
-          arriving at 16 MB with five pages). Set to <code>0</code> to disable the floor entirely.
+          partial/corrupt SAB deliveries (e.g. an Absolute Batman issue that should be ~50 MiB
+          arriving at 16 MiB with five pages). Set to <code>0</code> to disable the floor entirely.
           Currently saved:
-          <code class="font-mono">{s.min_file_size_mb} MB</code>.
+          <code class="font-mono">{s.min_file_size_mb} MiB</code>.
         </p>
         <form
           class="flex gap-2"
@@ -564,7 +564,7 @@
             bind:value={minFileSizeMbDraft}
             disabled={minFileSizeMbSaving}
             class="w-32 rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            aria-label="Minimum file size MB value"
+            aria-label="Minimum file size MiB value"
           />
           <Button type="submit" loading={minFileSizeMbSaving} disabled={minFileSizeMbSaving}>
             Save
