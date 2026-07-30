@@ -65,9 +65,28 @@ describe('formatDuration', () => {
 describe('formatBytes', () => {
   it('renders units sensibly', () => {
     expect(formatBytes(500)).toBe('500 B');
-    expect(formatBytes(2048)).toBe('2.0 KB');
-    expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MB');
-    expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2.00 GB');
+    expect(formatBytes(2048)).toBe('2.0 KiB');
+    expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MiB');
+    expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2.00 GiB');
+  });
+
+  // The label must match the arithmetic. This function divides by 1024, so a
+  // decimal label is a false statement — and it was one, on a page whose whole
+  // argument is that every number means what it says.
+  it('labels binary units, because it does binary maths', () => {
+    // The live reclaimable-space figure from the integrity view.
+    const bytes = 3_872_304_022;
+    expect(formatBytes(bytes)).toBe('3.61 GiB');
+    expect(bytes / 1024 ** 3).toBeCloseTo(3.61, 2);
+    // The decimal figure for the same number differs by ~7%, which is exactly
+    // the size of the error the old label was making.
+    expect(bytes / 1000 ** 3).toBeCloseTo(3.87, 2);
+  });
+
+  it('never renders a decimal-unit label', () => {
+    for (const n of [0, 1, 1023, 1024, 1_048_576, 1_073_741_824, 5_000_000_000]) {
+      expect(formatBytes(n)).not.toMatch(/\d\s(KB|MB|GB)$/);
+    }
   });
 });
 

@@ -87,14 +87,28 @@ export function formatDuration(ms: number): string {
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
 
-/** Format a byte count as KB/MB/GB. */
+/**
+ * Format a byte count with BINARY units — KiB/MiB/GiB, powers of 1024.
+ *
+ * The labels used to read KB/MB/GB while the arithmetic divided by 1024, so
+ * every size in the app was binary maths wearing a decimal label: 3,872,304,022
+ * bytes rendered as "3.61 GB" when 3.61 is the GiB figure and the GB figure is
+ * 3.87. Relabelling rather than switching to powers of 1000 keeps every
+ * displayed number exactly as it was — this is a correctness fix to the label,
+ * not a change to what is shown.
+ *
+ * Worth knowing when comparing against the OS: macOS Finder reports decimal,
+ * so deleting 3.61 GiB of duplicates shows as roughly 3.87 GB freed. Moving to
+ * decimal would align with that, but it is a product choice affecting every
+ * size in five views, not a bug fix.
+ */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  return `${(mb / 1024).toFixed(2)} GB`;
+  const kib = n / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)} KiB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(1)} MiB`;
+  return `${(mib / 1024).toFixed(2)} GiB`;
 }
 
 // ComicVine canonical URL construction. CV's permalinks use numeric
