@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::downloader::Downloader;
 use crate::error::DownloaderError;
-use crate::types::{DownloadHandle, DownloadStatus};
+use crate::types::{DownloadHandle, DownloadStatus, RemoteStorage};
 
 pub struct SabnzbdClient {
     base_url: String,
@@ -110,7 +110,12 @@ impl Downloader for SabnzbdClient {
         let history: SabHistoryResponse = serde_json::from_str(history_body.trim())
             .map_err(|e| DownloaderError::MalformedResponse(format!("SABnzbd history: {e}")))?;
         if let Some(slot) = history.history.slots.iter().find(|s| s.nzo_id == handle.0) {
-            return Ok(map_history_status(&slot.status, &slot.fail_message));
+            return Ok(map_history_status(
+                &slot.status,
+                &slot.fail_message,
+                &slot.storage,
+                slot.completed,
+            ));
         }
 
         Ok(DownloadStatus::Unknown)
@@ -138,9 +143,24 @@ fn map_queue_status(raw: &str) -> DownloadStatus {
 /// History status → common status. `Completed`/`Failed` are terminal;
 /// everything else (Verifying, Repairing, Extracting, …) is still
 /// post-processing.
-fn map_history_status(raw: &str, fail_message: &str) -> DownloadStatus {
+///
+/// `completed` is SAB's own job-completion time in Unix seconds,
+/// already normalised to `None` when absent, zero or unparseable.
+///
+/// `storage` is SAB's own record of the final output directory,
+/// carrying the `.1`/`.2` suffix it appends when a job name collides
+/// with an existing one. Empty when SAB has no path for the job.
+fn map_history_status(
+    raw: &str,
+    fail_message: &str,
+    storage: &str,
+    completed: Option<i64>,
+) -> DownloadStatus {
     match raw {
-        "Completed" => DownloadStatus::Completed,
+        "Completed" => DownloadStatus::Completed {
+            storage: (!storage.trim().is_empty()).then(|| RemoteStorage::new(storage)),
+            completed_at: completed,
+        },
         "Failed" => DownloadStatus::Failed(if fail_message.is_empty() {
             "SABnzbd reported a failure".into()
         } else {
@@ -193,6 +213,17 @@ struct SabHistorySlot {
     status: String,
     #[serde(default)]
     fail_message: String,
+    /// Final output directory. SAB's own field — see
+    /// [`map_history_status`]. Defaulted because older SAB releases
+    /// and mid-post-processing slots may omit it.
+    #[serde(default)]
+    storage: String,
+    /// Job completion time, Unix seconds. Verified populated on every
+    /// slot of the live API (40 slots, 24 distinct values — the
+    /// repeats are parallel downloads finishing in the same second,
+    /// not a batch write). Absent / zero / unparseable → `None`.
+    #[serde(default, deserialize_with = "crate::lenient_unix_secs")]
+    completed: Option<i64>,
 }
 
 #[cfg(test)]
@@ -239,28 +270,52 @@ mod tests {
         assert_eq!(map_queue_status("Propagating"), DownloadStatus::Downloading);
     }
 
+    /// The `.1` suffix SAB appends on a job-name collision is the
+    /// case a reconstruction from the submitted job name cannot
+    /// produce, and it is present in real history rows — so the
+    /// basename must come from SAB's own `storage`.
+    #[test]
+    fn completed_carries_sabs_own_folder_including_a_dedup_suffix() {
+        let status = map_history_status(
+            "Completed",
+            "",
+            "/Users/jeremy/Downloads/complete/The Amazing Spider-Man 25.1",
+            Some(1700000000),
+        );
+        let DownloadStatus::Completed { storage, .. } = status else {
+            panic!("expected Completed");
+        };
+        assert_eq!(
+            storage.expect("storage").basename(),
+            Some("The Amazing Spider-Man 25.1")
+        );
+    }
+
     #[test]
     fn history_status_mapping() {
         assert_eq!(
-            map_history_status("Completed", ""),
-            DownloadStatus::Completed
+            map_history_status("Completed", "", "", Some(1700000000)),
+            DownloadStatus::Completed {
+                storage: None,
+                completed_at: Some(1700000000)
+            }
         );
         assert_eq!(
-            map_history_status("Failed", "par2 verification failed"),
+            map_history_status("Failed", "par2 verification failed", "", Some(1700000000)),
             DownloadStatus::Failed("par2 verification failed".into())
         );
         // Failed with no message still carries a reason.
         assert!(matches!(
-            map_history_status("Failed", ""),
+            map_history_status("Failed", "", "", Some(1700000000)),
             DownloadStatus::Failed(_)
         ));
         // Mid-post-processing states are still in-progress.
         assert_eq!(
-            map_history_status("Repairing", ""),
+            map_history_status("Repairing", "", "", Some(1700000000)),
             DownloadStatus::Downloading
         );
         assert_eq!(
-            map_history_status("Extracting", ""),
+            map_history_status("Extracting", "", "", Some(1700000000)),
             DownloadStatus::Downloading
         );
     }

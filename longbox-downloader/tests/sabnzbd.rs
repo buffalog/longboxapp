@@ -109,7 +109,8 @@ async fn status_resolves_completed_from_history() {
         .and(query_param("mode", "history"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
             r#"{"history": {"slots": [
-                {"nzo_id": "SABnzbd_nzo_abc123", "status": "Completed", "fail_message": ""}
+                {"nzo_id": "SABnzbd_nzo_abc123", "status": "Completed", "fail_message": "",
+                 "storage": "/downloads/complete/Saga 001.1"}
             ]}}"#,
         ))
         .mount(&server)
@@ -119,7 +120,13 @@ async fn status_resolves_completed_from_history() {
         .status(&DownloadHandle("SABnzbd_nzo_abc123".into()))
         .await
         .unwrap();
-    assert_eq!(status, DownloadStatus::Completed);
+    // End-to-end: SAB's `storage` survives deserialization and the
+    // dedup suffix is preserved, because that is the folder that
+    // actually exists.
+    let DownloadStatus::Completed { storage, .. } = status else {
+        panic!("expected Completed, got {status:?}");
+    };
+    assert_eq!(storage.expect("storage").basename(), Some("Saga 001.1"));
 }
 
 #[tokio::test]

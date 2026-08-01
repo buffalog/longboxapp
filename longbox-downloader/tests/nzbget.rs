@@ -119,7 +119,19 @@ async fn status_resolves_completed_from_history() {
     mount_method(
         &server,
         "history",
-        json!([{ "NZBID": 42, "Status": "SUCCESS/ALL" }]),
+        json!([{
+            "NZBID": 42,
+            "Status": "SUCCESS/ALL",
+            // FinalDir wins over DestDir when a post-processing script
+            // relocated the job. Both names, and HistoryTime below,
+            // come from NZBGet's documented RPC surface and have never
+            // been checked against a live server — this fixture cannot
+            // prove they are right, but it pins what the code expects
+            // so the assumption is visible rather than inferred.
+            "FinalDir": "/dl/final/Saga 001",
+            "DestDir": "/dl/dst/elsewhere",
+            "HistoryTime": 1700000000
+        }]),
     )
     .await;
 
@@ -127,7 +139,20 @@ async fn status_resolves_completed_from_history() {
         .status(&DownloadHandle("42".into()))
         .await
         .unwrap();
-    assert_eq!(status, DownloadStatus::Completed);
+    let DownloadStatus::Completed {
+        storage,
+        completed_at,
+    } = status
+    else {
+        panic!("expected Completed, got {status:?}");
+    };
+    assert_eq!(storage.expect("storage").basename(), Some("Saga 001"));
+    // Pins the `HistoryTime` rename. The fixture supplied this field
+    // for two rounds while the assertion discarded it via `..` — set
+    // for show. A wrong key yields `None`, which makes `classify`
+    // abstain on 100% of downloads forever on this backend, and no
+    // test noticed.
+    assert_eq!(completed_at, Some(1700000000));
 }
 
 #[tokio::test]
@@ -147,7 +172,15 @@ async fn status_warning_band_maps_to_completed() {
         .status(&DownloadHandle("7".into()))
         .await
         .unwrap();
-    assert_eq!(status, DownloadStatus::Completed);
+    // No DestDir/FinalDir in the response at all: the fields default
+    // and the location is reported as unknown rather than guessed.
+    assert_eq!(
+        status,
+        DownloadStatus::Completed {
+            storage: None,
+            completed_at: None
+        }
+    );
 }
 
 #[tokio::test]

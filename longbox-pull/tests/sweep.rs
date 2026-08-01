@@ -154,7 +154,7 @@ async fn submits_a_matched_release_and_records_the_attempt() {
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.submitted, 1);
     assert_eq!(summary.no_match, 0);
 
@@ -177,7 +177,7 @@ async fn no_indexer_match_records_no_attempt() {
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.no_match, 1);
     assert_eq!(summary.submitted, 0);
 
@@ -205,7 +205,7 @@ async fn submission_failure_records_a_failed_attempt_with_retry_count() {
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.submission_failed, 1);
     assert_eq!(summary.submitted, 0);
 
@@ -258,7 +258,7 @@ async fn grab_retry_excludes_an_already_tried_release() {
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.submitted, 1);
 
     let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
@@ -300,7 +300,7 @@ async fn parked_issue_at_the_retry_ceiling_is_not_re_attempted() {
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     // The parked issue is not a candidate — nothing submitted.
     assert_eq!(summary.submitted, 0);
     assert_eq!(summary.no_match, 0);
@@ -352,7 +352,7 @@ async fn polling_a_failed_download_fails_the_attempt() {
         .await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.polled, 1);
     assert_eq!(summary.grab_failed, 1);
 
@@ -385,7 +385,7 @@ async fn polling_an_unknown_download_bumps_the_counter_below_the_limit() {
         .await;
     add_sab_downloader(&db, downloader.uri()).await;
 
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary.polled, 1);
     // One Unknown is below the give-up threshold — still in flight.
     assert_eq!(summary.grab_failed, 0);
@@ -402,7 +402,7 @@ async fn polling_an_unknown_download_bumps_the_counter_below_the_limit() {
 async fn sweep_without_a_downloader_is_a_no_op() {
     let (db, _series_id, _issue_id) = seed_catalog().await;
     // No downloader, no indexers configured.
-    let summary = sweep(&db).await.unwrap();
+    let summary = sweep(&db, None).await.unwrap();
     assert_eq!(summary, longbox_pull::SweepSummary::default());
 }
 
@@ -911,4 +911,588 @@ async fn sweep_single_issue_works_when_series_is_NOT_on_pull_list() {
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].status, "submitted");
     assert_eq!(attempts[0].release_id.as_deref(), Some("guid-unsubscribed"));
+}
+
+// -------- Phase 1: the completed-but-empty feedback edge --------
+//
+// Before this existed, a download that arrived perfectly and contained
+// no comic had no way to report itself: Phase B settles attempts by
+// matching an issue, and there is nothing to match. The attempt sat
+// `submitted` until SABnzbd forgot the job, then surfaced — three days
+// later — as "lost track of download". Nothing was lost.
+
+/// Scratch directory standing in for the watch root, removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let base = std::env::temp_dir().join(format!(
+            "longbox-sweep-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        Self(base)
+    }
+    /// Create `<root>/<job>/<file>`, mirroring how SAB deposits a job.
+    fn job_file(&self, job: &str, file: &str) -> &Self {
+        let dir = self.0.join(job);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), b"x").unwrap();
+        self
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    /// Force an mtime so the folder guards can be driven end to end.
+    fn age(&self, rel: &str, unix_secs: i64) -> &Self {
+        let p = if rel.is_empty() {
+            self.0.clone()
+        } else {
+            self.0.join(rel)
+        };
+        filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(unix_secs, 0))
+            .expect("set mtime");
+        self
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// SAB reports an empty queue and one Completed history slot whose
+/// `storage` points at `job` under some absolute path. The path is
+/// deliberately NOT the test's watch root — SAB reports its own
+/// namespace and only the final component is meaningful.
+async fn sab_completed_at(server: &MockServer, nzo_id: &str, job: &str) {
+    // "Now", because these fixtures create their folders fresh and do
+    // not age them — so the folder's mtime is now and this puts the
+    // job inside the completion window. SAB reports `completed` on
+    // every history slot, so a real timestamp is also the faithful
+    // default; a fixture that omitted it would only exercise the
+    // no-timestamp abstention.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs() as i64;
+    sab_completed_at_time(server, nzo_id, job, now).await;
+}
+
+/// As above, but with SAB's own `completed` timestamp (Unix seconds).
+/// `0` means "unreported", which is what the older fixtures used and
+/// what leaves the completion-window guard switched off.
+async fn sab_completed_at_time(server: &MockServer, nzo_id: &str, job: &str, completed: i64) {
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue": {"slots": []}}"#))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"history": {{"slots": [
+                {{"nzo_id": "{nzo_id}", "status": "Completed", "fail_message": "",
+                  "storage": "/sab/complete/{job}", "completed": {completed}}}
+            ]}}}}"#
+        )))
+        .mount(server)
+        .await;
+}
+
+/// Seed one in-flight attempt carrying a handle and a release guid.
+async fn seed_submitted(db: &Pool, series_id: i64, issue_id: i64, guid: &str, nzo_id: &str) {
+    pull_attempt_repo::insert(
+        db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some(guid.into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some(nzo_id.into()),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// MECHANISM 1 — the settle-on-empty condition.
+///
+/// A completed download whose folder holds only a PDF settles now,
+/// with a message describing what actually happened.
+#[tokio::test]
+async fn a_completed_download_with_no_comics_settles_honestly() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("nocomics");
+    // The `.1` is SAB's collision suffix — the folder that really
+    // exists, and one no reconstruction from the job name produces.
+    watch
+        .job_file("Saga 1.1", "Saga 001.pdf")
+        .job_file("Saga 1.1", "info.nfo");
+
+    let downloader = MockServer::start().await;
+    sab_completed_at(&downloader, "nzo-pdf", "Saga 1.1").await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-pdf", "nzo-pdf").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 1);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status, "failed",
+        "a completed-but-empty download must settle, not linger as submitted"
+    );
+    let msg = attempts[0].error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("no comic files"),
+        "the recorded reason must say what happened, got {msg:?}"
+    );
+    assert!(
+        !msg.contains("lost track"),
+        "nothing was lost — the download arrived, got {msg:?}"
+    );
+}
+
+/// MECHANISM 2 — the terminal state suppresses the release.
+///
+/// Settling must keep `release_id` on the row, because the exclusion
+/// list for the next attempt is built from the guids of prior
+/// attempts. Without that, the engine re-grabs the same PDF forever.
+#[tokio::test]
+async fn the_settled_release_is_not_grabbed_again_for_that_issue() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("suppress");
+    watch.job_file("Saga 1", "Saga 001.pdf");
+
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    // The indexer offers exactly one release — the one that just
+    // proved itself empty.
+    indexer_returns(&indexer, rss_one("guid-pdf")).await;
+    sab_completed_at(&downloader, "nzo-pdf", "Saga 1").await;
+    sab_accepts(&downloader, "nzo-second").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-pdf", "nzo-pdf").await;
+
+    // One sweep: Phase 1 settles the attempt, then Phase 2 re-searches
+    // the now-eligible issue and must refuse the same release.
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.submitted, 0,
+        "the release that contained no comics must not be grabbed again"
+    );
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attempts[0].release_id.as_deref(),
+        Some("guid-pdf"),
+        "settling must preserve the guid — it is what drives the exclusion"
+    );
+    assert!(
+        attempts[0].retry_count >= 1,
+        "the settle must count against the retry budget so the issue eventually parks"
+    );
+}
+
+/// The guard against the failure mode that matters: a wrong condition
+/// writes a terminal state that starves an issue forever, and it looks
+/// exactly like the feature working.
+#[tokio::test]
+async fn a_completed_download_containing_a_comic_is_left_alone() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("hascomic");
+    watch.job_file("Saga 1", "Saga 001.cbz");
+
+    let downloader = MockServer::start().await;
+    sab_completed_at(&downloader, "nzo-ok", "Saga 1").await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-ok", "nzo-ok").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 0);
+    // `HasComicFiles` is the one verdict with no counter of its own,
+    // so without these two this test passes when the check never ran
+    // at all — the only assertion it could make that proves the check
+    // reached the folder and declined on the merits.
+    assert_eq!(summary.landed_abstained, 0);
+    assert_eq!(summary.landed_unresolved, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attempts[0].status, "submitted",
+        "Phase B owns this one — the pull engine must not touch it"
+    );
+}
+
+/// A folder the user cleared by hand is not evidence of anything. This
+/// is the limitation the PR states: those attempts stay in flight and
+/// still age out as "lost track of download".
+#[tokio::test]
+async fn a_missing_folder_leaves_the_attempt_in_flight() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("cleared");
+
+    let downloader = MockServer::start().await;
+    sab_completed_at(&downloader, "nzo-gone", "Saga 1").await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-gone", "nzo-gone").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 0);
+    assert_eq!(
+        summary.landed_abstained, 1,
+        "the check must be reached and decline — not silently skipped"
+    );
+    assert_eq!(summary.landed_unresolved, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+/// Pins the SECOND `landed_unresolved` increment — the
+/// `basename() == None` branch. Mutating it alone previously failed
+/// zero tests; the other pinned test only covers the first.
+#[tokio::test]
+async fn a_location_with_no_final_component_is_counted_as_unresolved() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("nobase");
+
+    let downloader = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue": {"slots": []}}"#))
+        .mount(&downloader)
+        .await;
+    // A reported location with no usable final component.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"history": {"slots": [
+                {"nzo_id": "nzo-nobase", "status": "Completed", "fail_message": "",
+                 "storage": "/", "completed": 1780000000}
+            ]}}"#,
+        ))
+        .mount(&downloader)
+        .await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-nobase", "nzo-nobase").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.landed_unresolved, 1);
+    assert_eq!(summary.landed_abstained, 0);
+    assert_eq!(summary.completed_without_comics, 0);
+}
+
+/// With no watch root configured (Phase B disabled) the engine behaves
+/// exactly as it did before this change.
+#[tokio::test]
+async fn without_a_watch_root_the_check_does_not_run() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let downloader = MockServer::start().await;
+    sab_completed_at(&downloader, "nzo-x", "Saga 1").await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-x", "nzo-x").await;
+
+    let summary = sweep(&db, None).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 0);
+    // Phase B disabled is a permanent config state, so it must NOT
+    // pollute `landed_unresolved` — that counter has to keep meaning
+    // "something went wrong today".
+    assert_eq!(summary.landed_unresolved, 0);
+    assert_eq!(summary.landed_abstained, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+// -------- the two folder guards, exercised through the real sweep --------
+//
+// The unit tests in `landed.rs` prove each guard's logic. These prove
+// the *wiring* reaches them: `settle_if_nothing_landed` joins SAB's
+// `storage` basename onto the watch root and forwards SAB's
+// `completed`, and those two inputs are the whole subject of the
+// revision. A guard that is never invoked is indistinguishable from a
+// guard that was deleted.
+
+/// A plausible completion time, matching the unit tests' fixture clock.
+const JOB_COMPLETED: i64 = 1_780_000_000;
+
+#[tokio::test]
+async fn guard_one_end_to_end_a_stale_attempt_is_not_judged_against_a_newer_folder() {
+    // SAB says the job completed a day before the folder now sitting
+    // at that path was written — so the name was re-allocated and this
+    // folder belongs to someone else.
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("g1");
+    watch.job_file("Saga 1", "info.nfo");
+    watch
+        .age("Saga 1/info.nfo", JOB_COMPLETED + 86_400)
+        .age("Saga 1", JOB_COMPLETED + 86_400);
+
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(&downloader, "nzo-stale", "Saga 1", JOB_COMPLETED).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-stale", "nzo-stale").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.completed_without_comics, 0,
+        "a folder written a day after the job completed must not be judged"
+    );
+    assert_eq!(
+        summary.landed_abstained, 1,
+        "the guard must be reached — a silent no-op passes a condemn-count assertion too"
+    );
+    assert_eq!(
+        summary.landed_unresolved, 0,
+        "abstaining because no folder could be resolved is not the same as the guard declining"
+    );
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+#[tokio::test]
+async fn guard_two_end_to_end_a_folder_phase_b_emptied_is_not_condemned() {
+    // The F1 shape, nested: Phase B took the comic out of `disc1` and
+    // left the release's litter. Only the subdirectory's mtime moved.
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("g2");
+    // A file directly in the job root as well, so the root is
+    // evaluable and this fixture exercises the REMOVAL path rather
+    // than abstaining via `DirectoryNotEvaluable` — otherwise it
+    // passes for the wrong reason and stops distinguishing guard 2.
+    watch
+        .job_file("Saga 1", "info.nfo")
+        .job_file("Saga 1/disc1", "info.nfo");
+    watch
+        .age("Saga 1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1/disc1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1/disc1", JOB_COMPLETED + 600)
+        .age("Saga 1", JOB_COMPLETED);
+
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(&downloader, "nzo-emptied", "Saga 1", JOB_COMPLETED).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-emptied", "nzo-emptied").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.completed_without_comics, 0,
+        "a folder something was removed from must not be condemned"
+    );
+    assert_eq!(
+        summary.landed_abstained, 1,
+        "the guard must be reached — a silent no-op passes a condemn-count assertion too"
+    );
+    assert_eq!(
+        summary.landed_unresolved, 0,
+        "abstaining because no folder could be resolved is not the same as the guard declining"
+    );
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+#[tokio::test]
+async fn both_guards_satisfied_still_condemns_a_real_pdf_release() {
+    // Negative control for the pair. If either guard were over-eager
+    // the feature would abstain on everything and the two tests above
+    // would still pass.
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("g3");
+    watch
+        .job_file("Saga 1", "release.pdf")
+        .job_file("Saga 1", "info.nfo");
+    watch
+        .age("Saga 1/release.pdf", JOB_COMPLETED)
+        .age("Saga 1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1", JOB_COMPLETED);
+
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(&downloader, "nzo-pdf2", "Saga 1", JOB_COMPLETED).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-pdf2", "nzo-pdf2").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 1);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "failed");
+}
+
+/// The per-directory comparison, end to end. Under the previous
+/// global `max(dirs)` vs `max(files)` test, `disc2`'s untouched file
+/// is as new as `disc1`'s removal bump, the delta collapses to zero,
+/// and this folder is condemned. Only a per-directory comparison
+/// abstains here — so this test fails if that is reverted.
+#[tokio::test]
+async fn per_directory_comparison_end_to_end_a_sibling_cannot_mask_a_removal() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("perdir");
+    watch
+        .job_file("Saga 1", "info.nfo")
+        .job_file("Saga 1/disc1", "info.nfo")
+        .job_file("Saga 1/disc2", "extra.nfo");
+    watch
+        .age("Saga 1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1/disc1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1/disc1", JOB_COMPLETED + 600)
+        .age("Saga 1/disc2/extra.nfo", JOB_COMPLETED + 600)
+        .age("Saga 1/disc2", JOB_COMPLETED + 600)
+        .age("Saga 1", JOB_COMPLETED);
+
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(&downloader, "nzo-perdir", "Saga 1", JOB_COMPLETED).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-perdir", "nzo-perdir").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.completed_without_comics, 0,
+        "a file in a sibling directory must not vouch for disc1"
+    );
+    assert_eq!(
+        summary.landed_abstained, 1,
+        "the abstention must be counted, or it is invisible in production"
+    );
+    assert_eq!(summary.landed_unresolved, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+/// Pins `landed_unresolved`. Without this, deleting both increments in
+/// `settle_if_nothing_landed` fails **zero** tests — every other
+/// assertion on this counter is `== 0`.
+///
+/// That matters more than an ordinary coverage gap: this counter is
+/// the designated reveal mechanism for "the feature is dead because
+/// the downloader's location field is wrong", and its only live
+/// trigger is NZBGet, whose field names have never been checked
+/// against a running server. An unpinned reveal mechanism reveals
+/// nothing.
+#[tokio::test]
+async fn a_download_with_no_reported_location_is_counted_as_unresolved() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("noloc");
+
+    let downloader = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue": {"slots": []}}"#))
+        .mount(&downloader)
+        .await;
+    // Completed, with no `storage` at all — the shape a wrong field
+    // name produces on every download, forever.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"history": {"slots": [
+                {"nzo_id": "nzo-noloc", "status": "Completed", "fail_message": "",
+                 "completed": 1780000000}
+            ]}}"#,
+        ))
+        .mount(&downloader)
+        .await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-noloc", "nzo-noloc").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.landed_unresolved, 1,
+        "a completed download with no location must be visible, not silent"
+    );
+    assert_eq!(
+        summary.landed_abstained, 0,
+        "the check never ran; it did not decline"
+    );
+    assert_eq!(summary.completed_without_comics, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted");
+}
+
+/// The inverted condition, end to end.
+///
+/// The unit tests prove `classify`'s logic; this proves the wiring
+/// reaches it — `storage.basename()` joined onto the watch root, the
+/// verdict carried back into a counter and a DB decision. Four unit
+/// tests failed under mutation of this condition and **zero** sweep
+/// tests did, on the newest code in the branch, in the condemn
+/// direction.
+///
+/// The folder holds an unextracted container. It appears on no list,
+/// which is the point: it abstains because it is UNRECOGNISED, not
+/// because anyone enumerated `.rar`.
+#[tokio::test]
+async fn unrecognised_content_end_to_end_is_not_condemned() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("unrec-e2e");
+    watch
+        .job_file("Saga 1", "Saga 001.part01.rar")
+        .job_file("Saga 1", "info.nfo");
+    watch
+        .age("Saga 1/Saga 001.part01.rar", JOB_COMPLETED)
+        .age("Saga 1/info.nfo", JOB_COMPLETED)
+        .age("Saga 1", JOB_COMPLETED);
+
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(&downloader, "nzo-unrec", "Saga 1", JOB_COMPLETED).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-unrec", "nzo-unrec").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(
+        summary.completed_without_comics, 0,
+        "an unrecognised file means we cannot say the comic is absent"
+    );
+    assert_eq!(
+        summary.landed_abstained, 1,
+        "the check must be reached and decline — a silent no-op also condemns nothing"
+    );
+    assert_eq!(summary.landed_unresolved, 0);
+
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attempts[0].status, "submitted",
+        "the release must not be suppressed — the comic may be inside the rar"
+    );
 }
