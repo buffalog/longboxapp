@@ -993,8 +993,17 @@ async fn resolve_one(
     let mut deleted_file_ids = Vec::new();
     let mut failed = Vec::new();
     for loser in present.iter().filter(|f| f.id != keep_file_id) {
-        match delete_loser(state, roots, loser).await {
-            Ok(()) => deleted_file_ids.push(loser.id),
+        match crate::file_delete::delete_file(&state.db, roots, loser).await {
+            // The row is gone either way; a failed unlink is reported
+            // as a failure for this file so the user sees it, but the
+            // catalog is already correct.
+            Ok(d) => match d.unlink_error {
+                None => deleted_file_ids.push(loser.id),
+                Some(err) => failed.push(ResolveFailure {
+                    file_id: loser.id,
+                    error: err,
+                }),
+            },
             Err(err) => failed.push(ResolveFailure {
                 file_id: loser.id,
                 error: err,
@@ -1017,65 +1026,6 @@ async fn resolve_one(
 /// next scan (is_present → 0), whereas the reverse would leave an untracked
 /// orphan the scanner re-adds — recreating the very duplicate we're removing.
 /// Already-missing file / already-gone row both count as success.
-async fn delete_loser(
-    state: &AppState,
-    roots: &HashMap<i64, String>,
-    loser: &FileRow,
-) -> Result<(), String> {
-    if !is_contained(&loser.path_relative) {
-        tracing::warn!(
-            file_id = loser.id,
-            path = %loser.path_relative,
-            "duplicate-files: refused non-contained path"
-        );
-        return Err("stored path is not contained within its library root".to_owned());
-    }
-    let root = roots
-        .get(&loser.library_root_id)
-        .ok_or_else(|| format!("unknown library_root_id {}", loser.library_root_id))?;
-    let abs = Path::new(root).join(&loser.path_relative);
-
-    // `is_contained` above is purely lexical (rejects `..`/absolute). Delete
-    // is higher-stakes than the read paths that share that guard, so also
-    // resolve symlinks and confirm the real target is still inside the real
-    // library root — a symlinked parent directory can't redirect the delete
-    // outside. Canonicalize fails with NotFound iff the file is already gone,
-    // which we treat as success.
-    let canon_root = tokio::fs::canonicalize(root)
-        .await
-        .map_err(|e| format!("cannot resolve library root path: {e}"))?;
-    match tokio::fs::canonicalize(&abs).await {
-        Ok(canon_target) => {
-            if !canon_target.starts_with(&canon_root) {
-                tracing::warn!(
-                    file_id = loser.id,
-                    path = %loser.path_relative,
-                    resolved = %canon_target.display(),
-                    "duplicate-files: refused path resolving outside library root"
-                );
-                return Err("resolved path escapes its library root".to_owned());
-            }
-            if let Err(e) = tokio::fs::remove_file(&canon_target).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("failed to delete file: {e}"));
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Already gone on disk — treat as success and clean up the row.
-            tracing::info!(file_id = loser.id, path = %abs.display(), "duplicate-files: file already absent");
-        }
-        Err(e) => return Err(format!("cannot resolve file path: {e}")),
-    }
-
-    match file_repo::delete(&state.db, loser.id).await {
-        Ok(()) | Err(longbox_db::DbError::NotFound) => Ok(()),
-        Err(e) => Err(format!(
-            "file deleted from disk but DB row removal failed: {e}"
-        )),
-    }
-}
-
 // -------- POST: correct (re-point a mismatched file) --------
 
 #[derive(Debug, Deserialize)]
