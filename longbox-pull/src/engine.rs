@@ -18,22 +18,25 @@
 //! intended discovery path; closing that gap is out of Step 6's scope.
 
 use std::cmp::Ordering;
+use std::path::Path;
 
 use longbox_core::{IssueNumber, ParsingPattern, PULL_INDEXER_MATCH_THRESHOLD};
 use longbox_db::{
     downloader_config_repo, indexer_config_repo, issue_repo, parsing_pattern_repo,
     pull_attempt_repo, pull_list_repo, series_repo, settings_repo, webhook_config_repo,
-    DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool, PullListRow, SeriesRow,
+    DownloaderConfigRow, IndexerConfigRow, IssueRow, NewPullAttempt, Pool, PullAttemptRow,
+    PullListRow, SeriesRow,
 };
 use longbox_downloader::{
     connect, AnyDownloader, DownloadHandle, DownloadStatus, Downloader, DownloaderAuth,
-    DownloaderConfig,
+    DownloaderConfig, RemoteStorage,
 };
 use longbox_newznab::{FindOutcome, IndexerConfig, IndexerId, NewznabError};
 use longbox_webhooks::WebhookEvent;
 
 use crate::dispatch;
 use crate::error::PullError;
+use crate::landed::{self, LandedVerdict};
 
 /// Consecutive `Unknown` status polls tolerated before the engine
 /// gives up on an in-flight download and fails the attempt. A flaky
@@ -68,6 +71,39 @@ pub struct SweepSummary {
     pub series_mismatched: usize,
     /// Candidate issues skipped because every indexer errored.
     pub indexer_errors: usize,
+    /// Downloads the downloader reported `Completed` that contained no
+    /// comic file at all — settled terminally instead of being left to
+    /// age out as "lost track of download". Counts toward
+    /// `grab_failed` as well; this is the subset with a known cause.
+    pub completed_without_comics: usize,
+    /// Completed downloads the landed-content check declined to judge.
+    ///
+    /// This exists because the module's entire safety argument is
+    /// "abstaining is free", and that is only true if abstention is
+    /// **observable**. Without this counter a check that abstains on
+    /// every real folder emits output identical to one that correctly
+    /// found nothing to condemn, so a safety-biased check can go
+    /// silently useless and nothing in production would show it.
+    pub landed_abstained: usize,
+    /// Completed downloads where the check could not even be
+    /// attempted, because no folder could be resolved to look at — no
+    /// watch root, no location reported by the downloader, or a
+    /// location with no usable final component.
+    ///
+    /// The no-watch-root case is deliberately NOT counted here: Phase
+    /// B being disabled is a permanent configuration state, and a
+    /// counter that is non-zero on every sweep forever cannot mean
+    /// "something went wrong today". It logs at debug and is already
+    /// visible at boot as `phase_b.disabled`.
+    ///
+    /// **Deliberately a separate counter from `landed_abstained`.**
+    /// "The check ran and declined" and "the check never ran" are
+    /// different operational states, and folding them together
+    /// recreates the very blindness the counters exist to remove: a
+    /// backend whose location field is wrong would report a healthy
+    /// stream of abstentions forever. Non-zero here means the feature
+    /// is not working, not that it is being careful.
+    pub landed_unresolved: usize,
 }
 
 /// Per-sweep context: the rebuilt downloader, the enabled indexers,
@@ -181,7 +217,7 @@ async fn load_exclusion_keywords(db: &Pool) -> Result<Vec<String>, PullError> {
 }
 
 /// Run one pull sweep against the catalog and the configured services.
-pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
+pub async fn sweep(db: &Pool, watch_root: Option<&Path>) -> Result<SweepSummary, PullError> {
     let mut summary = SweepSummary::default();
 
     // Phase 1 needs only the downloader; load just enough to drive it
@@ -198,7 +234,7 @@ pub async fn sweep(db: &Pool) -> Result<SweepSummary, PullError> {
     let downloader = build_downloader(downloader_row);
 
     // Phase 1: poll in-flight attempts (needs only the downloader).
-    poll_in_flight(db, &downloader, &mut summary).await?;
+    poll_in_flight(db, &downloader, watch_root, &mut summary).await?;
 
     // Phase 1.5: workspace-wide stale-`grabbed` purge. A `grabbed`
     // row whose Phase B import never landed (SAB silently failed,
@@ -322,6 +358,7 @@ async fn load_patterns(db: &Pool) -> Result<Vec<ParsingPattern>, PullError> {
 async fn poll_in_flight(
     db: &Pool,
     downloader: &AnyDownloader,
+    watch_root: Option<&Path>,
     summary: &mut SweepSummary,
 ) -> Result<(), PullError> {
     for attempt in pull_attempt_repo::list_submitted(db).await? {
@@ -333,9 +370,27 @@ async fn poll_in_flight(
         };
         summary.polled += 1;
         match downloader.status(&DownloadHandle(handle)).await {
-            Ok(DownloadStatus::Completed) => {
-                // The file is landing in the watch folder; Phase B
-                // catches it and flips the attempt to `grabbed`.
+            Ok(DownloadStatus::Completed {
+                storage,
+                completed_at,
+            }) => {
+                // Phase B catches a landed comic and flips the attempt
+                // to `grabbed` — but only when something in the folder
+                // matches an issue. A download that contained no comic
+                // has nothing to match with, so without the check
+                // below it stays `submitted` until the downloader
+                // forgets the job and the `Unknown` branch reports
+                // "lost track of download" about a download that
+                // arrived perfectly. See `crate::landed`.
+                settle_if_nothing_landed(
+                    db,
+                    &attempt,
+                    storage.as_ref(),
+                    completed_at,
+                    watch_root,
+                    summary,
+                )
+                .await?;
             }
             Ok(DownloadStatus::Queued | DownloadStatus::Downloading) => {
                 // Still in progress. A known status resets the
@@ -346,14 +401,14 @@ async fn poll_in_flight(
             }
             Ok(DownloadStatus::Failed(reason)) => {
                 let msg = format!("download failed: {reason}");
-                pull_attempt_repo::record_failure(db, attempt.id, &msg).await?;
+                pull_attempt_repo::record_failure_if_submitted(db, attempt.id, &msg).await?;
                 summary.grab_failed += 1;
                 maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, &msg).await;
             }
             Ok(DownloadStatus::Unknown) => {
                 if attempt.unknown_polls + 1 >= UNKNOWN_POLL_LIMIT {
                     let msg = "lost track of download — the downloader no longer reports this job";
-                    pull_attempt_repo::record_failure(db, attempt.id, msg).await?;
+                    pull_attempt_repo::record_failure_if_submitted(db, attempt.id, msg).await?;
                     summary.grab_failed += 1;
                     maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
                 } else {
@@ -370,6 +425,140 @@ async fn poll_in_flight(
                     "pull.poll_failed"
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// The feedback edge. A download the downloader called `Completed`
+/// whose output folder demonstrably holds no comic file is settled
+/// terminally here, rather than being left to age out three days later
+/// as "lost track of download".
+///
+/// The transient/terminal distinction falls out of control flow rather
+/// than a heuristic: this is reachable **only** from the `Completed`
+/// arm, so a downloader error routes to `Failed` and a job that
+/// vanished routes to `Unknown`, and neither can reach this code. A
+/// bad indexer night cannot suppress anything from here.
+///
+/// `record_failure_if_submitted` leaves `release_id` in place, which is what makes
+/// the suppression work: `attempt_pull_for_candidate` builds its
+/// exclusion list from the `release_id` of every prior attempt for the
+/// issue, so this release is not offered again while a *different*
+/// release still can be.
+///
+/// Anything short of positive evidence leaves the attempt untouched —
+/// see [`crate::landed`] for why, and note the consequence: a watch
+/// folder the user clears by hand is outside this check's reach and
+/// those attempts still age out to "lost track of download".
+async fn settle_if_nothing_landed(
+    db: &Pool,
+    attempt: &PullAttemptRow,
+    storage: Option<&RemoteStorage>,
+    completed_at: Option<i64>,
+    watch_root: Option<&Path>,
+    summary: &mut SweepSummary,
+) -> Result<(), PullError> {
+    // No watch root (Phase B not configured) or no location reported
+    // by the downloader → degrade to the previous behaviour.
+    //
+    // These abstentions are counted and logged like every other one,
+    // and that matters more here than anywhere else in the function.
+    // The downloader clients turn an absent or empty path into `None`
+    // at their deserialisation boundary, so a wrong field name — the
+    // documented risk in the NZBGet client, which is untested against
+    // a live server — makes `storage` `None` on *every* download
+    // forever. Silent, that state emits a sweep line identical to a
+    // healthy one: `completed_without_comics=0 landed_abstained=0`.
+    // Counted, it reads as "the check declined N times for want of a
+    // location", which is the difference between a feature that is
+    // quietly dead and one you can see is dead.
+    //
+    // The reason is a literal rather than an `Inconclusive` variant
+    // because that enum is `classify`'s vocabulary, and these
+    // abstentions happen before `classify` is ever reached.
+    let (Some(root), Some(storage)) = (watch_root, storage) else {
+        if watch_root.is_none() {
+            // Phase B is not configured. A permanent, intentional
+            // state — counting it would make `landed_unresolved`
+            // non-zero on every sweep forever and destroy the one
+            // signal that is supposed to mean "something went wrong
+            // today". It is already visible at boot as
+            // `phase_b.disabled`.
+            tracing::debug!(
+                target: "longbox_pull",
+                attempt_id = attempt.id,
+                "pull.landed_skipped (no watch root configured)"
+            );
+            return Ok(());
+        }
+        summary.landed_unresolved += 1;
+        tracing::info!(
+            target: "longbox_pull",
+            attempt_id = attempt.id,
+            series_id = attempt.series_id,
+            issue_id = attempt.issue_id,
+            reason = "downloader_reported_no_location",
+            "pull.landed_unresolved (no folder to check; attempt left in flight)"
+        );
+        return Ok(());
+    };
+    // The downloader's path belongs to its own filesystem namespace;
+    // only the final component is meaningful here, joined onto *our*
+    // watch root. It also carries the `.1` suffix the downloader adds
+    // for a colliding job name, which no reconstruction from the
+    // submitted job name could produce.
+    let Some(name) = storage.basename() else {
+        summary.landed_unresolved += 1;
+        tracing::info!(
+            target: "longbox_pull",
+            attempt_id = attempt.id,
+            series_id = attempt.series_id,
+            issue_id = attempt.issue_id,
+            reason = "reported_location_has_no_final_component",
+            "pull.landed_unresolved (no folder to check; attempt left in flight)"
+        );
+        return Ok(());
+    };
+    let dir = root.join(name);
+
+    match landed::classify(&dir, completed_at) {
+        LandedVerdict::OnlyKnownNonPayload => {
+            let msg = "downloaded successfully but contained no comic files";
+            pull_attempt_repo::record_failure_if_submitted(db, attempt.id, msg).await?;
+            summary.grab_failed += 1;
+            summary.completed_without_comics += 1;
+            tracing::info!(
+                target: "longbox_pull",
+                attempt_id = attempt.id,
+                series_id = attempt.series_id,
+                issue_id = attempt.issue_id,
+                folder = %name,
+                "pull.completed_without_comics"
+            );
+            maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
+        }
+        LandedVerdict::HasComicFiles => {
+            // Phase B's job. Left alone deliberately.
+        }
+        LandedVerdict::Inconclusive(reason) => {
+            summary.landed_abstained += 1;
+            // `info`, not `debug`: the deployment runs at info, so a
+            // debug line here would make "the check declined" and "the
+            // check had nothing to do" indistinguishable in the only
+            // place it matters. The reason — and, for
+            // `ContentsRemoved`, the observed gap in seconds — is what
+            // turns assumptions about real-world folder timestamps
+            // into measurements.
+            tracing::info!(
+                target: "longbox_pull",
+                attempt_id = attempt.id,
+                series_id = attempt.series_id,
+                issue_id = attempt.issue_id,
+                folder = %name,
+                reason = ?reason,
+                "pull.landed_inconclusive (attempt left in flight)"
+            );
         }
     }
     Ok(())

@@ -557,28 +557,50 @@ where
     Ok(())
 }
 
-/// Transition an attempt to `failed` and bump its `retry_count` — the
-/// engine calls this on a submission failure, a downloader grab
-/// failure, or a lost-track timeout. The bumped `retry_count` is what
-/// the candidate query checks against the parking threshold (3).
-pub async fn record_failure<'e, E>(executor: E, id: i64, error_message: &str) -> Result<()>
+/// Transition an attempt to `failed` and bump its `retry_count`, **but
+/// only if the row is still `submitted`**. The engine calls this on a
+/// submission failure, a downloader grab failure, or a lost-track
+/// timeout. The bumped `retry_count` is what the candidate query
+/// checks against the parking threshold (3).
+///
+/// # Why the predicate
+///
+/// The poll loop snapshots rows with `list_submitted`, then does I/O
+/// (a downloader round-trip, and for the landed-content check a
+/// filesystem walk), then writes. Phase B can import the comic and
+/// call `mark_grabbed_for_issue` inside that window — and that
+/// function is correctly scoped to `('pending','submitted')`, so
+/// without the same predicate here the poll path could overwrite a
+/// `grabbed` row that had already moved on. An unscoped variant of
+/// this write existed and was deleted rather than left available:
+/// there is no caller for which overwriting a settled row is correct.
+///
+/// A row that has moved on is not ours to overwrite. The predicate
+/// makes the write a no-op in exactly that case.
+///
+/// Correctness here is argued from the predicate, not demonstrated by
+/// the suite: the test harness is in-memory SQLite at
+/// `max_connections = 1` and structurally cannot produce the
+/// interleaving this guards against.
+pub async fn record_failure_if_submitted<'e, E>(
+    executor: E,
+    id: i64,
+    error_message: &str,
+) -> Result<()>
 where
     E: SqliteExecutor<'e>,
 {
-    let result = sqlx::query!(
+    sqlx::query!(
         r#"UPDATE pull_attempts
            SET status = 'failed',
                error_message = ?,
                retry_count = retry_count + 1
-           WHERE id = ?"#,
+           WHERE id = ? AND status = 'submitted'"#,
         error_message,
         id
     )
     .execute(executor)
     .await?;
-    if result.rows_affected() == 0 {
-        return Err(DbError::NotFound);
-    }
     Ok(())
 }
 
