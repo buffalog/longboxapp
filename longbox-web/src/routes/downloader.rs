@@ -204,7 +204,7 @@ struct NotifyBody {
 /// post-processing script returned an error code, and an alarming
 /// status would cascade noise back to the user. Every branch — Completed,
 /// unknown nzo_id, already-failed attempt, even a DB write that fails
-/// inside `record_failure` — logs and returns 200.
+/// inside `record_failure_if_submitted` — logs and returns 200.
 async fn notify(State(state): State<AppState>, Json(body): Json<NotifyBody>) -> StatusCode {
     if body.status == "Completed" {
         // Phase B owns the success path — the file is landing in the
@@ -241,7 +241,9 @@ async fn notify(State(state): State<AppState>, Json(body): Json<NotifyBody>) -> 
         body.fail_msg.clone()
     };
 
-    if let Err(e) = pull_attempt_repo::record_failure(&state.db, attempt.id, &error_message).await {
+    if let Err(e) =
+        pull_attempt_repo::record_failure_if_submitted(&state.db, attempt.id, &error_message).await
+    {
         tracing::warn!(
             target: "longbox_web",
             attempt_id = attempt.id,

@@ -25,4 +25,7 @@ tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"
 pretty_assertions = "1"
+# Already in the lock via the watcher stack; used only to age fixture
+# mtimes so the folder guards can be tested without sleeping.
+filetime = "0.2"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros"] }

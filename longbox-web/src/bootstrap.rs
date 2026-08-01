@@ -120,9 +120,18 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //    Always started: the scheduler is a cheap sleeping task and
     //    each sweep no-ops gracefully when no downloader or indexers
     //    are configured.
+    //    The watch root is handed over rather than re-read from the
+    //    environment so the pull engine resolves completed downloads
+    //    against exactly the folder Phase B watches — including the
+    //    same `normalize_path` treatment. `None` when Phase B is
+    //    disabled, which turns the landed-content check off.
     let pull = longbox_pull::start(
         longbox_pull::PullConfig {
             daily_time: config.pull_schedule_time,
+            watch_root: config
+                .download_watch_path
+                .as_deref()
+                .map(|raw| std::path::PathBuf::from(crate::config::normalize_path(raw))),
         },
         db.clone(),
     );

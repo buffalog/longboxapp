@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::downloader::Downloader;
 use crate::error::DownloaderError;
-use crate::types::{DownloadHandle, DownloadStatus};
+use crate::types::{DownloadHandle, DownloadStatus, RemoteStorage};
 
 pub struct NzbgetClient {
     base_url: String,
@@ -138,7 +138,12 @@ impl Downloader for NzbgetClient {
         let history: Vec<NzbgetHistoryItem> = serde_json::from_value(history_raw)
             .map_err(|e| DownloaderError::MalformedResponse(format!("NZBGet history: {e}")))?;
         if let Some(h) = history.iter().find(|h| h.nzbid == target) {
-            return Ok(map_history_status(&h.status));
+            return Ok(map_history_status(
+                &h.status,
+                &h.final_dir,
+                &h.dest_dir,
+                h.history_time,
+            ));
         }
 
         Ok(DownloadStatus::Unknown)
@@ -165,9 +170,34 @@ fn map_group_status(raw: &str) -> DownloadStatus {
 /// `<BAND>/<DETAIL>`: `SUCCESS/*` and `WARNING/*` both mean a file
 /// landed (warnings are post-script / health notes, not download
 /// failure); anything else (`FAILURE/*`, `DELETED/*`) is a failure.
-fn map_history_status(raw: &str) -> DownloadStatus {
+///
+/// Output location, per NZBGet's documented history fields:
+/// `FinalDir` is "final destination if set by one of post-processing
+/// scripts" and `DestDir` is "destination directory for output
+/// files", so `FinalDir` wins when a pp-script relocated the job and
+/// `DestDir` is the fallback. Both empty → `None`, which degrades the
+/// caller to its prior behaviour rather than guessing a path.
+///
+/// **Untested against a live NZBGet.** This project runs SABnzbd; the
+/// field names and their precedence come from the documented RPC
+/// surface, not from an observed response. The `None` fallback is the
+/// safe failure mode if either field turns out to be absent in
+/// practice.
+fn map_history_status(
+    raw: &str,
+    final_dir: &str,
+    dest_dir: &str,
+    history_time: Option<i64>,
+) -> DownloadStatus {
     if raw.starts_with("SUCCESS") || raw.starts_with("WARNING") {
-        DownloadStatus::Completed
+        let location = [final_dir, dest_dir]
+            .into_iter()
+            .map(str::trim)
+            .find(|d| !d.is_empty());
+        DownloadStatus::Completed {
+            storage: location.map(RemoteStorage::new),
+            completed_at: history_time,
+        }
     } else {
         DownloadStatus::Failed(raw.to_string())
     }
@@ -201,6 +231,23 @@ struct NzbgetHistoryItem {
     nzbid: i64,
     #[serde(rename = "Status")]
     status: String,
+    /// See [`map_history_status`] for the precedence rule and the
+    /// note that this backend is untested here.
+    #[serde(rename = "FinalDir", default)]
+    final_dir: String,
+    #[serde(rename = "DestDir", default)]
+    dest_dir: String,
+    /// `HistoryTime` — "Date/time when the file was added to history
+    /// (Time is in C/Unix format)" per NZBGet's documented history
+    /// fields. Nearest equivalent to SABnzbd's `completed`. Same
+    /// untested caveat as the directory fields; 0 reads as unknown,
+    /// which degrades the caller safely.
+    #[serde(
+        rename = "HistoryTime",
+        default,
+        deserialize_with = "crate::lenient_unix_secs"
+    )]
+    history_time: Option<i64>,
 }
 
 #[cfg(test)]
@@ -251,35 +298,65 @@ mod tests {
 
     #[test]
     fn history_success_and_warning_both_complete() {
-        assert_eq!(map_history_status("SUCCESS/ALL"), DownloadStatus::Completed);
-        assert_eq!(
-            map_history_status("SUCCESS/HEALTH"),
-            DownloadStatus::Completed
-        );
+        for raw in ["SUCCESS/ALL", "SUCCESS/HEALTH"] {
+            assert!(matches!(
+                map_history_status(raw, "", "/done/job", Some(1700000000)),
+                DownloadStatus::Completed { .. }
+            ));
+        }
         // WARNING band: a file landed — mapped to Completed inside the
         // client so the pull engine never sees NZBGet specifics.
+        for raw in ["WARNING/SCRIPT", "WARNING/HEALTH"] {
+            assert!(matches!(
+                map_history_status(raw, "", "/done/job", Some(1700000000)),
+                DownloadStatus::Completed { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn final_dir_wins_over_dest_dir_and_absent_dirs_report_no_location() {
+        // Documented precedence: FinalDir is set by a post-processing
+        // script that relocated the job, so it describes where the
+        // files actually are.
+        let with_final =
+            map_history_status("SUCCESS/ALL", "/final/job", "/dest/job", Some(1700000000));
+        let DownloadStatus::Completed { storage, .. } = with_final else {
+            panic!("expected Completed");
+        };
+        assert_eq!(storage.expect("location").basename(), Some("job"));
+
+        // DestDir is the fallback when no script moved anything.
+        let dest_only = map_history_status("SUCCESS/ALL", "", "/dest/elsewhere", Some(1700000000));
+        let DownloadStatus::Completed { storage, .. } = dest_only else {
+            panic!("expected Completed");
+        };
+        assert_eq!(storage.expect("location").basename(), Some("elsewhere"));
+
+        // Neither reported → None, so the caller degrades to its prior
+        // behaviour rather than guessing a path.
+        let neither = map_history_status("SUCCESS/ALL", "", "   ", Some(1700000000));
         assert_eq!(
-            map_history_status("WARNING/SCRIPT"),
-            DownloadStatus::Completed
-        );
-        assert_eq!(
-            map_history_status("WARNING/HEALTH"),
-            DownloadStatus::Completed
+            neither,
+            DownloadStatus::Completed {
+                storage: None,
+                completed_at: Some(1700000000)
+            }
         );
     }
 
     #[test]
     fn history_failure_and_deleted_are_failed() {
         assert!(matches!(
-            map_history_status("FAILURE/PAR"),
+            map_history_status("FAILURE/PAR", "", "", Some(1700000000)),
             DownloadStatus::Failed(s) if s == "FAILURE/PAR"
         ));
         assert!(matches!(
-            map_history_status("FAILURE/UNPACK"),
+            map_history_status("FAILURE/UNPACK", "", "", Some(1700000000)),
             DownloadStatus::Failed(_)
         ));
         assert!(matches!(
-            map_history_status("DELETED/MANUAL"),
+            map_history_status("DELETED/MANUAL", "", "", Some(1700000000)),
             DownloadStatus::Failed(_)
         ));
     }

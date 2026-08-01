@@ -88,7 +88,7 @@ async fn scheduler_loop(
         }
 
         running.store(true, Ordering::SeqCst);
-        match engine::sweep(&db).await {
+        match engine::sweep(&db, config.watch_root.as_deref()).await {
             Ok(s) => tracing::info!(
                 target: "longbox_pull",
                 polled = s.polled,
@@ -98,6 +98,9 @@ async fn scheduler_loop(
                 grab_failed = s.grab_failed,
                 series_mismatched = s.series_mismatched,
                 indexer_errors = s.indexer_errors,
+                completed_without_comics = s.completed_without_comics,
+                landed_abstained = s.landed_abstained,
+                landed_unresolved = s.landed_unresolved,
                 "pull.sweep_complete"
             ),
             Err(e) => {
