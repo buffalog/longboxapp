@@ -482,32 +482,62 @@ where
     Ok(row.is_some())
 }
 
-/// The status of a `pending` or `grabbed` attempt on this issue, if
-/// one exists.
+/// The attempt-level reasons the pull sweep would skip this issue.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AttemptBlockers {
+    /// Status of a surviving `pending`/`grabbed` attempt, if any.
+    pub in_flight_status: Option<String>,
+    /// Some attempt has `retry_count >= 3`.
+    pub retries_exhausted: bool,
+    /// A `submitted` attempt landed inside the 6-hour window.
+    pub recently_submitted: bool,
+}
+
+/// The three attempt-level exclusions `list_pull_candidates` applies,
+/// reported individually.
 ///
-/// A **fact**, not a candidacy derivation. `list_pull_candidates`
-/// excludes issues carrying either status, so an issue that has just
-/// reverted to missing will not be re-searched while such a row
-/// survives — the daily sweep's stale-`grabbed` purge clears it first.
-/// Callers report this so a user is not left watching an issue sit
-/// missing and concluding the revert failed.
+/// **Facts, not a candidacy derivation.** Each field mirrors exactly
+/// one disjunct of that query's `NOT EXISTS`, and the caller decides
+/// what to say about them. Reimplementing the candidate query here
+/// instead would be a second implementation of one rule, which is how
+/// the two drift — and this one only has to explain a user-visible
+/// outcome, never to decide one.
 ///
-/// Deliberately does NOT reimplement the candidate query: that query
-/// has several other exclusions and two implementations of one rule is
-/// how they drift.
-pub async fn pending_or_grabbed_status<'e, E>(executor: E, issue_id: i64) -> Result<Option<String>>
+/// Why all three rather than just the in-flight status this used to
+/// return: an issue that has reverted to missing and will NOT be
+/// re-searched looks identical, from the outside, to one that will.
+/// Saying "reverts to missing" and stopping there invites the user to
+/// wait for a sweep that is never going to look at it. Two of these
+/// fire zero times on the current library; they are encoded rather
+/// than assumed precisely because "zero today" is not "zero".
+///
+/// This does NOT cover the series-level exclusions — pull-list
+/// membership, `paused`, the `start_issue` floor — or the issue's own
+/// `cover_date`. Those live on rows the caller already holds.
+pub async fn attempt_blockers<'e, E>(executor: E, issue_id: i64) -> Result<AttemptBlockers>
 where
     E: SqliteExecutor<'e>,
 {
     let row = sqlx::query!(
-        r#"SELECT status FROM pull_attempts
-           WHERE issue_id = ? AND status IN ('pending', 'grabbed')
-           ORDER BY attempted_at DESC LIMIT 1"#,
+        r#"SELECT
+             (SELECT status FROM pull_attempts
+               WHERE issue_id = ?1 AND status IN ('pending', 'grabbed')
+               ORDER BY attempted_at DESC LIMIT 1) AS "in_flight_status?: String",
+             EXISTS(SELECT 1 FROM pull_attempts
+                     WHERE issue_id = ?1 AND retry_count >= 3) AS "retries_exhausted!: bool",
+             EXISTS(SELECT 1 FROM pull_attempts
+                     WHERE issue_id = ?1 AND status = 'submitted'
+                       AND attempted_at >= datetime('now', '-6 hours'))
+               AS "recently_submitted!: bool""#,
         issue_id
     )
-    .fetch_optional(executor)
+    .fetch_one(executor)
     .await?;
-    Ok(row.map(|r| r.status))
+    Ok(AttemptBlockers {
+        in_flight_status: row.in_flight_status,
+        retries_exhausted: row.retries_exhausted,
+        recently_submitted: row.recently_submitted,
+    })
 }
 
 /// Whether an issue has an in-flight attempt (`pending` or

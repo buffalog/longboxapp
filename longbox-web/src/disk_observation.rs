@@ -6,6 +6,29 @@
 //! where only one of them could reach it is how the second one came to be
 //! written without it.
 //!
+//! # `validate_digest` is FROZEN
+//!
+//! Do not change what it returns without a demonstrated failure that
+//! requires it. Three revisions of the non-file case shipped in one
+//! change set, and the middle one turned a refusal into a delete in
+//! **two** features at once by returning the same tuple that means
+//! "nothing is there".
+//!
+//! The general rule, which is the fourth time this shape has appeared
+//! in this codebase: **a shared function's callers may read its
+//! "nothing there" return as permission rather than as an error.**
+//! Changing what a shared function returns in an edge case is a change
+//! to every caller's control flow, and it cannot be assessed from the
+//! function alone. Trace the callers, or do not make the change.
+//!
+//! Known and deliberately not fixed: every `metadata()` failure
+//! collapses to "absent", so an unreadable file (`EACCES` on a parent,
+//! `EIO` on a flaky mount) reads as missing rather than as unknown.
+//! That is the **permissive** direction — the delete proceeds where it
+//! should have refused — which is why it is worth revisiting later
+//! rather than never. It stays recorded rather than patched because
+//! every change to this function so far has cost more than it bought.
+//!
 //! It also carries **identity** — `(dev, ino)` — because "is this a copy?"
 //! and "is this the same file?" are different questions and only the second
 //! one can be answered from a path. `metadata()` follows symlinks, so an

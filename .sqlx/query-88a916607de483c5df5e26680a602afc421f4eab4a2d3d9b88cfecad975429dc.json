@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             (SELECT status FROM pull_attempts\n               WHERE issue_id = ?1 AND status IN ('pending', 'grabbed')\n               ORDER BY attempted_at DESC LIMIT 1) AS \"in_flight_status?: String\",\n             EXISTS(SELECT 1 FROM pull_attempts\n                     WHERE issue_id = ?1 AND retry_count >= 3) AS \"retries_exhausted!: bool\",\n             EXISTS(SELECT 1 FROM pull_attempts\n                     WHERE issue_id = ?1 AND status = 'submitted'\n                       AND attempted_at >= datetime('now', '-6 hours'))\n               AS \"recently_submitted!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "in_flight_status?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "retries_exhausted!: bool",
+        "ordinal": 1,
+        "type_info": "Int"
+      },
+      {
+        "name": "recently_submitted!: bool",
+        "ordinal": 2,
+        "type_info": "Int"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "88a916607de483c5df5e26680a602afc421f4eab4a2d3d9b88cfecad975429dc"
+}

@@ -13,17 +13,20 @@
   import { FileSearch, RefreshCw } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
+    describeRevert,
     getAnalyzeStatus,
     getFindings,
     startAnalyze,
     walkIsConclusive,
     type AnalyzeStatus,
     type CrossFolderCategory,
+    type DeleteDuplicateResult,
     type Findings
   } from '$lib/api/integrity';
   import { formatBytes } from '$lib/format';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
+  import DeleteCopyButton from '$lib/components/DeleteCopyButton.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import EvidenceRow from '$lib/components/EvidenceRow.svelte';
   import IntegritySection from '$lib/components/IntegritySection.svelte';
@@ -62,6 +65,31 @@
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     }
+  }
+
+  // What happened is read from the RESPONSE, never assumed from the
+  // delete having succeeded. `describeRevert` picks the sentence from
+  // `now_missing` and `search_outlook`; the one live counter-example is
+  // an issue that owns a second file outside the group and therefore
+  // does NOT revert.
+  //
+  // A failed unlink is reported separately and loudly: in that case the
+  // catalog row is already gone and the bytes are still on disk, so the
+  // file is now an orphan. Saying only "deleted" there would be a lie
+  // by omission about the state of the disk.
+  async function afterDelete(result: DeleteDuplicateResult): Promise<void> {
+    if (result.unlink_error) {
+      toast.error(
+        `The catalog entry was removed but the file is still on disk — it will show up as an orphan on the next scan. ${result.unlink_error}`
+      );
+    } else {
+      toast.success(describeRevert(result.reverted));
+    }
+    // Re-read rather than splice the group locally: deleting a copy can
+    // drop a group below two files and remove it from the findings
+    // entirely, and can change the reclaimable total. Recomputing that
+    // in the client would be a second implementation of the detector.
+    await refresh();
   }
 
   async function runAnalyze(): Promise<void> {
@@ -201,7 +229,16 @@
             </div>
             <ul class="divide-y divide-slate-100">
               {#each g.files as f (f.file_id)}
-                <EvidenceRow file={f} classes={classesFor(f.file_id)} />
+                <EvidenceRow file={f} classes={classesFor(f.file_id)}>
+                  {#snippet action()}
+                    <DeleteCopyButton
+                      digest={g.digest}
+                      file={f}
+                      groupSize={g.files.length}
+                      onDeleted={afterDelete}
+                    />
+                  {/snippet}
+                </EvidenceRow>
               {/each}
             </ul>
           </li>
@@ -222,6 +259,11 @@
       one of them serves the other’s content. The archive’s own internal name usually says which
       series it really is — compare the “archive says” column below.
     </p>
+    <!-- No delete control here on purpose. These are the same groups the
+         section above lists, shown again because crossing a series
+         boundary is worth its own heading. Repeating the action would
+         put two delete buttons on one file in two places, and the user
+         would have no way to tell they were the same decision. -->
     {#if crossSeries.length === 0}
       <p class="text-sm text-slate-500">
         {pending > 0

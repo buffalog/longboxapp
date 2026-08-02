@@ -7,6 +7,7 @@
   // No suggested keeper, no ranking, no "we think this one". Interpretation
   // ships with the actions it drives.
   import { Layers } from 'lucide-svelte';
+  import type { Snippet } from 'svelte';
   import { formatBytes } from '$lib/format';
   import type { FileEvidence } from '$lib/api/integrity';
 
@@ -14,8 +15,16 @@
     file: FileEvidence;
     /** How many finding classes this file appears in, when more than one. */
     classes?: number;
+    /**
+     * Optional per-row control. Only the content-duplicate section passes
+     * one: that is the single finding class where a delete is a defensible
+     * action, because byte-identity is proof of redundancy. The other
+     * sections show the same evidence and must NOT grow a delete by
+     * inheriting it from here.
+     */
+    action?: Snippet;
   }
-  let { file, classes }: Props = $props();
+  let { file, classes, action }: Props = $props();
 
   // A claim disagrees with the binding it sits next to. Highlighted rather
   // than resolved — which source is right is a judgement the user makes.
@@ -37,6 +46,9 @@
       >
         <Layers class="size-3" aria-hidden="true" /> in {classes} checks
       </span>
+    {/if}
+    {#if action}
+      <span class="ml-auto">{@render action()}</span>
     {/if}
   </div>
 

@@ -397,10 +397,55 @@ pub(crate) struct RevertedIssue {
     series_title: String,
     /// The issue has no owned, present file any more.
     now_missing: bool,
-    /// A `pending`/`grabbed` pull attempt survives on this issue, so
-    /// `list_pull_candidates` still excludes it. The revert has landed;
-    /// re-search waits for the daily sweep's stale-grab purge.
-    awaiting_stale_grab_purge: Option<String>,
+    /// Whether anything will actually search for it again, and if not,
+    /// why. See [`SearchOutlook`].
+    search_outlook: SearchOutlook,
+}
+
+/// Will the pull sweep search for this issue again — and if not, why?
+///
+/// A revert is only half the story the user needs. "Reverts to missing"
+/// reads as "so it will be re-downloaded", and on this library that is
+/// false for roughly half the issues a delete can touch: 632 of 777
+/// series are not on the pull list, so nothing searches for them ever,
+/// regardless of their attempt state. Reporting the revert without this
+/// invites the user to wait for a sweep that will never look.
+///
+/// Each variant is one exclusion the sweep applies, and every one is
+/// read from a fact rather than re-derived: the `pull_list` row, the
+/// issue's own `cover_date`, and
+/// [`AttemptBlockers`](longbox_db::pull_attempt_repo::AttemptBlockers).
+/// `list_pull_candidates` stays the single implementation of candidacy;
+/// this only explains an outcome, it never decides one.
+///
+/// Three of these fire zero times on the current library
+/// (`BelowSeriesStartIssue`, `RetriesExhausted`, `RecentlySubmitted`).
+/// They are encoded anyway, because "zero today" is a measurement, not
+/// an invariant, and the failure mode is silent.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SearchOutlook {
+    /// Nothing blocks it: the next sweep will search for this issue.
+    WillSearch,
+    /// No `pull_list` row for this series. Nothing sweeps it, ever.
+    SeriesNotOnPullList,
+    /// The series is on the pull list but paused, so `list_active`
+    /// skips it.
+    SeriesPaused,
+    /// Below the series' `start_issue` floor, which the sweep applies
+    /// after the candidate query.
+    BelowSeriesStartIssue,
+    /// No usable `cover_date` — absent, malformed, or in the future.
+    /// The candidate query requires a well-formed date not later than
+    /// today.
+    NoUsableCoverDate,
+    /// An attempt carries `retry_count >= 3`; the sweep has given up.
+    RetriesExhausted,
+    /// A `pending`/`grabbed` attempt survives. Searching resumes once
+    /// the sweep's stale-grab purge clears it.
+    GrabInFlight,
+    /// A `submitted` attempt landed inside the 6-hour window.
+    RecentlySubmitted,
 }
 
 #[derive(Debug, Serialize)]
@@ -420,6 +465,74 @@ pub(crate) struct DeleteDuplicateResult {
     /// Set when the catalog row was removed but the bytes survived.
     /// The file is now an orphan and reconciliation will report it.
     unlink_error: Option<String>,
+}
+
+/// Decide which single reason to report, most permanent first.
+///
+/// The order matters because several can hold at once and only one is
+/// the binding constraint. A series that is not on the pull list will
+/// never be swept no matter what its attempts look like, so saying
+/// "waiting for a grab to clear" there would be true about the attempt
+/// and useless to the user. Series-level reasons therefore outrank
+/// issue-level ones, and permanent outranks temporary.
+fn search_outlook(
+    issue: &longbox_db::IssueRow,
+    entry: Option<&longbox_db::PullListRow>,
+    blockers: &longbox_db::pull_attempt_repo::AttemptBlockers,
+) -> SearchOutlook {
+    let Some(entry) = entry else {
+        return SearchOutlook::SeriesNotOnPullList;
+    };
+    if entry.paused {
+        return SearchOutlook::SeriesPaused;
+    }
+    if let Some(floor) = entry.start_issue.as_deref() {
+        // Same comparison the sweep's `apply_start_floor` uses —
+        // natural order, so `29.5` sorts between `29` and `30` and a
+        // string compare cannot truncate it.
+        let number = longbox_core::IssueNumber::new(issue.number.clone());
+        let floor = longbox_core::IssueNumber::new(floor.to_owned());
+        if longbox_core::IssueNumber::natural_cmp(&number, &floor) == std::cmp::Ordering::Less {
+            return SearchOutlook::BelowSeriesStartIssue;
+        }
+    }
+    if !has_usable_cover_date(issue.cover_date.as_deref()) {
+        return SearchOutlook::NoUsableCoverDate;
+    }
+    if blockers.retries_exhausted {
+        return SearchOutlook::RetriesExhausted;
+    }
+    if blockers.in_flight_status.is_some() {
+        return SearchOutlook::GrabInFlight;
+    }
+    if blockers.recently_submitted {
+        return SearchOutlook::RecentlySubmitted;
+    }
+    SearchOutlook::WillSearch
+}
+
+/// The candidate query's date test, in Rust: a well-formed `YYYY-MM-DD`
+/// no later than today.
+///
+/// Compared as text against a UTC date, exactly as the SQL does
+/// (`length(cover_date) = 10 AND cover_date <= date('now')`), so a
+/// future-dated solicitation is correctly reported as not-yet-searched
+/// rather than as a blocked one.
+fn has_usable_cover_date(cover_date: Option<&str>) -> bool {
+    let Some(d) = cover_date else {
+        return false;
+    };
+    if d.len() != 10 {
+        return false;
+    }
+    let today = time::OffsetDateTime::now_utc().date();
+    let today = format!(
+        "{:04}-{:02}-{:02}",
+        today.year(),
+        u8::from(today.month()),
+        today.day()
+    );
+    d <= today.as_str()
 }
 
 /// Delete exactly one copy from one content-duplicate group.
@@ -611,15 +724,16 @@ async fn delete_duplicate(
                 .await?
                 .map(|s| s.title)
                 .unwrap_or_default();
-            let blocking =
-                longbox_db::pull_attempt_repo::pending_or_grabbed_status(&state.db, issue_id)
-                    .await?;
+            let entry = longbox_db::pull_list_repo::get(&state.db, issue.series_id).await?;
+            let blockers =
+                longbox_db::pull_attempt_repo::attempt_blockers(&state.db, issue_id).await?;
+            let outlook = search_outlook(&issue, entry.as_ref(), &blockers);
             reverted = Some(RevertedIssue {
                 issue_id,
                 issue_number: issue.number,
                 series_title: series,
                 now_missing: !still_owned,
-                awaiting_stale_grab_purge: blocking,
+                search_outlook: outlook,
             });
         }
     }
@@ -640,4 +754,173 @@ async fn delete_duplicate(
         remaining_in_group: surviving_copies,
         unlink_error: deleted.unlink_error,
     }))
+}
+
+#[cfg(test)]
+mod outlook_tests {
+    use super::*;
+    use longbox_db::pull_attempt_repo::AttemptBlockers;
+
+    fn issue(number: &str, cover_date: Option<&str>) -> longbox_db::IssueRow {
+        let now = time::OffsetDateTime::now_utc();
+        let now = time::PrimitiveDateTime::new(now.date(), now.time());
+        longbox_db::IssueRow {
+            id: 1,
+            series_id: 1,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: number.to_owned(),
+            title: None,
+            cover_date: cover_date.map(str::to_owned),
+            summary: None,
+            cover_url: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn entry(paused: bool, start_issue: Option<&str>) -> longbox_db::PullListRow {
+        let now = time::OffsetDateTime::now_utc();
+        let now = time::PrimitiveDateTime::new(now.date(), now.time());
+        longbox_db::PullListRow {
+            id: 1,
+            series_id: 1,
+            added_at: now,
+            start_issue: start_issue.map(str::to_owned),
+            paused,
+            last_pull_attempt_at: None,
+            last_successful_pull_at: None,
+            failure_count: 0,
+        }
+    }
+
+    fn blockers(retries: bool, in_flight: Option<&str>, submitted: bool) -> AttemptBlockers {
+        AttemptBlockers {
+            in_flight_status: in_flight.map(str::to_owned),
+            retries_exhausted: retries,
+            recently_submitted: submitted,
+        }
+    }
+
+    fn clear() -> AttemptBlockers {
+        AttemptBlockers::default()
+    }
+
+    /// Every variant is reachable, and reachable for its own reason.
+    #[test]
+    fn each_reason_is_reported() {
+        let ok = issue("5", Some("2020-01-01"));
+        let listed = entry(false, None);
+
+        assert_eq!(
+            search_outlook(&ok, None, &clear()),
+            SearchOutlook::SeriesNotOnPullList
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&entry(true, None)), &clear()),
+            SearchOutlook::SeriesPaused
+        );
+        assert_eq!(
+            search_outlook(
+                &issue("2", Some("2020-01-01")),
+                Some(&entry(false, Some("10"))),
+                &clear()
+            ),
+            SearchOutlook::BelowSeriesStartIssue
+        );
+        assert_eq!(
+            search_outlook(&issue("5", None), Some(&listed), &clear()),
+            SearchOutlook::NoUsableCoverDate
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&listed), &blockers(true, None, false)),
+            SearchOutlook::RetriesExhausted
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&listed), &blockers(false, Some("grabbed"), false)),
+            SearchOutlook::GrabInFlight
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&listed), &blockers(false, None, true)),
+            SearchOutlook::RecentlySubmitted
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&listed), &clear()),
+            SearchOutlook::WillSearch
+        );
+    }
+
+    /// When several hold at once, the BINDING one is reported.
+    ///
+    /// This is the whole reason the order exists. An issue with an
+    /// in-flight grab on a series that is not on the pull list is not
+    /// "waiting for the grab to clear" — nothing will search for it
+    /// when the grab clears either. Reporting the temporary reason
+    /// there tells the user to wait for something that will not happen.
+    #[test]
+    fn the_most_binding_reason_wins() {
+        let ok = issue("5", Some("2020-01-01"));
+        let all = blockers(true, Some("grabbed"), true);
+
+        assert_eq!(
+            search_outlook(&ok, None, &all),
+            SearchOutlook::SeriesNotOnPullList,
+            "no pull-list row outranks every attempt-level reason"
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&entry(true, None)), &all),
+            SearchOutlook::SeriesPaused,
+            "paused outranks every attempt-level reason"
+        );
+        assert_eq!(
+            search_outlook(&issue("5", None), Some(&entry(false, None)), &all),
+            SearchOutlook::NoUsableCoverDate,
+            "an unsearchable issue outranks a temporary attempt state"
+        );
+        assert_eq!(
+            search_outlook(&ok, Some(&entry(false, None)), &all),
+            SearchOutlook::RetriesExhausted,
+            "giving up permanently outranks two temporary states"
+        );
+    }
+
+    /// `29.5` must not be truncated to `29` when compared to a floor,
+    /// and the floor is inclusive.
+    #[test]
+    fn the_start_floor_uses_natural_order() {
+        let listed = entry(false, Some("29.5"));
+        assert_eq!(
+            search_outlook(&issue("29", Some("2020-01-01")), Some(&listed), &clear()),
+            SearchOutlook::BelowSeriesStartIssue,
+            "29 is below a 29.5 floor"
+        );
+        assert_eq!(
+            search_outlook(&issue("29.5", Some("2020-01-01")), Some(&listed), &clear()),
+            SearchOutlook::WillSearch,
+            "the floor issue itself is included"
+        );
+        assert_eq!(
+            search_outlook(&issue("30", Some("2020-01-01")), Some(&listed), &clear()),
+            SearchOutlook::WillSearch,
+            "and everything above it"
+        );
+    }
+
+    /// A future-dated solicitation is not yet a candidate.
+    #[test]
+    fn cover_date_matches_the_candidate_querys_test() {
+        assert!(has_usable_cover_date(Some("2020-01-01")));
+        assert!(!has_usable_cover_date(None));
+        assert!(!has_usable_cover_date(Some("2020-01")), "malformed");
+        assert!(!has_usable_cover_date(Some("")), "empty");
+        assert!(!has_usable_cover_date(Some("2999-01-01")), "future");
+        let today = time::OffsetDateTime::now_utc().date();
+        let today = format!(
+            "{:04}-{:02}-{:02}",
+            today.year(),
+            u8::from(today.month()),
+            today.day()
+        );
+        assert!(has_usable_cover_date(Some(&today)), "today is usable");
+    }
 }

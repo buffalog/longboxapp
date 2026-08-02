@@ -1330,39 +1330,68 @@ async fn an_ignored_unbound_copy_deletes_and_reverts_nothing() {
 /// lands immediately but re-search waits for the sweep to purge it, and
 /// the user must be told or they will read a missing issue as a failed
 /// delete.
+///
+/// Asserted twice, because the same fixture answers differently
+/// depending on something outside the issue entirely. This test used to
+/// seed no pull-list row and assert "grabbed" — and it passed, while
+/// telling the user to wait for a sweep that was never going to look at
+/// that series. Whether a grab is the BINDING reason depends on the
+/// series being swept at all.
 #[tokio::test]
 async fn a_stale_grab_on_the_reverted_issue_is_reported() {
-    let app = build_test_app().await;
-    let series = seed_series_with_year(&app, "Ferocious", 2025).await;
-    let a = seed_bound_issue(&app, series, "2").await;
-    let b = seed_bound_issue(&app, series, "5").await;
-    let keep = seed_copy(&app, Some(a), "F/F 002.cbz", "dig-g", "owned").await;
-    let loser = seed_copy(&app, Some(b), "F/F 005.cbz", "dig-g", "owned").await;
+    for listed in [true, false] {
+        let app = build_test_app().await;
+        let series = seed_series_with_year(&app, "Ferocious", 2025).await;
+        if listed {
+            longbox_db::pull_list_repo::add(
+                &app.state.db,
+                longbox_db::pull_list_repo::NewPullEntry {
+                    series_id: series,
+                    start_issue: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let a = seed_bound_issue(&app, series, "2").await;
+        let b = seed_bound_issue(&app, series, "5").await;
+        let keep = seed_copy(&app, Some(a), "F/F 002.cbz", "dig-g", "owned").await;
+        let loser = seed_copy(&app, Some(b), "F/F 005.cbz", "dig-g", "owned").await;
 
-    longbox_db::pull_attempt_repo::insert(
-        &app.state.db,
-        longbox_db::NewPullAttempt {
-            series_id: series,
-            issue_id: b,
-            indexer_id: None,
-            release_id: Some("guid".into()),
-            status: "grabbed".into(),
-            error_message: None,
-            retry_count: 0,
-            download_handle: None,
-        },
-    )
-    .await
-    .unwrap();
+        longbox_db::pull_attempt_repo::insert(
+            &app.state.db,
+            longbox_db::NewPullAttempt {
+                series_id: series,
+                issue_id: b,
+                indexer_id: None,
+                release_id: Some("guid".into()),
+                status: "grabbed".into(),
+                error_message: None,
+                retry_count: 0,
+                download_handle: None,
+            },
+        )
+        .await
+        .unwrap();
 
-    let (status, body) = delete_dup(&app, "dig-g", loser).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["reverted"]["now_missing"], true);
-    assert_eq!(
-        body["reverted"]["awaiting_stale_grab_purge"], "grabbed",
-        "the user must be told re-search waits for the sweep: {body}"
-    );
-    let _ = keep;
+        let (status, body) = delete_dup(&app, "dig-g", loser).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["reverted"]["now_missing"], true, "{body}");
+        let expected = if listed {
+            // Swept series: the grab really is what re-search waits on.
+            "grab_in_flight"
+        } else {
+            // Unswept series: the grab is true and irrelevant. Nothing
+            // searches for this issue when it clears either, so naming
+            // the grab would send the user off to wait for nothing.
+            "series_not_on_pull_list"
+        };
+        assert_eq!(
+            body["reverted"]["search_outlook"], expected,
+            "listed={listed}: the BINDING reason must be the one reported: {body}"
+        );
+        let _ = keep;
+    }
 }
 
 /// Refuses to empty a group. Deleting the last copy of a digest
@@ -2292,4 +2321,64 @@ async fn an_alias_anywhere_in_the_group_refuses_even_with_a_genuine_third_copy()
         "nothing may be deleted from a group containing an alias"
     );
     let _ = alias;
+}
+
+/// The revert carries WHY nothing will search for the issue, not just
+/// that it reverted — and it is wired to the real pull-list and
+/// attempt rows, not only to the pure function that decides it.
+///
+/// This is the half the unit tests cannot reach: the handler has to
+/// look up the `pull_list` entry for the issue's series and the
+/// attempt blockers for the issue, and pass the issue row that carries
+/// the cover date. A wiring mistake there returns a confident, wrong
+/// reason rather than failing.
+///
+/// It matters because "reverts to missing" reads as "so it will be
+/// downloaded again", and on the live library that is false for
+/// roughly half the issues a delete can touch — 632 of 777 series are
+/// not on the pull list at all.
+#[tokio::test]
+async fn the_revert_says_whether_anything_will_search_for_the_issue() {
+    // Not on the pull list: the dominant live case.
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Unlisted", 2025).await;
+    let issue = seed_bound_issue(&app, series, "1").await;
+    let other = seed_bound_issue(&app, series, "2").await;
+    let loser = seed_copy(&app, Some(issue), "U/u1.cbz", "dig-out1", "owned").await;
+    let keep = seed_copy(&app, Some(other), "U/u2.cbz", "dig-out1", "owned").await;
+
+    let (status, body) = delete_dup(&app, "dig-out1", loser).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reverted"]["now_missing"], true, "{body}");
+    assert_eq!(
+        body["reverted"]["search_outlook"], "series_not_on_pull_list",
+        "an unlisted series is never swept, and the copy must say so: {body}"
+    );
+    let _ = keep;
+
+    // On the pull list, with a usable cover date and no attempts: the
+    // only case where promising a re-search is honest.
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Listed", 2025).await;
+    longbox_db::pull_list_repo::add(
+        &app.state.db,
+        longbox_db::pull_list_repo::NewPullEntry {
+            series_id: series,
+            start_issue: None,
+        },
+    )
+    .await
+    .unwrap();
+    let issue = seed_bound_issue(&app, series, "1").await;
+    let other = seed_bound_issue(&app, series, "2").await;
+    let loser = seed_copy(&app, Some(issue), "L/l1.cbz", "dig-out2", "owned").await;
+    let keep = seed_copy(&app, Some(other), "L/l2.cbz", "dig-out2", "owned").await;
+
+    let (status, body) = delete_dup(&app, "dig-out2", loser).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["reverted"]["search_outlook"], "will_search",
+        "a listed, dated issue with no attempts WILL be swept: {body}"
+    );
+    let _ = keep;
 }
