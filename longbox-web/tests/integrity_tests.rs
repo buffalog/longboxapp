@@ -1630,6 +1630,66 @@ async fn deleting_a_link_to_an_outside_file_unlinks_the_link_not_the_target() {
     let _ = keep;
 }
 
+/// A target that IS a directory — no `.`, no trailing slash — is
+/// refused, because the guard that catches it is semantic, not
+/// syntactic.
+///
+/// `"Probe"` walks past the dot-guard entirely: it is a perfectly
+/// well-formed relative path whose final component is a normal name.
+/// What stops it is that the stat reports present-but-no-digest, so the
+/// freshness check refuses.
+///
+/// This is a regression test with a specific history. An earlier
+/// version reported a non-file as ABSENT, which is the same tuple as
+/// "nothing is there" — and every guard downstream reads absence as a
+/// green light. `target_exists` short-circuited the freshness check and
+/// the delete proceeded: row destroyed, issue reverted to missing, the
+/// directory and the comic inside it untouched. The check meant to
+/// harden this path was what opened it.
+#[tokio::test]
+async fn a_target_that_is_a_directory_is_refused_without_any_syntactic_tell() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "DirTarget", 2025).await;
+    let dir_issue = seed_bound_issue(&app, series, "1").await;
+    let keep_issue = seed_bound_issue(&app, series, "2").await;
+
+    std::fs::create_dir_all(app.library_path().join("Probe")).unwrap();
+    std::fs::write(app.library_path().join("Probe/real.cbz"), b"bytes").unwrap();
+    // Note the path: no `.`, no trailing slash. Nothing syntactic to catch.
+    let dir_row = seed_existing(&app, Some(dir_issue), "Probe", "dig-dir").await;
+    let keep = seed_copy(
+        &app,
+        Some(keep_issue),
+        "Genuine/dir.cbz",
+        "dig-dir",
+        "owned",
+    )
+    .await;
+
+    let (status, body) = delete_dup(&app, "dig-dir", dir_row).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a directory carries no verifiable bytes and must be refused: {body}"
+    );
+    assert!(
+        file_repo::find_by_id(&app.state.db, dir_row)
+            .await
+            .unwrap()
+            .is_some(),
+        "the catalog row must survive"
+    );
+    assert!(
+        app.library_path().join("Probe/real.cbz").exists(),
+        "the directory contents must be untouched"
+    );
+    assert!(
+        issue_is_owned(&app, dir_issue).await,
+        "and the issue must not revert on a delete that deleted nothing"
+    );
+    let _ = keep;
+}
+
 /// The canonicalise-the-PARENT rule, pinned against the only case that
 /// still needs it.
 ///

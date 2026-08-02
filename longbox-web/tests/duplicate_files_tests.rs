@@ -1395,3 +1395,53 @@ async fn resolve_refuses_a_group_whose_files_are_the_same_file_aliased() {
     assert!(db_row_exists(&app, keep).await);
     assert!(db_row_exists(&app, alias).await);
 }
+
+/// A loser whose path is not a regular file must still face the content
+/// verdict, not slip under the threshold that triggers it.
+///
+/// The content gate only runs when at least two present files are in
+/// hand. An earlier version reported a non-file as ABSENT — the same
+/// answer as "nothing is there" — which dropped it from that count, took
+/// the group under the threshold, and skipped the entire
+/// Identical/Distinct/Unknown block. The keeper rail still passed,
+/// because the keeper was a real file, so a resolve that had correctly
+/// refused on differing content began deleting instead.
+///
+/// Present-but-unreadable keeps it in the count and refuses: a
+/// directory has no digest, and `classify_content` answers `Unknown`
+/// on a missing digest and `Distinct` on a size mismatch.
+#[tokio::test]
+async fn resolve_refuses_when_a_loser_is_not_a_regular_file() {
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "Directory", "1").await;
+
+    let keep = seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbz", true, 5, Some(b"bytes")).await;
+    // A catalogued row whose path is a DIRECTORY holding a real comic.
+    std::fs::create_dir_all(app.library_path().join("Dir/Dir 1.cbr")).unwrap();
+    std::fs::write(app.library_path().join("Dir/Dir 1.cbr/inner.cbz"), b"bytes").unwrap();
+    let loser = seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbr", true, 5, None).await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{keep}}}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = &response_json(resp).await["results"][0];
+
+    assert_eq!(
+        r["status"], "refused",
+        "a non-file carries no bytes to compare, so this cannot be a keep-one decision: {r}"
+    );
+    assert!(
+        db_row_exists(&app, loser).await,
+        "the loser row must survive — it was never content-verified"
+    );
+    assert!(
+        app.library_path().join("Dir/Dir 1.cbr/inner.cbz").exists(),
+        "and the directory contents must be untouched"
+    );
+    assert!(db_row_exists(&app, keep).await);
+}

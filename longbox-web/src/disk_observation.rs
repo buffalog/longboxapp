@@ -51,17 +51,33 @@ pub(crate) async fn validate_digest(
     let Ok(meta) = tokio::fs::metadata(Path::new(root).join(path_relative)).await else {
         return (false, None, None, None);
     };
-    // A directory is not a file, and "exists" here means "there is a
-    // file here whose bytes we can reason about". Without this a stored
-    // path that resolves to a directory reports as present, carries a
-    // size, and can be counted as the surviving copy that justifies
-    // deleting a real one. `metadata()` follows symlinks, so a link to
-    // a regular file is still `is_file()` and is unaffected.
+    let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    // A non-file — a directory, a fifo, a link to one — is PRESENT but
+    // carries no bytes we can reason about. It reports `exists = true`
+    // with no digest and no identity, and the distinction is the whole
+    // point.
+    //
+    // Returning the absent tuple here instead is a mistake that has
+    // been made once already, and it made both callers WORSE than no
+    // check at all: every guard downstream reads "not there" as a green
+    // light. Integrity's `target_exists` short-circuits its own
+    // freshness check, so a target that is a directory skipped straight
+    // to the delete, removed the row and reverted the issue. Tidy drops
+    // absent files before `classify_content`, so a non-file member took
+    // the group under the two-file threshold and the entire
+    // Identical/Distinct/Unknown verdict was skipped — a resolve that
+    // had correctly refused began deleting.
+    //
+    // Present-but-unreadable is the honest answer and the conservative
+    // one. No digest means it can never be the surviving copy that
+    // justifies deleting a real file, and it can never be `Identical`
+    // to anything; `classify_content` answers `Unknown` on a missing
+    // digest and `Distinct` on a size mismatch, so both refuse. No
+    // identity means it is never mistaken for an alias.
     if !meta.is_file() {
-        return (false, None, None, None);
+        return (true, Some(observed_size), None, None);
     }
     let ident = Some((meta.dev(), meta.ino()));
-    let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
     let Some(digest) = digest.filter(|d| !d.is_empty()) else {
         return (true, Some(observed_size), None, ident);
     };
