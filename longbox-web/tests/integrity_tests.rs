@@ -1569,13 +1569,16 @@ async fn an_aliased_pair_is_refused_from_either_direction() {
 /// A symlink whose target lives OUTSIDE the library still unlinks the
 /// LINK, never the file it points at.
 ///
-/// This is the case that keeps the canonicalise-the-parent rule under
-/// test now that an aliased pair refuses outright. Here the group is
-/// genuinely two files — a real in-library copy and a link to
-/// something outside any root — so they carry different identities,
-/// the delete proceeds, and the unlink has to land on the link itself.
-/// Canonicalising the FULL path would resolve the final component and
-/// destroy the outside file instead, leaving the link dangling.
+/// Note what does and does not defend this one: under full-path
+/// canonicalisation the resolved target lands outside the root and the
+/// ESCAPE check refuses the request, so the outside file survives
+/// either way. This test therefore pins the success path — that a link
+/// in a genuine two-file group is deletable at all — and not the
+/// canonicalise-the-parent rule.
+/// `deleting_a_link_to_an_uncatalogued_in_library_file_spares_the_target`
+/// is the one that pins that rule, because there the escape check
+/// passes and only the parent-vs-full choice stands between the delete
+/// and a file the user never saw.
 #[tokio::test]
 async fn deleting_a_link_to_an_outside_file_unlinks_the_link_not_the_target() {
     let app = build_test_app().await;
@@ -1623,6 +1626,69 @@ async fn deleting_a_link_to_an_outside_file_unlinks_the_link_not_the_target() {
     assert!(
         on_disk_rel(&app, "Genuine/comic.cbz"),
         "the surviving in-library copy must be untouched"
+    );
+    let _ = keep;
+}
+
+/// The canonicalise-the-PARENT rule, pinned against the only case that
+/// still needs it.
+///
+/// Three cases reach a symlinked row, and two are already covered
+/// elsewhere: a link and its target both catalogued in one group is
+/// refused by the alias guard, and a link to a file outside any root is
+/// refused by the escape check. What passes both is a link to an
+/// in-library file the scanner never catalogued — a `.bak` beside the
+/// comics, say. Full-path canonicalisation resolves it inside the root,
+/// clears the escape check, and `remove_file` destroys that file while
+/// leaving the link in place: a deletion of something the user never
+/// saw in any group and never confirmed.
+#[tokio::test]
+async fn deleting_a_link_to_an_uncatalogued_in_library_file_spares_the_target() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Backup", 2025).await;
+    let keep_issue = seed_bound_issue(&app, series, "1").await;
+    let link_issue = seed_bound_issue(&app, series, "2").await;
+
+    // Inside the library, but never catalogued — the scanner skips it
+    // on extension, so it is in no group and no guard knows about it.
+    std::fs::create_dir_all(app.library_path().join("Backups")).unwrap();
+    let backup = app.library_path().join("Backups/comic.bak");
+    std::fs::write(&backup, b"bytes").unwrap();
+
+    std::fs::create_dir_all(app.library_path().join("Lnk")).unwrap();
+    std::os::unix::fs::symlink(&backup, app.library_path().join("Lnk/comic.cbz")).unwrap();
+    let link = seed_existing(&app, Some(link_issue), "Lnk/comic.cbz", "dig-bak").await;
+    let keep = seed_copy(
+        &app,
+        Some(keep_issue),
+        "Genuine/bak.cbz",
+        "dig-bak",
+        "owned",
+    )
+    .await;
+
+    let (status, body) = delete_dup(&app, "dig-bak", link).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the link and the genuine copy are two different files: {body}"
+    );
+
+    assert!(
+        backup.exists(),
+        "the uncatalogued file the link pointed at must survive — nothing in the UI ever \
+         offered it for deletion: {body}"
+    );
+    assert!(
+        app.library_path()
+            .join("Lnk/comic.cbz")
+            .symlink_metadata()
+            .is_err(),
+        "the symlink itself must be gone"
+    );
+    assert!(
+        on_disk_rel(&app, "Genuine/bak.cbz"),
+        "the surviving copy must be untouched"
     );
     let _ = keep;
 }
@@ -1903,50 +1969,57 @@ async fn the_delete_touches_no_table_other_than_files() {
 /// this guard compared `Path` values and therefore never fired at all.
 #[tokio::test]
 async fn a_path_ending_in_a_dot_component_is_refused_before_the_row_is_touched() {
-    let app = build_test_app().await;
-    let series = seed_series_with_year(&app, "DotPath", 2025).await;
-    let dir_issue = seed_bound_issue(&app, series, "1").await;
-    let keep_issue = seed_bound_issue(&app, series, "2").await;
+    // BOTH syntactic forms of "names a directory". `"Probe/"` is the
+    // one a guard written for `"Probe/."` misses: splitting on `/`
+    // leaves an empty final segment, so any scan that skips empties
+    // lands on `Probe` and passes. It shipped that way for one round.
+    for dir_path in ["Probe/.", "Probe/"] {
+        let app = build_test_app().await;
+        let series = seed_series_with_year(&app, "DotPath", 2025).await;
+        let dir_issue = seed_bound_issue(&app, series, "1").await;
+        let keep_issue = seed_bound_issue(&app, series, "2").await;
 
-    // A real directory holding a real comic, catalogued under a path
-    // that resolves to the DIRECTORY.
-    std::fs::create_dir_all(app.library_path().join("Probe")).unwrap();
-    std::fs::write(app.library_path().join("Probe/real.cbz"), b"bytes").unwrap();
-    let dir_row = seed_existing(&app, Some(dir_issue), "Probe/.", "dig-dot").await;
-    // A genuine sibling, so the never-empty-a-group guard is satisfied
-    // and cannot be what produces the refusal.
-    let keep = seed_copy(
-        &app,
-        Some(keep_issue),
-        "Genuine/real.cbz",
-        "dig-dot",
-        "owned",
-    )
-    .await;
+        // A real directory holding a real comic, catalogued under a path
+        // that resolves to the DIRECTORY.
+        std::fs::create_dir_all(app.library_path().join("Probe")).unwrap();
+        std::fs::write(app.library_path().join("Probe/real.cbz"), b"bytes").unwrap();
+        let dir_row = seed_existing(&app, Some(dir_issue), dir_path, "dig-dot").await;
+        // A genuine sibling, so the never-empty-a-group guard is satisfied
+        // and cannot be what produces the refusal.
+        let keep = seed_copy(
+            &app,
+            Some(keep_issue),
+            "Genuine/real.cbz",
+            "dig-dot",
+            "owned",
+        )
+        .await;
 
-    let (status, body) = delete_dup(&app, "dig-dot", dir_row).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a path ending in `.` names no file and must be refused: {body}"
-    );
-    assert!(
-        file_repo::find_by_id(&app.state.db, dir_row)
-            .await
-            .unwrap()
-            .is_some(),
-        "the catalog row must survive — the refusal has to happen BEFORE the row is removed"
-    );
-    assert!(
-        app.library_path().join("Probe").is_dir()
-            && app.library_path().join("Probe/real.cbz").exists(),
-        "the directory and its contents must be untouched"
-    );
-    assert!(
-        issue_is_owned(&app, dir_issue).await,
-        "and no issue may revert on the strength of a delete that deleted nothing"
-    );
-    let _ = keep;
+        let (status, body) = delete_dup(&app, "dig-dot", dir_row).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{dir_path:?} names no file and must be refused: {body}"
+        );
+        assert!(
+            file_repo::find_by_id(&app.state.db, dir_row)
+                .await
+                .unwrap()
+                .is_some(),
+            "{dir_path:?}: the catalog row must survive — the refusal has to happen BEFORE the \
+             row is removed"
+        );
+        assert!(
+            app.library_path().join("Probe").is_dir()
+                && app.library_path().join("Probe/real.cbz").exists(),
+            "{dir_path:?}: the directory and its contents must be untouched"
+        );
+        assert!(
+            issue_is_owned(&app, dir_issue).await,
+            "{dir_path:?}: no issue may revert on the strength of a delete that deleted nothing"
+        );
+        let _ = keep;
+    }
 }
 
 /// The alias check covers the whole group, not just the file being

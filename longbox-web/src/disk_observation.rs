@@ -51,6 +51,15 @@ pub(crate) async fn validate_digest(
     let Ok(meta) = tokio::fs::metadata(Path::new(root).join(path_relative)).await else {
         return (false, None, None, None);
     };
+    // A directory is not a file, and "exists" here means "there is a
+    // file here whose bytes we can reason about". Without this a stored
+    // path that resolves to a directory reports as present, carries a
+    // size, and can be counted as the surviving copy that justifies
+    // deleting a real one. `metadata()` follows symlinks, so a link to
+    // a regular file is still `is_file()` and is unaffected.
+    if !meta.is_file() {
+        return (false, None, None, None);
+    }
     let ident = Some((meta.dev(), meta.ino()));
     let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
     let Some(digest) = digest.filter(|d| !d.is_empty()) else {

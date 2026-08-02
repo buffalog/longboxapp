@@ -105,7 +105,8 @@ pub async fn delete_file(
     // legitimately see `./a/b.cbz`. For a delete that is not enough:
     // `"Batman/."` names a DIRECTORY, and unlinking it fails only AFTER
     // the catalog row is already gone, destroying a row for a path that
-    // never named a file.
+    // never named a file and reverting its issue on the strength of a
+    // delete that deleted nothing.
     //
     // No `std::path` API can catch that. `Path` parsing normalises `.`
     // away, so `Path::new("Batman/.")` and `Path::new("Batman")` are
@@ -116,12 +117,20 @@ pub async fn delete_file(
     // version of this check did, and what the first proposed fix for it
     // would also have done. See the PR note: a normalised form of a
     // value is not the value.
+    //
+    // "Names a directory" has TWO syntactic forms and both need
+    // covering. `"Batman/"` is the other one, and it is the form a
+    // guard written for the first will miss: splitting on `/` leaves an
+    // empty final segment, so any scan that skips empties lands on
+    // `Batman` and passes. `is_contained` allows it too — `Path` drops a
+    // trailing separator just as it drops `.`. The first version of this
+    // check covered `.` alone and had exactly that gap.
     let last = file
         .path_relative
         .rsplit('/')
         .find(|s| !s.is_empty())
         .unwrap_or("");
-    if last == "." || last == ".." {
+    if file.path_relative.ends_with('/') || last == "." || last == ".." {
         tracing::warn!(
             file_id = file.id,
             path = %file.path_relative,
@@ -143,14 +152,23 @@ pub async fn delete_file(
     //
     // Resolve the PARENT, not the file. Canonicalising the full path
     // follows a final-component symlink, and `remove_file` on the
-    // result unlinks the link's TARGET while leaving the link — so
-    // deleting one member of a duplicate group would destroy the other
-    // one, the copy the user chose to keep, and leave its row behind
-    // still marked owned. The scanner walks with `follow_links(true)`,
-    // so a link and its target are both catalogued as ordinary rows
-    // with identical bytes: exactly a duplicate group. Resolving only
-    // the parent keeps the escape protection, which is what
-    // canonicalisation was for, and drops the final-component
+    // result unlinks the link's TARGET while leaving the link.
+    //
+    // Be precise about which case that still endangers, because it is
+    // not the obvious one. A link and its target both catalogued in one
+    // group is refused before reaching here — they are one file under
+    // two names, and the alias guard stops it. A link whose target is
+    // OUTSIDE any library root is caught by the escape check below.
+    // What survives both is a link to an in-library file that is not
+    // catalogued at all: `Lnk/comic.cbz` -> `Backups/comic.bak`, say,
+    // where the scanner never picked the target up because of its
+    // extension. Full-path canonicalisation resolves inside the root,
+    // passes the escape check, and destroys the backup while leaving
+    // the link dangling — a file the user never saw in any group and
+    // never confirmed.
+    //
+    // Resolving only the parent keeps the escape protection, which is
+    // what canonicalisation was for, and drops the final-component
     // resolution, which was never the goal.
     let canon_root = tokio::fs::canonicalize(root)
         .await
