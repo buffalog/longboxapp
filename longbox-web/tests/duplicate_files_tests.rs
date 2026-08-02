@@ -1233,3 +1233,257 @@ async fn several_catalog_volumes_across_two_folders_keeps_the_wrong_series_label
         "more than one catalog volume by this name → the year names a volume"
     );
 }
+
+/// The one test that can distinguish the two possible orderings.
+///
+/// Everything else here asserts the end state — row gone AND file gone
+/// — which either order satisfies, so from PR #32 until the shared
+/// operation landed nothing constrained it. This makes the *second*
+/// write fail and asserts the *first* one happened anyway.
+///
+/// Row-first (correct): the catalog row is gone, the bytes survive as
+/// an orphan, and the failure is reported. Bytes-first (the previous
+/// behaviour): the unlink fails, the function returns early, and the
+/// row is still there — leaving a row whose issue stays `owned`, which
+/// is the state that silently defeats the revert-to-missing payoff.
+#[tokio::test]
+async fn row_is_gone_even_when_the_unlink_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "Saga", "1").await;
+    let keep = seed_file(&app, issue, "Saga/Saga 1.cbz", true, 90_000_000, true).await;
+    let loser = seed_file(&app, issue, "Saga/Saga 1.cbr", true, 80_000_000, true).await;
+
+    // Remove write permission from the containing directory: the file
+    // itself stays readable, but it cannot be unlinked from it.
+    let dir = app.library_path().join("Saga");
+    let original = std::fs::metadata(&dir).unwrap().permissions();
+    let mut locked = original.clone();
+    locked.set_mode(0o555);
+    std::fs::set_permissions(&dir, locked).unwrap();
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{keep}}}]}}"#),
+        ))
+        .await;
+    let status = resp.status();
+    let body = response_json(resp).await;
+
+    // Restore before asserting, so a failure doesn't leave an
+    // undeletable temp directory behind.
+    std::fs::set_permissions(&dir, original).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+
+    // Self-detecting skip: if the unlink succeeded anyway (running as
+    // root, or a filesystem that ignores the mode) then the second
+    // write did not fail and there is no ordering to observe. Keyed on
+    // the observed outcome rather than on guessing the cause.
+    if !on_disk(&app, "Saga/Saga 1.cbr") {
+        eprintln!("skipped: the environment allowed the unlink, so ordering is unobservable here");
+        return;
+    }
+
+    assert!(
+        !db_row_exists(&app, loser).await,
+        "the catalog row must be gone even though the unlink failed — \
+         a surviving row keeps the issue owned and the issue never reverts to missing"
+    );
+    assert!(
+        on_disk(&app, "Saga/Saga 1.cbr"),
+        "the bytes should still be present; this is the orphan case reconciliation reports"
+    );
+
+    let r = &body["results"][0];
+    // `orphaned`, not `failed`. The row IS gone, so the duplicate is
+    // resolved as far as the library is concerned and there is nothing
+    // to retry — what remains is bytes on disk for the next scan to
+    // surface. Reporting it as "could not be deleted" would name the
+    // wrong problem and invite a retry against a row that no longer
+    // exists.
+    assert_eq!(
+        r["failed"].as_array().unwrap().len(),
+        0,
+        "a failed unlink is not a failed delete: {r}"
+    );
+    let orphaned = r["orphaned"].as_array().unwrap();
+    assert_eq!(
+        orphaned.len(),
+        1,
+        "the orphaned file must be reported, not swallowed: {r}"
+    );
+    assert_eq!(orphaned[0]["file_id"], loser);
+
+    assert!(on_disk(&app, "Saga/Saga 1.cbz"), "kept file must survive");
+    assert!(db_row_exists(&app, keep).await, "kept row must survive");
+}
+
+/// Tidy's half of the alias hole: the keeper and a loser are the same
+/// file reached by two names.
+///
+/// `metadata()` follows symlinks, so both stat identically — same size,
+/// same mtime, same validated digest — and the keep-one guard reads
+/// them as two copies. Deleting the "loser" then destroys the bytes the
+/// keeper points at, leaving a kept row resolving to nothing.
+///
+/// Reachable without any symlink too: one file under two library roots
+/// produces the same alias pair. The scanner walks `follow_links(true)`,
+/// so anything aliased inside a root is guaranteed to present as a
+/// content-duplicate group.
+#[tokio::test]
+async fn resolve_refuses_a_group_whose_files_are_the_same_file_aliased() {
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "Saga", "1").await;
+
+    // Real file with real bytes and a real digest, then a symlink to it
+    // seeded the same way. Both must be content-analysed, or the
+    // resolve refuses as `Unknown` before ever reaching the alias
+    // check — which is how the first version of this test passed while
+    // the guard was disabled.
+    let keep = seed_file_with_bytes(&app, issue, "Saga/Saga 1.cbz", true, 5, Some(b"bytes")).await;
+    std::os::unix::fs::symlink(
+        app.library_path().join("Saga/Saga 1.cbz"),
+        app.library_path().join("Saga/Saga 1.cbr"),
+    )
+    .unwrap();
+    // No `content` — the bytes already exist through the link — but the
+    // digest is stamped from the resolved file, exactly as analyze
+    // would see it.
+    let alias = seed_file_with_bytes(&app, issue, "Saga/Saga 1.cbr", true, 5, None).await;
+    {
+        let full = app.library_path().join("Saga/Saga 1.cbr");
+        let meta = std::fs::metadata(&full).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hasher
+            .update_reader(std::fs::File::open(&full).unwrap())
+            .unwrap();
+        let off =
+            time::OffsetDateTime::from(meta.modified().unwrap()).to_offset(time::UtcOffset::UTC);
+        file_repo::set_content_hash(
+            &app.state.db,
+            alias,
+            hasher.finalize().to_hex().as_ref(),
+            meta.len() as i64,
+            time::PrimitiveDateTime::new(off.date(), off.time()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{keep}}}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = &response_json(resp).await["results"][0];
+
+    assert_eq!(
+        r["status"], "refused",
+        "nothing here is a redundant copy of anything: {r}"
+    );
+    assert!(
+        on_disk(&app, "Saga/Saga 1.cbz"),
+        "the only real bytes must survive"
+    );
+    assert!(db_row_exists(&app, keep).await);
+    assert!(db_row_exists(&app, alias).await);
+}
+
+/// A loser whose path is not a regular file must still face the content
+/// verdict, not slip under the threshold that triggers it.
+///
+/// The content gate only runs when at least two present files are in
+/// hand. An earlier version reported a non-file as ABSENT — the same
+/// answer as "nothing is there" — which dropped it from that count, took
+/// the group under the threshold, and skipped the entire
+/// Identical/Distinct/Unknown block. The keeper rail still passed,
+/// because the keeper was a real file, so a resolve that had correctly
+/// refused on differing content began deleting instead.
+///
+/// Present-but-unreadable keeps it in the count and refuses: a
+/// directory has no digest, and `classify_content` answers `Unknown`
+/// on a missing digest and `Distinct` on a size mismatch.
+///
+/// The fixture is built so that the SIZE proof cannot be what refuses
+/// it. `classify_content` checks sizes before digests, so a directory
+/// of the usual few dozen bytes against a 5-byte comic returns
+/// `Distinct` whether or not a non-file is special-cased at all — and
+/// the first version of this test passed for exactly that reason,
+/// constraining nothing. Here the keeper is padded to the directory's
+/// own `st_size` and the directory row is stamped with the keeper's
+/// digest against the directory's real stat. Without the non-file
+/// branch that group classifies `Identical` and the resolve DELETES.
+#[tokio::test]
+async fn resolve_refuses_when_a_loser_is_not_a_regular_file() {
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "Directory", "1").await;
+
+    // A catalogued row whose path is a DIRECTORY holding a real comic.
+    std::fs::create_dir_all(app.library_path().join("Dir/Dir 1.cbr")).unwrap();
+    std::fs::write(app.library_path().join("Dir/Dir 1.cbr/inner.cbz"), b"bytes").unwrap();
+    let dir_meta = std::fs::metadata(app.library_path().join("Dir/Dir 1.cbr")).unwrap();
+    let dir_size = dir_meta.len();
+
+    // Keeper padded to the directory's own size, so the size proof is
+    // silent and only the digest can decide.
+    let padded = vec![b'x'; usize::try_from(dir_size).unwrap()];
+    let keep = seed_file_with_bytes(
+        &app,
+        issue,
+        "Dir/Dir 1.cbz",
+        true,
+        dir_size as i64,
+        Some(&padded),
+    )
+    .await;
+    let loser =
+        seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbr", true, dir_size as i64, None).await;
+    // Stamp the directory row with the KEEPER's digest, against the
+    // directory's real size and mtime so the stamp reads as fresh.
+    {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&padded);
+        let off = time::OffsetDateTime::from(dir_meta.modified().unwrap())
+            .to_offset(time::UtcOffset::UTC);
+        file_repo::set_content_hash(
+            &app.state.db,
+            loser,
+            hasher.finalize().to_hex().as_ref(),
+            dir_size as i64,
+            time::PrimitiveDateTime::new(off.date(), off.time()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{keep}}}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = &response_json(resp).await["results"][0];
+
+    assert_eq!(
+        r["status"], "refused",
+        "a non-file carries no bytes to compare, so this cannot be a keep-one decision: {r}"
+    );
+    assert!(
+        db_row_exists(&app, loser).await,
+        "the loser row must survive — it was never content-verified"
+    );
+    assert!(
+        app.library_path().join("Dir/Dir 1.cbr/inner.cbz").exists(),
+        "and the directory contents must be untouched"
+    );
+    assert!(db_row_exists(&app, keep).await);
+}

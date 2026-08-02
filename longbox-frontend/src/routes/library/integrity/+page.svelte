@@ -1,25 +1,32 @@
 <script lang="ts">
   // Library Integrity — discovery.
   //
-  // Read-only by construction: the only request this page can make that
-  // writes anything is "Analyze content", and its entire write surface is
-  // the digest and archive-label columns. There is no delete, relink, move
-  // or rematch anywhere on this page, deliberately — resolution ships
-  // separately, designed against this output.
+  // This VIEW makes no destructive request: the only thing it can write
+  // is "Analyze content", whose surface is the digest and archive-label
+  // columns. But the server now also exposes a per-group delete
+  // (`POST /library/integrity/duplicates/delete`) that this page does
+  // not yet call, so do not describe the FEATURE as read-only — only
+  // this page's current request set. The distinction matters: a page
+  // claiming a safety property the server no longer has is the same
+  // defect as a module doc claiming it, and both were true here at one
+  // point.
   import { FileSearch, RefreshCw } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
+    describeRevert,
     getAnalyzeStatus,
     getFindings,
     startAnalyze,
     walkIsConclusive,
     type AnalyzeStatus,
     type CrossFolderCategory,
+    type DeleteDuplicateResult,
     type Findings
   } from '$lib/api/integrity';
   import { formatBytes } from '$lib/format';
   import { toast } from '$lib/stores/toast.svelte';
   import Button from '$lib/components/Button.svelte';
+  import DeleteCopyButton from '$lib/components/DeleteCopyButton.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import EvidenceRow from '$lib/components/EvidenceRow.svelte';
   import IntegritySection from '$lib/components/IntegritySection.svelte';
@@ -58,6 +65,31 @@
     } catch (e) {
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
     }
+  }
+
+  // What happened is read from the RESPONSE, never assumed from the
+  // delete having succeeded. `describeRevert` picks the sentence from
+  // `now_missing` and `search_outlook`; the one live counter-example is
+  // an issue that owns a second file outside the group and therefore
+  // does NOT revert.
+  //
+  // A failed unlink is reported separately and loudly: in that case the
+  // catalog row is already gone and the bytes are still on disk, so the
+  // file is now an orphan. Saying only "deleted" there would be a lie
+  // by omission about the state of the disk.
+  async function afterDelete(result: DeleteDuplicateResult): Promise<void> {
+    if (result.unlink_error) {
+      toast.error(
+        `The catalog entry was removed but the file is still on disk — it will show up as an orphan on the next scan. ${result.unlink_error}`
+      );
+    } else {
+      toast.success(describeRevert(result.reverted));
+    }
+    // Re-read rather than splice the group locally: deleting a copy can
+    // drop a group below two files and remove it from the findings
+    // entirely, and can change the reclaimable total. Recomputing that
+    // in the client would be a second implementation of the detector.
+    await refresh();
   }
 
   async function runAnalyze(): Promise<void> {
@@ -113,10 +145,9 @@
   </header>
 
   <p class="text-sm text-slate-600">
-    Everything below is read-only. Nothing on this page deletes, moves or re-points a file — it
-    reports what it found so you can decide. The one exception is <strong
-      >Analyze content</strong
-    >, which reads files and records their checksums; it changes no bindings and no files on disk.
+    Nothing on this page deletes, moves or re-points a file yet — it reports what it found so you
+    can decide. <strong>Analyze content</strong> reads files and records their checksums; it changes
+    no bindings and no files on disk.
   </p>
 
   {#if error}
@@ -198,7 +229,16 @@
             </div>
             <ul class="divide-y divide-slate-100">
               {#each g.files as f (f.file_id)}
-                <EvidenceRow file={f} classes={classesFor(f.file_id)} />
+                <EvidenceRow file={f} classes={classesFor(f.file_id)}>
+                  {#snippet action()}
+                    <DeleteCopyButton
+                      digest={g.digest}
+                      file={f}
+                      groupSize={g.files.length}
+                      onDeleted={afterDelete}
+                    />
+                  {/snippet}
+                </EvidenceRow>
               {/each}
             </ul>
           </li>
@@ -219,6 +259,11 @@
       one of them serves the other’s content. The archive’s own internal name usually says which
       series it really is — compare the “archive says” column below.
     </p>
+    <!-- No delete control here on purpose. These are the same groups the
+         section above lists, shown again because crossing a series
+         boundary is worth its own heading. Repeating the action would
+         put two delete buttons on one file in two places, and the user
+         would have no way to tell they were the same decision. -->
     {#if crossSeries.length === 0}
       <p class="text-sm text-slate-500">
         {pending > 0

@@ -23,6 +23,31 @@ pub struct AppState {
     pub metron: Option<Arc<longbox_metron::MetronClient>>,
     pub scanner: Arc<longbox_scanner::Scanner>,
     pub config: Arc<AppConfig>,
+    /// Serialises file deletions across the two features that perform
+    /// them (Library Tidy's resolve, Library Integrity's per-group
+    /// delete).
+    ///
+    /// Both check "at least one other verified copy survives" and then
+    /// delete. Without a lock those two steps interleave: two requests
+    /// naming different members of a two-file group each observe the
+    /// other as the survivor, both pass, and the group empties —
+    /// defeating the one guard the whole feature rests on. The window
+    /// is not small; the guard stats every sibling between reading and
+    /// writing.
+    ///
+    /// **Ceiling, stated rather than implied:** this serialises deletes
+    /// *within this process only*. A second LongBox process against the
+    /// same database, or a hand-run `sqlite3`, is unaffected. Deletes
+    /// here are human-paced and one-at-a-time by design, so a process-
+    /// wide lock costs nothing and a heavier mechanism would buy no
+    /// real protection.
+    ///
+    /// The test harness cannot demonstrate the race it prevents:
+    /// `:memory:` pools are pinned to `max_connections(1)` while
+    /// production runs sqlx's default of 10, so the interleaving is
+    /// structurally impossible in tests. Correctness here is argued
+    /// from the critical section, not shown by the suite.
+    pub delete_lock: Arc<tokio::sync::Mutex<()>>,
     pub scan_status: Arc<RwLock<ScanStatus>>,
     /// Live state of the content-analysis pass (Library Integrity). In-memory
     /// only, like `scan_status` — there is no analysis history to render.
