@@ -235,6 +235,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         metron,
         scanner,
         config: Arc::new(config),
+        delete_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         scan_status,
         analyze_status,
         library_root_id,

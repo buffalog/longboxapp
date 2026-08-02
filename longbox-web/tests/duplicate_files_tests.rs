@@ -1299,14 +1299,99 @@ async fn row_is_gone_even_when_the_unlink_fails() {
     );
 
     let r = &body["results"][0];
-    let failed = r["failed"].as_array().unwrap();
+    // `orphaned`, not `failed`. The row IS gone, so the duplicate is
+    // resolved as far as the library is concerned and there is nothing
+    // to retry — what remains is bytes on disk for the next scan to
+    // surface. Reporting it as "could not be deleted" would name the
+    // wrong problem and invite a retry against a row that no longer
+    // exists.
     assert_eq!(
-        failed.len(),
-        1,
-        "the unlink failure must be reported, not swallowed: {r}"
+        r["failed"].as_array().unwrap().len(),
+        0,
+        "a failed unlink is not a failed delete: {r}"
     );
-    assert_eq!(failed[0]["file_id"], loser);
+    let orphaned = r["orphaned"].as_array().unwrap();
+    assert_eq!(
+        orphaned.len(),
+        1,
+        "the orphaned file must be reported, not swallowed: {r}"
+    );
+    assert_eq!(orphaned[0]["file_id"], loser);
 
     assert!(on_disk(&app, "Saga/Saga 1.cbz"), "kept file must survive");
     assert!(db_row_exists(&app, keep).await, "kept row must survive");
+}
+
+/// Tidy's half of the alias hole: the keeper and a loser are the same
+/// file reached by two names.
+///
+/// `metadata()` follows symlinks, so both stat identically — same size,
+/// same mtime, same validated digest — and the keep-one guard reads
+/// them as two copies. Deleting the "loser" then destroys the bytes the
+/// keeper points at, leaving a kept row resolving to nothing.
+///
+/// Reachable without any symlink too: one file under two library roots
+/// produces the same alias pair. The scanner walks `follow_links(true)`,
+/// so anything aliased inside a root is guaranteed to present as a
+/// content-duplicate group.
+#[tokio::test]
+async fn resolve_refuses_a_group_whose_files_are_the_same_file_aliased() {
+    let app = build_test_app().await;
+    let issue = seed_series_issue(&app, "Saga", "1").await;
+
+    // Real file with real bytes and a real digest, then a symlink to it
+    // seeded the same way. Both must be content-analysed, or the
+    // resolve refuses as `Unknown` before ever reaching the alias
+    // check — which is how the first version of this test passed while
+    // the guard was disabled.
+    let keep = seed_file_with_bytes(&app, issue, "Saga/Saga 1.cbz", true, 5, Some(b"bytes")).await;
+    std::os::unix::fs::symlink(
+        app.library_path().join("Saga/Saga 1.cbz"),
+        app.library_path().join("Saga/Saga 1.cbr"),
+    )
+    .unwrap();
+    // No `content` — the bytes already exist through the link — but the
+    // digest is stamped from the resolved file, exactly as analyze
+    // would see it.
+    let alias = seed_file_with_bytes(&app, issue, "Saga/Saga 1.cbr", true, 5, None).await;
+    {
+        let full = app.library_path().join("Saga/Saga 1.cbr");
+        let meta = std::fs::metadata(&full).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hasher
+            .update_reader(std::fs::File::open(&full).unwrap())
+            .unwrap();
+        let off =
+            time::OffsetDateTime::from(meta.modified().unwrap()).to_offset(time::UtcOffset::UTC);
+        file_repo::set_content_hash(
+            &app.state.db,
+            alias,
+            hasher.finalize().to_hex().as_ref(),
+            meta.len() as i64,
+            time::PrimitiveDateTime::new(off.date(), off.time()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/library/tidy/duplicate-files/resolve",
+            format!(r#"{{"resolutions":[{{"issue_id":{issue},"keep_file_id":{keep}}}]}}"#),
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = &response_json(resp).await["results"][0];
+
+    assert_eq!(
+        r["status"], "refused",
+        "nothing here is a redundant copy of anything: {r}"
+    );
+    assert!(
+        on_disk(&app, "Saga/Saga 1.cbz"),
+        "the only real bytes must survive"
+    );
+    assert!(db_row_exists(&app, keep).await);
+    assert!(db_row_exists(&app, alias).await);
 }

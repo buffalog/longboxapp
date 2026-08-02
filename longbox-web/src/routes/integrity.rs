@@ -1,15 +1,24 @@
-//! Library Integrity — discovery.
+//! Library Integrity — discovery, and now resolution.
 //!
-//! # This module has exactly ONE write path
+//! # This module's mutating surface is declared and enforced
 //!
-//! Not "read-only" — that would be a claim the code does not support. The
-//! precise property is: **one non-GET route, `POST …/analyze`, and its entire
-//! write surface is `files.content_blake3`, `files.hashed_size_bytes`,
-//! `files.hashed_mtime`, `files.archive_label` and `files.archive_label_kind`.**
-//! Nothing here deletes a file, moves a file, re-points a binding, changes a
-//! status, or triggers a rematch.
+//! Not "read-only", and no longer "one write path" — both were true of the
+//! discovery-only version and neither is now. The property that survives, and
+//! the one worth having, is that **every route declares what it may touch, and
+//! a test proves the declaration matches what it actually reaches**:
 //!
-//! That property is enforced two ways, because the obvious way is not enough:
+//! - `POST …/analyze` — [`Surface::Writes`] over [`DIGEST_COLUMNS`]. Derived
+//!   cache: recomputable from bytes already on disk, so losing it costs one
+//!   re-analysis and nothing depends on it.
+//! - `POST …/duplicates/delete` — [`Surface::Deletes`] over [`DELETE_TABLES`].
+//!   Removes a catalog row and unlinks a file. Recoverable from nothing, which
+//!   is why it is a separate variant rather than a flavour of `Writes`.
+//!
+//! Retiring the property when the module gained the ability to act would have
+//! been backwards: a declared write surface matters *more* once it writes, not
+//! less.
+//!
+//! That property is enforced three ways, because the obvious way is not enough:
 //!
 //! 1. [`route_table`] declares, per route, whether it writes and what it
 //!    writes to. The router is built from that same list, so a route cannot be
@@ -27,9 +36,13 @@
 //! A grep over query text is deliberately NOT one of these: it is defeated by
 //! a multiline string, a helper indirection, or a macro.
 //!
-//! Resolution — delete, relink, revert-to-missing, keeper selection — is
-//! deliberately absent. It ships separately, designed against this module's
-//! real output rather than a reconstruction of it.
+//! Relink and keeper selection remain deliberately absent. Relink belongs with
+//! the cross-folder findings, which are the shape that needs it; every one of
+//! the 37 content-duplicate groups resolves by delete alone. A suggested keeper
+//! is ruled out on purpose: 28 of 37 groups are decidable from evidence already
+//! on screen, so a suggestion saves almost nothing and would be confidently
+//! wrong on exactly the handful that need the most thought — and a hint right
+//! 33 times out of 37 stops the reader looking at the evidence by group twelve.
 
 use std::sync::Arc;
 
@@ -52,7 +65,21 @@ pub(crate) enum Surface {
     ReadOnly,
     /// Writes, and only to these columns.
     Writes(&'static [&'static str]),
+    /// Removes rows from these tables, and may unlink files beneath a
+    /// library root.
+    ///
+    /// Strictly more than [`Surface::Writes`] rather than a flavour of
+    /// it: the columns a write touches are derived cache, recomputable
+    /// from bytes still on disk, so losing one costs a re-analysis. A
+    /// removed row and an unlinked file are not recomputable from
+    /// anything. Declaring them with the same variant would let a
+    /// reviewer read "writes" and picture the recoverable case.
+    Deletes(&'static [&'static str]),
 }
+
+/// What the duplicate-delete route removes. One table, plus the file
+/// on disk — see [`crate::file_delete`] for the ordering and why.
+pub(crate) const DELETE_TABLES: &[&str] = &["files"];
 
 /// The columns the analyze pass may touch. Digests and the archive label are
 /// derived cache: they describe bytes already on disk and can be recomputed
@@ -90,6 +117,11 @@ fn route_table() -> Vec<(&'static str, MethodRouter<AppState>, Surface)> {
             get(findings),
             Surface::ReadOnly,
         ),
+        (
+            "/library/integrity/duplicates/delete",
+            post(delete_duplicate),
+            Surface::Deletes(DELETE_TABLES),
+        ),
     ]
 }
 
@@ -112,7 +144,28 @@ fn route_surfaces() -> Vec<(&'static str, Surface)> {
 pub fn declared_routes() -> Vec<(&'static str, bool)> {
     route_surfaces()
         .into_iter()
-        .map(|(p, s)| (p, matches!(s, Surface::Writes(_))))
+        .map(|(p, s)| (p, matches!(s, Surface::Writes(_) | Surface::Deletes(_))))
+        .collect()
+}
+
+/// Every route paired with the *kind* of surface it declares, for the
+/// enforcement test.
+///
+/// Kind, not just a write/no-write bool: `Deletes` and `Writes` are
+/// deliberately different variants because a column write is
+/// recomputable and a removed row is not, and a test that collapsed
+/// them could not notice a delete route mis-declared as a write.
+pub fn declared_surface_kinds() -> Vec<(&'static str, &'static str)> {
+    route_surfaces()
+        .into_iter()
+        .map(|(p, s)| {
+            let kind = match s {
+                Surface::ReadOnly => "read_only",
+                Surface::Writes(_) => "writes",
+                Surface::Deletes(_) => "deletes",
+            };
+            (p, kind)
+        })
         .collect()
 }
 
@@ -318,4 +371,273 @@ mod tests {
             );
         }
     }
+}
+
+// -------- POST: delete one redundant copy from a content-duplicate group --------
+
+/// One file, named with the digest of the group it belongs to.
+///
+/// The digest is not redundant with `file_id`: it is the client's claim
+/// about *which group it was looking at*, and the server refuses if the
+/// file does not belong to it. A stale page that has since been
+/// re-analysed cannot delete a file the user never saw.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct DeleteDuplicateBody {
+    digest: String,
+    file_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RevertedIssue {
+    issue_id: i64,
+    /// Text, never a number. Issue numbers are `29.5`, `1A`, `∞` —
+    /// parsing one to compare or display it is how a decimal gets
+    /// truncated to `29`.
+    issue_number: String,
+    series_title: String,
+    /// The issue has no owned, present file any more.
+    now_missing: bool,
+    /// A `pending`/`grabbed` pull attempt survives on this issue, so
+    /// `list_pull_candidates` still excludes it. The revert has landed;
+    /// re-search waits for the daily sweep's stale-grab purge.
+    awaiting_stale_grab_purge: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DeleteDuplicateResult {
+    file_id: i64,
+    path_relative: String,
+    /// `None` when the deleted copy was not bound to any issue — an
+    /// `ignored` stray, which owns nothing and therefore reverts
+    /// nothing.
+    reverted: Option<RevertedIssue>,
+    /// Verified copies of these bytes still on disk after this delete.
+    ///
+    /// Counted by stat-ing each sibling and confirming its digest is
+    /// still valid — NOT by counting catalog rows, which would inflate
+    /// with absent files and reassure the user with a number too high.
+    remaining_in_group: usize,
+    /// Set when the catalog row was removed but the bytes survived.
+    /// The file is now an orphan and reconciliation will report it.
+    unlink_error: Option<String>,
+}
+
+/// Delete exactly one copy from one content-duplicate group.
+///
+/// One file per request, by design. There is no bulk form and no
+/// "resolve all": 37 groups is twenty minutes of clicking, and a bulk
+/// control is the shape that once armed 26 delete buttons on issues of
+/// The Authority that were all correctly bound.
+///
+/// Everything is re-derived server-side. The client supplies a digest
+/// and a file id; the server decides what that means.
+async fn delete_duplicate(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<DeleteDuplicateBody>,
+) -> Result<axum::Json<DeleteDuplicateResult>, ApiError> {
+    let group = longbox_db::file_repo::list_by_content_hash(&state.db, &body.digest).await?;
+
+    let target = group
+        .iter()
+        .find(|f| f.id == body.file_id)
+        .ok_or_else(|| ApiError::BadRequest {
+            message: "that file is not part of the group with this digest".into(),
+        })?
+        .clone();
+
+    let roots = library_root_repo::list_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.path))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    // Never empty a group — and decide that by LOOKING AT THE DISK, not
+    // by counting catalog rows.
+    //
+    // `is_present` only changes on a scan, so a row can claim a file
+    // that is not there; counting rows would let this endpoint report
+    // "1 copy remains" while removing the last real bytes, which is
+    // exactly what its refusal message promises cannot happen. The
+    // stored digest is likewise only trustworthy if the file still
+    // matches the stamp it was hashed against — a file modified since
+    // the last analyze is not a duplicate, and deleting on a stale
+    // digest destroys something that is no longer a copy.
+    //
+    // `DiskObservation::stat` answers both questions in one syscall and
+    // is the type that exists precisely so a delete decision cannot
+    // rest on a catalog column. Library Tidy has used it since PR #32;
+    // this endpoint was written without it, which is the fifth instance
+    // of that substitution on this codebase and the first where the
+    // remedy was already in the tree.
+    // Held across the guard AND the delete, as one unit. Checking
+    // "another verified copy survives" and then deleting are only safe
+    // together; a lock around either half alone leaves the interleaving
+    // that empties a group. See `AppState::delete_lock` for the ceiling.
+    let _delete_guard = state.delete_lock.lock().await;
+
+    let stamps: std::collections::HashMap<i64, longbox_db::ContentStamp> =
+        longbox_db::file_repo::content_stamps_by_content_hash(&state.db, &body.digest)
+            .await?
+            .into_iter()
+            .map(|s| (s.file_id, s))
+            .collect();
+
+    // The TARGET's own digest first. The rule above applies to the file
+    // being deleted at least as much as to the ones surviving it: if it
+    // has changed since the analyze that grouped it, its stored digest
+    // describes bytes that no longer exist, it is not a copy of
+    // anything, and deleting it destroys the only instance of whatever
+    // it now contains.
+    //
+    // An earlier revision stat-ed only the siblings — the rule was
+    // written out in full immediately above and then applied to
+    // everything except the file at risk. `integrity_scan` groups purely
+    // on the catalog's `content_blake3` with no disk validation, so a
+    // stale member stays on screen and remains clickable.
+    let (target_exists, target_obs) = crate::disk_observation::DiskObservation::stat(
+        &roots,
+        target.library_root_id,
+        &target.path_relative,
+        stamps
+            .get(&target.id)
+            .and_then(|s| s.content_blake3.as_deref()),
+        stamps.get(&target.id).and_then(|s| s.hashed_size_bytes),
+        stamps.get(&target.id).and_then(|s| s.hashed_mtime),
+    )
+    .await;
+    if target_exists && target_obs.digest() != Some(body.digest.as_str()) {
+        return Err(ApiError::BadRequest {
+            message: "this file has changed on disk since it was analysed, so it is no longer a \
+                      verified copy of these bytes; re-run Analyze before deleting it"
+                .into(),
+        });
+    }
+
+    let mut siblings = Vec::new();
+    for other in group.iter().filter(|f| f.id != target.id) {
+        let (exists, obs) = crate::disk_observation::DiskObservation::stat(
+            &roots,
+            other.library_root_id,
+            &other.path_relative,
+            stamps
+                .get(&other.id)
+                .and_then(|s| s.content_blake3.as_deref()),
+            stamps.get(&other.id).and_then(|s| s.hashed_size_bytes),
+            stamps.get(&other.id).and_then(|s| s.hashed_mtime),
+        )
+        .await;
+        siblings.push((exists, obs));
+    }
+    // Identity BEFORE content, across the WHOLE group, and a refusal
+    // rather than a skip.
+    //
+    // `metadata()` follows symlinks, so an alias — a symlink and its
+    // target, or one file catalogued under two library roots — stats
+    // identically to what it points at: same size, same mtime, same
+    // validated digest. It is not a copy of anything; it is one file
+    // wearing two names, and no delete in such a group performs the
+    // redundancy-removal this feature exists for.
+    //
+    // Refusing outright is deliberate, and is the whole shape of this
+    // guard. The alternative — treat aliases as non-copies but let the
+    // delete proceed when the target is itself a symlink, reasoning
+    // that unlinking a link frees no bytes — is true about bytes and
+    // false about the library: two symlinks pointing at one file
+    // outside any root are catalogued as an ordinary two-member group
+    // (the scanner walks with `follow_links(true)`), and that bypass
+    // would empty the group completely, reverting both issues, while
+    // this endpoint's own message promised it could not.
+    //
+    // So: one behaviour, not three. Any aliased pair anywhere in the
+    // group stops the operation — the same predicate Library Tidy
+    // applies, deliberately, because two implementations of one rule
+    // are two chances to disagree. That also keeps `remaining_in_group`
+    // honest: there is no successful-delete-with-alias path left for it
+    // to misreport.
+    let all: Vec<&crate::disk_observation::DiskObservation> = std::iter::once(&target_obs)
+        .chain(siblings.iter().map(|(_, o)| o))
+        .collect();
+    if all
+        .iter()
+        .enumerate()
+        .any(|(i, a)| all.iter().skip(i + 1).any(|b| a.is_same_file(b)))
+    {
+        return Err(ApiError::BadRequest {
+            message: "these entries are the same file on disk, reached by different names (a \
+                      symlink, or one file catalogued under two library roots), so neither is a \
+                      redundant copy of the other and deleting either would remove the only \
+                      bytes. Resolve this one manually."
+                .into(),
+        });
+    }
+
+    // Present on disk AND still carrying a digest that matches this
+    // group's. A stale or absent digest means we cannot say this is a
+    // copy of the bytes being deleted.
+    let surviving_copies = siblings
+        .iter()
+        .filter(|(exists, obs)| *exists && obs.digest() == Some(body.digest.as_str()))
+        .count();
+    if surviving_copies == 0 {
+        return Err(ApiError::BadRequest {
+            message: "no other verified copy of these bytes is on disk, so deleting this file \
+                      would remove the last one — which is not what a duplicate delete is for"
+                .into(),
+        });
+    }
+
+    // The issue this copy occupies, captured BEFORE the delete. Files
+    // in one group can be bound to different series (byte-identical
+    // content filed under two titles), so nothing here may assume a
+    // single series for the group — only this file's own binding.
+    let bound = target.issue_id;
+
+    let deleted = crate::file_delete::delete_file(&state.db, &roots, &target)
+        .await
+        .map_err(|message| ApiError::BadRequest { message })?;
+
+    // What reverted. `None` for an unbound copy: an `ignored` stray
+    // holds no issue, so its removal changes no ownership. Status is
+    // deliberately not consulted — ownership is derived from a present
+    // file bound to the issue, and an ignored row is neither.
+    let mut reverted = None;
+    if let Some(issue_id) = bound {
+        if let Some(issue) = longbox_db::issue_repo::find_by_id(&state.db, issue_id).await? {
+            let still_owned = longbox_db::file_repo::list_by_issue(&state.db, issue_id)
+                .await?
+                .iter()
+                .any(|f| f.status == "owned" && f.is_present);
+            let series = longbox_db::series_repo::find_by_id(&state.db, issue.series_id)
+                .await?
+                .map(|s| s.title)
+                .unwrap_or_default();
+            let blocking =
+                longbox_db::pull_attempt_repo::pending_or_grabbed_status(&state.db, issue_id)
+                    .await?;
+            reverted = Some(RevertedIssue {
+                issue_id,
+                issue_number: issue.number,
+                series_title: series,
+                now_missing: !still_owned,
+                awaiting_stale_grab_purge: blocking,
+            });
+        }
+    }
+
+    tracing::info!(
+        target: "longbox_web",
+        file_id = target.id,
+        path = %target.path_relative,
+        digest = %body.digest,
+        reverted_issue = ?reverted.as_ref().map(|r| r.issue_id),
+        "integrity: deleted a redundant copy"
+    );
+
+    Ok(axum::Json(DeleteDuplicateResult {
+        file_id: target.id,
+        path_relative: target.path_relative,
+        reverted,
+        remaining_in_group: surviving_copies,
+        unlink_error: deleted.unlink_error,
+    }))
 }

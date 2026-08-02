@@ -20,12 +20,29 @@
 //! | **row, then bytes** | file remains on disk with no row | an **orphan** — the next scan sees an untracked file and re-adds it |
 //! | bytes, then row | row remains, pointing at nothing | a **ghost** — unrecoverable |
 //!
-//! The ghost is worse than untidy. A surviving row keeps its issue
-//! `owned` (ownership is derived by `EXISTS` over present files), so
-//! the issue never reverts to missing and the pull engine never
-//! re-fetches it — which is precisely the payoff the delete exists to
-//! deliver. The bytes-first order can therefore *silently defeat the
-//! feature while appearing to succeed.*
+//! **The two callers reach the same order for different reasons, and
+//! the reasons are not interchangeable.**
+//!
+//! *Library Integrity* — row-first because a surviving row keeps its
+//! issue `owned` (ownership is derived by `EXISTS` over present
+//! files), so the issue never reverts to missing and the pull engine
+//! never re-fetches it. Bytes-first there can *silently defeat the
+//! entire payoff while appearing to succeed*. That is a strong reason.
+//!
+//! *Library Tidy* — row-first because the alternative is worse, not
+//! because row-first is good. Tidy gains nothing from a revert; what
+//! it gains is that the failure is **visible**. Bytes-first leaves a
+//! row claiming a file that is gone — silent until the next scan.
+//! Row-first leaves bytes with no row, which the next scan re-adds,
+//! recreating the very duplicate that was being removed. Annoying and
+//! recoverable beats silent.
+//!
+//! Do not copy Integrity's justification onto Tidy: it does not hold
+//! there, and someone reasoning from it will draw a wrong conclusion
+//! about what a failed unlink costs. The previous version of this
+//! comment argued the *opposite* order for Tidy on exactly that
+//! ground, and was left dangling on an unrelated type when the
+//! function moved.
 //!
 //! So: row first, and if the unlink then fails, say so loudly and
 //! leave it. Reconciliation already detects that class and reports it
@@ -34,8 +51,17 @@
 //! This ordering was reversed in Library Tidy from PR #32 until this
 //! change, and no test constrained it — the suite asserted only the
 //! end state (row gone **and** file gone), which either order
-//! satisfies. [`tests::row_is_gone_even_when_the_unlink_fails`] is the
-//! first test that can tell them apart.
+//! satisfies.
+//!
+//! Both callers now pin it, and each pins its own route:
+//! `row_is_gone_even_when_the_unlink_fails` (Tidy) and
+//! `integrity_delete_removes_the_row_even_when_the_unlink_fails`
+//! (Integrity). Two, not one, because for a period only Tidy's
+//! existed — and reversing the order left every Integrity test
+//! passing, so the caller with the *stronger* justification had no
+//! test defending it. A doc that cites a constraint living in another
+//! crate's test target is decorative: it cannot fail when the code it
+//! claims to constrain changes.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -72,6 +98,38 @@ pub async fn delete_file(
         );
         return Err("stored path is not contained within its library root".to_owned());
     }
+    // On the RAW STRING, before any `Path` conversion, because that is
+    // the only place this information still exists.
+    //
+    // `is_contained` permits a `.` component — the read paths sharing it
+    // legitimately see `./a/b.cbz`. For a delete that is not enough:
+    // `"Batman/."` names a DIRECTORY, and unlinking it fails only AFTER
+    // the catalog row is already gone, destroying a row for a path that
+    // never named a file.
+    //
+    // No `std::path` API can catch that. `Path` parsing normalises `.`
+    // away, so `Path::new("Batman/.")` and `Path::new("Batman")` are
+    // indistinguishable to every accessor: `file_name()` returns
+    // `Some("Batman")` for both, and `components().next_back()` returns
+    // `Normal("Batman")` for both. A guard written against either one
+    // compares equal and never fires — which is exactly what the first
+    // version of this check did, and what the first proposed fix for it
+    // would also have done. See the PR note: a normalised form of a
+    // value is not the value.
+    let last = file
+        .path_relative
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    if last == "." || last == ".." {
+        tracing::warn!(
+            file_id = file.id,
+            path = %file.path_relative,
+            "file_delete: refused path whose final component is not a file name"
+        );
+        return Err("stored path does not end in a file name".to_owned());
+    }
+
     let root = roots
         .get(&file.library_root_id)
         .ok_or_else(|| format!("unknown library_root_id {}", file.library_root_id))?;
@@ -79,24 +137,39 @@ pub async fn delete_file(
 
     // `is_contained` is purely lexical (rejects `..` and absolute
     // paths). Delete is higher-stakes than the read paths sharing that
-    // guard, so also resolve symlinks and confirm the real target is
-    // still inside the real root — a symlinked parent must not
-    // redirect the delete outside the library.
+    // guard, so also resolve symlinks and confirm the real location is
+    // still inside the real root — a symlinked parent directory must
+    // not redirect the delete outside the library.
+    //
+    // Resolve the PARENT, not the file. Canonicalising the full path
+    // follows a final-component symlink, and `remove_file` on the
+    // result unlinks the link's TARGET while leaving the link — so
+    // deleting one member of a duplicate group would destroy the other
+    // one, the copy the user chose to keep, and leave its row behind
+    // still marked owned. The scanner walks with `follow_links(true)`,
+    // so a link and its target are both catalogued as ordinary rows
+    // with identical bytes: exactly a duplicate group. Resolving only
+    // the parent keeps the escape protection, which is what
+    // canonicalisation was for, and drops the final-component
+    // resolution, which was never the goal.
     let canon_root = tokio::fs::canonicalize(root)
         .await
         .map_err(|e| format!("cannot resolve library root path: {e}"))?;
-    let target = match tokio::fs::canonicalize(&abs).await {
-        Ok(canon_target) => {
-            if !canon_target.starts_with(&canon_root) {
+    let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
+        return Err("stored path has no parent directory or file name".to_owned());
+    };
+    let target = match tokio::fs::canonicalize(parent).await {
+        Ok(canon_parent) => {
+            if !canon_parent.starts_with(&canon_root) {
                 tracing::warn!(
                     file_id = file.id,
                     path = %file.path_relative,
-                    resolved = %canon_target.display(),
+                    resolved = %canon_parent.display(),
                     "file_delete: refused path resolving outside library root"
                 );
                 return Err("resolved path escapes its library root".to_owned());
             }
-            Some(canon_target)
+            Some(canon_parent.join(name))
         }
         // Already gone on disk. Not an error — the row still needs
         // removing, and that is the whole remaining job.

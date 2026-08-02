@@ -482,6 +482,34 @@ where
     Ok(row.is_some())
 }
 
+/// The status of a `pending` or `grabbed` attempt on this issue, if
+/// one exists.
+///
+/// A **fact**, not a candidacy derivation. `list_pull_candidates`
+/// excludes issues carrying either status, so an issue that has just
+/// reverted to missing will not be re-searched while such a row
+/// survives — the daily sweep's stale-`grabbed` purge clears it first.
+/// Callers report this so a user is not left watching an issue sit
+/// missing and concluding the revert failed.
+///
+/// Deliberately does NOT reimplement the candidate query: that query
+/// has several other exclusions and two implementations of one rule is
+/// how they drift.
+pub async fn pending_or_grabbed_status<'e, E>(executor: E, issue_id: i64) -> Result<Option<String>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT status FROM pull_attempts
+           WHERE issue_id = ? AND status IN ('pending', 'grabbed')
+           ORDER BY attempted_at DESC LIMIT 1"#,
+        issue_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|r| r.status))
+}
+
 /// Whether an issue has an in-flight attempt (`pending` or
 /// `submitted`). Phase B's processor calls this to decide whether a
 /// caught file should be attributed to the pull engine.

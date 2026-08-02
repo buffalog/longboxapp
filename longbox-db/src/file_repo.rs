@@ -578,6 +578,34 @@ where
     Ok(result.rows_affected() > 0)
 }
 
+/// Every file sharing one content digest, in id order.
+///
+/// Byte-identical copies, which is what makes a content-duplicate
+/// group. Deliberately unfiltered by `status` or `is_present`: a group
+/// can contain an `ignored` copy with no `issue_id` at all, and that
+/// copy is exactly the kind a caller may want to remove.
+pub async fn list_by_content_hash<'e, E>(executor: E, digest: &str) -> Result<Vec<FileRow>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        FileRow,
+        r#"SELECT id AS "id!: i64", issue_id, library_root_id AS "library_root_id!: i64",
+                  path_relative, size_bytes AS "size_bytes!: i64",
+                  mtime AS "mtime: _", last_scanned_at AS "last_scanned_at: _",
+                  match_method, match_confidence, status,
+                  cached_comicinfo_xml, cached_at AS "cached_at: _",
+                  is_present AS "is_present!: bool",
+                  last_seen_at AS "last_seen_at: _",
+                  matched_at AS "matched_at: _"
+           FROM files WHERE content_blake3 = ? ORDER BY id"#,
+        digest
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
 /// Count of issues that have more than one `is_present = 1` file — the total
 /// number of duplicate-file groups, for the paginated detector's `total`.
 pub async fn count_duplicate_file_groups<'e, E>(executor: E) -> Result<i64>
@@ -740,6 +768,34 @@ pub struct ContentStamp {
     pub content_blake3: Option<String>,
     pub hashed_size_bytes: Option<i64>,
     pub hashed_mtime: Option<PrimitiveDateTime>,
+}
+
+/// Digest stamps for every file sharing one content digest.
+///
+/// Deliberately not filtered on `is_present`: the caller is deciding
+/// whether a copy really exists, and must stat rather than trust that
+/// column. Returning only "present" rows would pre-answer the question
+/// with the catalog value the caller is trying to avoid.
+pub async fn content_stamps_by_content_hash<'e, E>(
+    executor: E,
+    digest: &str,
+) -> Result<Vec<ContentStamp>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let rows = sqlx::query_as!(
+        ContentStamp,
+        r#"SELECT id AS "file_id!: i64",
+                  content_blake3,
+                  hashed_size_bytes,
+                  hashed_mtime AS "hashed_mtime?: PrimitiveDateTime"
+           FROM files
+           WHERE content_blake3 = ?"#,
+        digest
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
 }
 
 /// Digest stamps for every present file on one issue.

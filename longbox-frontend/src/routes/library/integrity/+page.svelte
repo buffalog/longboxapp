@@ -1,11 +1,15 @@
 <script lang="ts">
   // Library Integrity — discovery.
   //
-  // Read-only by construction: the only request this page can make that
-  // writes anything is "Analyze content", and its entire write surface is
-  // the digest and archive-label columns. There is no delete, relink, move
-  // or rematch anywhere on this page, deliberately — resolution ships
-  // separately, designed against this output.
+  // This VIEW makes no destructive request: the only thing it can write
+  // is "Analyze content", whose surface is the digest and archive-label
+  // columns. But the server now also exposes a per-group delete
+  // (`POST /library/integrity/duplicates/delete`) that this page does
+  // not yet call, so do not describe the FEATURE as read-only — only
+  // this page's current request set. The distinction matters: a page
+  // claiming a safety property the server no longer has is the same
+  // defect as a module doc claiming it, and both were true here at one
+  // point.
   import { FileSearch, RefreshCw } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import {
@@ -113,10 +117,9 @@
   </header>
 
   <p class="text-sm text-slate-600">
-    Everything below is read-only. Nothing on this page deletes, moves or re-points a file — it
-    reports what it found so you can decide. The one exception is <strong
-      >Analyze content</strong
-    >, which reads files and records their checksums; it changes no bindings and no files on disk.
+    Nothing on this page deletes, moves or re-points a file yet — it reports what it found so you
+    can decide. <strong>Analyze content</strong> reads files and records their checksums; it changes
+    no bindings and no files on disk.
   </p>
 
   {#if error}
