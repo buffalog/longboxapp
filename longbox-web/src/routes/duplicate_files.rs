@@ -44,14 +44,19 @@
 //!    `{issue_id, keep_file_id}` pairs the client sends. "Resolve all with
 //!    defaults" is a client action that pre-fills those pairs.
 //!
-//! Resolution order per losing file: delete the physical file first
-//! (already-missing counts as success), then hard-delete the DB row. If the
-//! file delete fails the row is left intact (retryable); the kept file/row is
-//! never touched.
+//! Resolution per losing file goes through [`crate::file_delete`], which
+//! removes the catalog row FIRST and the bytes second. If the unlink then
+//! fails the row is already gone, so the file becomes an **orphan** the next
+//! scan reports — surfaced separately as `orphaned`, not as `failed`. The
+//! kept file/row is never touched.
+//!
+//! That order is the opposite of what this comment claimed until the delete
+//! operation was extracted, and the reasoning behind it is not Tidy's own —
+//! see the `file_delete` module docs, which argue the two callers' cases
+//! separately on purpose.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::path::Path;
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
@@ -62,8 +67,8 @@ use longbox_db::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::disk_observation::{validate_digest, DiskObservation};
 use crate::error::ApiError;
-use crate::pathsafe::is_contained;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -257,51 +262,16 @@ async fn validated_observations(
     out
 }
 
-/// Stat the file and decide whether its stored digest still describes it.
-///
-/// Returns (exists on disk, observed size, trustworthy digest). The size comes
-/// from the stat, never from the catalog — on the delete path, differing sizes
-/// are proof of differing content, and proof must come from disk for the same
-/// reason the digest's freshness does.
-async fn validate_digest(
-    roots: &HashMap<i64, String>,
-    library_root_id: i64,
-    path_relative: &str,
-    digest: Option<&str>,
-    stamp_size: Option<i64>,
-    stamp_mtime: Option<time::PrimitiveDateTime>,
-) -> (bool, Option<i64>, Option<String>) {
-    if !is_contained(path_relative) {
-        return (false, None, None);
-    }
-    let Some(root) = roots.get(&library_root_id) else {
-        return (false, None, None);
-    };
-    let Ok(meta) = tokio::fs::metadata(Path::new(root).join(path_relative)).await else {
-        return (false, None, None);
-    };
-    let observed_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-    let Some(digest) = digest.filter(|d| !d.is_empty()) else {
-        return (true, Some(observed_size), None);
-    };
-    let (Some(stamp_size), Some(stamp_mtime)) = (stamp_size, stamp_mtime) else {
-        return (true, Some(observed_size), None);
-    };
-    let Ok(modified) = meta.modified() else {
-        return (true, Some(observed_size), None);
-    };
-    let off = time::OffsetDateTime::from(modified).to_offset(time::UtcOffset::UTC);
-    let observed_mtime = time::PrimitiveDateTime::new(off.date(), off.time());
-    let fresh = stamp_size == observed_size && stamp_mtime == observed_mtime;
-    (true, Some(observed_size), fresh.then(|| digest.to_owned()))
-}
-
 /// The content verdict for a resolve, computed over the files that actually
 /// exist on disk.
 struct ContentJudgement {
     verdict: ContentVerdict,
     on_disk_count: usize,
     on_disk_ids: Vec<i64>,
+    /// Two or more of the present files are the same file on disk,
+    /// reached by different names. Nothing here is a redundant copy of
+    /// anything, so there is nothing safe to delete.
+    aliased: bool,
 }
 
 async fn judge_content(
@@ -327,63 +297,22 @@ async fn judge_content(
             observed.push(obs);
         }
     }
+    // Any two of these that are the SAME FILE reached by two names —
+    // a symlink and its target, or one file under two library roots.
+    // `metadata()` follows links, so an alias stats identically to what
+    // it points at and would otherwise read as a second copy: the
+    // keeper could be an alias of the loser, and deleting the loser
+    // would destroy the bytes the keeper needs.
+    let aliased = observed
+        .iter()
+        .enumerate()
+        .any(|(i, a)| observed.iter().skip(i + 1).any(|b| a.is_same_file(b)));
+
     ContentJudgement {
         verdict: classify_content(&observed),
         on_disk_count: on_disk_ids.len(),
         on_disk_ids,
-    }
-}
-
-/// Evidence about a file's CONTENT, obtained by looking at the file.
-///
-/// A newtype with exactly one production constructor — [`DiskObservation::stat`],
-/// which performs the stat itself — so a catalog value cannot be substituted
-/// for a disk value here even by accident. That mistake has been made four
-/// separate times on this codebase (digest freshness, post-process import
-/// size, the detector's grouping key, and this classifier), always because
-/// `files.size_bytes` is the nearest thing to hand: already loaded, no
-/// syscall, usually correct. Discipline lost to that gradient every time, so
-/// the value is made unavailable rather than discouraged.
-///
-/// Catalog `size_bytes` remains perfectly good for display, for sorting, and
-/// for the corruption floor. It is only illegitimate as proof about bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiskObservation {
-    /// Size the file has right now. `None` when it is not on disk at all.
-    size: Option<i64>,
-    /// A digest validated against that same stat. `None` when there is no
-    /// trustworthy one.
-    digest: Option<String>,
-}
-
-impl DiskObservation {
-    /// The only way production code obtains one: by stat-ing the file.
-    async fn stat(
-        roots: &HashMap<i64, String>,
-        library_root_id: i64,
-        path_relative: &str,
-        digest: Option<&str>,
-        stamp_size: Option<i64>,
-        stamp_mtime: Option<time::PrimitiveDateTime>,
-    ) -> (bool, Self) {
-        let (exists, size, digest) = validate_digest(
-            roots,
-            library_root_id,
-            path_relative,
-            digest,
-            stamp_size,
-            stamp_mtime,
-        )
-        .await;
-        (exists, Self { size, digest })
-    }
-
-    /// Test-only constructor. Deliberately absent from production builds:
-    /// the point of the newtype is that the only other way to get one is to
-    /// look at a real file.
-    #[cfg(test)]
-    fn from_parts(size: Option<i64>, digest: Option<String>) -> Self {
-        Self { size, digest }
+        aliased,
     }
 }
 
@@ -537,17 +466,17 @@ fn classify_content(observed: Observed<'_>) -> ContentVerdict {
         return ContentVerdict::Unknown;
     }
     // A file we could not stat tells us nothing about content.
-    if observed.iter().any(|o| o.size.is_none()) {
+    if observed.iter().any(|o| o.size().is_none()) {
         return ContentVerdict::Unknown;
     }
     // Proof of difference, available without reading a byte.
-    if observed.windows(2).any(|w| w[0].size != w[1].size) {
+    if observed.windows(2).any(|w| w[0].size() != w[1].size()) {
         return ContentVerdict::Distinct;
     }
-    if observed.iter().any(|o| o.digest.is_none()) {
+    if observed.iter().any(|o| o.digest().is_none()) {
         return ContentVerdict::Unknown;
     }
-    if observed.windows(2).all(|w| w[0].digest == w[1].digest) {
+    if observed.windows(2).all(|w| w[0].digest() == w[1].digest()) {
         ContentVerdict::Identical
     } else {
         ContentVerdict::Distinct
@@ -821,8 +750,17 @@ struct ResolveResult {
     status: &'static str,
     kept_file_id: Option<i64>,
     deleted_file_ids: Vec<i64>,
-    /// Losers whose physical delete failed — their DB rows were left intact.
+    /// Losers nothing could be done with — the delete was refused
+    /// before either write, so the row and the file both survive and a
+    /// retry is meaningful.
     failed: Vec<ResolveFailure>,
+    /// Losers whose catalog row was removed but whose bytes could not
+    /// be unlinked. The duplicate IS resolved as far as the library is
+    /// concerned; the file remains on disk and reconciliation will
+    /// report it as an orphan. Distinct from `failed` because the user
+    /// action that follows is different: nothing to retry, something to
+    /// clean up.
+    orphaned: Vec<ResolveFailure>,
     reason: Option<String>,
 }
 
@@ -837,20 +775,6 @@ struct ResolveResponse {
     results: Vec<ResolveResult>,
 }
 
-/// Serializes all resolve batches process-wide. Without it, two concurrent
-/// resolves of the *same* issue with *different* keeps could each read the
-/// full present set before either deletes and, between them, delete every
-/// copy — total loss for that issue. Holding this for the batch means the
-/// second batch's per-group re-read (`resolve_one`) sees the first's deletes
-/// and refuses the now-stale group. Resolve is not hot; a global lock is
-/// cheap insurance on a permanent-delete path.
-// ponytail: process-wide lock; if resolve ever needs throughput, key it per
-// issue_id instead.
-fn resolve_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
 /// Best-effort batch: each resolution is independent, so one refusal or one
 /// undeletable file never sinks the rest. Every group re-runs the full safety
 /// check server-side — the client's `kind`/suggestion is never trusted.
@@ -858,9 +782,22 @@ async fn resolve(
     State(state): State<AppState>,
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
-    // Serialize against concurrent resolves so a group's re-validation and
-    // deletes are atomic w.r.t. another resolve touching the same issue.
-    let _guard = resolve_lock().lock().await;
+    // One resolve at a time, process-wide: a group's re-validation and
+    // the deletes it authorises must be atomic against another resolve
+    // touching the same issue, and against an Integrity delete. Two
+    // concurrent resolves of one issue with different keeps could each
+    // read the full present set before either deletes and, between
+    // them, delete every copy.
+    //
+    // This replaced a module-local `resolve_lock` that did the same job
+    // for this route alone. Once Integrity gained a delete, one rule
+    // enforced by two independent mutexes protected neither against the
+    // other. See `AppState::delete_lock` for the ceiling.
+    //
+    // Exactly one acquisition: `tokio::sync::Mutex` is not reentrant, so
+    // taking it twice on this task deadlocks — and a deadlock hangs the
+    // suite rather than failing it.
+    let _guard = state.delete_lock.lock().await;
     // No parsing patterns here any more: the delete decision is made from
     // content digests, not filenames. Loading them would only invite a
     // filename-based fallback back onto the permanent-delete path.
@@ -878,6 +815,7 @@ async fn resolve(
             // rather than failing the whole batch (matches reconcile's bulk
             // convention).
             Err(e) => ResolveResult {
+                orphaned: Vec::new(),
                 issue_id: r.issue_id,
                 status: "refused",
                 kept_file_id: None,
@@ -908,6 +846,7 @@ async fn resolve_one(
         .collect();
 
     let refuse = |reason: &str| ResolveResult {
+        orphaned: Vec::new(),
         issue_id,
         status: "refused",
         kept_file_id: None,
@@ -982,6 +921,17 @@ async fn resolve_one(
         }
     }
 
+    // Two entries that are one file cannot be a keep-one/delete-rest
+    // decision at all — there is nothing redundant to remove. Say what
+    // the situation IS, not merely that the button declined: someone
+    // hitting this needs to understand what they are looking at.
+    if judged.aliased {
+        return Ok(refuse(
+            "these entries are the same file on disk, reached by different names (a symlink, or \
+             one file catalogued under two library roots), so neither is a redundant copy of the \
+             other and deleting either would remove the only bytes. Resolve this one manually.",
+        ));
+    }
     // Never keep a ghost while deleting real files: if anything is on disk,
     // the survivor has to be one of those.
     if judged.on_disk_count > 0 && !judged.on_disk_ids.contains(&keep_file_id) {
@@ -992,9 +942,23 @@ async fn resolve_one(
 
     let mut deleted_file_ids = Vec::new();
     let mut failed = Vec::new();
+    let mut orphaned = Vec::new();
     for loser in present.iter().filter(|f| f.id != keep_file_id) {
-        match delete_loser(state, roots, loser).await {
-            Ok(()) => deleted_file_ids.push(loser.id),
+        match crate::file_delete::delete_file(&state.db, roots, loser).await {
+            // Three outcomes, not two. A failed unlink is NOT a failed
+            // delete: the catalog row is gone, so the duplicate is
+            // resolved as far as the library is concerned, and the
+            // bytes are left behind as an orphan the next scan will
+            // surface. Reporting that as "could not be deleted" names
+            // the wrong problem and invites a pointless retry — the
+            // row it would retry against no longer exists.
+            Ok(d) => match d.unlink_error {
+                None => deleted_file_ids.push(loser.id),
+                Some(err) => orphaned.push(ResolveFailure {
+                    file_id: loser.id,
+                    error: err,
+                }),
+            },
             Err(err) => failed.push(ResolveFailure {
                 file_id: loser.id,
                 error: err,
@@ -1003,6 +967,7 @@ async fn resolve_one(
     }
 
     Ok(ResolveResult {
+        orphaned,
         issue_id,
         status: "resolved",
         kept_file_id: Some(keep_file_id),
@@ -1010,70 +975,6 @@ async fn resolve_one(
         failed,
         reason: None,
     })
-}
-
-/// Delete one loser's physical file then its DB row. Physical-first: a file
-/// delete that succeeds followed by a failed row delete self-heals on the
-/// next scan (is_present → 0), whereas the reverse would leave an untracked
-/// orphan the scanner re-adds — recreating the very duplicate we're removing.
-/// Already-missing file / already-gone row both count as success.
-async fn delete_loser(
-    state: &AppState,
-    roots: &HashMap<i64, String>,
-    loser: &FileRow,
-) -> Result<(), String> {
-    if !is_contained(&loser.path_relative) {
-        tracing::warn!(
-            file_id = loser.id,
-            path = %loser.path_relative,
-            "duplicate-files: refused non-contained path"
-        );
-        return Err("stored path is not contained within its library root".to_owned());
-    }
-    let root = roots
-        .get(&loser.library_root_id)
-        .ok_or_else(|| format!("unknown library_root_id {}", loser.library_root_id))?;
-    let abs = Path::new(root).join(&loser.path_relative);
-
-    // `is_contained` above is purely lexical (rejects `..`/absolute). Delete
-    // is higher-stakes than the read paths that share that guard, so also
-    // resolve symlinks and confirm the real target is still inside the real
-    // library root — a symlinked parent directory can't redirect the delete
-    // outside. Canonicalize fails with NotFound iff the file is already gone,
-    // which we treat as success.
-    let canon_root = tokio::fs::canonicalize(root)
-        .await
-        .map_err(|e| format!("cannot resolve library root path: {e}"))?;
-    match tokio::fs::canonicalize(&abs).await {
-        Ok(canon_target) => {
-            if !canon_target.starts_with(&canon_root) {
-                tracing::warn!(
-                    file_id = loser.id,
-                    path = %loser.path_relative,
-                    resolved = %canon_target.display(),
-                    "duplicate-files: refused path resolving outside library root"
-                );
-                return Err("resolved path escapes its library root".to_owned());
-            }
-            if let Err(e) = tokio::fs::remove_file(&canon_target).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("failed to delete file: {e}"));
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Already gone on disk — treat as success and clean up the row.
-            tracing::info!(file_id = loser.id, path = %abs.display(), "duplicate-files: file already absent");
-        }
-        Err(e) => return Err(format!("cannot resolve file path: {e}")),
-    }
-
-    match file_repo::delete(&state.db, loser.id).await {
-        Ok(()) | Err(longbox_db::DbError::NotFound) => Ok(()),
-        Err(e) => Err(format!(
-            "file deleted from disk but DB row removal failed: {e}"
-        )),
-    }
 }
 
 // -------- POST: correct (re-point a mismatched file) --------
@@ -1110,7 +1011,7 @@ async fn correct(
 ) -> Result<Json<CorrectResult>, ApiError> {
     // Share the resolver's lock: a concurrent delete-resolve reads the same
     // present-file sets we validate against.
-    let _guard = resolve_lock().lock().await;
+    let _guard = state.delete_lock.lock().await;
     let patterns = load_patterns(&state).await?;
 
     let refuse = |message: String| ApiError::Unprocessable {
@@ -1201,7 +1102,7 @@ async fn correct(
         let mut others = Vec::new();
         for f in &siblings {
             let stamp = stamps.get(&f.id);
-            let (_, _, digest) = validate_digest(
+            let (_, _, digest, _) = validate_digest(
                 &roots,
                 f.library_root_id,
                 &f.path_relative,

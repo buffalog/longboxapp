@@ -143,11 +143,13 @@
       let deleted = 0;
       let refused = 0;
       let failed = 0;
+      let orphaned = 0;
       for (const r of results) {
         if (r.status === 'resolved') {
           resolvedIds.add(r.issue_id);
           deleted += r.deleted_file_ids.length;
           failed += r.failed.length;
+          orphaned += (r.orphaned ?? []).length;
         } else {
           refused += 1;
         }
@@ -159,7 +161,13 @@
       let msg = `Deleted ${deleted} duplicate file${deleted === 1 ? '' : 's'}.`;
       if (refused > 0) msg += ` ${refused} group${refused === 1 ? '' : 's'} refused (see list).`;
       if (failed > 0) msg += ` ${failed} file${failed === 1 ? '' : 's'} could not be deleted.`;
-      if (failed > 0 || refused > 0) toast.warning(msg);
+      // Distinct from `failed`, and deliberately not phrased as a failed
+      // delete: the catalog row is gone, so the duplicate is resolved
+      // and there is nothing to retry. What is left is bytes on disk,
+      // which the next scan reports as an orphan.
+      if (orphaned > 0)
+        msg += ` ${orphaned} file${orphaned === 1 ? '' : 's'} removed from the catalog but still on disk — the next scan will list ${orphaned === 1 ? 'it' : 'them'} as orphaned.`;
+      if (failed > 0 || refused > 0 || orphaned > 0) toast.warning(msg);
       else toast.success(msg);
 
       // If the page emptied but more remain, pull the (now shifted) page.

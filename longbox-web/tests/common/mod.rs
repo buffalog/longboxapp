@@ -192,6 +192,7 @@ pub async fn build_test_app() -> TestApp {
         metron: None,
         scanner: Arc::new(scanner),
         config: Arc::new(config),
+        delete_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
         analyze_status: Arc::new(RwLock::new(Default::default())),
         library_root_id,

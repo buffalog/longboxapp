@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"file_id!: i64\",\n                  content_blake3,\n                  hashed_size_bytes,\n                  hashed_mtime AS \"hashed_mtime?: PrimitiveDateTime\"\n           FROM files\n           WHERE content_blake3 = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "content_blake3",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "hashed_size_bytes",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "hashed_mtime?: PrimitiveDateTime",
+        "ordinal": 3,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "cc215901df216b1d4b3cc931a217b67bd6402ee1a827fc66a9659dfc42cf8a3f"
+}

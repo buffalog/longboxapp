@@ -8,7 +8,9 @@
 pub mod bootstrap;
 pub mod config;
 pub mod content_hash;
+pub(crate) mod disk_observation;
 pub mod error;
+pub mod file_delete;
 pub mod frontend;
 pub mod integrity_scan;
 pub mod metron_link;

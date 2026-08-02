@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", issue_id, library_root_id AS \"library_root_id!: i64\",\n                  path_relative, size_bytes AS \"size_bytes!: i64\",\n                  mtime AS \"mtime: _\", last_scanned_at AS \"last_scanned_at: _\",\n                  match_method, match_confidence, status,\n                  cached_comicinfo_xml, cached_at AS \"cached_at: _\",\n                  is_present AS \"is_present!: bool\",\n                  last_seen_at AS \"last_seen_at: _\",\n                  matched_at AS \"matched_at: _\"\n           FROM files WHERE content_blake3 = ? ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "issue_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "library_root_id!: i64",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "path_relative",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "size_bytes!: i64",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "mtime: _",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "last_scanned_at: _",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "match_method",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "match_confidence",
+        "ordinal": 8,
+        "type_info": "Float"
+      },
+      {
+        "name": "status",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_comicinfo_xml",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_at: _",
+        "ordinal": 11,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "is_present!: bool",
+        "ordinal": 12,
+        "type_info": "Bool"
+      },
+      {
+        "name": "last_seen_at: _",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "matched_at: _",
+        "ordinal": 14,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "180f7b12bee80f23fcde00af37b884679ce0890a83c4c59d8c1a8c8d760416f8"
+}
