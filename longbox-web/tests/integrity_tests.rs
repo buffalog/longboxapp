@@ -7,6 +7,8 @@
 
 mod common;
 
+use std::collections::HashMap;
+
 use axum::http::{Method, StatusCode};
 use common::{build_test_app, empty_request, response_json, TestApp};
 use longbox_db::{file_repo, issue_repo, series_repo, NewFile, NewIssue, NewSeries};
@@ -1630,6 +1632,146 @@ async fn deleting_a_link_to_an_outside_file_unlinks_the_link_not_the_target() {
     let _ = keep;
 }
 
+/// A row whose file is genuinely gone from disk can still be deleted,
+/// and the issue still reverts.
+///
+/// This pins the PURPOSE of the `target_exists &&` conjunct in the
+/// freshness check. Without that conjunct an absent file has no digest,
+/// the check refuses, and a row pointing at nothing becomes
+/// undeletable — the catalog could never be cleaned up through this
+/// screen. The conjunct is what makes that case work, and until now
+/// nothing asserted it, so the conjunct could have been deleted with
+/// the whole suite green.
+///
+/// Its known cost is recorded rather than fixed here: `validate_digest`
+/// collapses EVERY `metadata()` failure into "absent", so a target that
+/// is unreadable rather than missing (`EACCES` on a parent, `EIO` on a
+/// flaky mount) also skips the freshness check. The delete then
+/// proceeds, the row goes, the unlink fails, and the issue reverts with
+/// the bytes still on disk. That is the documented row-first tradeoff —
+/// visible via `unlink_error` and recoverable on the next scan — but it
+/// is a wider door than the one this test needs open.
+#[tokio::test]
+async fn a_row_whose_file_is_already_gone_is_deletable_and_still_reverts() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Vanished", 2025).await;
+    let gone_issue = seed_bound_issue(&app, series, "1").await;
+    let keep_issue = seed_bound_issue(&app, series, "2").await;
+
+    let gone = seed_copy(
+        &app,
+        Some(gone_issue),
+        "Gone/comic.cbz",
+        "dig-gone",
+        "owned",
+    )
+    .await;
+    let keep = seed_copy(
+        &app,
+        Some(keep_issue),
+        "Genuine/gone.cbz",
+        "dig-gone",
+        "owned",
+    )
+    .await;
+    // The bytes disappear after the stamp — a file deleted outside
+    // LongBox, which is exactly the row this cleans up.
+    std::fs::remove_file(app.library_path().join("Gone/comic.cbz")).unwrap();
+
+    let (status, body) = delete_dup(&app, "dig-gone", gone).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a row pointing at nothing must still be removable: {body}"
+    );
+    assert_eq!(
+        body["reverted"]["now_missing"], true,
+        "and its issue reverts, because the copy it claimed is gone: {body}"
+    );
+    assert!(
+        body["unlink_error"].is_null(),
+        "an already-absent file is not an unlink failure: {body}"
+    );
+    assert!(
+        file_repo::find_by_id(&app.state.db, gone)
+            .await
+            .unwrap()
+            .is_none(),
+        "the row must be gone"
+    );
+    assert!(
+        on_disk_rel(&app, "Genuine/gone.cbz"),
+        "the surviving copy is untouched"
+    );
+    let _ = keep;
+}
+
+/// The shared delete operation refuses a path that does not name a
+/// file, tested against the operation itself.
+///
+/// Both current routes happen to refuse these earlier, on content — a
+/// directory carries no digest, so the freshness check fires first.
+/// That makes every route-level test of this guard vacuous: disable the
+/// guard entirely and they all still pass. The guard is defence in
+/// depth in the SHARED operation, so it is pinned where it lives, not
+/// through a caller that would refuse anyway.
+#[tokio::test]
+async fn the_delete_operation_refuses_a_path_that_does_not_name_a_file() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "RawGuard", 2025).await;
+    let issue = seed_bound_issue(&app, series, "1").await;
+
+    std::fs::create_dir_all(app.library_path().join("Shelf")).unwrap();
+    std::fs::write(app.library_path().join("Shelf/real.cbz"), b"bytes").unwrap();
+    let roots = HashMap::from([(
+        app.library_root_id,
+        app.library_path().to_string_lossy().into_owned(),
+    )]);
+
+    for bad in ["Shelf/.", "Shelf/", "Shelf/./", "Shelf//"] {
+        let id = seed_existing(&app, Some(issue), bad, "dig-raw").await;
+        let row = file_repo::find_by_id(&app.state.db, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let err = longbox_web::file_delete::delete_file(&app.state.db, &roots, &row)
+            .await
+            .expect_err("{bad:?} names a directory and must be refused");
+        assert!(
+            err.contains("does not end in a file name"),
+            "{bad:?}: refused for the wrong reason: {err}"
+        );
+        assert!(
+            file_repo::find_by_id(&app.state.db, id)
+                .await
+                .unwrap()
+                .is_some(),
+            "{bad:?}: the row must survive a refusal"
+        );
+    }
+
+    // And the guard must not refuse a legitimate path that merely
+    // contains a `.` component — the read paths share `is_contained`
+    // and see `./a/b.cbz` routinely.
+    std::fs::write(app.library_path().join("Shelf/ok.cbz"), b"bytes").unwrap();
+    let ok = seed_existing(&app, Some(issue), "Shelf/./ok.cbz", "dig-raw").await;
+    let row = file_repo::find_by_id(&app.state.db, ok)
+        .await
+        .unwrap()
+        .unwrap();
+    longbox_web::file_delete::delete_file(&app.state.db, &roots, &row)
+        .await
+        .expect("a real file behind a `.` component must still be deletable");
+    assert!(
+        !app.library_path().join("Shelf/ok.cbz").exists(),
+        "and it must actually be gone"
+    );
+    assert!(
+        app.library_path().join("Shelf/real.cbz").exists(),
+        "without touching anything else in the directory"
+    );
+}
+
 /// A target that IS a directory — no `.`, no trailing slash — is
 /// refused, because the guard that catches it is semantic, not
 /// syntactic.
@@ -2077,6 +2219,28 @@ async fn a_path_ending_in_a_dot_component_is_refused_before_the_row_is_touched()
         assert!(
             issue_is_owned(&app, dir_issue).await,
             "{dir_path:?}: no issue may revert on the strength of a delete that deleted nothing"
+        );
+
+        // The route refuses these on content — a directory carries no
+        // digest — so this asserts the OUTCOME and cannot tell which
+        // guard produced it. The guard itself is pinned directly in
+        // `the_delete_operation_refuses_a_path_that_does_not_name_a_file`,
+        // because a test that passes with its subject disabled is not
+        // evidence about its subject.
+        let row = file_repo::find_by_id(&app.state.db, dir_row)
+            .await
+            .unwrap()
+            .unwrap();
+        let roots = HashMap::from([(
+            app.library_root_id,
+            app.library_path().to_string_lossy().into_owned(),
+        )]);
+        let err = longbox_web::file_delete::delete_file(&app.state.db, &roots, &row)
+            .await
+            .expect_err("the shared operation must refuse it too");
+        assert!(
+            err.contains("does not end in a file name"),
+            "{dir_path:?}: refused for the wrong reason: {err}"
         );
         let _ = keep;
     }

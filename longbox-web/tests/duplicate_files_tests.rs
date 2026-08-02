@@ -1410,16 +1410,58 @@ async fn resolve_refuses_a_group_whose_files_are_the_same_file_aliased() {
 /// Present-but-unreadable keeps it in the count and refuses: a
 /// directory has no digest, and `classify_content` answers `Unknown`
 /// on a missing digest and `Distinct` on a size mismatch.
+///
+/// The fixture is built so that the SIZE proof cannot be what refuses
+/// it. `classify_content` checks sizes before digests, so a directory
+/// of the usual few dozen bytes against a 5-byte comic returns
+/// `Distinct` whether or not a non-file is special-cased at all — and
+/// the first version of this test passed for exactly that reason,
+/// constraining nothing. Here the keeper is padded to the directory's
+/// own `st_size` and the directory row is stamped with the keeper's
+/// digest against the directory's real stat. Without the non-file
+/// branch that group classifies `Identical` and the resolve DELETES.
 #[tokio::test]
 async fn resolve_refuses_when_a_loser_is_not_a_regular_file() {
     let app = build_test_app().await;
     let issue = seed_series_issue(&app, "Directory", "1").await;
 
-    let keep = seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbz", true, 5, Some(b"bytes")).await;
     // A catalogued row whose path is a DIRECTORY holding a real comic.
     std::fs::create_dir_all(app.library_path().join("Dir/Dir 1.cbr")).unwrap();
     std::fs::write(app.library_path().join("Dir/Dir 1.cbr/inner.cbz"), b"bytes").unwrap();
-    let loser = seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbr", true, 5, None).await;
+    let dir_meta = std::fs::metadata(app.library_path().join("Dir/Dir 1.cbr")).unwrap();
+    let dir_size = dir_meta.len();
+
+    // Keeper padded to the directory's own size, so the size proof is
+    // silent and only the digest can decide.
+    let padded = vec![b'x'; usize::try_from(dir_size).unwrap()];
+    let keep = seed_file_with_bytes(
+        &app,
+        issue,
+        "Dir/Dir 1.cbz",
+        true,
+        dir_size as i64,
+        Some(&padded),
+    )
+    .await;
+    let loser =
+        seed_file_with_bytes(&app, issue, "Dir/Dir 1.cbr", true, dir_size as i64, None).await;
+    // Stamp the directory row with the KEEPER's digest, against the
+    // directory's real size and mtime so the stamp reads as fresh.
+    {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&padded);
+        let off = time::OffsetDateTime::from(dir_meta.modified().unwrap())
+            .to_offset(time::UtcOffset::UTC);
+        file_repo::set_content_hash(
+            &app.state.db,
+            loser,
+            hasher.finalize().to_hex().as_ref(),
+            dir_size as i64,
+            time::PrimitiveDateTime::new(off.date(), off.time()),
+        )
+        .await
+        .unwrap();
+    }
 
     let resp = app
         .request(json_request(
