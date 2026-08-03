@@ -88,6 +88,19 @@ fn scene_year_re() -> &'static Regex {
 /// 2. **Strip all bracketed segments** wholesale.
 /// 3. **Dots → spaces** so `Absolute.Green.Lantern.008` becomes the
 ///    space-separated form the filename parser expects.
+///
+///    Deliberately NOT underscores, unlike [`normalize_scene_title`].
+///    This pass runs first, and its year-less output path (`{cleaned}
+///    .cbz`, taken whenever there is no `[YYYY]` bracket) drops the
+///    year entirely. On an all-underscore title that would hand
+///    `Powers v06 2024 digital ...` to pattern id=1, which captures the
+///    release YEAR as the issue number and yields `year: None` — a
+///    confident wrong answer that beats the correct id=14 parse the
+///    scene pass produces, and one the year gate cannot catch because
+///    `year: None` always passes. Measured on a 60-issue live sample:
+///    adding `_` here regressed 11 of 110 real underscored titles from
+///    a correct parse to a wrong one, and fixed none. Underscore
+///    handling belongs in the scene pass, which wraps the bare year.
 /// 4. **Collapse whitespace** — bracket-stripping leaves runs of
 ///    spaces where the brackets used to sit; squash them.
 /// 5. **Re-emit canonical** — `{cleaned} ({year}).cbz` when year was
@@ -141,10 +154,18 @@ fn nzb_bracket_re() -> &'static Regex {
 ///     the string gets removed. The regex is anchored so internal
 ///     hyphenated tokens (`digital-mobile`, `Spider-Man`) survive.
 ///
-///  2. **Dots → spaces, blanket.** Title-internal dots
+///  2. **Dots AND underscores → spaces, blanket.** Title-internal dots
 ///     (`S.W.O.R.D.`, `G.I.Joe`) lose their structure but the
 ///     matcher's `normalize_title` reduces both sides to the same
 ///     punctuation-free form, so similarity scoring isn't affected.
+///     Underscore is load-bearing beyond the separator itself: `_` is
+///     a regex WORD character, so `\b` never fires between `_` and a
+///     digit or letter. Until this step converts them, an
+///     all-underscore title like
+///     `The_Author_Immortal_005__2026___Digital___Zone-Empire_`
+///     (DrunkenSlug's normalization of the same release NZBGeek ships
+///     bracketed) is invisible to steps 3, 4 and 5 below — every one
+///     of them is `\b`-anchored.
 ///
 ///  3. **Wrap `\d+ of \d+` as `\d+ (of \d+)`.** Mini-series notation
 ///     in scene format is dot-separated (`01.of.04`); the parser
@@ -172,7 +193,7 @@ fn nzb_bracket_re() -> &'static Regex {
 ///     the downloader.
 pub fn normalize_scene_title(input: &str) -> String {
     let degrouped = strip_scene_group_suffix(input);
-    let with_spaces = degrouped.replace('.', " ");
+    let with_spaces = degrouped.replace(['.', '_'], " ");
     let with_of = wrap_of_marker(&with_spaces);
     let denoised = strip_scene_noise(&with_of);
     let with_year = wrap_rightmost_year(&denoised);
@@ -209,11 +230,23 @@ fn wrap_of_marker(input: &str) -> String {
 /// `digital-mobile` and friends are listed BEFORE `digital` so the
 /// longer match wins — the regex engine is greedy on alternation
 /// position, not match length, so we put long-before-short by hand.
+///
+/// `\d+ covers?` is correctness-critical, not cosmetic like the rest.
+/// An art-count tag (`The New Space Age 001 2025 3 covers digital
+/// Knight Ripper-Empire`) leaves a BARE NUMBER sitting after the
+/// wrapped year — precisely the shape pattern id=7 (`Series (YYYY)
+/// NNN`) claims. Unstripped it captures `series="The New Space Age
+/// 001"`, `number="3"` and still scores 0.76 against the real series
+/// name, so it clears the pre-grab similarity gate and grabs issue 001
+/// as issue 3. Every other token here is alphabetic and can only ever
+/// be absorbed by a permissive `.*?` tail; this one changes the parse.
 fn strip_scene_noise(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:digital-mobile|digital-rip|digital-hd|digital|webrip|webdl|mobile)\b")
-            .unwrap()
+        Regex::new(
+            r"(?i)\b(?:\d+\s+covers?|digital-mobile|digital-rip|digital-hd|digital|webrip|webdl|mobile)\b",
+        )
+        .unwrap()
     });
     re.replace_all(input, " ").into_owned()
 }
@@ -439,10 +472,16 @@ pub fn filter_by_series_title(
     // "0 parseable / wrong series" diagnostics when the indexer
     // happened to return only digital-only formats.
     //
-    // Normalization (lowercase + dots → spaces) matches both
-    // `Infinity Comic` (NZBGeek-style space-separated) and
-    // `Infinity.Comic` (Scene-style dotted) with the same single
-    // human-readable keyword in the config.
+    // Normalization (lowercase + dots AND underscores → spaces) matches
+    // `Infinity Comic` (NZBGeek-style space-separated),
+    // `Infinity.Comic` (Scene-style dotted) and `Infinity_Comic`
+    // (DrunkenSlug-style underscored) with the same single
+    // human-readable keyword in the config. Underscore is load-bearing
+    // for multi-word keywords: without it `infinity comic` never
+    // matched an underscored title. That was masked while such titles
+    // were unparseable and got dropped anyway — now that the scene
+    // normalizer claims them, an underscore-blind exclusion list would
+    // let a format the user explicitly excluded through the gate.
     let lowered_keywords: Vec<String> = exclusion_keywords
         .iter()
         .map(|k| k.trim().to_lowercase())
@@ -454,7 +493,7 @@ pub fn filter_by_series_title(
         releases
             .into_iter()
             .filter(|r| {
-                let normalized_title = r.title.to_lowercase().replace('.', " ");
+                let normalized_title = r.title.to_lowercase().replace(['.', '_'], " ");
                 !lowered_keywords
                     .iter()
                     .any(|kw| normalized_title.contains(kw))
@@ -1597,6 +1636,237 @@ mod tests {
     fn nzb_no_year_bracket_strips_other_tags_and_yields_yearless() {
         let normalized = normalize_nzb_title("Some Mini 003 [Digital] [Group-Name]");
         assert_eq!(normalized, "Some Mini 003.cbz");
+    }
+
+    // ---- underscore-separated indexer titles (DrunkenSlug) ----
+    //
+    // Some indexers normalize every non-alphanumeric character in a
+    // release name to `_`, so the SAME release NZBGeek ships as
+    // `The Author Immortal 005 [2026] [Digital] [Zone-Empire]`
+    // arrives as
+    // `The_Author_Immortal_005__2026___Digital___Zone-Empire_`.
+    // Pre-fix the underscored copy failed all four cascade passes and
+    // scored 0.0, so the pre-grab gate declined a release the library
+    // could have had whenever that indexer was the only stockist.
+
+    /// Mechanism 1 — the scene normalizer's separator substitution.
+    /// The bare (unbracketed) year in an underscored title can only be
+    /// reached once `_` becomes a space: `\b` does not fire between two
+    /// word characters, so `_2026_` is invisible to the year-wrap and
+    /// `_Digital_` invisible to the noise strip.
+    #[test]
+    fn scene_normalizer_treats_underscore_as_a_separator() {
+        assert_eq!(
+            normalize_scene_title("The_Author_Immortal_005__2026___Digital___Zone-Empire_"),
+            "The Author Immortal 005 (2026) Zone-Empire.cbz",
+        );
+    }
+
+    /// Mechanism 2 — `normalize_nzb_title` must stay underscore-BLIND.
+    ///
+    /// The obvious symmetric change (teaching this normalizer about `_`
+    /// too) is wrong, and this test is the lock that says so. This pass
+    /// runs before the scene pass and, with no `[YYYY]` bracket to
+    /// capture, emits a year-less string. On a `vNN` release that hands
+    /// `Powers v06 2024 digital ...` to pattern id=1, which takes the
+    /// release YEAR as the issue number — beating the correct id=14
+    /// parse the scene pass would produce. Measured on a 60-issue live
+    /// sample: 11 of 110 real underscored titles regressed this way.
+    ///
+    /// Worse than a miss: series similarity is still 1.0, so
+    /// `best_similarity >= threshold` and `filter_by_series_title`
+    /// reports NO mismatch — the release is silently dropped on the
+    /// issue-number gate with no diagnostic row to explain it.
+    #[test]
+    fn vnn_underscored_release_parses_via_the_scene_pass_not_the_nzb_pass() {
+        let patterns = default_patterns();
+        let t = "Powers_v06__2024___digital___Son_of_Ultron-Empire_";
+        let p = parse_release_title(t, &patterns).expect("parses");
+        assert_eq!(p.series_title, "Powers");
+        assert_eq!(p.number, "06", "must be the volume number, NOT the year");
+        assert_eq!(p.year, Some(2024));
+        assert_eq!(p.pattern_id, 14, "id=14 (Series vNN (YYYY)) must claim it");
+
+        // And it survives the real gate for the issue it actually is.
+        let outcome = filter_by_series_title(
+            vec![release(t, Some(10))],
+            &patterns,
+            "Powers",
+            None,
+            0.75,
+            &[],
+            None,
+            "6",
+            &[],
+        );
+        assert_eq!(outcome.kept.len(), 1, "vNN release must be grabbable");
+    }
+
+    /// A bare `N covers` art-count tag must not be mistaken for the
+    /// issue number.
+    ///
+    /// Real sampled title. Once `_` becomes a space the `3` in
+    /// `3 covers` is a standalone token sitting after the wrapped year,
+    /// which is exactly the shape pattern id=7 (`Series (YYYY) NNN`)
+    /// wants — it claims `series="The New Space Age 001"`, `number="3"`,
+    /// and scores 0.76 against "The New Space Age", clearing the 0.75
+    /// gate. That is a FALSE ACCEPT: issue 001 gets grabbed as issue 3,
+    /// and a genuine request for issue 1 is silently declined. The
+    /// dotted form of the same title has always had this bug; making
+    /// underscored titles parseable is what widened the population.
+    #[test]
+    fn covers_count_tag_is_not_mistaken_for_the_issue_number() {
+        let patterns = default_patterns();
+        let t = "The_New_Space_Age_001__2025___3_covers___digital___Knight_Ripper-Empire_";
+        let p = parse_release_title(t, &patterns).expect("parses");
+        assert_eq!(p.series_title, "The New Space Age");
+        assert_eq!(p.number, "001", "the `3` in `3 covers` is not the issue");
+
+        // The false accept the gate must refuse.
+        let wrong = filter_by_series_title(
+            vec![release(t, Some(10))],
+            &patterns,
+            "The New Space Age",
+            Some(2025),
+            0.75,
+            &[],
+            None,
+            "3",
+            &[],
+        );
+        assert!(
+            wrong.kept.is_empty(),
+            "issue 001 must NOT be accepted as issue 3"
+        );
+
+        // ...while the issue it really is stays grabbable.
+        let right = filter_by_series_title(
+            vec![release(t, Some(10))],
+            &patterns,
+            "The New Space Age",
+            Some(2025),
+            0.75,
+            &[],
+            None,
+            "1",
+            &[],
+        );
+        assert_eq!(right.kept.len(), 1, "issue 001 must be grabbable as #1");
+    }
+
+    /// The same `N covers` bug in the pre-existing dotted form — this
+    /// one predates the underscore work and is fixed by the same noise
+    /// strip. Locks the root cause, not just the shape that surfaced it.
+    #[test]
+    fn covers_count_tag_is_stripped_from_dotted_scene_titles_too() {
+        let patterns = default_patterns();
+        let p = parse_release_title(
+            "The.New.Space.Age.001.2025.3.covers.digital.Knight.Ripper-Empire",
+            &patterns,
+        )
+        .expect("parses");
+        assert_eq!(p.series_title, "The New Space Age");
+        assert_eq!(p.number, "001");
+    }
+
+    /// Exclusion keywords must match underscored titles.
+    ///
+    /// `filter_by_series_title` lowercases and replaces dots before the
+    /// `contains` check, so a multi-word keyword like `infinity comic`
+    /// never matched `..._Infinity_Comic_...`. Pre-fix that was masked —
+    /// the underscored title was unparseable and got dropped anyway.
+    /// Now that it parses at 1.0, an unfixed exclusion list would let a
+    /// format the user explicitly excluded be grabbed.
+    #[test]
+    fn exclusion_keywords_match_underscored_titles() {
+        let patterns = default_patterns();
+        let kw = vec!["infinity comic".to_string()];
+        for t in [
+            "My_Little_Warlord_018__2026___Infinity_Comic___Son_of_Ultron-Empire_",
+            "My Little Warlord 018 (2026) (Infinity Comic) (Son of Ultron-Empire)",
+            "My.Little.Warlord.018.2026.Infinity.Comic.Son.of.Ultron-Empire",
+        ] {
+            let outcome = filter_by_series_title(
+                vec![release(t, Some(10))],
+                &patterns,
+                "My Little Warlord",
+                None,
+                0.75,
+                &kw,
+                None,
+                "18",
+                &[],
+            );
+            assert!(outcome.kept.is_empty(), "must be excluded: {t}");
+        }
+    }
+
+    /// Mechanism 3 — end-to-end through the cascade: the underscored
+    /// copy must parse to the same series/number/year as the bracketed
+    /// copy, and score the same.
+    #[test]
+    fn underscored_and_bracketed_copies_of_one_release_score_alike() {
+        let patterns = default_patterns();
+        let bracketed = "The Author Immortal 005 [2026] [Digital] [Zone-Empire]";
+        let underscored = "The_Author_Immortal_005__2026___Digital___Zone-Empire_";
+
+        let b = parse_release_title(bracketed, &patterns).expect("bracketed parses");
+        let u = parse_release_title(underscored, &patterns).expect("underscored parses");
+        assert_eq!(u.series_title, b.series_title);
+        assert_eq!(u.number, b.number);
+        assert_eq!(u.year, b.year);
+
+        let bs = score_release_title(bracketed, "The Author Immortal", &patterns)
+            .expect("bracketed scores");
+        let us = score_release_title(underscored, "The Author Immortal", &patterns)
+            .expect("underscored scores");
+        assert_eq!(us, bs, "same release must score the same either way");
+        assert!(us > 0.99, "exact series match should be ~1.0, got {us}");
+    }
+
+    /// Mechanism 4 — the pre-grab gate itself. An underscored release
+    /// must survive `filter_by_series_title` rather than be dropped as
+    /// unparseable and reported as a series-mismatch.
+    #[test]
+    fn pre_grab_gate_keeps_an_underscored_release() {
+        let patterns = default_patterns();
+        let outcome = filter_by_series_title(
+            vec![release(
+                "The_Author_Immortal_005__2026___Digital___Zone-Empire_",
+                Some(10),
+            )],
+            &patterns,
+            "The Author Immortal",
+            Some(2026),
+            0.75,
+            &[],
+            None,
+            "5",
+            &[],
+        );
+        assert_eq!(outcome.kept.len(), 1, "underscored release must be kept");
+        assert!(
+            outcome.mismatch.is_none(),
+            "must not report series_mismatch"
+        );
+    }
+
+    /// Making underscored titles parseable must not make them match
+    /// EVERYTHING — a now-parseable release for a different series has
+    /// to score low, so the similarity gate still rejects it.
+    #[test]
+    fn underscored_series_scores_low_against_a_different_series() {
+        let patterns = default_patterns();
+        let score = score_release_title(
+            "The_Author_Immortal_005__2026___Digital___Zone-Empire_",
+            "Batman",
+            &patterns,
+        )
+        .expect("parses");
+        assert!(
+            score < 0.5,
+            "wrong series must still score low, got {score}"
+        );
     }
 
     /// Direct normalizer round-trip — the canonical-shape output the
