@@ -266,3 +266,57 @@ async fn find_release_ok_none_when_some_error_but_others_just_empty() {
 async fn find_release_empty_indexer_list_is_ok_none() {
     assert!(find_release(&[], "X", "1", None).await.unwrap().is_none());
 }
+
+/// Integration bar for the underscore-separated indexer title.
+///
+/// Some indexers (DrunkenSlug) normalize every non-alphanumeric
+/// character in a release name to `_`. The release below is the same
+/// one NZBGeek ships as
+/// `The Author Immortal 005 [2026] [Digital] [Zone-Empire]`.
+///
+/// This exercises the REAL pull-engine entrypoint — HTTP fetch, parse,
+/// pre-grab similarity gate at the production 0.75 threshold, and
+/// selection — not just the normalizer in isolation. Pre-fix the
+/// cascade could not parse the title, so the gate counted it
+/// unparseable and returned `Mismatch` (logged as series_mismatch),
+/// declining a release that was in stock.
+#[tokio::test]
+async fn find_release_filtered_accepts_underscore_separated_title() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "The_Author_Immortal_005__2026___Digital___Zone-Empire_",
+            "underscored",
+            7,
+        )])))
+        .mount(&server)
+        .await;
+
+    let indexers = vec![indexer(1, "drunkenslug", &server.uri(), 0)];
+    let outcome = longbox_newznab::find_release_excluding_filtered(
+        &indexers,
+        "The Author Immortal",
+        "5",
+        Some(2026),
+        &[],
+        &longbox_core::filename::default_patterns(),
+        0.75,
+        &[],
+        None,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    match outcome {
+        longbox_newznab::FindOutcome::Match { release, .. } => {
+            assert_eq!(
+                release.title,
+                "The_Author_Immortal_005__2026___Digital___Zone-Empire_"
+            );
+        }
+        other => panic!("expected the underscored release to be grabbable, got {other:?}"),
+    }
+}
