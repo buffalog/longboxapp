@@ -133,6 +133,9 @@ pub async fn reconcile(
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FileEvidence {
     pub file_id: i64,
+    /// Which library root `path_relative` is relative to. Needed to stat
+    /// the file — a path alone cannot be resolved.
+    pub library_root_id: i64,
     pub path_relative: String,
     pub size_bytes: i64,
     pub content_blake3: Option<String>,
@@ -173,11 +176,13 @@ type EvidenceRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    i64,
 );
 
 const EVIDENCE_SQL: &str = "SELECT f.id, f.path_relative, f.size_bytes, f.content_blake3, \
      f.issue_id, i.number, i.series_id, s.title, s.start_year, f.match_method, \
-     f.match_confidence, f.archive_label, f.archive_label_kind, f.cached_comicinfo_xml \
+     f.match_confidence, f.archive_label, f.archive_label_kind, f.cached_comicinfo_xml, \
+     f.library_root_id \
      FROM files f \
      LEFT JOIN issues i ON f.issue_id = i.id \
      LEFT JOIN series s ON i.series_id = s.id \
@@ -226,6 +231,7 @@ async fn load_evidence(db: &longbox_db::Pool) -> Result<Vec<FileEvidence>, longb
             });
             FileEvidence {
                 file_id: r.0,
+                library_root_id: r.14,
                 size_bytes: r.2,
                 content_blake3: r.3,
                 issue_id: r.4,
@@ -350,22 +356,72 @@ pub async fn findings(
             by_digest.entry(d).or_default().push(f);
         }
     }
-    let mut content_duplicates: Vec<ContentDuplicateGroup> = by_digest
+    // A stored digest is only evidence about bytes that are still there.
+    //
+    // Grouping on `content_blake3` alone reports a file replaced since it
+    // was analysed as a copy of whatever else carries its old digest —
+    // describing content that no longer exists anywhere. Seen live: two
+    // Ferocious issues with different sizes, different ComicInfo numbers
+    // and different pages, both still carrying one November digest
+    // stamped against a size neither file has had since.
+    //
+    // Analyze cannot clear it: `refresh_digests` only visits
+    // size-collision candidates, and a file whose size changed no longer
+    // collides with its former twin. So the stale row is permanent and
+    // unactionable — the delete endpoint refuses it (correctly), leaving
+    // a finding that can only ever be dismissed by not believing it.
+    //
+    // Freshness is decided by `DiskObservation::stat` — the same stat the
+    // delete path performs — and never by comparing `files.size_bytes` to
+    // `files.hashed_size_bytes`. Both are catalog columns; agreeing with
+    // each other says nothing about the bytes on disk, and reaching for
+    // them here would be the sixth instance of the substitution
+    // `DiskObservation` exists to prevent.
+    let roots: std::collections::HashMap<i64, String> = longbox_db::library_root_repo::list_all(db)
+        .await?
         .into_iter()
-        .filter(|(_, files)| files.len() > 1)
-        .map(|(digest, files)| {
-            let issues: BTreeSet<i64> = files.iter().filter_map(|f| f.issue_id).collect();
-            let series: BTreeSet<i64> = files.iter().filter_map(|f| f.series_id).collect();
-            ContentDuplicateGroup {
-                digest: digest.to_owned(),
-                size_bytes: files[0].size_bytes,
-                redundant_bytes: files[0].size_bytes * (files.len() as i64 - 1),
-                distinct_issue_ids: issues.into_iter().collect(),
-                spans_multiple_series: series.len() > 1,
-                files: files.into_iter().cloned().collect(),
-            }
-        })
+        .map(|r| (r.id, r.path))
         .collect();
+
+    let mut content_duplicates: Vec<ContentDuplicateGroup> = Vec::new();
+    for (digest, files) in by_digest.into_iter().filter(|(_, files)| files.len() > 1) {
+        let stamps: std::collections::HashMap<i64, longbox_db::ContentStamp> =
+            longbox_db::file_repo::content_stamps_by_content_hash(db, digest)
+                .await?
+                .into_iter()
+                .map(|s| (s.file_id, s))
+                .collect();
+        let mut verified: Vec<&FileEvidence> = Vec::new();
+        for f in files {
+            let stamp = stamps.get(&f.file_id);
+            let (_, obs) = crate::disk_observation::DiskObservation::stat(
+                &roots,
+                f.library_root_id,
+                &f.path_relative,
+                stamp.and_then(|s| s.content_blake3.as_deref()),
+                stamp.and_then(|s| s.hashed_size_bytes),
+                stamp.and_then(|s| s.hashed_mtime),
+            )
+            .await;
+            if obs.digest() == Some(digest) {
+                verified.push(f);
+            }
+        }
+        // One surviving member is not a duplicate of anything.
+        if verified.len() < 2 {
+            continue;
+        }
+        let issues: BTreeSet<i64> = verified.iter().filter_map(|f| f.issue_id).collect();
+        let series: BTreeSet<i64> = verified.iter().filter_map(|f| f.series_id).collect();
+        content_duplicates.push(ContentDuplicateGroup {
+            digest: digest.to_owned(),
+            size_bytes: verified[0].size_bytes,
+            redundant_bytes: verified[0].size_bytes * (verified.len() as i64 - 1),
+            distinct_issue_ids: issues.into_iter().collect(),
+            spans_multiple_series: series.len() > 1,
+            files: verified.into_iter().cloned().collect(),
+        });
+    }
     // Biggest reclaimable first: triage where the space is.
     content_duplicates.sort_by_key(|g| std::cmp::Reverse(g.redundant_bytes));
 
