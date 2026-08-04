@@ -142,10 +142,14 @@ async fn find_release_respects_priority_order() {
 }
 
 #[tokio::test]
-async fn find_release_retries_unpadded_when_padded_is_empty() {
-    // Padded query "wolverine 005" → zero results; unpadded
-    // "wolverine 5" → a hit. The variation retry must kick in.
+async fn the_bare_rung_is_reached_when_the_narrow_one_returns_nothing() {
+    // The Brother Lono shape: the narrow rung matches nothing, because
+    // newznab `q` is a crude substring match over dot-separated scene
+    // names. The bare rung has it. The mock answers ONLY the bare term,
+    // so a ladder that stopped at the narrow rung would find nothing.
     let server = MockServer::start().await;
+    // Narrow rung: a clean empty response, not an error — the shape a
+    // real indexer returns when the crude substring match finds nothing.
     Mock::given(method("GET"))
         .and(path("/api"))
         .and(query_param("q", "wolverine 005"))
@@ -154,9 +158,9 @@ async fn find_release_retries_unpadded_when_padded_is_empty() {
         .await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("q", "wolverine 5"))
+        .and(query_param("q", "wolverine"))
         .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
-            "Wolverine 5 unpadded.cbz",
+            "Wolverine 005 (2024).cbz",
             "u1",
             7,
         )])))
@@ -167,8 +171,8 @@ async fn find_release_retries_unpadded_when_padded_is_empty() {
     let chosen = find_release(&indexers, "Wolverine", "5", None)
         .await
         .unwrap()
-        .expect("unpadded retry should find it");
-    assert_eq!(chosen.title, "Wolverine 5 unpadded.cbz");
+        .expect("the series-only query must find it");
+    assert_eq!(chosen.title, "Wolverine 005 (2024).cbz");
 }
 
 #[tokio::test]
@@ -318,5 +322,139 @@ async fn find_release_filtered_accepts_underscore_separated_title() {
             );
         }
         other => panic!("expected the underscored release to be grabbable, got {other:?}"),
+    }
+}
+
+/// The ladder must not declare victory on results the engine rejects.
+///
+/// The defect needs the WRONG rung to come FIRST — otherwise removing
+/// the issue number alone would mask it. So: the full-title rung
+/// returns a different book, and the ALIAS rung has the right release.
+/// (An earlier version of this test put the right release on rung 0,
+/// which the ladder reaches first regardless of the success rule; it
+/// passed against the old "any HTTP results wins" behaviour and proved
+/// nothing. Mutation testing caught it.)
+#[tokio::test]
+async fn a_rung_returning_only_wrong_series_does_not_stop_the_ladder() {
+    let server = MockServer::start().await;
+    // Rung 0 — precision term. Returns a different book entirely.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("q", "fbp federal bureau of physics 001"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "100.Bullets.001.1999.G85.and.Megan-Empire",
+            "wrong-0",
+            99,
+        )])))
+        .mount(&server)
+        .await;
+    // Rung 1 — bare full title. Also wrong.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("q", "fbp federal bureau of physics"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "100.Bullets.001.1999.G85.and.Megan-Empire",
+            "wrong-1",
+            99,
+        )])))
+        .mount(&server)
+        .await;
+    // Rung 1 — after-colon. Also wrong.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("q", "federal bureau of physics"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "Some.Other.Book.002.2020.Digital-Empire",
+            "wrong-2",
+            50,
+        )])))
+        .mount(&server)
+        .await;
+    // before-colon rung — now LAST, and empty. Mocked explicitly so the
+    // test exercises the survival rule, not wiremock's 404 path.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("q", "fbp"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(empty_rss()))
+        .mount(&server)
+        .await;
+    // Alias rung — the right one, reached only if the ladder keeps going.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("q", "collider"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "FBP.-.Federal.Bureau.of.Physics.001.2013.Digital-Empire",
+            "right-1",
+            3,
+        )])))
+        .mount(&server)
+        .await;
+
+    let indexers = vec![indexer(1, "test", &server.uri(), 0)];
+    let outcome = longbox_newznab::find_release_excluding_filtered(
+        &indexers,
+        "FBP: Federal Bureau of Physics",
+        "1",
+        None,
+        &[],
+        &longbox_core::filename::default_patterns(),
+        longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        &[],
+        Some("2013-09-01"),
+        None,
+        &["Collider".to_string()],
+    )
+    .await
+    .unwrap();
+
+    match outcome {
+        longbox_newznab::FindOutcome::Match { release, .. } => assert_eq!(
+            release.title, "FBP.-.Federal.Bureau.of.Physics.001.2013.Digital-Empire",
+            "a wrong-series rung must not stop the ladder"
+        ),
+        other => panic!("expected the alias rung's release, got {other:?}"),
+    }
+}
+
+/// An exhausted ladder must still hand back what it saw, so the caller
+/// can raise a `Mismatch` ("N returned, none matched") instead of a
+/// silent `NoMatch`. Returning an empty pool here would convert a
+/// surfaced failure into an invisible one — the same trade this change
+/// exists to stop making, reintroduced at a different layer.
+#[tokio::test]
+async fn an_exhausted_ladder_still_reports_a_mismatch() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss(&[(
+            "Some.Totally.Different.Book.001.2020.Digital-Empire",
+            "wrong-1",
+            5,
+        )])))
+        .mount(&server)
+        .await;
+
+    let indexers = vec![indexer(1, "test", &server.uri(), 0)];
+    let outcome = longbox_newznab::find_release_excluding_filtered(
+        &indexers,
+        "Saga",
+        "1",
+        None,
+        &[],
+        &longbox_core::filename::default_patterns(),
+        longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+        &[],
+        None,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    match outcome {
+        longbox_newznab::FindOutcome::Mismatch { diagnostic, .. } => {
+            assert_eq!(diagnostic.total_results, 1);
+        }
+        other => panic!("exhaustion must stay diagnosable, got {other:?}"),
     }
 }
