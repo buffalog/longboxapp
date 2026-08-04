@@ -590,6 +590,46 @@ where
     Ok(result.rows_affected())
 }
 
+/// Transition every in-flight (`pending`/`submitted`) attempt for an
+/// issue to `failed`, recording why. The mirror of
+/// [`mark_grabbed_for_issue`], for the case where the file arrived and
+/// turned out to be unusable.
+///
+/// Phase B is the only component that can reach this verdict. Comic
+/// NZBs routinely carry no par2 recovery set, so the downloader has no
+/// checksums, reports the job Completed in good faith, and the
+/// corruption inside the archive is invisible until something opens it.
+/// Without this the attempt sat `submitted` until three polls of
+/// `Unknown` aged it out as "lost track of download" — which is not
+/// what happened and tells the user nothing.
+///
+/// `retry_count` is bumped, matching [`record_failure_if_submitted`]:
+/// this was a real consumed attempt, not a no-op.
+pub async fn record_failure_for_issue<'e, E>(
+    executor: E,
+    series_id: i64,
+    issue_id: i64,
+    error_message: &str,
+) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let result = sqlx::query!(
+        r#"UPDATE pull_attempts
+           SET status = 'failed',
+               error_message = ?,
+               retry_count = retry_count + 1
+           WHERE series_id = ? AND issue_id = ?
+             AND status IN ('pending', 'submitted')"#,
+        error_message,
+        series_id,
+        issue_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Update one attempt's status (+ optional error message). Used for
 /// transitions that don't change the retry count.
 pub async fn update_status<'e, E>(

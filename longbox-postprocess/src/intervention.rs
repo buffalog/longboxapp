@@ -35,7 +35,25 @@ pub enum InterventionReason {
     Conflict,
     /// The CBZ was matched but Phase B couldn't write the ComicInfo
     /// payload into it (zip-write failure, disk full, permission error).
+    ///
+    /// A LOCAL problem. Says nothing about the release, so it must not
+    /// fail the pull attempt — see [`SourceArchiveUnreadable`].
+    ///
+    /// [`SourceArchiveUnreadable`]: InterventionReason::SourceArchiveUnreadable
     ComicInfoWriteFailed(String),
+    /// The downloaded archive itself could not be read — CRC error,
+    /// truncated RAR, corrupt zip central directory.
+    ///
+    /// A verdict about the RELEASE, and one only Phase B can reach:
+    /// comic NZBs routinely ship without a par2 recovery set, so the
+    /// downloader has no checksums, reports Completed in good faith,
+    /// and the corruption is invisible until the archive is opened.
+    /// Kept distinct from [`ComicInfoWriteFailed`] because the two
+    /// demand opposite responses — fail the attempt and move on, versus
+    /// leave it alone and retry once the disk is fixed.
+    ///
+    /// [`ComicInfoWriteFailed`]: InterventionReason::ComicInfoWriteFailed
+    SourceArchiveUnreadable(String),
     /// File move from watch folder to final library path failed
     /// (cross-device error, target permissions, race condition).
     MoveFailed(String),
