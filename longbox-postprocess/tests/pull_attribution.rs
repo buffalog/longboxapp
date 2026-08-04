@@ -191,3 +191,130 @@ async fn caught_file_without_an_attempt_is_an_ordinary_phase_b_catch() {
         .expect("imported file row");
     assert_eq!(file.match_method, "phase_b");
 }
+
+// ---- corrupt-download attribution ----------------------------------
+//
+// SAB cannot detect this class. Observed live: 47 comic jobs in one
+// SAB log, every one "No par2 sets for <job>" and zero repair events —
+// these NZBs carry no recovery set, so SAB has no checksums, reports
+// Completed in good faith, and the CRC error inside the RAR is only
+// discovered when Phase B opens the archive.
+//
+// Phase B is therefore the only component positioned to detect it, and
+// it used to throw the knowledge away: it logged `phase_b.failed`, left
+// the file in the watch folder, and left the attempt `submitted` to age
+// out three sweeps later as "lost track of download" — a reason that is
+// simply false. We did not lose track. We know exactly what happened.
+
+/// Write the real corrupt-download shape: a RAR whose headers and
+/// `ComicInfo.xml` read cleanly, but whose page data fails its CRC.
+///
+/// This is the shape that actually reaches the rewrite. A file that is
+/// not an archive at all fails earlier, in `read_comic_info_xml`, and
+/// never gets far enough to be attributed to an issue — so a fixture
+/// built that way would test a different code path than the one the
+/// three live corrupt downloads exercised.
+///
+/// Byte 72 of the vendored fixture sits inside `page-001.jpg`'s
+/// compressed data; flipping it leaves the entry table and the
+/// ComicInfo entry intact. Verified with `unrar t`: exactly
+/// `page-001.jpg - checksum error`.
+fn write_crc_corrupt_archive(path: &Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-rar5.cbr");
+    let mut bytes = std::fs::read(fixture).unwrap();
+    bytes[72] ^= 0xFF;
+    std::fs::write(path, &bytes).unwrap();
+    let earlier = SystemTime::now() - Duration::from_secs(10);
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(earlier)).ok();
+}
+
+async fn attempt_status(db: &Pool, series_id: i64, issue_id: i64) -> (String, Option<String>) {
+    let rows = pull_attempt_repo::list_for_issue(db, series_id, issue_id)
+        .await
+        .unwrap();
+    let a = rows.first().expect("an attempt row");
+    (a.status.clone(), a.error_message.clone())
+}
+
+#[tokio::test]
+async fn an_unreadable_download_records_the_real_reason_on_the_attempt() {
+    let f = seed().await;
+    seed_in_flight_attempt(&f.db, f.series_id, f.issue_id).await;
+
+    let source = f.watch.path().join("Saga 001.cbr");
+    write_crc_corrupt_archive(&source);
+
+    let outcome = process_one(
+        &source,
+        &f.library_root,
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let (status, message) = attempt_status(&f.db, f.series_id, f.issue_id).await;
+    assert_eq!(
+        status, "failed",
+        "the attempt must settle now, not age out as 'lost track of download': {outcome:?}"
+    );
+    let message = message.expect("a reason must be recorded");
+    assert!(
+        message.to_lowercase().contains("unreadable"),
+        "the reason must name what actually happened, got {message:?}"
+    );
+}
+
+/// The guard that makes the above safe: a failure to WRITE the output
+/// is a local problem — a full disk, a read-only library — and says
+/// nothing about the release. Blaming the release for it would fail a
+/// perfectly good download and burn a retry on every one of them.
+///
+/// This test is vacuous before the fix (nothing records failures at
+/// all); its value is as the regression bar afterwards, and it is
+/// mutation-verified by mis-classifying the two failure sides.
+#[tokio::test]
+async fn a_local_write_failure_does_not_blame_the_release() {
+    let f = seed().await;
+    seed_in_flight_attempt(&f.db, f.series_id, f.issue_id).await;
+
+    let source = f.watch.path().join("Saga 001.cbz");
+    write_saga_1(&source); // a perfectly good archive
+
+    // Make the library root unwritable so the temp CBZ cannot be created.
+    let mut perms = std::fs::metadata(&f.library_root).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o555);
+    }
+    std::fs::set_permissions(&f.library_root, perms).unwrap();
+
+    let outcome = process_one(
+        &source,
+        &f.library_root,
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await;
+
+    // Restore before asserting so a failure cannot leave an undeletable tempdir.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&f.library_root).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&f.library_root, p).unwrap();
+    }
+    let outcome = outcome.unwrap();
+
+    let (status, _) = attempt_status(&f.db, f.series_id, f.issue_id).await;
+    assert_eq!(
+        status, "submitted",
+        "a local write failure must not fail the attempt: {outcome:?}"
+    );
+}

@@ -606,9 +606,38 @@ async fn import_as_owned(
 
     let temp = match rewrite_res {
         Ok(t) => t,
-        Err(e) => {
+        Err(RewriteFailure::SourceUnreadable(e)) => {
+            // The download itself is bad. Settle any in-flight attempt
+            // NOW with what actually happened, instead of leaving it to
+            // age out three sweeps later as "lost track of download".
+            // Symmetric with the `mark_grabbed_for_issue` call on the
+            // success path below.
+            let message = format!("downloaded archive is unreadable: {e}");
+            let settled =
+                pull_attempt_repo::record_failure_for_issue(db, series.id, issue.id, &message)
+                    .await?;
+            if settled > 0 {
+                tracing::warn!(
+                    target: "longbox_postprocess",
+                    series_id = series.id,
+                    issue_id = issue.id,
+                    attempts = settled,
+                    error = %e,
+                    "phase_b.pull_failed_corrupt_download"
+                );
+            }
             return Ok(Outcome::Failed {
-                reason: InterventionReason::ComicInfoWriteFailed(e.to_string()),
+                reason: InterventionReason::SourceArchiveUnreadable(e.to_string()),
+                target: target_abs,
+                size,
+            });
+        }
+        Err(other) => {
+            // Local write problem — a full disk, a read-only library.
+            // The release is fine; leave the attempt alone so it retries
+            // once the local cause is fixed.
+            return Ok(Outcome::Failed {
+                reason: InterventionReason::ComicInfoWriteFailed(other.into_error().to_string()),
                 target: target_abs,
                 size,
             });
@@ -804,21 +833,51 @@ fn is_metadata_entry(name: &str) -> bool {
 /// All errors here are "ComicInfoWriteFailed" semantically — we
 /// couldn't produce the rewritten archive. The temp drops on Err and
 /// the source stays where it was.
+/// Which side of the rewrite failed.
+///
+/// Load-bearing, and not derivable from the error type alone: reading a
+/// source CBZ and writing the target CBZ both raise `ZipError`, and
+/// opening the source and creating the temp both raise `io::Error`. The
+/// only place the distinction exists is at the callsite, so it is
+/// recorded there rather than reconstructed later from a message.
+pub(crate) enum RewriteFailure {
+    /// The downloaded archive could not be read. A verdict about the
+    /// release.
+    SourceUnreadable(PostprocessError),
+    /// Creating, writing or finishing the target. A local problem.
+    LocalWrite(PostprocessError),
+}
+
+impl RewriteFailure {
+    pub(crate) fn into_error(self) -> PostprocessError {
+        match self {
+            Self::SourceUnreadable(e) | Self::LocalWrite(e) => e,
+        }
+    }
+}
+
 fn rewrite_to_temp(
     source: &Path,
     target: &Path,
     comic_info_xml: &str,
     metron_info_xml: &str,
-) -> Result<tempfile::NamedTempFile> {
+) -> std::result::Result<tempfile::NamedTempFile, RewriteFailure> {
+    use RewriteFailure::{LocalWrite, SourceUnreadable};
+    let local = |e: PostprocessError| LocalWrite(e);
+    let src = |e: PostprocessError| SourceUnreadable(e);
+
     let target_dir = target.parent().ok_or_else(|| {
-        PostprocessError::Io(std::io::Error::other("target has no parent directory"))
+        local(PostprocessError::Io(std::io::Error::other(
+            "target has no parent directory",
+        )))
     })?;
-    std::fs::create_dir_all(target_dir)?;
+    std::fs::create_dir_all(target_dir).map_err(|e| local(e.into()))?;
 
     let temp = tempfile::Builder::new()
         .prefix(".longbox-phase-b-")
         .suffix(".cbz.tmp")
-        .tempfile_in(target_dir)?;
+        .tempfile_in(target_dir)
+        .map_err(|e| local(e.into()))?;
 
     {
         let mut writer = ZipWriter::new(temp.as_file());
@@ -827,31 +886,41 @@ fn rewrite_to_temp(
         if longbox_archive::is_rar(source) {
             // CBR: no RAR writer exists, so decompress every entry via
             // libunrar and recompress it into the ZIP.
-            for entry in longbox_archive::read_entries(source)? {
+            for entry in longbox_archive::read_entries(source).map_err(|e| src(e.into()))? {
                 if is_metadata_entry(&entry.name) {
                     continue;
                 }
-                writer.start_file(&entry.name, deflated)?;
-                writer.write_all(&entry.data)?;
+                writer
+                    .start_file(&entry.name, deflated)
+                    .map_err(|e| local(e.into()))?;
+                writer.write_all(&entry.data).map_err(|e| local(e.into()))?;
             }
         } else {
             // CBZ: raw-copy compressed entries, no recompression.
-            let src_file = std::fs::File::open(source)?;
-            let mut archive = ZipArchive::new(src_file)?;
+            let src_file = std::fs::File::open(source).map_err(|e| src(e.into()))?;
+            let mut archive = ZipArchive::new(src_file).map_err(|e| src(e.into()))?;
             for i in 0..archive.len() {
-                let entry = archive.by_index(i)?;
+                let entry = archive.by_index(i).map_err(|e| src(e.into()))?;
                 if is_metadata_entry(entry.name()) {
                     continue;
                 }
-                writer.raw_copy_file(entry)?;
+                writer.raw_copy_file(entry).map_err(|e| local(e.into()))?;
             }
         }
 
-        writer.start_file("ComicInfo.xml", deflated)?;
-        writer.write_all(comic_info_xml.as_bytes())?;
-        writer.start_file("MetronInfo.xml", deflated)?;
-        writer.write_all(metron_info_xml.as_bytes())?;
-        writer.finish()?;
+        writer
+            .start_file("ComicInfo.xml", deflated)
+            .map_err(|e| local(e.into()))?;
+        writer
+            .write_all(comic_info_xml.as_bytes())
+            .map_err(|e| local(e.into()))?;
+        writer
+            .start_file("MetronInfo.xml", deflated)
+            .map_err(|e| local(e.into()))?;
+        writer
+            .write_all(metron_info_xml.as_bytes())
+            .map_err(|e| local(e.into()))?;
+        writer.finish().map_err(|e| local(e.into()))?;
     }
 
     Ok(temp)
