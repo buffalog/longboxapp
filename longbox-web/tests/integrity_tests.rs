@@ -2382,3 +2382,66 @@ async fn the_revert_says_whether_anything_will_search_for_the_issue() {
     );
     let _ = keep;
 }
+
+/// A group member whose bytes changed after analyze is not a duplicate,
+/// and must not be listed as one.
+///
+/// `integrity_scan` grouped purely on the catalog's `content_blake3`.
+/// A file replaced since it was hashed keeps its old digest, so it stays
+/// grouped with whatever else carries that digest — describing bytes
+/// that no longer exist anywhere. Observed live: two Ferocious issues
+/// with different sizes, different ComicInfo numbers and different
+/// pages, both still carrying one November digest stamped against a
+/// size neither file has had since.
+///
+/// The delete endpoint already refuses these
+/// (`refuses_when_the_target_itself_has_changed_since_analyze`), so the
+/// damage was confined to the screen — a permanent, unactionable row
+/// that reads as "you have a redundant copy" when you do not. Analyze
+/// cannot clear it either: `refresh_digests` only visits
+/// size-collision candidates, and a file whose size changed no longer
+/// collides with its former twin.
+///
+/// Freshness is decided by `DiskObservation::stat`, the same stat the
+/// delete path uses — never by comparing catalog columns to each other.
+#[tokio::test]
+async fn a_member_modified_since_analyze_is_not_reported_as_a_duplicate() {
+    let app = build_test_app().await;
+    let series = seed_series_with_year(&app, "Ferocious", 2025).await;
+    let i2 = seed_bound_issue(&app, series, "2").await;
+    let i5 = seed_bound_issue(&app, series, "5").await;
+    let kept = seed_copy(&app, Some(i2), "Fero/Fero 002.cbz", "dig-stale", "owned").await;
+    let changed = seed_copy(&app, Some(i5), "Fero/Fero 005.cbz", "dig-stale", "owned").await;
+
+    // Both stamps are honest right now, so this really is a group.
+    let before = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        before["content_duplicates"].as_array().unwrap().len(),
+        1,
+        "two verified copies of one digest are a real group: {before}"
+    );
+
+    // One file is replaced afterwards. Its stored digest now describes
+    // content that no longer exists; the pair is no longer a pair.
+    std::fs::write(
+        app.library_path().join("Fero/Fero 005.cbz"),
+        b"different bytes, different length entirely",
+    )
+    .unwrap();
+
+    let after = response_json(
+        app.request(empty_request("GET", "/api/library/integrity/findings"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        after["content_duplicates"].as_array().unwrap().len(),
+        0,
+        "a single verified member is not a duplicate group: {after}"
+    );
+    let _ = (kept, changed);
+}
