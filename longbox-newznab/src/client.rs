@@ -7,7 +7,7 @@ use longbox_core::ParsingPattern;
 
 use crate::error::{IndexerError, NewznabError};
 use crate::parse::parse_response;
-use crate::query::{build_url, search_ladder};
+use crate::query::{build_url, effective_maxage, result_limit, search_ladder, MaxAge};
 use crate::select::{filter_by_series_title, select_best, MismatchDiagnostic};
 use crate::types::{IndexerConfig, IndexerId, Release};
 
@@ -63,7 +63,13 @@ pub async fn search_indexer(
     indexer: &IndexerConfig,
     search_term: &str,
 ) -> Result<Vec<Release>, IndexerError> {
-    search_with(&http_client(), indexer, search_term, None).await
+    search_with(
+        &http_client(),
+        indexer,
+        search_term,
+        MaxAge::Days(i64::from(indexer.maxage_days)),
+    )
+    .await
 }
 
 /// Probe an indexer: confirm it is reachable and the API key is
@@ -82,14 +88,14 @@ pub async fn test_connection(indexer: &IndexerConfig) -> Result<(), IndexerError
 /// across its indexer loop. `maxage_override` is `None` for the
 /// low-level / test_connection callers (use the indexer's configured
 /// value) and `Some(effective)` from the engine path (per-issue
-/// back-catalog widening, see [`query::effective_maxage_days`]).
+/// back-catalog widening, see [`query::effective_maxage`]).
 async fn search_with(
     client: &reqwest::Client,
     indexer: &IndexerConfig,
     search_term: &str,
-    maxage_override: Option<i64>,
+    maxage: MaxAge,
 ) -> Result<Vec<Release>, IndexerError> {
-    let url = build_url(indexer, search_term, maxage_override)?;
+    let url = build_url(indexer, search_term, maxage)?;
     // `without_url()` strips the request URL from the reqwest error's
     // Display — the newznab URL embeds `apikey=...`, and these messages
     // reach both the engine's logs and (via interactive search) the client.
@@ -118,26 +124,152 @@ async fn search_with(
     parse_response(&body)
 }
 
-/// Search one indexer by walking the relaxation ladder, stopping at the first
-/// rung that returns a non-empty result. First-rung failure propagates as the
-/// indexer's failure; later-rung failures are best-effort (logged, continue).
+/// Everything the ladder needs to answer "did this rung return anything
+/// USABLE?" — which is the engine's own `filter_by_series_title`, not a
+/// second opinion about it.
+pub(crate) struct SurvivalTest<'a> {
+    pub patterns: &'a [ParsingPattern],
+    pub series: &'a str,
+    pub issue: &'a str,
+    pub year: Option<i32>,
+    pub threshold: f64,
+    pub exclusion_keywords: &'a [String],
+    pub min_size_bytes: Option<i64>,
+    pub aliases: &'a [String],
+    pub exclude_guids: &'a [String],
+}
+
+impl SurvivalTest<'_> {
+    /// How many of `releases` the engine would actually keep.
+    fn survivors(&self, releases: &[Release]) -> usize {
+        let pool: Vec<Release> = releases
+            .iter()
+            .filter(|r| !self.exclude_guids.iter().any(|g| g == &r.guid))
+            .cloned()
+            .collect();
+        filter_by_series_title(
+            pool,
+            self.patterns,
+            self.series,
+            self.year,
+            self.threshold,
+            self.exclusion_keywords,
+            self.min_size_bytes,
+            self.issue,
+            self.aliases,
+        )
+        .kept
+        .len()
+    }
+}
+
+/// Search one indexer by walking the relaxation ladder.
+///
+/// **A rung succeeds when it returns a candidate that SURVIVES
+/// `filter_by_series_title` — not when it returns HTTP results.**
+///
+/// "Any results" is a proxy for "usable results", and it answers a
+/// different question. Measured on DogNZB for `100 Bullets: Brother
+/// Lono` #1: the `100 bullets 001` rung returns four releases of the
+/// 1999 PARENT series, the ladder declared victory, and the rung
+/// holding all eight Brother Lono issues was never requested. The
+/// engine then rejected those four one function later. That is not a
+/// near miss — it is the ladder and the filter disagreeing about what
+/// the search was for, and it fails silently, looking exactly like
+/// "the release does not exist".
+///
+/// This costs requests, and the honest figure is not small. On an issue
+/// that stays missing — half the sampled set, re-run every sweep — the
+/// old rule stopped at the first junk-returning rung (1 request per
+/// indexer) and the new one runs the ladder out (up to
+/// `MAX_LADDER_RUNGS`, 5 in a colon-titled-with-alias case, × 8
+/// indexers). Measured end to end on 30 issues: 95s → 235s, ~2.5×.
+/// That is a real operational cost on a daily sweep and an argument for
+/// prioritising the alias work that would let those issues resolve,
+/// not for softening the rule.
+///
+/// First-rung failure propagates as the indexer's failure; later-rung
+/// failures are best-effort (logged, continue).
+#[allow(clippy::too_many_arguments)] // every argument is a distinct
+                                     // per-search input threaded from the
+                                     // engine; the only natural bundle
+                                     // (the filter inputs) is already
+                                     // extracted as `SurvivalTest`.
 async fn search_one_indexer(
     client: &reqwest::Client,
     indexer: &IndexerConfig,
     series: &str,
     issue: &str,
     aliases: &[String],
-    maxage_override: Option<i64>,
+    maxage: MaxAge,
+    // `None` on the bare `find_release_excluding` variant, which
+    // deliberately skips the similarity filter and therefore has no
+    // definition of "usable" — there, any non-empty rung wins, the old
+    // behaviour. Production goes through the filtered variant.
+    survival: Option<&SurvivalTest<'_>>,
 ) -> Result<Vec<Release>, IndexerError> {
     let ladder = search_ladder(series, issue, aliases);
+    let mut seen = 0usize;
+    // The first rung that returned anything, kept so an exhausted
+    // ladder can still hand the caller something to diagnose with.
+    //
+    // This recovers the diagnostic for a WRONG-SERIES pool: those score
+    // below threshold, so `filter_by_series_title` emits a
+    // `MismatchDiagnostic` and the failure surfaces on /needs-attention.
+    //
+    // It does NOT recover it for a right-series/wrong-issue pool —
+    // `Brother Lono 002` when we wanted #1 scores ~1.0, clears the
+    // threshold, and is dropped by the issue-number gate, which is the
+    // deliberate "silent" path in `filter_by_series_title`. That case
+    // still ends as `NoMatch`, and correctly so: the series was found,
+    // the issue genuinely is not out there. `pull.ladder_exhausted` is
+    // what makes it countable — the diagnostic is not the only
+    // observability channel and should not be strained into covering a
+    // case it was not built for.
+    let mut first_non_empty: Vec<Release> = Vec::new();
     for (i, term) in ladder.iter().enumerate() {
-        match search_with(client, indexer, term, maxage_override).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => {}
+        match search_with(client, indexer, term, maxage).await {
+            Ok(results) => {
+                seen += results.len();
+                // Truncation signal: a rung that came back exactly full
+                // means the indexer capped us and the wanted release may
+                // be in a tail we never saw. Recorded rather than paged
+                // — how often this actually costs us a grab is not yet
+                // measured, and paging multiplies requests against a
+                // problem of unknown size.
+                if results.len() >= result_limit() {
+                    // Common and expected on broad rungs (bare `criminal`
+                    // caps on 3 of 8 indexers), so debug — it is a
+                    // counter to aggregate, not an alarm per occurrence.
+                    tracing::debug!(
+                        target: "longbox_newznab",
+                        indexer = %indexer.name,
+                        term = %term,
+                        returned = results.len(),
+                        cap = result_limit(),
+                        "pull.rung_truncated"
+                    );
+                }
+                let usable = match survival {
+                    Some(t) => t.survivors(&results),
+                    None => results.len(),
+                };
+                if usable > 0 {
+                    return Ok(results);
+                }
+                let returned = results.len();
+                if first_non_empty.is_empty() && returned > 0 {
+                    first_non_empty = results;
+                }
+                tracing::debug!(
+                    target: "longbox_newznab",
+                    indexer = %indexer.name,
+                    term = %term,
+                    returned,
+                    "ladder rung returned nothing the filter keeps; continuing"
+                );
+            }
             Err(e) => {
-                // First rung's failure is the indexer's failure — propagate so
-                // the caller can attribute it. Later rungs are best-effort
-                // (a clean earlier empty already proved reachability).
                 if i == 0 {
                     return Err(e);
                 }
@@ -151,7 +283,20 @@ async fn search_one_indexer(
             }
         }
     }
-    Ok(Vec::new())
+    // Every rung tried, nothing survived. This is a REAL "not found",
+    // and it must never again look like the ladder stopping early on
+    // junk. Counting these turns a silent per-issue failure into a
+    // countable class — the same payoff `landed_abstained` gives Phase B.
+    tracing::info!(
+        target: "longbox_newznab",
+        indexer = %indexer.name,
+        series = %series,
+        issue = %issue,
+        rungs = ladder.len(),
+        candidates_seen = seen,
+        "pull.ladder_exhausted"
+    );
+    Ok(first_non_empty)
 }
 
 /// Find the best release for an issue across a list of indexers.
@@ -208,6 +353,10 @@ pub async fn find_release_excluding(
     // nowhere to influence the result here. Production code goes
     // through `find_release_excluding_filtered`, which DOES use year
     // for similarity ranking.
+    // Neither `year` nor `issue` can influence this bare variant: the
+    // q-term no longer carries either, and this path deliberately skips
+    // the similarity filter that would use them. Kept on the signature
+    // for API stability; production uses the filtered variant.
     let _ = year;
 
     // Defensive: sort by priority so the caller need not pre-order.
@@ -218,10 +367,8 @@ pub async fn find_release_excluding(
     let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
 
     for indexer in ordered {
-        let effective_maxage =
-            crate::query::effective_maxage_days(i64::from(indexer.maxage_days), cover_date);
-        match search_one_indexer(&client, indexer, series, issue, &[], Some(effective_maxage)).await
-        {
+        let maxage = effective_maxage(i64::from(indexer.maxage_days), cover_date);
+        match search_one_indexer(&client, indexer, series, issue, &[], maxage, None).await {
             Ok(results) => {
                 let kept: Vec<Release> = results
                     .into_iter()
@@ -304,6 +451,18 @@ pub async fn find_release_excluding_filtered(
         return Ok(FindOutcome::NoMatch);
     }
 
+    let survival = SurvivalTest {
+        patterns,
+        series,
+        issue,
+        year,
+        threshold: similarity_threshold,
+        exclusion_keywords,
+        min_size_bytes,
+        aliases,
+        exclude_guids,
+    };
+
     // Sort by priority — used as tiebreaker when grabs/format are equal.
     let mut ordered: Vec<&IndexerConfig> = indexers.iter().collect();
     ordered.sort_by_key(|i| i.priority);
@@ -317,13 +476,20 @@ pub async fn find_release_excluding_filtered(
     // for back-catalog searches: a 20-year-old issue's NZBs were getting
     // server-side filtered by the configured `maxage_days` (4 years by
     // default), so the engine never saw them. The dynamic max() in
-    // `effective_maxage_days` keeps the configured floor for fresh
+    // `effective_maxage` keeps the configured floor for fresh
     // issues and automatically extends for older ones.
     let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
         futures::future::join_all(ordered.iter().map(|idx| {
-            let effective_maxage =
-                crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
-            search_one_indexer(&client, idx, series, issue, aliases, Some(effective_maxage))
+            let maxage = effective_maxage(i64::from(idx.maxage_days), cover_date);
+            search_one_indexer(
+                &client,
+                idx,
+                series,
+                issue,
+                aliases,
+                maxage,
+                Some(&survival),
+            )
         }))
         .await;
 
@@ -423,7 +589,7 @@ pub struct SearchAllOutcome {
 ///
 /// The query is searched exactly as given (the client pre-normalizes); no
 /// padded/unpadded variation. Each indexer's `maxage` is widened for
-/// back-catalog issues via [`effective_maxage_days`] from the issue's
+/// back-catalog issues via [`effective_maxage`] from the issue's
 /// `cover_date`, so an old issue's NZBs aren't server-side filtered — the
 /// same fix the engine path uses.
 pub async fn search_all_indexers(
@@ -438,9 +604,8 @@ pub async fn search_all_indexers(
     let client = http_client();
     let per_indexer: Vec<Result<Vec<Release>, IndexerError>> =
         futures::future::join_all(indexers.iter().map(|idx| {
-            let effective_maxage =
-                crate::query::effective_maxage_days(i64::from(idx.maxage_days), cover_date);
-            search_with(&client, idx, query, Some(effective_maxage))
+            let effective_maxage_v = effective_maxage(i64::from(idx.maxage_days), cover_date);
+            search_with(&client, idx, query, effective_maxage_v)
         }))
         .await;
 
