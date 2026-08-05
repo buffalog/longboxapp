@@ -66,6 +66,20 @@ WHERE rn <= 2
 ORDER BY (stitle LIKE '%Brother Lono%') DESC, stitle, CAST(inum AS INTEGER)
 "#;
 
+/// Every missing issue whose series title matches `LONGBOX_MEASURE_LIKE`,
+/// unstratified — for scoping one class of failure rather than sampling
+/// across the catalog.
+const FILTERED_SQL: &str = r#"
+SELECT s.id, s.title, i.id, i.number, i.cover_date
+FROM issues i JOIN series s ON s.id = i.series_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM files f
+    WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1
+)
+AND s.title LIKE ?1
+ORDER BY s.title, CAST(i.number AS INTEGER)
+"#;
+
 #[tokio::test]
 #[ignore]
 async fn measure_recall() {
@@ -129,10 +143,12 @@ async fn measure_recall() {
     let min_size_bytes = Some(min_size_mb * 1024 * 1024);
     eprintln!("settings: threshold={threshold} min_size_mb={min_size_mb} exclusions={exclusion_keywords:?}\n");
 
-    let rows: Vec<(i64, String, i64, String, Option<String>)> = sqlx::query_as(SAMPLE_SQL)
-        .fetch_all(&db)
-        .await
-        .expect("sample query");
+    let like = std::env::var("LONGBOX_MEASURE_LIKE").ok();
+    let rows: Vec<(i64, String, i64, String, Option<String>)> = match &like {
+        Some(pat) => sqlx::query_as(FILTERED_SQL).bind(pat).fetch_all(&db).await,
+        None => sqlx::query_as(SAMPLE_SQL).fetch_all(&db).await,
+    }
+    .expect("sample query");
 
     let mut out = String::from("series\tissue\treturned\tparsed\tbest_sim\tgrabbable\n");
     let (mut grabbable, mut total) = (0usize, 0usize);
