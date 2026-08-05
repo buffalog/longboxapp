@@ -22,10 +22,20 @@
 -- An earlier version of this comment claimed sqlx types it as i64. That
 -- was asserted, not tested, and it is wrong.
 --
--- Verified 2026-08-04 against a copy of the live catalog: SQLite
--- inlines this view completely, so the query plan is unchanged and the
--- covering index from 20260608000000_add_dashboard_stats_indexes.sql
--- is still used.
+-- Performance, measured rather than assumed, and NOT uniform:
+--
+--   * simple predicate use (`WHERE is_owned = 0`) -- SQLite flattens the
+--     view entirely; plan and timing identical to the hand-written form
+--     (1.07 ms either way on the live catalog).
+--   * nested inside an aggregate (`COUNT(DISTINCT CASE WHEN NOT EXISTS
+--     (...)`) -- NOT fully flattened. One extra rowid seek and a level
+--     of subquery nesting appear. Measured at 20x live scale:
+--     find_all_with_counts 36.4 ms -> 57.0 ms. At live scale ~2 -> ~3 ms.
+--
+-- The covering index from 20260608000000_add_dashboard_stats_indexes.sql
+-- is still used in both shapes. An earlier version of this comment
+-- claimed the plan was unchanged full stop; that generalised from the
+-- simple case and was wrong.
 CREATE VIEW issue_ownership AS
 SELECT i.id        AS issue_id,
        i.series_id AS series_id,

@@ -218,8 +218,8 @@ where
 {
     let row = sqlx::query!(
         r#"SELECT 1 AS "x: i64"
-           FROM files
-           WHERE issue_id = ? AND status = 'owned' AND is_present = 1
+           FROM issue_ownership
+           WHERE issue_id = ? AND is_owned = 1
            LIMIT 1"#,
         issue_id
     )
