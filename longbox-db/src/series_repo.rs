@@ -462,18 +462,14 @@ where
                THEN i.id END) AS "unmatched_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                THEN i.id END) AS "missing_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                AND i.cover_date IS NOT NULL
                AND i.cover_date >= date('now')
@@ -549,18 +545,14 @@ where
                THEN i.id END) AS "unmatched_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                THEN i.id END) AS "missing_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                AND i.cover_date IS NOT NULL
                AND i.cover_date >= date('now')
