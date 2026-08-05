@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                 i.id AS \"issue_id!: i64\",\n                 i.number AS \"number!\",\n                 i.title AS \"title?\",\n                 i.cover_url AS \"cover_url?\",\n                 i.cover_date AS \"cover_date?\",\n                 i.created_at AS \"issue_created_at!: time::PrimitiveDateTime\",\n                 s.id AS \"series_id!: i64\",\n                 s.title AS \"series_title!\",\n                 s.sort_title AS \"series_sort_title!\",\n                 s.start_year AS \"series_start_year?: i64\"\n               FROM issues i\n               JOIN series s ON i.series_id = s.id\n               WHERE NOT EXISTS (\n                 SELECT 1 FROM files f\n                 WHERE f.issue_id = i.id\n                   AND f.status = 'owned'\n                   AND f.is_present = 1\n               )\n               ORDER BY s.sort_title ASC, i.id ASC",
+  "query": "SELECT\n                     i.id AS \"issue_id!: i64\",\n                     i.number AS \"number!\",\n                     i.title AS \"title?\",\n                     i.cover_url AS \"cover_url?\",\n                     i.cover_date AS \"cover_date?\",\n                     i.created_at AS \"issue_created_at!: time::PrimitiveDateTime\",\n                     s.id AS \"series_id!: i64\",\n                     s.title AS \"series_title!\",\n                     s.sort_title AS \"series_sort_title!\",\n                     s.start_year AS \"series_start_year?: i64\"\n                   FROM issues i\n                   JOIN series s ON i.series_id = s.id\n                   WHERE s.id = ?\n                     AND NOT EXISTS (\n                       SELECT 1 FROM issue_ownership o\n                       WHERE o.issue_id = i.id AND o.is_owned = 1\n                     )\n                   ORDER BY s.sort_title ASC, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -55,7 +55,7 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       true,
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "dedbc8f3e4dd31735f42859d56d7503f7abaa656802ba0fb0761d79ac3df1bb4"
+  "hash": "0b522657dda5b4908f98715c7966215cab6a91a7e173d631bbcf038f342db169"
 }
