@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ic.role AS \"role!\", COUNT(DISTINCT ic.issue_id) AS \"count!: i64\"\n           FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id\n           WHERE ic.creator_id = ?\n             AND EXISTS (SELECT 1 FROM issue_ownership o WHERE o.issue_id = i.id AND o.is_owned = 1)\n           GROUP BY ic.role\n           -- ORDER BY repeats the aggregate: the sqlx type-cast alias\n           -- (\"count!: i64\") isn't a plain column name, so it can't be\n           -- referenced in ORDER BY.\n           ORDER BY COUNT(DISTINCT ic.issue_id) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "role!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "4b63917735820907ab0712d2258fd990788569f6578a9611d2d62ff0eb68d1d8"
+}

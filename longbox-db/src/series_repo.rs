@@ -437,11 +437,14 @@ pub struct SeriesWithCounts {
 /// conflates with needs_review and ignored.
 /// Note on the ownership predicates inside: the `missing_count` and
 /// `solicited_count` columns go through the `issue_ownership` view, but
-/// `owned_count` deliberately does NOT. `owned_count` is one arm of a
-/// per-STATUS breakdown (it sits beside needs_review/ignored/unmatched)
-/// and the view answers only a boolean "is it owned" -- routing it
-/// through the view would collapse the breakdown into a different
-/// question. Do not "finish the job" by converting it.
+/// `owned_count` deliberately does NOT -- and the reason is forward-
+/// looking, not arithmetic. Measured on a duplicate-heavy fixture, the
+/// view form and this CASE form agree on every series TODAY. The point
+/// is what happens next: `owned_count` is one arm of a per-STATUS
+/// breakdown (it sits beside needs_review/ignored/unmatched) and must
+/// keep meaning "has an owned file", while `missing_count` will come to
+/// mean "not owned AND not covered". Converting this would silently
+/// enrol it in that future change. Do not "finish the job".
 pub async fn find_all_with_counts<'e, E>(executor: E) -> Result<Vec<SeriesWithCounts>>
 where
     E: SqliteExecutor<'e>,
