@@ -545,6 +545,9 @@ async fn detail(
     // delete_series guard (issue→series join, status='owned',
     // is_present=1) so the frontend's modal-skip decision aligns
     // with what the backend will actually do on the delete call.
+    // Counts owned FILES, not owned ISSUES, so the `issue_ownership`
+    // view cannot express it -- two files on one issue must count twice
+    // for the modal-skip decision to match what the delete actually does.
     let owned_file_count = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64"
            FROM files f

@@ -435,6 +435,13 @@ pub struct SeriesWithCounts {
 /// counts. `missing_count` is "issues for which no present owned file
 /// exists" — not derivable from `total_count - owned_count`, because that
 /// conflates with needs_review and ignored.
+/// Note on the ownership predicates inside: the `missing_count` and
+/// `solicited_count` columns go through the `issue_ownership` view, but
+/// `owned_count` deliberately does NOT. `owned_count` is one arm of a
+/// per-STATUS breakdown (it sits beside needs_review/ignored/unmatched)
+/// and the view answers only a boolean "is it owned" -- routing it
+/// through the view would collapse the breakdown into a different
+/// question. Do not "finish the job" by converting it.
 pub async fn find_all_with_counts<'e, E>(executor: E) -> Result<Vec<SeriesWithCounts>>
 where
     E: SqliteExecutor<'e>,
@@ -804,6 +811,9 @@ pub async fn refresh_last_matched_counts<'e, E>(executor: E) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {
+    // Counts owned FILES, not owned ISSUES. Two files on one issue
+    // count twice here and once in `issue_ownership`, so the view
+    // cannot express this and must not be substituted in.
     let result = sqlx::query!(
         r#"UPDATE series SET last_matched_count = (
                SELECT COUNT(*) FROM files f
