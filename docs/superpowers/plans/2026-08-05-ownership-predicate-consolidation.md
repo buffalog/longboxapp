@@ -41,6 +41,24 @@
 
 `longbox-postprocess/src/processor.rs` contains no `status = 'owned'` occurrence; earlier notes listing it were wrong.
 
+**MIGRATION STALENESS — read before running any test after a migration change.**
+`sqlx::migrate!` embeds migrations into the binary at COMPILE time, and
+`longbox-db` has no `build.rs`. Adding, removing or editing a migration file
+does **not** reliably trigger a rebuild, so `cargo test` can silently run a
+stale binary and give a confident wrong answer. Observed during Task 1:
+restoring a deleted migration left the test failing until the crate was forced
+to recompile.
+
+After ANY migration change, force the rebuild before testing:
+
+```bash
+touch longbox-db/src/lib.rs
+```
+
+This matters most in Task 8, where the whole point is reading a mutation
+result. A stale binary there would report "the mutation changed nothing" and
+look exactly like a passing verification.
+
 **Standing rules for every task:** run `cargo fmt --all`, `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`, and `SQLX_OFFLINE=true cargo test --workspace` before each commit. Any task touching SQL must re-run `./scripts/prepare-sqlx.sh` and commit `.sqlx/`.
 
 ---
