@@ -76,17 +76,13 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
               WHERE status = 'unmatched' AND is_present = 1) AS "unmatched_files!: i64",
              (SELECT COUNT(*) FROM issues i
               WHERE NOT EXISTS (
-                SELECT 1 FROM files f
-                WHERE f.issue_id = i.id
-                  AND f.status = 'owned'
-                  AND f.is_present = 1
+                SELECT 1 FROM issue_ownership o
+                WHERE o.issue_id = i.id AND o.is_owned = 1
               )) AS "missing_issues!: i64",
              (SELECT COUNT(DISTINCT i.series_id) FROM issues i
               WHERE NOT EXISTS (
-                SELECT 1 FROM files f
-                WHERE f.issue_id = i.id
-                  AND f.status = 'owned'
-                  AND f.is_present = 1
+                SELECT 1 FROM issue_ownership o
+                WHERE o.issue_id = i.id AND o.is_owned = 1
               )) AS "series_with_missing!: i64",
              (SELECT COUNT(*) FROM pull_list) AS "pull_list_count!: i64",
              -- Failure-class pull attempts, one row per issue (latest

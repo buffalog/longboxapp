@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"issue_id!: i64\", i.cv_issue_id AS \"cv_issue_id!: i64\"\n           FROM issues i\n           WHERE i.credits_fetched = 0\n             AND i.cv_issue_id IS NOT NULL\n             AND EXISTS (SELECT 1 FROM issue_ownership o\n                         WHERE o.issue_id = i.id AND o.is_owned = 1)\n           ORDER BY i.id ASC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cv_issue_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "1a0df774ace91c5e0088f167d515f27a9c3b793f1c0b2150e17129a8cfee0c6f"
+}

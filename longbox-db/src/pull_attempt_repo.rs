@@ -295,10 +295,8 @@ where
              AND status = 'grabbed'
              AND attempted_at < datetime('now', '-24 hours')
              AND NOT EXISTS (
-               SELECT 1 FROM files f
-               WHERE f.issue_id = pull_attempts.issue_id
-                 AND f.status = 'owned'
-                 AND f.is_present = 1
+               SELECT 1 FROM issue_ownership o
+               WHERE o.issue_id = pull_attempts.issue_id AND o.is_owned = 1
              )"#,
         series_id,
         issue_id
@@ -322,10 +320,8 @@ where
            WHERE status = 'grabbed'
              AND attempted_at < datetime('now', '-24 hours')
              AND NOT EXISTS (
-               SELECT 1 FROM files f
-               WHERE f.issue_id = pull_attempts.issue_id
-                 AND f.status = 'owned'
-                 AND f.is_present = 1
+               SELECT 1 FROM issue_ownership o
+               WHERE o.issue_id = pull_attempts.issue_id AND o.is_owned = 1
              )"#
     )
     .execute(executor)
