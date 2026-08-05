@@ -57,8 +57,8 @@ WITH missing AS (
            ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY CAST(i.number AS INTEGER)) AS rn
     FROM issues i JOIN series s ON s.id = i.series_id
     WHERE NOT EXISTS (
-        SELECT 1 FROM files f
-        WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1
+        SELECT 1 FROM issue_ownership o
+        WHERE o.issue_id = i.id AND o.is_owned = 1
     )
 )
 SELECT sid, stitle, iid, inum, icover FROM missing
@@ -73,8 +73,8 @@ const FILTERED_SQL: &str = r#"
 SELECT s.id, s.title, i.id, i.number, i.cover_date
 FROM issues i JOIN series s ON s.id = i.series_id
 WHERE NOT EXISTS (
-    SELECT 1 FROM files f
-    WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1
+    SELECT 1 FROM issue_ownership o
+    WHERE o.issue_id = i.id AND o.is_owned = 1
 )
 AND s.title LIKE ?1
 ORDER BY s.title, CAST(i.number AS INTEGER)

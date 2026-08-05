@@ -76,3 +76,33 @@ async fn the_view_agrees_with_the_hand_written_predicate() {
     assert_eq!(hand, vec![2, 3, 4], "fixture sanity: 2,3,4 are missing");
     assert_eq!(view, hand, "the view must not change meaning");
 }
+
+/// The view's `series_id` column had no direct coverage: mutating
+/// `i.series_id` to a constant left this file green and was caught only
+/// indirectly, by a web-crate stats test. `series_id` is what the
+/// per-series ownership conversion in stats.rs depends on, so it gets
+/// pinned here.
+#[tokio::test]
+async fn the_view_carries_the_issues_series_id() {
+    let db = fresh_pool().await;
+    seed(&db).await;
+    sqlx::query("INSERT INTO series (id, title, sort_title) VALUES (2, 'T', 't')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues (id, series_id, number) VALUES (9, 2, '1')")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let pairs: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT issue_id, series_id FROM issue_ownership ORDER BY issue_id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        pairs,
+        vec![(1, 1), (2, 1), (3, 1), (4, 1), (9, 2)],
+        "each row must carry its own issue's series_id"
+    );
+}
