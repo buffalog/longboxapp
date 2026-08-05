@@ -48,8 +48,8 @@ where
            FROM issues i
            WHERE i.credits_fetched = 0
              AND i.cv_issue_id IS NOT NULL
-             AND EXISTS (SELECT 1 FROM files f
-                         WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o
+                         WHERE o.issue_id = i.id AND o.is_owned = 1)
            ORDER BY i.id ASC
            LIMIT ?"#,
         limit,

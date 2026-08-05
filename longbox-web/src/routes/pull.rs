@@ -209,10 +209,8 @@ async fn search_all_missing(State(state): State<AppState>) -> Result<Response, A
                   i.cover_date
            FROM issues i
            WHERE NOT EXISTS (
-               SELECT 1 FROM files f
-               WHERE f.issue_id = i.id
-                 AND f.status = 'owned'
-                 AND f.is_present = 1
+               SELECT 1 FROM issue_ownership o
+               WHERE o.issue_id = i.id AND o.is_owned = 1
            )"#
     )
     .fetch_all(&state.db)
