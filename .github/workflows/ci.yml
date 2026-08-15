@@ -24,6 +24,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # longbox-archive's PDF reader shells out to pdfinfo/pdftoppm. Without
+      # these the pdf_reader tests cannot run, so poppler is a dependency of
+      # the test job, not only of the runtime image.
+      - name: Install poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
