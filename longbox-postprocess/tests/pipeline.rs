@@ -586,6 +586,82 @@ async fn imports_owned_cbr_converting_to_cbz() {
     assert!(xml.contains("<Web>https://comicvine.gamespot.com/issue/4000-364354/</Web>"));
 }
 
+/// A PDF is imported by moving it, not by rewriting it: it keeps its own
+/// extension and its bytes are untouched.
+///
+/// The byte-identity assertion is the load-bearing one. A PDF is read-only
+/// forever — there is no PDF writer and none is coming — so an import that
+/// injected ComicInfo, or that routed the file through the CBZ repack, would
+/// produce a file no reader can open. Asserting only that *a* file arrived
+/// cannot tell those apart from a correct move.
+#[tokio::test]
+async fn imports_owned_pdf_verbatim_keeping_its_extension() {
+    let f = seed_basic_fixture().await;
+
+    // Phase B never opens a PDF: `read_comic_info` returns Ok(None) without
+    // touching it, and the import copies bytes. So these bytes only have to be
+    // recognisable in the assertion below — poppler is not in this loop.
+    // (`longbox-archive`'s own tests render a real PDF.)
+    let bytes = b"%PDF-1.4\nnot parsed on this path\n%%EOF\n";
+    let source = f._watch.path().join("Saga 001.pdf");
+    std::fs::write(&source, bytes).unwrap();
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    filetime::set_file_mtime(&source, filetime::FileTime::from_system_time(earlier)).ok();
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let target = match outcome {
+        Outcome::Imported { target, .. } => target,
+        other => panic!("expected Imported, got {other:?}"),
+    };
+
+    // Canonical folder and filename, `.pdf` extension — the one place the
+    // naming convention's `.cbz` does not apply.
+    assert_eq!(
+        target,
+        f.library
+            .path()
+            .join("Saga (2012)")
+            .join("Saga (2012) 001.pdf")
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        bytes,
+        "PDF bytes must cross unchanged — nothing is injected into a PDF"
+    );
+    assert!(!source.exists(), "PDF source removed after import");
+    // No stray `.tmp` left behind in the series folder.
+    let strays: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "Saga (2012) 001.pdf")
+        .collect();
+    assert!(strays.is_empty(), "unexpected leftovers: {strays:?}");
+
+    // Catalogued at the `.pdf` path, owned like any other import.
+    let row = longbox_db::file_repo::find_by_path(
+        &f.db,
+        f.library_root_id,
+        "Saga (2012)/Saga (2012) 001.pdf",
+    )
+    .await
+    .unwrap()
+    .expect("no catalog row at the .pdf path");
+    assert_eq!(row.issue_id, Some(f.issue_id));
+    assert_eq!(row.status, "owned");
+    assert_eq!(row.size_bytes, bytes.len() as i64);
+    assert!(row.is_present);
+}
+
 /// The catalogued size must describe the file that actually landed in the
 /// library, not the watch-folder source it was built from.
 ///

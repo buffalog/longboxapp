@@ -1,5 +1,5 @@
 //! Per-file processing pipeline. Owns the full lifecycle for one
-//! watch-folder file (CBZ or CBR):
+//! watch-folder file (CBZ, CBR or PDF):
 //! stability check → ComicInfo + filename extraction → match → either
 //! (write ComicInfo, move to library, upsert as owned) OR (leave the
 //! file where it sits in the watch folder and emit a `phase_b.skipped`
@@ -353,9 +353,11 @@ async fn load_patterns(db: &Pool) -> Result<Vec<ParsingPattern>> {
 /// Read `ComicInfo.xml` from the source archive — CBZ or CBR — via
 /// `longbox-archive`, so the ZIP/RAR dispatch lives in exactly one
 /// place. `Ok(None)` means the archive carries no ComicInfo (the
-/// untagged common case). A genuinely unreadable archive (corrupt
-/// ZIP/RAR, I/O failure, non-UTF-8 ComicInfo payload) propagates as an
-/// error, leaving the file in the watch folder for manual intervention.
+/// untagged common case), which is also every PDF: a PDF is matched on
+/// its filename or its SAB job folder alone. A genuinely unreadable
+/// archive (corrupt ZIP/RAR, I/O failure, non-UTF-8 ComicInfo payload)
+/// propagates as an error, leaving the file in the watch folder for
+/// manual intervention.
 fn read_comic_info_xml(source: &Path) -> Result<Option<String>> {
     Ok(longbox_archive::read_comic_info(source)?)
 }
@@ -563,7 +565,15 @@ async fn import_as_owned(
         series.start_year.map(|y| y as i32),
         issue.number.as_str(),
     );
-    let target_abs = library_path.full(library_root);
+    // The convention's extension is `.cbz` because every import that CAN be
+    // repacked is — a CBR is converted on the way in. A PDF cannot be: it is
+    // read-only forever, so it keeps its own extension and lands verbatim.
+    // Same folder, same filename, different container.
+    let target_abs = if longbox_archive::is_pdf(source) {
+        library_path.full(library_root).with_extension("pdf")
+    } else {
+        library_path.full(library_root)
+    };
 
     if target_abs.exists() {
         // The library already owns this exact (series, issue). The
@@ -827,8 +837,11 @@ fn is_metadata_entry(name: &str) -> bool {
 /// move across without recompression. A **CBR** source is read via
 /// `longbox-archive` (libunrar): there is no RAR writer, so a matched
 /// CBR is necessarily converted here — its entries are decompressed
-/// and recompressed into the ZIP. Either way the output is a `.cbz`,
-/// which is what the canonical target path always is.
+/// and recompressed into the ZIP. Either way the output is a `.cbz`.
+///
+/// A **PDF** is the exception to all of that: it is copied byte-for-byte
+/// and stays a `.pdf`. Nothing is injected into it, because a PDF is
+/// read-only forever — the catalog is the only place its metadata lives.
 ///
 /// All errors here are "ComicInfoWriteFailed" semantically — we
 /// couldn't produce the rewritten archive. The temp drops on Err and
@@ -873,11 +886,25 @@ fn rewrite_to_temp(
     })?;
     std::fs::create_dir_all(target_dir).map_err(|e| local(e.into()))?;
 
+    let is_pdf = longbox_archive::is_pdf(source);
+
     let temp = tempfile::Builder::new()
         .prefix(".longbox-phase-b-")
-        .suffix(".cbz.tmp")
+        .suffix(if is_pdf { ".pdf.tmp" } else { ".cbz.tmp" })
         .tempfile_in(target_dir)
         .map_err(|e| local(e.into()))?;
+
+    if is_pdf {
+        // A PDF is staged verbatim — nothing to rewrite. There is no
+        // ComicInfo/MetronInfo to inject (no PDF writer exists, and none
+        // will) and no archive to re-emit, so the bytes cross unchanged.
+        // It still goes through the temp rather than renaming the source
+        // straight to the target: /watch and the library are routinely
+        // separate mounts, and stage 2's rename has to stay same-filesystem.
+        let mut source_file = std::fs::File::open(source).map_err(|e| src(e.into()))?;
+        std::io::copy(&mut source_file, &mut temp.as_file()).map_err(|e| local(e.into()))?;
+        return Ok(temp);
+    }
 
     {
         let mut writer = ZipWriter::new(temp.as_file());

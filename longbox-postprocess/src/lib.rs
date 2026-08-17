@@ -141,8 +141,8 @@ async fn resolve_library_root_id(library_root: &Path, db: &longbox_db::Pool) -> 
     ))
 }
 
-/// Walk the watch folder once at startup, enqueueing every CBZ that
-/// passes the skip filter. Runs inside `spawn_blocking` because
+/// Walk the watch folder once at startup, enqueueing every comic file
+/// that passes the skip filter. Runs inside `spawn_blocking` because
 /// walkdir is synchronous I/O.
 async fn initial_sweep(root: PathBuf, tx: mpsc::Sender<PathBuf>) {
     let root_for_log = root.clone();
@@ -230,7 +230,7 @@ async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
 }
 
 /// Read the live `min_file_size_mb` setting. Phase B rejects any
-/// incoming CBR/CBZ/CB7 smaller than this many megabytes — catches
+/// incoming file smaller than this many megabytes — catches
 /// partial/corrupt SAB deliveries that look valid at the archive
 /// level. Default `MIN_FILE_SIZE_MB_DEFAULT` (10) if the row is
 /// absent / unparseable; the 20260607 migration seeds the row at

@@ -19,8 +19,11 @@ pub enum SkipReason {
     /// Filename ends with a downloader's in-progress suffix
     /// (`.partial`, `.crdownload`, `.!ut`) — case-insensitive.
     InProgress,
-    /// Not a comic-archive extension. `.cbz` (ZIP) and `.cbr` (RAR)
-    /// are candidates; `.cb7` and everything else land here.
+    /// Not a comic-file extension. `.cbz` (ZIP), `.cbr` (RAR) and
+    /// `.pdf` are candidates; `.cb7` and everything else land here.
+    /// Kept in step with `longbox_scanner::walker` — a format Phase B
+    /// files into the library that the scanner then refuses to index
+    /// (or the reverse) is worse than not supporting it at all.
     NotComicArchive,
     /// `path.file_name()` returned None (path ends in `..` or `/`,
     /// or is otherwise not a normal file path). Defensive; should
@@ -49,7 +52,7 @@ pub fn should_skip(path: &Path) -> Option<SkipReason> {
         }
     }
 
-    if !lower.ends_with(".cbz") && !lower.ends_with(".cbr") {
+    if ![".cbz", ".cbr", ".pdf"].iter().any(|e| lower.ends_with(e)) {
         return Some(SkipReason::NotComicArchive);
     }
 
@@ -62,8 +65,8 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn cbz_and_cbr_are_candidates() {
-        // Both comic-archive extensions, mixed case, absolute paths.
+    fn cbz_cbr_and_pdf_are_candidates() {
+        // Every comic extension, mixed case, absolute paths.
         for n in [
             "Saga 001.cbz",
             "/abs/path/Saga 001.cbz",
@@ -72,6 +75,10 @@ mod tests {
             "Saga 001.cbr",
             "Saga 001.CBR",
             "Saga 001.CbR",
+            "Saga 001.pdf",
+            "/abs/path/Saga 001.pdf",
+            "Saga 001.PDF",
+            "Saga 001.Pdf",
         ] {
             assert_eq!(
                 should_skip(Path::new(n)),
@@ -120,6 +127,7 @@ mod tests {
             "Saga 001.cbz.crdownload",
             "Saga 001.!ut",
             "Saga 001.cbz.!ut",
+            "Saga 001.pdf.partial",
         ] {
             assert_eq!(
                 should_skip(Path::new(n)),

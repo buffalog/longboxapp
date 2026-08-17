@@ -75,6 +75,38 @@ async fn seed_settings_row_present() {
     assert_eq!(value.as_deref(), Some("0.85"));
 }
 
+/// The seeded patterns must claim a `.pdf` filename, not just `.cbz`/`.cbr`.
+///
+/// Asserted here rather than only end-to-end in Phase B because this is where
+/// it can break: the patterns are seeded and rewritten across ten migrations,
+/// and a new one that forgets `.pdf` would surface as an unrelated import
+/// failure two crates away. The stakes are higher for PDFs than for the
+/// archive formats — a PDF has no embedded ComicInfo to fall back on, so a
+/// pattern that stops at the extension doesn't weaken its match, it ends it.
+#[tokio::test]
+async fn seeded_parsing_patterns_claim_pdf_filenames() {
+    let pool = fresh_pool().await;
+    let patterns: Vec<longbox_core::ParsingPattern> =
+        longbox_db::parsing_pattern_repo::list_enabled(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| longbox_core::ParsingPattern {
+                id: r.id,
+                name: r.name,
+                pattern: r.pattern,
+                priority: i32::try_from(r.priority).unwrap(),
+                enabled: r.enabled,
+            })
+            .collect();
+
+    let parsed = longbox_core::filename::parse("Saga 001 (2012).pdf", &patterns)
+        .expect("no seeded pattern claims a .pdf filename");
+    assert_eq!(parsed.series_title, "Saga");
+    assert_eq!(parsed.number, "001");
+    assert_eq!(parsed.year, Some(2012));
+}
+
 #[tokio::test]
 async fn seed_parsing_patterns_at_correct_priorities() {
     // The original four (5/10/20/30), the A.9 parser hot-fix three
