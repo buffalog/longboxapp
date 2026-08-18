@@ -451,16 +451,26 @@ async fn try_folder_match(
     // series-title filter already cleared the title; the local
     // floor is redundant.
     //
-    // The ambiguous arm mirrors `process_one` too, and is deliberately not
-    // omitted as dead code. It IS dead today — this path calls `match_file`
-    // with `comic_info: None`, and `ambiguous` is only ever set where BOTH
-    // tiers resolve, so Tier 2 returning None makes it structurally
-    // unreachable. But "unreachable" here is a property of one argument at one
-    // call site, not of this function. The day anyone threads ComicInfo into
-    // the folder match, the hole silently reopens — and it reopens onto
-    // `import_as_owned`, which MOVES the archive and REWRITES its metadata.
-    // A guess there is not a row you flip back. One line to make it
-    // unreachable for a reason instead of by luck.
+    // The ambiguous arm mirrors `process_one` too — and it is LIVE. It was
+    // added (#35) against a version of this code where it was unreachable:
+    // back then `ambiguous` meant only "Tier 2 and Tier 3 named different
+    // issues", and this path passes `comic_info: None`, so Tier 2 never
+    // resolved and the flag could never be set. That argument expired in
+    // #36/#38, which gave `ambiguous` a second and independent source:
+    // `best_candidate_match` now raises it for a same-titled volume collision
+    // that evidence cannot decide, inside the helper BOTH tiers share. A
+    // Tier-3-only result carries the flag out just fine.
+    //
+    // This path is if anything the more exposed of the two. It hands
+    // `match_in_candidates` a `YearEvidence` with `volume: None` and
+    // `FolderEvidence::NoFolder` — a SAB job folder is not a library series
+    // folder — so `decided_by_evidence` is left with the job folder's year
+    // hint alone. A job folder without a year, against two volumes of one
+    // title, is an abstention, and the abstention lands here.
+    //
+    // Which is the whole reason the line was written before it was needed:
+    // it reopens onto `import_as_owned`, which MOVES the archive and REWRITES
+    // its metadata. Not a row you flip back.
     let trust_via_pull = match match_result.issue_id {
         Some(_) if match_result.ambiguous => false,
         Some(id) => pull_attempt_repo::issue_has_attempt(db, id).await?,
