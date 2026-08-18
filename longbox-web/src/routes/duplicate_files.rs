@@ -106,7 +106,8 @@ struct DupCandidate {
     file_id: i64,
     path_relative: String,
     size_bytes: i64,
-    /// `cbz` | `cbr` | `cb7` | `other`, from the path extension.
+    /// `cbz` | `cbr` | `pdf` | `cb7` | `other`, from the path extension.
+    /// Ranked for keep-preference by [`format_priority`].
     format: String,
     /// The issue number parsed from this file's name. `None` when it doesn't
     /// parse — which keeps the group out of the deletable `duplicate` bucket.
@@ -1197,7 +1198,52 @@ fn derive_format(path_relative: &str) -> &'static str {
         "cbz" => "cbz",
         "cbr" => "cbr",
         "cb7" => "cb7",
+        "pdf" => "pdf",
         _ => "other",
+    }
+}
+
+/// Keep-preference by format. **Higher is more preferred** — it feeds the
+/// `max_by_key` in [`suggest_keep`] directly rather than through a `Reverse`.
+///
+/// **Read what this actually decides before trusting the order.**
+/// [`suggest_keep`] runs only for an `is_dup` group, which requires
+/// [`ContentVerdict::Identical`] — every copy the same size AND the same
+/// digest. So this never compares a cbz against a cbr holding different
+/// bytes; it compares *names attached to one identical byte string*. The
+/// only groups where it decides anything are groups where the extensions
+/// disagree, and there at least one of them is factually wrong about its
+/// own content.
+///
+/// That makes this a bet on which NAME most likely matches the shared
+/// bytes, not a judgement about what those bytes are. The order encodes the
+/// prior that a comic library is overwhelmingly cbz and cbr, that a
+/// readable extension beats an unopenable one, and that among readable ones
+/// the more malleable wins (cbz and cbr can be repacked and retagged; a pdf
+/// is read-only forever, there is no PDF writer). It is a prior, not proof.
+/// `longbox_archive::classify` dispatches on the extension too, so when the
+/// bet is wrong — genuine PDF bytes stored as both `X.pdf` and a renamed
+/// `X.cbz` — this pre-selects the copy LongBox cannot open. Extension alone
+/// cannot catch that; only sniffing magic bytes could, at a disk read per
+/// candidate, for a case the pipeline cannot even produce (Phase B files a
+/// PDF verbatim and repacks a CBR into a CBZ, so neither path yields a
+/// byte-identical pair with disagreeing extensions — it takes a human
+/// copying and renaming by hand). Not worth the read; worth knowing.
+///
+/// `cb7` scores with `other`: `longbox_archive` has no 7-Zip reader
+/// (`classify` returns `None`, `read_comic_info` errors `UnknownFormat`),
+/// so the extension buys a keep decision nothing. Neither value is
+/// reachable today — a `files` row is created only by the scanner, gated on
+/// `longbox_scanner::walker::is_comic_archive`, or by Phase B import, gated
+/// on `longbox_postprocess::skip::should_skip`, and BOTH admit only
+/// cbz/cbr/pdf. If a 7-Zip reader ever lands, this is where cb7 rejoins the
+/// readable tiers.
+fn format_priority(format: &str) -> u8 {
+    match format {
+        "cbz" => 3,
+        "cbr" => 2,
+        "pdf" => 1,
+        _ => 0,
     }
 }
 
@@ -1275,7 +1321,7 @@ fn suggest_keep(files: &[DupCandidate]) -> Option<i64> {
         .max_by_key(|f| {
             (
                 !f.under_unsorted,            // true (not staging) preferred
-                f.format == "cbz",            // cbz preferred
+                format_priority(&f.format),   // likeliest-honest name; see fn
                 f.size_bytes,                 // larger preferred
                 std::cmp::Reverse(f.file_id), // lower id as tiebreak
             )
@@ -1323,8 +1369,23 @@ mod tests {
         assert_eq!(derive_format("a/b.cbz"), "cbz");
         assert_eq!(derive_format("a/b.CBR"), "cbr");
         assert_eq!(derive_format("a/b.cb7"), "cb7");
-        assert_eq!(derive_format("a/b.pdf"), "other");
+        assert_eq!(derive_format("a/b.pdf"), "pdf");
+        assert_eq!(derive_format("a/b.PDF"), "pdf");
         assert_eq!(derive_format("noext"), "other");
+    }
+
+    #[test]
+    fn format_priority_ranks_by_what_longbox_can_do_with_the_file() {
+        // The readable tiers, ordered by how much LongBox can do with them:
+        // rewrite (cbz), rewrite after conversion (cbr), read-only (pdf).
+        assert!(format_priority("cbz") > format_priority("cbr"));
+        assert!(format_priority("cbr") > format_priority("pdf"));
+        // Everything LongBox cannot open ranks below everything it can, and
+        // ties with everything else it cannot open. `cb7` is named by
+        // `derive_format` but has no reader, so it earns nothing here.
+        assert!(format_priority("pdf") > format_priority("cb7"));
+        assert_eq!(format_priority("cb7"), format_priority("other"));
+        assert_eq!(format_priority("cb7"), format_priority("wildly-unknown"));
     }
 
     #[test]
@@ -1347,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn suggest_keep_prefers_library_over_unsorted_then_cbz_then_size() {
+    fn suggest_keep_prefers_library_then_format_capability_then_size() {
         // A .cbz in _unsorted vs a .cbr in the real library → library wins
         // (location precedes format).
         let files = vec![
@@ -1362,6 +1423,36 @@ mod tests {
             cand(4, "Saga/Saga 1.cbz", 90_000_000, false, false),
         ];
         assert_eq!(suggest_keep(&files), Some(4));
+
+        // The full format ladder in one group, each lower rung given MORE
+        // bytes than the rung above it so size cannot be what is deciding.
+        // Size sits below format in the key: it breaks ties within a format,
+        // it never promotes one.
+        let files = vec![
+            cand(30, "Saga/Saga 1.pdf", 300_000_000, false, false),
+            cand(31, "Saga/Saga 1.cb7", 400_000_000, false, false),
+            cand(32, "Saga/Saga 1.cbr", 200_000_000, false, false),
+            cand(33, "Saga/Saga 1.cbz", 100_000_000, false, false),
+        ];
+        assert_eq!(suggest_keep(&files), Some(33));
+
+        // Drop the cbz: a cbr still beats a much larger pdf.
+        let files = vec![
+            cand(34, "Saga/Saga 1.pdf", 300_000_000, false, false),
+            cand(35, "Saga/Saga 1.cbr", 200_000_000, false, false),
+        ];
+        assert_eq!(suggest_keep(&files), Some(35));
+
+        // Drop the cbr too, and the pdf must win over the unopenable copies.
+        // This is the rung that moved: under the old binary `format == "cbz"`
+        // check these three tied, and the biggest file took it — which handed
+        // the keep to a .cb7 nothing in LongBox can read.
+        let files = vec![
+            cand(36, "Saga/Saga 1.cb7", 400_000_000, false, false),
+            cand(37, "Saga/Saga 1.junk", 500_000_000, false, false),
+            cand(38, "Saga/Saga 1.pdf", 100_000_000, false, false),
+        ];
+        assert_eq!(suggest_keep(&files), Some(38));
 
         // Same location + format, larger wins.
         let files = vec![
@@ -1593,6 +1684,49 @@ mod tests {
     /// candidate. Before this it read `pending_analysis` forever, pointing
     /// the user at an analysis that by construction could never reach it.
     #[test]
+    fn the_format_ladder_is_reachable_by_a_real_identical_group() {
+        // Every other `suggest_keep` test hands the function candidates
+        // directly. This one goes through `build_one_group`, because the
+        // ladder can only ever fire for a group that classifies `Identical`
+        // — same size AND same digest — and nothing proved such a group can
+        // carry disagreeing extensions in the first place.
+        //
+        // It also documents the ONLY shape the tier decides: two copies of
+        // one byte string under two names. One of these extensions is lying
+        // about its own content; the ladder is a prior on which is likelier
+        // to be honest, not a reading of the bytes. See `format_priority`.
+        let pats = number_pattern();
+        let pdf = row(1, "The Authority (1999)/The Authority 017.pdf");
+        let cbz = row(2, "The Authority (1999)/The Authority 017.cbz");
+        let g = build_one_group(&[pdf, cbz], &pats, &same(2));
+
+        assert_eq!(
+            g.kind, "duplicate",
+            "same size + same digest is the only state that reaches suggest_keep"
+        );
+        assert_eq!(
+            g.suggested_keep_file_id,
+            Some(2),
+            "cbz outranks pdf among byte-identical copies"
+        );
+        // Both parsed, or the group would not be deletable at all — this is
+        // what the `.pdf` pattern anchor buys.
+        assert!(
+            g.files.iter().all(|f| f.parsed_number.is_some()),
+            "a pdf must parse its issue number like any other comic file"
+        );
+        // And the new bucket is what the UI renders for it.
+        assert_eq!(
+            g.files
+                .iter()
+                .find(|f| f.file_id == 1)
+                .map(|f| f.format.as_str()),
+            Some("pdf"),
+            "a pdf must not display as OTHER"
+        );
+    }
+
+    #[test]
     fn a_format_pair_with_unique_sizes_is_classified_without_hashing() {
         let pats = number_pattern();
         let mut a = row(1, "The Authority (1999)/The Authority 017.cbr");
@@ -1706,7 +1840,11 @@ mod tests {
         vec![ParsingPattern {
             id: 1,
             name: "test".to_owned(),
-            pattern: r"^(?P<series>[A-Za-z ]+?)\s+(?P<number>\d+).*\.(?i:cbz|cbr)$".to_owned(),
+            // Mirrors the seeded DB patterns, which accept `.pdf` since the
+            // 20260817000000 migration. A pdf carries no ComicInfo, so its
+            // filename is the only evidence it has — a pattern that rejects
+            // the extension leaves every pdf with `parsed_number: None`.
+            pattern: r"^(?P<series>[A-Za-z ]+?)\s+(?P<number>\d+).*\.(?i:cbz|cbr|pdf)$".to_owned(),
             priority: 1,
             enabled: true,
         }]
