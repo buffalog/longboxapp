@@ -29,6 +29,7 @@
   let query = $state('');
   let results = $state<InteractiveSearchResult[]>([]);
   let errors = $state<IndexerSearchError[]>([]);
+  let alreadyOwned = $state(false);
   let searching = $state(false);
   let searched = $state(false);
   // The nzb_url currently being grabbed (per-row spinner / disable).
@@ -45,6 +46,7 @@
       query = `${seriesTitle} ${issueNumber}`.trim();
       results = [];
       errors = [];
+      alreadyOwned = false;
       searched = false;
       sortKey = 'confidence';
       sortDir = 'desc';
@@ -94,6 +96,7 @@
       });
       results = res.results;
       errors = res.errors;
+      alreadyOwned = res.already_owned;
       searched = true;
     } catch (e) {
       toast.warning(e instanceof ApiError ? e.message : 'Search failed.');
@@ -141,6 +144,19 @@
       Search
     </Button>
   </form>
+
+  <div role="status" aria-live="polite">
+    {#if alreadyOwned}
+      <div
+        class="mb-3 rounded-md border border-slate-300 bg-slate-100 px-3 py-2 text-xs text-slate-700"
+      >
+        <span class="font-medium">Note — you already have this issue.</span> This page loaded
+        before the file appeared; reload to see it. Grabbing again will not replace it: when a
+        download collides with a file already at the issue's library path, it is discarded and the
+        existing file is kept. Delete the old file first if you mean to replace it.
+      </div>
+    {/if}
+  </div>
 
   {#if errors.length > 0}
     <div class="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
