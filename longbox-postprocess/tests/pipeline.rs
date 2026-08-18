@@ -954,6 +954,224 @@ async fn sub_threshold_match_skipped_when_no_pull_attempt_exists() {
 }
 
 #[tokio::test]
+async fn ambiguous_match_is_never_trusted_through_by_a_pull_attempt() {
+    // The trust override forgives a weak *confidence* score on an issue we
+    // ourselves asked an indexer for. It must NOT forgive *ambiguity* —
+    // ComicInfo and the filename naming two different issues. Nothing about
+    // having requested an issue adjudicates which of two contradicting
+    // numbers is real, and getting it wrong here is not a row you flip back:
+    // the trusted arm calls `import_as_owned`, which MOVES the archive to the
+    // target issue's canonical path and REWRITES its embedded metadata.
+    //
+    // Guarding this needs BOTH halves of the #34 fix, which is why the test
+    // lives here rather than on `classify_status`. Flagging ambiguity only
+    // forces status=NeedsReview — and the trusted dispatch arm is
+    // `(Some(id), _, true)`, which ignores status entirely. The override
+    // itself has to refuse.
+    let f = seed_basic_fixture().await;
+
+    // A second issue for ComicInfo to point at, so both tiers resolve
+    // *within the same series* — the only shape `match_file` flags.
+    issue_repo::insert(
+        &f.db,
+        NewIssue {
+            series_id: f.series_id,
+            cv_issue_id: Some(364355),
+            metron_issue_id: None,
+            number: "2".into(),
+            title: Some("The Chase".into()),
+            cover_date: Some("2012-04-11".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The live failure mode from #34: a correctly-named file whose embedded
+    // <Number> lies. Tier 2 says issue 2, Tier 3 says issue 1 → ambiguous,
+    // and the filename's issue is the one carried forward.
+    let lying_xml =
+        r#"<?xml version="1.0"?><ComicInfo><Series>Saga</Series><Number>2</Number></ComicInfo>"#;
+    let source = f._watch.path().join("Saga 001.cbz");
+    write_cbz(&source, Some(lying_xml));
+
+    // Arm the override on the issue the match actually lands on. Without the
+    // guard this is exactly enough to wave the file through as Owned.
+    longbox_db::pull_attempt_repo::insert(
+        &f.db,
+        longbox_db::NewPullAttempt {
+            series_id: f.series_id,
+            issue_id: f.issue_id,
+            indexer_id: None,
+            release_id: Some("guid-saga-001-ambiguous".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-saga-001-ambiguous".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Default threshold, not the 0.99 its siblings use: an ambiguous match
+    // scores ABOVE the floor (0.90 vs 0.85). Confidence is not what is
+    // supposed to stop this one.
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome, Outcome::Skipped { .. }),
+        "an ambiguous match must not be trusted through by pull history; got {outcome:?}"
+    );
+
+    // The physical invariants are the point — a status is cheap to correct,
+    // a moved-and-rewritten archive is not.
+    assert!(
+        source.exists(),
+        "the file must stay in /watch/ for a human, not be imported"
+    );
+    let xml = read_cbz_entry(&source, "ComicInfo.xml").expect("source ComicInfo.xml missing");
+    assert!(
+        xml.contains("<Number>2</Number>"),
+        "the source archive must be left untouched, lying <Number> and all: {xml}"
+    );
+    for name in ["Saga (2012) 001.cbz", "Saga (2012) 002.cbz"] {
+        let target = f.library.path().join("Saga (2012)").join(name);
+        assert!(
+            !target.exists(),
+            "nothing may land in the library: {}",
+            target.display()
+        );
+    }
+    for path in [
+        "Saga (2012)/Saga (2012) 001.cbz",
+        "Saga (2012)/Saga (2012) 002.cbz",
+    ] {
+        let row = file_repo::find_by_path(&f.db, f.library_root_id, path)
+            .await
+            .unwrap();
+        assert!(row.is_none(), "no catalog row may be written for {path}");
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_folder_match_is_never_trusted_through_by_a_pull_attempt() {
+    // The Tier 1 (SAB job folder) twin of the test above, pinning the guard
+    // added in #35. That guard was written against a version of the matcher
+    // where it could not fire; #36/#38 gave `ambiguous` a second source —
+    // a same-titled volume collision evidence cannot settle — raised inside
+    // the helper both tiers share, so a Tier-3-only match carries it now.
+    // This test exists to keep that reachability a fact rather than a claim
+    // in a comment.
+    let f = seed_basic_fixture().await;
+
+    // A second volume of the same title. Two "Saga"s, one issue #1 each,
+    // and nothing to tell them apart: a job folder is not a series folder
+    // (`FolderEvidence::NoFolder`), there is no ComicInfo `<Volume>`, and
+    // the folder name below carries no year. That is the abstention.
+    let other_series_id = series_repo::insert(
+        &f.db,
+        NewSeries {
+            cv_id: Some(101),
+            metron_id: None,
+            title: "Saga".into(),
+            sort_title: "saga".into(),
+            start_year: Some(2024),
+            publisher: Some("Image".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let other_issue_id = issue_repo::insert(
+        &f.db,
+        NewIssue {
+            series_id: other_series_id,
+            cv_issue_id: Some(999001),
+            metron_issue_id: None,
+            number: "1".into(),
+            title: Some("Book One".into()),
+            cover_date: Some("2024-01-10".into()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+
+    // Inside a job folder, which is what puts Tier 1 in play at all.
+    let source = f._watch.path().join("Saga 001").join("Saga 001.cbz");
+    write_cbz(&source, None);
+
+    // Arm the override on BOTH volumes, so the test does not silently depend
+    // on which one the sort happens to surface.
+    for (series_id, issue_id, tag) in [
+        (f.series_id, f.issue_id, "2012"),
+        (other_series_id, other_issue_id, "2024"),
+    ] {
+        longbox_db::pull_attempt_repo::insert(
+            &f.db,
+            longbox_db::NewPullAttempt {
+                series_id,
+                issue_id,
+                indexer_id: None,
+                release_id: Some(format!("guid-saga-001-{tag}")),
+                status: "submitted".into(),
+                error_message: None,
+                retry_count: 0,
+                download_handle: Some(format!("nzo-saga-001-{tag}")),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome, Outcome::Skipped { .. }),
+        "an ambiguous FOLDER match must not be trusted through by pull history; got {outcome:?}"
+    );
+    assert!(
+        source.exists(),
+        "the file must stay in its job folder for a human"
+    );
+    for year in ["2012", "2024"] {
+        let target = f
+            .library
+            .path()
+            .join(format!("Saga ({year})"))
+            .join(format!("Saga ({year}) 001.cbz"));
+        assert!(
+            !target.exists(),
+            "an unsettled volume question must not pick a volume: {}",
+            target.display()
+        );
+    }
+}
+
+#[tokio::test]
 async fn conflict_cleans_source_and_preserves_target() {
     // Phase B detects target_abs.exists() → Conflict. The library
     // already owns canonical bytes for this (series, issue), so
