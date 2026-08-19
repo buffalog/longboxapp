@@ -55,7 +55,7 @@ fn scene_year_re() -> &'static Regex {
 ///    name contains a year-range number — wrapping it as the year would
 ///    break the parse).
 ///
-/// 3. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor in
+/// 3. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor in
 ///    every pattern matches. The fact that Scene NZBs aren't actually
 ///    CBZs is irrelevant — we're feeding the *parser*, not the
 ///    downloader.
@@ -187,7 +187,7 @@ fn nzb_bracket_re() -> &'static Regex {
 ///
 ///  6. **Collapse whitespace runs** left by the strip steps.
 ///
-///  7. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor
+///  7. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor
 ///     in every pattern matches. The fact that scene NZBs aren't
 ///     actually CBZs is irrelevant — we're feeding the *parser*, not
 ///     the downloader.
@@ -290,7 +290,7 @@ fn wrap_rightmost_year(input: &str) -> String {
 ///    `Beneath the Trees Where Nobody Sees 001 (2023) (digital) (Son
 ///    of Ultron-Empire)` — no extension, year already wrapped. The
 ///    only thing keeping parse_filename from accepting these is the
-///    trailing `\.(?i:cbz|cbr|cb7)$` anchor; appending `.cbz`
+///    trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor; appending `.cbz`
 ///    satisfies the anchor without touching the year token. Trying
 ///    this step BEFORE [`normalize_scene_title`] is load-bearing:
 ///    the normalizer's `\b(YYYY)\b` regex matches inside an existing
@@ -612,23 +612,42 @@ pub fn score_release_title(
 }
 
 /// Infer archive format from a release title. Newznab has no
-/// structured format field; sniff the `.cbz` / `.cbr` substring.
+/// structured format field; sniff the extension substring.
 pub fn archive_format(title: &str) -> ArchiveFormat {
     let lower = title.to_lowercase();
     if lower.contains(".cbz") {
         ArchiveFormat::Cbz
     } else if lower.contains(".cbr") {
         ArchiveFormat::Cbr
+    } else if lower.contains(".pdf") {
+        ArchiveFormat::Pdf
     } else {
         ArchiveFormat::Unknown
     }
 }
 
+/// Sort key for [`select_best`]. Lower is better.
+///
+/// `Pdf` and `Unknown` deliberately TIE. A PDF is now readable, so it must
+/// not be penalised — but it must not be promoted over `Unknown` either,
+/// because `Unknown` is not junk here. Newznab has no format field, so
+/// `Unknown` is simply "the title never named an extension", and that is
+/// the scene release: `100.Bullets.001.1999.G85.and.Megan-Empire`. Those
+/// dominate real indexer pools (the whole `normalize_scene_title` apparatus
+/// below exists for them) and are usually a CBZ or CBR inside.
+///
+/// So ranking `Pdf` above `Unknown` would put a CERTAIN un-repackable file
+/// ahead of a PROBABLE archive at any popularity ratio — the opposite of
+/// why `Pdf` sits under `Cbr` in the first place. Tied, grabs and recency
+/// decide between them, which is the honest answer when one side's format
+/// is genuinely unknown.
 fn format_rank(title: &str) -> u8 {
     match archive_format(title) {
         ArchiveFormat::Cbz => 0,
         ArchiveFormat::Cbr => 1,
-        ArchiveFormat::Unknown => 2,
+        // Named-but-read-only and not-named-at-all are equally preferable:
+        // neither beats the other on evidence, so let popularity speak.
+        ArchiveFormat::Pdf | ArchiveFormat::Unknown => 2,
     }
 }
 
@@ -692,6 +711,8 @@ mod tests {
     fn detects_archive_format_from_title() {
         assert_eq!(archive_format("Wolverine 005.cbz"), ArchiveFormat::Cbz);
         assert_eq!(archive_format("Wolverine 005.CBR"), ArchiveFormat::Cbr);
+        assert_eq!(archive_format("Wolverine 005.pdf"), ArchiveFormat::Pdf);
+        assert_eq!(archive_format("Wolverine 005.PDF"), ArchiveFormat::Pdf);
         assert_eq!(archive_format("Wolverine 005"), ArchiveFormat::Unknown);
     }
 
@@ -730,6 +751,63 @@ mod tests {
     fn cbr_still_selectable_when_no_cbz() {
         let pool = vec![release("only.cbr", Some(1))];
         assert_eq!(select_best(pool, None).unwrap().title, "only.cbr");
+    }
+
+    #[test]
+    fn pdf_ranks_under_the_repackable_formats() {
+        // The archive formats win outright, and size of the crowd cannot
+        // buy a promotion: each lower rung is given MORE grabs than the rung
+        // above it. Grabs break ties WITHIN a rank; they never cross one.
+        let pool = vec![
+            release("Wolverine 005.pdf", Some(500)),
+            release("Wolverine 005", Some(900)),
+            release("Wolverine 005.cbr", Some(100)),
+            release("Wolverine 005.cbz", Some(5)),
+        ];
+        assert_eq!(select_best(pool, None).unwrap().title, "Wolverine 005.cbz");
+
+        // Drop the cbz: a cbr still beats a far more popular pdf, because a
+        // cbr is repackable and taggable and a pdf is not.
+        let pool = vec![
+            release("Wolverine 005.pdf", Some(500)),
+            release("Wolverine 005.cbr", Some(100)),
+        ];
+        assert_eq!(select_best(pool, None).unwrap().title, "Wolverine 005.cbr");
+    }
+
+    #[test]
+    fn a_pdf_neither_outranks_nor_yields_to_an_unnamed_format() {
+        // `Unknown` means "the title named no extension", which is the scene
+        // release — usually an archive. Promoting a certain read-only PDF
+        // over a probable CBZ would invert the very reason PDF sits under
+        // CBR, so the two tie and popularity decides. Asserted in BOTH
+        // directions: an ordering either way would pass one of these and
+        // fail the other.
+        let pool = vec![
+            release("Wolverine 005.pdf", Some(900)),
+            release("100.Bullets.001.1999.G85.and.Megan-Empire", Some(5)),
+        ];
+        assert_eq!(
+            select_best(pool, None).unwrap().title,
+            "Wolverine 005.pdf",
+            "a much more popular pdf must win a tie on format"
+        );
+
+        let pool = vec![
+            release("Wolverine 005.pdf", Some(5)),
+            release("100.Bullets.001.1999.G85.and.Megan-Empire", Some(900)),
+        ];
+        assert_eq!(
+            select_best(pool, None).unwrap().title,
+            "100.Bullets.001.1999.G85.and.Megan-Empire",
+            "and a much more popular scene release must win the same tie"
+        );
+    }
+
+    #[test]
+    fn pdf_still_selectable_when_it_is_the_only_offer() {
+        let pool = vec![release("only.pdf", Some(1))];
+        assert_eq!(select_best(pool, None).unwrap().title, "only.pdf");
     }
 
     #[test]

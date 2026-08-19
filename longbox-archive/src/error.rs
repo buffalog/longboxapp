@@ -14,9 +14,9 @@ pub enum ArchiveError {
         source: std::io::Error,
     },
 
-    /// The path's extension is neither `.cbz` nor `.cbr`. Callers that
-    /// pre-filter by extension should never see this.
-    #[error("unrecognized archive type (expected .cbz or .cbr): {0}")]
+    /// The path's extension is none of `.cbz`, `.cbr`, `.pdf`. Callers
+    /// that pre-filter by extension should never see this.
+    #[error("unrecognized archive type (expected .cbz, .cbr or .pdf): {0}")]
     UnknownFormat(PathBuf),
 
     /// The file claims to be a CBZ but isn't a valid ZIP, or a ZIP
@@ -28,4 +28,11 @@ pub enum ArchiveError {
     /// operation failed mid-read.
     #[error("rar error for {path}: {message}")]
     Rar { path: PathBuf, message: String },
+
+    /// A poppler-utils call failed: the file isn't a readable PDF, a page
+    /// would not render, or `pdfinfo`/`pdftoppm` is not installed. The
+    /// message names the tool so a missing dependency is distinguishable
+    /// from a bad file.
+    #[error("pdf error for {path}: {message}")]
+    Pdf { path: PathBuf, message: String },
 }

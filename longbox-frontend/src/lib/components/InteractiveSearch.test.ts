@@ -52,7 +52,8 @@ const SAMPLE = {
       nzb_url: 'https://idx/nzb/batman'
     }
   ],
-  errors: [{ indexer: 'DeadIndexer', error: 'timeout' }]
+  errors: [{ indexer: 'DeadIndexer', error: 'timeout' }],
+  already_owned: false
 };
 
 beforeEach(() => {
@@ -60,6 +61,64 @@ beforeEach(() => {
 });
 
 describe('InteractiveSearch modal', () => {
+  it('warns when the library already owns the issue, without hiding results', async () => {
+    // The warning is advisory. Interactive Search exists for the case where
+    // the engine got it wrong, and "I already have it" is often exactly why
+    // someone is here — replacing a bad scan, a wrong language, a PDF they
+    // want as a CBZ. So the banner appears AND every result stays grabbable.
+    vi.mocked(interactiveSearch).mockResolvedValue({ ...SAMPLE, already_owned: true });
+    renderModal();
+
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/You already have this issue/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('Saga 012 (2012) (digital).cbz')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Grab/i }).length).toBeGreaterThan(0);
+  });
+
+  it('shows no ownership warning when the library does not have the issue', async () => {
+    vi.mocked(interactiveSearch).mockResolvedValue(SAMPLE); // already_owned: false
+    renderModal();
+
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Saga 012 (2012) (digital).cbz')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/You already have this issue/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no ownership warning before a search has run', async () => {
+    vi.mocked(interactiveSearch).mockResolvedValue({ ...SAMPLE, already_owned: true });
+    renderModal();
+    // Nothing has been searched yet — the flag is unknown, not false.
+    expect(screen.queryByText(/you already have this issue/i)).not.toBeInTheDocument();
+  });
+
+  it('clears a prior ownership warning when reopened for a different issue', async () => {
+    // The modal is mounted once and REUSED (it lives outside any {#if} on
+    // both the series and missing pages), so every piece of per-issue state
+    // has to be reset by the open-effect. A warning that survives into the
+    // next issue's modal is a lie about a different comic.
+    vi.mocked(interactiveSearch).mockResolvedValue({ ...SAMPLE, already_owned: true });
+    const { rerender } = renderModal();
+
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/you already have this issue/i)).toBeInTheDocument();
+    });
+
+    // Close, then reopen on another issue — as the parent pages do.
+    await rerender({ open: false, onClose, seriesId: 42, issueId: 7, seriesTitle: 'Saga', issueNumber: '12' });
+    await rerender({ open: true, onClose, seriesId: 42, issueId: 8, seriesTitle: 'Saga', issueNumber: '13' });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/you already have this issue/i)).not.toBeInTheDocument();
+    });
+  });
+
   it('pre-populates the query from series title + issue number', () => {
     renderModal();
     const input = screen.getByLabelText('Search query') as HTMLInputElement;

@@ -22,6 +22,9 @@ export interface IndexerSearchError {
 export interface InteractiveSearchResponse {
   results: InteractiveSearchResult[];
   errors: IndexerSearchError[];
+  /** The library already holds an owned, present file for this issue.
+   *  A warning only — results are still returned and grab still works. */
+  already_owned: boolean;
 }
 
 export interface GrabResponse {

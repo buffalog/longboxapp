@@ -6,13 +6,13 @@ A step-by-step guide to self-hosting LongBox, the comic library catalog. Written
 
 ## What LongBox does
 
-LongBox tracks your comic library. Point it at a folder of CBZ/CBR files, and it will scan, identify, and catalog every issue against ComicVine metadata. It surfaces what you own, what you're missing, and (optionally) integrates with Usenet tools to fill the gaps automatically.
+LongBox tracks your comic library. Point it at a folder of CBZ, CBR, or PDF files, and it will scan, identify, and catalog every issue against ComicVine metadata. It surfaces what you own, what you're missing, and (optionally) integrates with Usenet tools to fill the gaps automatically.
 
 ## What you'll need
 
 - **Docker** (required, Docker Desktop 4.x+ or Docker Engine 20.10+)
 - **A ComicVine API key** (required, free)
-- **A folder of comic files** (CBZ, CBR, or CB7)
+- **A folder of comic files** (CBZ, CBR, or PDF)
 - **SABnzbd + a Newznab indexer** (optional, for automated downloading)
 
 **Supported architectures:** LongBox publishes multi-architecture Docker images for both **arm64** (Apple Silicon, Raspberry Pi 4/5) and **amd64** (Intel/AMD). Docker will pull the correct image automatically.
@@ -571,7 +571,8 @@ Your library path isn't reaching the container. Check:
 
 1. The `LIBRARY_PATH` in `.env` is correct and matches the actual folder on your computer.
 2. On macOS/Windows: the path is in Docker Desktop's File Sharing allow-list (Docker Desktop > Settings > Resources > File Sharing).
-3. The folder contains CBZ/CBR/CB7 files (LongBox doesn't scan other formats like PDF or EPUB).
+3. The folder contains CBZ, CBR, or PDF files. LongBox does not scan CB7, EPUB, MOBI or
+   anything else — a `.cb7` in the library is skipped silently, exactly like a `.txt`.
 4. Run this command to verify the container can see your files:
    ```bash
    docker exec longbox ls /library
@@ -621,7 +622,7 @@ Comics/
 
 The ideal filename format is `Series Name (Year) Issue.ext`. LongBox's scanner handles many naming variations, but this format gives the best matching results.
 
-LongBox does NOT require this structure. It will scan and attempt to match any CBZ/CBR/CB7 file it finds, regardless of folder structure or naming convention. But organized libraries match faster and more accurately.
+LongBox does NOT require this structure. It will scan and attempt to match any CBZ, CBR, or PDF file it finds, regardless of folder structure or naming convention. But organized libraries match faster and more accurately.
 
 ---
 

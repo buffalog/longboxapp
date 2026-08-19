@@ -81,7 +81,14 @@ RUN cargo build --release --target "$(cat /tmp/rust-target)" --package longbox-w
 # Minimal Alpine image. Keeps sh + wget so we can shell in for debugging.
 # ────────────────────────────────────────────────────────────────────────────
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# poppler-utils supplies `pdfinfo` and `pdftoppm`, which longbox-archive's
+# PDF reader SHELLS OUT TO — it does not link a PDF crate. Without them the
+# binary still starts, still scans, still imports a PDF into the library,
+# and only fails when someone opens one in the reader. Nothing in
+# `cargo test` can catch that: the tests run on a host where poppler is
+# installed (CI installs it explicitly), so the image is the only place
+# this dependency exists or can go missing.
+RUN apk add --no-cache ca-certificates poppler-utils
 
 RUN addgroup -g 1000 -S longbox \
  && adduser -u 1000 -S -G longbox -h /home/longbox longbox \

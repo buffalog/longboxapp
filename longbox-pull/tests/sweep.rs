@@ -1026,7 +1026,7 @@ async fn seed_submitted(db: &Pool, series_id: i64, issue_id: i64, guid: &str, nz
 
 /// MECHANISM 1 — the settle-on-empty condition.
 ///
-/// A completed download whose folder holds only a PDF settles now,
+/// A completed download whose folder holds only an EPUB settles now,
 /// with a message describing what actually happened.
 #[tokio::test]
 async fn a_completed_download_with_no_comics_settles_honestly() {
@@ -1035,13 +1035,13 @@ async fn a_completed_download_with_no_comics_settles_honestly() {
     // The `.1` is SAB's collision suffix — the folder that really
     // exists, and one no reconstruction from the job name produces.
     watch
-        .job_file("Saga 1.1", "Saga 001.pdf")
+        .job_file("Saga 1.1", "Saga 001.epub")
         .job_file("Saga 1.1", "info.nfo");
 
     let downloader = MockServer::start().await;
-    sab_completed_at(&downloader, "nzo-pdf", "Saga 1.1").await;
+    sab_completed_at(&downloader, "nzo-ebook", "Saga 1.1").await;
     add_sab_downloader(&db, downloader.uri()).await;
-    seed_submitted(&db, series_id, issue_id, "guid-pdf", "nzo-pdf").await;
+    seed_submitted(&db, series_id, issue_id, "guid-ebook", "nzo-ebook").await;
 
     let summary = sweep(&db, Some(watch.path())).await.unwrap();
     assert_eq!(summary.completed_without_comics, 1);
@@ -1069,23 +1069,23 @@ async fn a_completed_download_with_no_comics_settles_honestly() {
 ///
 /// Settling must keep `release_id` on the row, because the exclusion
 /// list for the next attempt is built from the guids of prior
-/// attempts. Without that, the engine re-grabs the same PDF forever.
+/// attempts. Without that, the engine re-grabs the same release forever.
 #[tokio::test]
 async fn the_settled_release_is_not_grabbed_again_for_that_issue() {
     let (db, series_id, issue_id) = seed_catalog().await;
     let watch = Scratch::new("suppress");
-    watch.job_file("Saga 1", "Saga 001.pdf");
+    watch.job_file("Saga 1", "Saga 001.epub");
 
     let indexer = MockServer::start().await;
     let downloader = MockServer::start().await;
     // The indexer offers exactly one release — the one that just
     // proved itself empty.
-    indexer_returns(&indexer, rss_one("guid-pdf")).await;
-    sab_completed_at(&downloader, "nzo-pdf", "Saga 1").await;
+    indexer_returns(&indexer, rss_one("guid-ebook")).await;
+    sab_completed_at(&downloader, "nzo-ebook", "Saga 1").await;
     sab_accepts(&downloader, "nzo-second").await;
     add_indexer(&db, indexer.uri()).await;
     add_sab_downloader(&db, downloader.uri()).await;
-    seed_submitted(&db, series_id, issue_id, "guid-pdf", "nzo-pdf").await;
+    seed_submitted(&db, series_id, issue_id, "guid-ebook", "nzo-ebook").await;
 
     // One sweep: Phase 1 settles the attempt, then Phase 2 re-searches
     // the now-eligible issue and must refuse the same release.
@@ -1100,7 +1100,7 @@ async fn the_settled_release_is_not_grabbed_again_for_that_issue() {
         .unwrap();
     assert_eq!(
         attempts[0].release_id.as_deref(),
-        Some("guid-pdf"),
+        Some("guid-ebook"),
         "settling must preserve the guid — it is what drives the exclusion"
     );
     assert!(
@@ -1322,24 +1322,24 @@ async fn guard_two_end_to_end_a_folder_phase_b_emptied_is_not_condemned() {
 }
 
 #[tokio::test]
-async fn both_guards_satisfied_still_condemns_a_real_pdf_release() {
+async fn both_guards_satisfied_still_condemns_a_real_ebook_release() {
     // Negative control for the pair. If either guard were over-eager
     // the feature would abstain on everything and the two tests above
     // would still pass.
     let (db, series_id, issue_id) = seed_catalog().await;
     let watch = Scratch::new("g3");
     watch
-        .job_file("Saga 1", "release.pdf")
+        .job_file("Saga 1", "release.epub")
         .job_file("Saga 1", "info.nfo");
     watch
-        .age("Saga 1/release.pdf", JOB_COMPLETED)
+        .age("Saga 1/release.epub", JOB_COMPLETED)
         .age("Saga 1/info.nfo", JOB_COMPLETED)
         .age("Saga 1", JOB_COMPLETED);
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-pdf2", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-ebook2", "Saga 1", JOB_COMPLETED).await;
     add_sab_downloader(&db, downloader.uri()).await;
-    seed_submitted(&db, series_id, issue_id, "guid-pdf2", "nzo-pdf2").await;
+    seed_submitted(&db, series_id, issue_id, "guid-ebook2", "nzo-ebook2").await;
 
     let summary = sweep(&db, Some(watch.path())).await.unwrap();
     assert_eq!(summary.completed_without_comics, 1);

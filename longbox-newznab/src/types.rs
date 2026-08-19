@@ -27,13 +27,24 @@ pub struct IndexerConfig {
 }
 
 /// Archive format inferred from a release title. Newznab has no
-/// structured format field; we sniff `.cbz` / `.cbr` from the title
-/// string. Used only as a selection sort-key — both cbz and cbr are
-/// acceptable results.
+/// structured format field; we sniff the extension out of the title
+/// string. Used only as a selection sort-key — every variant except
+/// `Unknown` is an acceptable result, they are just not equally good.
+///
+/// `Pdf` sits below `Cbr` rather than beside it. LongBox reads PDFs, so a
+/// PDF release is a real delivery and not a wasted grab — but it is the one
+/// format that lands verbatim: there is no PDF writer, so Phase B cannot
+/// repack it or inject ComicInfo/MetronInfo the way it does for every
+/// archive. Preferring a CBR keeps a taggable file when both are on offer.
+///
+/// It does NOT sit above `Unknown`, though — see `select::format_rank`.
+/// `Unknown` is "the title named no extension", which is the scene release,
+/// and those are usually archives. The two tie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
     Cbz,
     Cbr,
+    Pdf,
     Unknown,
 }
 
