@@ -9,7 +9,11 @@
 //! matches, nothing settles, and the attempt sits `submitted` until
 //! the downloader forgets the job and the poller calls it
 //! "lost track of download". The download was never lost. It arrived
-//! perfectly and contained a PDF.
+//! perfectly and contained an EPUB.
+//!
+//! (A PDF was the original example and is no longer one: LongBox reads
+//! PDFs now, so a PDF release delivers a comic and settles by the
+//! ordinary import route. See [`RECOGNISED_NON_PAYLOAD`].)
 //!
 //! So the verdict here is derived from the bytes on disk rather than
 //! from a catalog match, and it is deliberately biased toward saying
@@ -104,7 +108,7 @@
 //!
 //! **An empty directory is not evidence either.** Phase B moves an
 //! imported comic out of the watch folder, so "no files here" is
-//! equally consistent with "this release was a PDF" and with "the
+//! equally consistent with "this release was an EPUB" and with "the
 //! comic already imported".
 
 use std::collections::HashMap;
@@ -469,8 +473,16 @@ const OS_JUNK: [&str; 5] = [
 /// Guessing wide buys nothing (an omission is already free) and risks
 /// adding something that *can* hold a comic, which is the one way an
 /// entry here becomes harmful.
-const RECOGNISED_NON_PAYLOAD: [&str; 11] = [
-    ".pdf", ".nfo", ".diz", ".sfv", ".txt", ".url", ".m3u", ".srr", ".epub", ".mobi", ".azw3",
+///
+/// `.pdf` used to head this list — it was the motivating case, the
+/// release that arrived intact and delivered nothing LongBox could
+/// read. It came off when LongBox learned to read PDFs. That is the
+/// harmful direction the paragraph above warns about, arrived at by
+/// the format changing rather than by a bad guess: an entry here that
+/// *can* hold a comic condemns a release that actually delivered one.
+/// Any format LongBox learns to read next must leave at the same time.
+const RECOGNISED_NON_PAYLOAD: [&str; 10] = [
+    ".nfo", ".diz", ".sfv", ".txt", ".url", ".m3u", ".srr", ".epub", ".mobi", ".azw3",
 ];
 
 /// True when the filename ends in an extension we have positively
@@ -645,15 +657,33 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn a_pdf_release_is_the_terminal_verdict() {
-        // The observed shape: one PDF plus the usual usenet litter.
+    fn an_ebook_release_is_the_terminal_verdict() {
+        // The observed shape: one file LongBox cannot read, plus the
+        // usual usenet litter.
+        let s = Scratch::new("ebook");
+        s.file("Amazing Spider-Man 006.epub")
+            .file("info.nfo")
+            .file("release.diz");
+        assert_eq!(
+            classify(s.path(), Some(now_secs())),
+            LandedVerdict::OnlyKnownNonPayload
+        );
+    }
+
+    /// A PDF release used to be THE condemned shape. It is a delivered
+    /// comic now, and this is where a regression would show: putting
+    /// `.pdf` back on the recognised-non-payload list would condemn a
+    /// release Phase B is about to import, and settle the attempt as a
+    /// failure the user then can't explain.
+    #[test]
+    fn a_pdf_release_delivers_a_comic() {
         let s = Scratch::new("pdf");
         s.file("Amazing Spider-Man 006.pdf")
             .file("info.nfo")
             .file("release.diz");
         assert_eq!(
             classify(s.path(), Some(now_secs())),
-            LandedVerdict::OnlyKnownNonPayload
+            LandedVerdict::HasComicFiles
         );
     }
 
@@ -803,8 +833,8 @@ mod guard_tests {
         // Negative control for guard 1: within slack, the verdict must
         // still be reached, or the guard would suppress everything.
         let s = Scratch::new("inwindow");
-        s.file("release.pdf").file("info.nfo");
-        s.age("release.pdf", T).age("info.nfo", T).age("", T);
+        s.file("release.epub").file("info.nfo");
+        s.age("release.epub", T).age("info.nfo", T).age("", T);
 
         assert_eq!(
             classify(s.path(), Some(T + 60)),
@@ -820,8 +850,8 @@ mod guard_tests {
         // so. A downloader that reports no timestamp now makes the
         // feature decline everything, visibly.
         let s = Scratch::new("nots");
-        s.file("release.pdf");
-        s.age("release.pdf", T).age("", T);
+        s.file("release.epub");
+        s.age("release.epub", T).age("", T);
 
         assert_eq!(
             classify(s.path(), None),
@@ -852,12 +882,12 @@ mod guard_tests {
 
     #[test]
     fn an_untouched_folder_is_condemned() {
-        // Negative control for guard 2: a genuine PDF release, never
+        // Negative control for guard 2: a genuine ebook release, never
         // touched since unpack, must still be condemned — otherwise
         // the guard has disabled the feature.
         let s = Scratch::new("untouched");
-        s.file("release.pdf").file("info.nfo");
-        s.age("release.pdf", T).age("info.nfo", T).age("", T);
+        s.file("release.epub").file("info.nfo");
+        s.age("release.epub", T).age("info.nfo", T).age("", T);
 
         assert_eq!(
             classify(s.path(), Some(T)),
@@ -1028,12 +1058,12 @@ mod recognition_tests {
     use super::*;
 
     #[test]
-    fn a_genuine_pdf_release_is_condemned() {
-        // The live case: one PDF plus scene litter, every file
-        // recognised. This is the only shape that earns a terminal
+    fn a_genuine_ebook_release_is_condemned() {
+        // The live case: one unreadable format plus scene litter, every
+        // file recognised. This is the only shape that earns a terminal
         // verdict.
-        let s = Scratch::new("pdfrel");
-        s.file("Amazing Spider-Man 006.pdf")
+        let s = Scratch::new("ebookrel");
+        s.file("Amazing Spider-Man 006.epub")
             .file("info.nfo")
             .file("release.diz");
         assert_eq!(
@@ -1082,7 +1112,7 @@ mod recognition_tests {
         // list flipped between inertness and condemning a delivered
         // comic — a question that simply does not arise now.
         let s = Scratch::new("par2rel");
-        s.file("Amazing Spider-Man 006.pdf").file("Saga 001.par2");
+        s.file("Amazing Spider-Man 006.epub").file("Saga 001.par2");
         assert_eq!(
             classify(s.path(), Some(now_secs())),
             LandedVerdict::Inconclusive(Inconclusive::UnrecognisedContent)

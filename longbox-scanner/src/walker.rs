@@ -16,8 +16,8 @@ pub struct DiscoveredFile {
     pub mtime: PrimitiveDateTime,
 }
 
-/// Walk `root` and yield every `.cbz` and `.cbr` file. Hidden entries
-/// (names starting with `.`), `Thumbs.db`, `.cb7` archives, and
+/// Walk `root` and yield every `.cbz`, `.cbr` and `.pdf` file. Hidden
+/// entries (names starting with `.`), `Thumbs.db`, `.cb7` archives, and
 /// non-regular files (sockets, fifos, broken symlinks) are silently
 /// skipped. Symlink loops are detected by walkdir and surface as
 /// `ScanError::Walk`.
@@ -68,12 +68,15 @@ fn dispatch(
     Some(make_discovered(entry, root))
 }
 
-/// True for the comic-archive extensions LongBox indexes — `.cbz` (ZIP)
-/// and `.cbr` (RAR), case-insensitive. `.cb7` is excluded: there is no
-/// 7-Zip reader.
+/// True for the comic formats LongBox indexes — `.cbz` (ZIP), `.cbr`
+/// (RAR) and `.pdf` (rendered via poppler), case-insensitive. `.cb7` is
+/// excluded: there is no 7-Zip reader.
+///
+/// This is the single gate on what the scanner even sees, so it must stay
+/// in step with `longbox_archive::classify`.
 fn is_comic_archive(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".cbz") || lower.ends_with(".cbr")
+    lower.ends_with(".cbz") || lower.ends_with(".cbr") || lower.ends_with(".pdf")
 }
 
 fn make_discovered(entry: walkdir::DirEntry, root: &Path) -> Result<DiscoveredFile, ScanError> {
@@ -139,18 +142,19 @@ mod tests {
     }
 
     #[test]
-    fn walks_cbz_and_cbr_skips_cb7_and_others() {
+    fn walks_cbz_cbr_and_pdf_skips_cb7_and_others() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::write(root.join("Saga 1.cbz"), b"fake").unwrap();
         fs::write(root.join("Saga 1.cbr"), b"fake").unwrap();
+        fs::write(root.join("Saga 1.pdf"), b"fake").unwrap();
         fs::write(root.join("Saga 1.cb7"), b"fake").unwrap();
         fs::write(root.join("README.txt"), b"fake").unwrap();
         let mut names: Vec<String> = walk_library(root)
             .filter_map(|r| r.ok().map(|d| d.path_relative))
             .collect();
         names.sort();
-        assert_eq!(names, vec!["Saga 1.cbr", "Saga 1.cbz"]);
+        assert_eq!(names, vec!["Saga 1.cbr", "Saga 1.cbz", "Saga 1.pdf"]);
     }
 
     #[test]
@@ -159,11 +163,12 @@ mod tests {
         let root = tmp.path();
         fs::write(root.join("upper.CBZ"), b"fake").unwrap();
         fs::write(root.join("upper.CbR"), b"fake").unwrap();
+        fs::write(root.join("upper.PDF"), b"fake").unwrap();
         let mut names: Vec<String> = walk_library(root)
             .filter_map(|r| r.ok().map(|d| d.path_relative))
             .collect();
         names.sort();
-        assert_eq!(names, vec!["upper.CBZ", "upper.CbR"]);
+        assert_eq!(names, vec!["upper.CBZ", "upper.CbR", "upper.PDF"]);
     }
 
     #[test]

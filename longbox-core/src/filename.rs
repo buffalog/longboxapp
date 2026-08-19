@@ -97,7 +97,7 @@ pub fn parse_with_normalization(
 /// and year is captured from the FIRST `(YYYY)` in the stem.
 ///
 /// Algorithm:
-/// 1. Split the extension off (`.cbz` / `.cbr` / `.cb7`) so its dot
+/// 1. Split the extension off (`.cbz` / `.cbr` / `.cb7` / `.pdf`) so its dot
 ///    isn't replaced. Anything without a `.` returns unchanged.
 /// 2. Capture the first `(YYYY)` from the stem — the release-year
 ///    tag scene releases (almost) always carry.
@@ -204,28 +204,28 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
         ParsingPattern {
             id: 1,
             name: "Series Vol N #M".into(),
-            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<volume>\d+)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 5,
             enabled: true,
         },
         ParsingPattern {
             id: 2,
             name: "Series #NNN (YYYY)".into(),
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)(?:\s+-\s+(?P<title>.+))?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)(?:\s+-\s+(?P<title>.+))?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 10,
             enabled: true,
         },
         ParsingPattern {
             id: 3,
             name: "Series NNN (YYYY)".into(),
-            pattern: r"^(?P<series>.+?)\s+(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\)\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 20,
             enabled: true,
         },
         ParsingPattern {
             id: 4,
             name: "Series_NNN or Series NNN".into(),
-            pattern: r"^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)[_\s]+#?(?P<number>\d+(?:\.\d+)?)\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 30,
             enabled: true,
         },
@@ -239,7 +239,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // Part-of-N marker between number and year (20th Century
             // Men 01 (0f 06) (2022).cbr). Conservative literal `Xf Y`
             // — broader paren-tolerance is a separate fix.
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(\d+f\s*\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(\d+f\s*\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 11,
             enabled: true,
         },
@@ -250,7 +250,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // of Warm Dust (2013) (Digital).cbr). New pattern rather
             // than rewriting id=2 so id=2's existing tests stay
             // undisturbed.
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+-\s+(?P<title>.+?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+-\s+(?P<title>.+?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 12,
             enabled: true,
         },
@@ -263,7 +263,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // files. Without it, the catch-all (id=4, priority 30)
             // absorbs these but bakes the year into `series_title`,
             // which poisons the scanner's title-similarity match.
-            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 15,
             enabled: true,
         },
@@ -281,7 +281,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // TPB-only series. Hybrid series with both single-issue
             // #N and TPB vN would collide; see A.9 prompt's deferred
             // items.
-            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+)\s+-\s+.+?\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+)\s+-\s+.+?\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 6,
             enabled: true,
         },
@@ -292,7 +292,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // (digital) (Tithe-Empire).cbr`. Strips "Book" from the
             // series capture so the catalog records "Promethea" not
             // "Promethea Book".
-            pattern: r"^(?P<series>.+?)\s+(?i:book)\s+(?P<number>\d+)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+(?i:book)\s+(?P<number>\d+)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 7,
             enabled: true,
         },
@@ -306,7 +306,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // `Saga 001 (2014) - Volume One.cbz`. Title group uses
             // `[^()]+` so a trailing scanlator paren-group is not
             // consumed as title.
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})(?:-\d{1,2})?\)(?:\s+-\s+(?P<title>[^()]+))?.*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})(?:-\d{1,2})?\)(?:\s+-\s+(?P<title>[^()]+))?.*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 25,
             enabled: true,
         },
@@ -322,7 +322,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
         ParsingPattern {
             id: 11,
             name: "Series N (of M) (YYYY)".into(),
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 13,
             enabled: true,
         },
@@ -333,7 +333,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // (Digital).cbr`-shaped filenames where the year sits
             // before the number and the part-of marker after. Mirrors
             // id=7's year-first ordering.
-            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+\((?P<year>\d{4})\)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 14,
             enabled: true,
         },
@@ -344,7 +344,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // fires on shapes the strict patterns (11, 12) and every
             // pattern above them couldn't claim. Permissive `.*?`
             // tolerates trailing scanlator markers without a year.
-            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+#?(?P<number>\d+(?:\.\d+)?)\s+\(of\s+\d+\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 28,
             enabled: true,
         },
@@ -369,7 +369,7 @@ pub fn default_patterns() -> Vec<ParsingPattern> {
             // because the trailing-period / trailing-dash isn't
             // ambiguous — the only `\s+(?i:v|vol|volume)\s*\d+` lookahead
             // sits at the boundary the series capture must end at.
-            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7)$".into(),
+            pattern: r"^(?P<series>.+?)\s+(?i:v|vol|volume)\s*(?P<number>\d+(?:\.\d+)?)\s+\((?P<year>\d{4})\).*?\.(?i:cbz|cbr|cb7|pdf)$".into(),
             priority: 9,
             enabled: true,
         },
@@ -405,6 +405,25 @@ mod tests {
         // The #NNN (YYYY) pattern's `#?` makes it match "1 (2012)" too, so
         // it wins over the NNN (YYYY) pattern (id=3) at higher priority.
         assert_eq!(p.pattern_id, 2);
+    }
+
+    /// `.pdf` is a comic extension to the parser, exactly like `.cbz`.
+    ///
+    /// It matters more here than for the archive formats: a PDF carries no
+    /// ComicInfo, so its filename is the only evidence it has about which
+    /// issue it is. A pattern that can't reach past the extension doesn't
+    /// degrade a PDF's match — it ends it.
+    #[test]
+    fn matches_pdf_extension_like_any_other_comic_extension() {
+        for name in ["Saga #1 (2012) - The Beginning.pdf", "Saga 1 (2012).PDF"] {
+            let p = parse(name, &patterns()).unwrap_or_else(|| panic!("{name} did not parse"));
+            assert_eq!(p.series_title, "Saga", "{name}");
+            assert_eq!(p.number, "1", "{name}");
+            assert_eq!(p.year, Some(2012), "{name}");
+        }
+        // Still only the comic extensions — `.pdf` joined the list, it did
+        // not dissolve it.
+        assert!(parse("Saga 1 (2012).epub", &patterns()).is_none());
     }
 
     #[test]

@@ -5,8 +5,9 @@ mod common;
 use axum::http::StatusCode;
 use common::{build_test_app, json_request, response_json, TestApp};
 use longbox_db::{
-    downloader_config_repo, indexer_config_repo, issue_repo, series_repo, NewDownloaderConfig,
-    NewIndexerConfig, NewIssue, NewSeries,
+    downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
+    series_repo, NewDownloaderConfig, NewFile, NewIndexerConfig, NewIssue, NewLibraryRoot,
+    NewSeries,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -197,6 +198,185 @@ async fn empty_results_when_no_indexers() {
     .await;
     assert!(body["results"].as_array().unwrap().is_empty());
     assert!(body["errors"].as_array().unwrap().is_empty());
+}
+
+/// Give `issue_id` an owned, present file — what makes the catalog consider
+/// the issue held. `is_present` matters as much as `status`: a row for bytes
+/// that are gone from disk is not ownership.
+async fn seed_owned_file(db: &longbox_db::Pool, issue_id: i64, is_present: bool) {
+    seed_file(db, issue_id, is_present, "owned").await
+}
+
+/// As above, but the caller picks the status — both halves of the
+/// `status='owned' AND is_present=1` predicate need their own test.
+async fn seed_file(db: &longbox_db::Pool, issue_id: i64, is_present: bool, status: &str) {
+    let root = library_root_repo::insert(
+        db,
+        NewLibraryRoot {
+            path: "/comics".to_owned(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let now = time::OffsetDateTime::now_utc();
+    let now_p = time::PrimitiveDateTime::new(now.date(), now.time());
+    file_repo::insert(
+        db,
+        NewFile {
+            issue_id: Some(issue_id),
+            library_root_id: root,
+            path_relative: "Saga (2012)/Saga (2012) 012.cbz".to_owned(),
+            size_bytes: 45_000_000,
+            mtime: now_p,
+            last_scanned_at: now_p,
+            match_method: "phase_b".to_owned(),
+            match_confidence: 1.0,
+            status: status.to_owned(),
+            cached_comicinfo_xml: None,
+            cached_at: None,
+            is_present,
+            last_seen_at: now_p,
+            matched_at: Some(now_p),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn search_warns_when_the_issue_is_already_owned_without_filtering_results() {
+    // The warning is advisory, not a filter. Interactive Search is the
+    // escape hatch for when the engine got it wrong, and wanting a
+    // replacement copy is a legitimate reason to be here — so every result
+    // must still come back.
+    let mock = newznab_serving(RSS).await;
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_issue(&app.state.db).await;
+    seed_indexer(&app.state.db, "NZBGeek", &mock.uri()).await;
+    seed_owned_file(&app.state.db, issue, true).await;
+
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
+
+    assert_eq!(body["already_owned"], json!(true));
+    assert!(
+        !body["results"].as_array().unwrap().is_empty(),
+        "the warning must not suppress results: {body}"
+    );
+}
+
+#[tokio::test]
+async fn search_does_not_warn_for_an_issue_the_library_lacks() {
+    let mock = newznab_serving(RSS).await;
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_issue(&app.state.db).await;
+    seed_indexer(&app.state.db, "NZBGeek", &mock.uri()).await;
+    // No file row at all.
+
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
+
+    assert_eq!(body["already_owned"], json!(false));
+}
+
+#[tokio::test]
+async fn a_catalogued_file_whose_bytes_are_gone_is_not_ownership() {
+    // The distinction the whole warning rests on. A row with is_present=0 is
+    // the catalog remembering a file that is no longer on disk — precisely
+    // the case where the user SHOULD be re-downloading, so warning them off
+    // would be worse than saying nothing.
+    let mock = newznab_serving(RSS).await;
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_issue(&app.state.db).await;
+    seed_indexer(&app.state.db, "NZBGeek", &mock.uri()).await;
+    seed_owned_file(&app.state.db, issue, false).await;
+
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
+
+    assert_eq!(
+        body["already_owned"],
+        json!(false),
+        "a missing file is not a held issue"
+    );
+}
+
+#[tokio::test]
+async fn a_needs_review_file_is_not_ownership() {
+    // The other half of the predicate. A needs-review file DOES carry the
+    // issue link — `classify_status` only returns NeedsReview when an issue
+    // matched — so `is_present` alone would call this owned. It is not: the
+    // catalog is not confident this file is this issue, which is exactly
+    // when a user should still be allowed to search without being told they
+    // already have it.
+    let mock = newznab_serving(RSS).await;
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_issue(&app.state.db).await;
+    seed_indexer(&app.state.db, "NZBGeek", &mock.uri()).await;
+    seed_file(&app.state.db, issue, true, "needs_review").await;
+
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
+
+    assert_eq!(
+        body["already_owned"],
+        json!(false),
+        "a needs-review file is not a held issue"
+    );
+}
+
+#[tokio::test]
+async fn ownership_is_scoped_to_the_issue_asked_about() {
+    // Pins the WHERE clause. Without it, owning any issue anywhere would
+    // warn on every search.
+    let mock = newznab_serving(RSS).await;
+    let app = build_test_app().await;
+    let (series, issue) = seed_series_issue(&app.state.db).await;
+    seed_indexer(&app.state.db, "NZBGeek", &mock.uri()).await;
+
+    let other_issue = issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id: series,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: "13".to_owned(),
+            title: None,
+            cover_date: Some("2012-04-18".to_owned()),
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    // Only the OTHER issue is owned.
+    seed_owned_file(&app.state.db, other_issue, true).await;
+
+    let body = search(
+        &app,
+        json!({ "series_id": series, "issue_id": issue, "query": "Saga 12" }),
+    )
+    .await;
+
+    assert_eq!(
+        body["already_owned"],
+        json!(false),
+        "owning issue 13 must not warn on a search for issue 12"
+    );
 }
 
 #[tokio::test]

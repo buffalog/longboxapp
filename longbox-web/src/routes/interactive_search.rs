@@ -41,6 +41,24 @@ struct SearchRequest {
 struct SearchResponse {
     results: Vec<SearchResult>,
     errors: Vec<IndexerErrorEntry>,
+    /// The catalog already holds an owned, present file for this issue.
+    ///
+    /// **This fires on stale data, not on a deliberate re-download.** Every
+    /// route into Interactive Search already excludes owned issues — the
+    /// per-issue button renders only for `status === 'missing'`
+    /// (`IssueRow.svelte`), and `/missing` filters on the same
+    /// `status='owned' AND is_present=1` predicate this uses. So a user
+    /// cannot normally arrive here owning the issue; they arrive here on a
+    /// tab that loaded before a scan or a Phase B import filled it, or on a
+    /// race against an import that landed while the modal was open.
+    ///
+    /// It stays a warning rather than a block because the server should not
+    /// refuse a search over a fact the client may simply not have refreshed
+    /// yet. But the copy must NOT invite a re-grab: on a path collision
+    /// Phase B deletes the download and keeps the existing file
+    /// (`processor.rs` conflict branch), so "grab anyway" silently destroys
+    /// what the user just fetched.
+    already_owned: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +97,11 @@ async fn interactive_search(
     let cover_date = issue_repo::find_by_id(&state.db, body.issue_id)
         .await?
         .and_then(|issue| issue.cover_date);
+
+    // Reuses the pull engine's own on-demand ownership check rather than
+    // re-deriving "owned" here — one definition, so the warning cannot drift
+    // from the guard the engine actually enforces.
+    let already_owned = issue_repo::has_owned_present_file(&state.db, body.issue_id).await?;
 
     let indexers = load_indexers(&state.db).await?;
     let patterns = load_patterns(&state.db).await?;
@@ -120,7 +143,11 @@ async fn interactive_search(
         })
         .collect();
 
-    Ok(Json(SearchResponse { results, errors }))
+    Ok(Json(SearchResponse {
+        results,
+        errors,
+        already_owned,
+    }))
 }
 
 // ---------- grab ----------

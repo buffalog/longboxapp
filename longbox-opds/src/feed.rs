@@ -27,6 +27,13 @@ pub fn archive_mime(filename: &str) -> &'static str {
         "application/x-cbr"
     } else if lower.ends_with(".cb7") {
         "application/x-cb7"
+    } else if lower.ends_with(".pdf") {
+        // Not an `application/x-` vendor type like the others: PDF has a real
+        // registered one, and OPDS clients branch on it to decide whether they
+        // can open a file at all. Serving a readable PDF as octet-stream tells
+        // Chunky/Panels/KyBook "unknown binary" about a format every one of
+        // them handles natively.
+        "application/pdf"
     } else {
         "application/octet-stream"
     }
@@ -422,7 +429,8 @@ mod tests {
         assert_eq!(archive_mime("X 001.cbz"), "application/x-cbz");
         assert_eq!(archive_mime("X 001.CBR"), "application/x-cbr"); // case-insensitive
         assert_eq!(archive_mime("X 001.cb7"), "application/x-cb7");
-        assert_eq!(archive_mime("X 001.pdf"), "application/octet-stream");
+        assert_eq!(archive_mime("X 001.pdf"), "application/pdf");
+        assert_eq!(archive_mime("X 001.PDF"), "application/pdf"); // case-insensitive
         assert_eq!(archive_mime("noext"), "application/octet-stream");
     }
 
