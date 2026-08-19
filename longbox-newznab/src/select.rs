@@ -55,7 +55,7 @@ fn scene_year_re() -> &'static Regex {
 ///    name contains a year-range number — wrapping it as the year would
 ///    break the parse).
 ///
-/// 3. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor in
+/// 3. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor in
 ///    every pattern matches. The fact that Scene NZBs aren't actually
 ///    CBZs is irrelevant — we're feeding the *parser*, not the
 ///    downloader.
@@ -187,7 +187,7 @@ fn nzb_bracket_re() -> &'static Regex {
 ///
 ///  6. **Collapse whitespace runs** left by the strip steps.
 ///
-///  7. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7)$` anchor
+///  7. **Append `.cbz`** so the trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor
 ///     in every pattern matches. The fact that scene NZBs aren't
 ///     actually CBZs is irrelevant — we're feeding the *parser*, not
 ///     the downloader.
@@ -290,7 +290,7 @@ fn wrap_rightmost_year(input: &str) -> String {
 ///    `Beneath the Trees Where Nobody Sees 001 (2023) (digital) (Son
 ///    of Ultron-Empire)` — no extension, year already wrapped. The
 ///    only thing keeping parse_filename from accepting these is the
-///    trailing `\.(?i:cbz|cbr|cb7)$` anchor; appending `.cbz`
+///    trailing `\.(?i:cbz|cbr|cb7|pdf)$` anchor; appending `.cbz`
 ///    satisfies the anchor without touching the year token. Trying
 ///    this step BEFORE [`normalize_scene_title`] is load-bearing:
 ///    the normalizer's `\b(YYYY)\b` regex matches inside an existing

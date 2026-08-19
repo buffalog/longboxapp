@@ -410,7 +410,7 @@ async fn try_folder_match(
         return Ok(None);
     }
 
-    // Append `.cbz` so the parser's `\.(?i:cbz|cbr|cb7)$` anchor
+    // Append `.cbz` so the parser's `\.(?i:cbz|cbr|cb7|pdf)$` anchor
     // matches. The folder doesn't have an extension; the parser
     // doesn't care that the trailing `.cbz` is synthetic — it's
     // shape, not provenance. Same trick the newznab pull engine
