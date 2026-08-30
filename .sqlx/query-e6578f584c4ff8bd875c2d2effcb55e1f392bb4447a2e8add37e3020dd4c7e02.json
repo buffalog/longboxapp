@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"x: i64\"\n           FROM issue_ownership\n           WHERE issue_id = ? AND is_owned = 1\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "x: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e6578f584c4ff8bd875c2d2effcb55e1f392bb4447a2e8add37e3020dd4c7e02"
+}

@@ -543,6 +543,10 @@ pub async fn findings(
         .collect();
 
     // ---- (f) orphaned owned rows ----
+    // NOT the ownership predicate: `issue_id IS NULL AND status =
+    // 'owned'` detects BROKEN rows -- owned, pointing at nothing. The
+    // `issue_ownership` view is keyed by issue and structurally cannot
+    // see a row whose issue_id is NULL.
     let orphan_rows: Vec<(i64, String, String, bool)> = sqlx::query_as(
         "SELECT id, path_relative, match_method, is_present FROM files \
          WHERE issue_id IS NULL AND status = 'owned' AND match_method <> '' ORDER BY id",

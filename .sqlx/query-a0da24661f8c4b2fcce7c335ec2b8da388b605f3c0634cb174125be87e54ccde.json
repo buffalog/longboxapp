@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.id AS \"issue_id!: i64\",\n                  i.series_id AS \"series_id!: i64\",\n                  i.cover_date\n           FROM issues i\n           WHERE NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n           )",
+  "query": "SELECT i.id AS \"issue_id!: i64\",\n                  i.series_id AS \"series_id!: i64\",\n                  i.cover_date\n           FROM issues i\n           WHERE NOT EXISTS (\n               SELECT 1 FROM issue_ownership o\n               WHERE o.issue_id = i.id AND o.is_owned = 1\n           )",
   "describe": {
     "columns": [
       {
@@ -28,5 +28,5 @@
       true
     ]
   },
-  "hash": "831f3b664c0f624e6e6f531b9311ac094c531f5c1fee7d45ad5e1ea405dc6cc7"
+  "hash": "a0da24661f8c4b2fcce7c335ec2b8da388b605f3c0634cb174125be87e54ccde"
 }
