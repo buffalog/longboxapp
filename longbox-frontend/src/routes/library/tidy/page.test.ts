@@ -25,6 +25,7 @@ import {
 import { deleteSeries } from '$lib/api/series';
 import { toast } from '$lib/stores/toast.svelte';
 import TidyPage from './+page.svelte';
+import type { PageData } from './$types';
 
 vi.mock('$lib/api/reconcile', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/reconcile')>()),
@@ -125,11 +126,12 @@ function pageData(
           all_zero_owned: phantoms,
           with_transition: phantoms.filter((p) => p.last_matched_count > 0)
         },
+        kept: [],
         untracked: over.untracked ?? [],
         enrichmentSummary: over.enrichmentSummary ?? emptyEnrichmentSummary(),
         enrichmentQueue: over.enrichmentQueue ?? [],
         duplicates: over.duplicates ?? []
-      }
+      } satisfies PageData
     }
   };
 }

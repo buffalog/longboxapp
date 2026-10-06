@@ -12,6 +12,7 @@ import {
 } from '$lib/api/pull';
 import { ApiError } from '$lib/api/client';
 import PullListPage from './+page.svelte';
+import type { PageData } from './$types';
 
 vi.mock('$lib/api/pull', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/pull')>()),
@@ -44,14 +45,20 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+function pageData(entries: PullListEntry[]) {
+  return {
+    props: { data: { libraryRoot: null, entries, pullFailureCount: 0 } satisfies PageData }
+  };
+}
+
 describe('pull-list page', () => {
   it('lists the subscribed series', () => {
-    render(PullListPage, { props: { data: { libraryRoot: null, entries: [sampleListEntry()] } } });
+    render(PullListPage, pageData([sampleListEntry()]));
     expect(screen.getByText('Saga')).toBeInTheDocument();
   });
 
   it('shows an empty state when nothing is subscribed', () => {
-    render(PullListPage, { props: { data: { libraryRoot: null, entries: [] } } });
+    render(PullListPage, pageData([]));
     expect(screen.getByText(/No series on the pull list/)).toBeInTheDocument();
   });
 
@@ -66,7 +73,7 @@ describe('pull-list page', () => {
       last_successful_pull_at: null,
       failure_count: 0
     });
-    render(PullListPage, { props: { data: { libraryRoot: null, entries: [sampleListEntry()] } } });
+    render(PullListPage, pageData([sampleListEntry()]));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
 
@@ -76,7 +83,7 @@ describe('pull-list page', () => {
 
   it('removes a series from the list', async () => {
     vi.mocked(removeFromPullList).mockResolvedValue(undefined);
-    render(PullListPage, { props: { data: { libraryRoot: null, entries: [sampleListEntry()] } } });
+    render(PullListPage, pageData([sampleListEntry()]));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 
@@ -86,25 +93,21 @@ describe('pull-list page', () => {
 
   it('triggers a sweep with Check now', async () => {
     vi.mocked(checkPull).mockResolvedValue(undefined);
-    render(PullListPage, { props: { data: { libraryRoot: null, entries: [] } } });
+    render(PullListPage, pageData([]));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(checkPull).toHaveBeenCalledTimes(1));
   });
 
   it('fires Search now for exactly that row', async () => {
-    vi.mocked(searchSeriesNow).mockResolvedValue(undefined);
-    render(PullListPage, {
-      props: {
-        data: {
-          libraryRoot: null,
-          entries: [
-            sampleListEntry({ series_id: 1, series_title: 'Saga' }),
-            sampleListEntry({ series_id: 2, series_title: 'Chew' })
-          ]
-        }
-      }
-    });
+    vi.mocked(searchSeriesNow).mockResolvedValue({ queued: 1, note: null });
+    render(
+      PullListPage,
+      pageData([
+        sampleListEntry({ series_id: 1, series_title: 'Saga' }),
+        sampleListEntry({ series_id: 2, series_title: 'Chew' })
+      ])
+    );
 
     // Two rows, two buttons — click the first one only.
     const buttons = screen.getAllByRole('button', { name: 'Search now' });
@@ -124,14 +127,7 @@ describe('pull-list page', () => {
     vi.mocked(searchSeriesNow).mockRejectedValue(
       new ApiError(409, 'conflict.pull_search_running', 'A search is already running.')
     );
-    render(PullListPage, {
-      props: {
-        data: {
-          libraryRoot: null,
-          entries: [sampleListEntry({ series_id: 1, series_title: 'Saga' })]
-        }
-      }
-    });
+    render(PullListPage, pageData([sampleListEntry({ series_id: 1, series_title: 'Saga' })]));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Search now' }));
     await waitFor(() =>

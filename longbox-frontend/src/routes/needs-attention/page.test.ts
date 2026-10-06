@@ -10,6 +10,7 @@ import {
 } from '$lib/api/needs_attention';
 import type { PendingIntervention } from '$lib/types';
 import NeedsAttentionPage from './+page.svelte';
+import type { PageData } from './$types';
 
 vi.mock('$lib/api/needs_attention', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/needs_attention')>()),
@@ -52,7 +53,15 @@ function pageData(
   pullFailures: PullFailure[],
   items: PendingIntervention[] = []
 ) {
-  return { props: { data: { pullFailures, pending: { count: items.length, items } } } };
+  return {
+    props: {
+      data: {
+        libraryRoot: null,
+        pullFailures,
+        pending: { count: items.length, items }
+      } satisfies PageData
+    }
+  };
 }
 
 beforeEach(() => {

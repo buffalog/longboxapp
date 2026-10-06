@@ -15,6 +15,7 @@ import { searchVolumes } from '$lib/api/cv';
 import { invalidateAll } from '$app/navigation';
 import { ApiError } from '$lib/api/client';
 import Page from './+page.svelte';
+import type { PageData } from './$types';
 
 vi.mock('$lib/api/series', () => ({
   refreshSeries: vi.fn(),
@@ -90,7 +91,7 @@ function seriesDetail(over: Partial<SeriesDetail> = {}): SeriesDetail {
 }
 
 function pageData(series: SeriesDetail, pullEntry: PullEntry | null = null) {
-  return { props: { data: { series, pullEntry } } };
+  return { props: { data: { libraryRoot: null, series, pullEntry } satisfies PageData } };
 }
 
 describe('series detail page', () => {
@@ -120,36 +121,42 @@ describe('series detail page', () => {
           issues: [
             {
               id: 1,
+              series_id: 1,
               number: '1',
               title: null,
               cover_date: null,
               cover_url: null,
               cv_issue_id: null,
               metron_issue_id: null,
+              summary: null,
               created_at: '2026-05-20 00:00:00',
               updated_at: '2026-05-20 00:00:00',
               file: fileSummary(1)
             },
             {
               id: 2,
+              series_id: 1,
               number: '2',
               title: null,
               cover_date: null,
               cover_url: null,
               cv_issue_id: null,
               metron_issue_id: null,
+              summary: null,
               created_at: '2026-05-20 00:00:00',
               updated_at: '2026-05-20 00:00:00',
               file: fileSummary(2)
             },
             {
               id: 3,
+              series_id: 1,
               number: '3',
               title: null,
               cover_date: null,
               cover_url: null,
               cv_issue_id: null,
               metron_issue_id: null,
+              summary: null,
               created_at: '2026-05-20 00:00:00',
               updated_at: '2026-05-20 00:00:00',
               file: null
@@ -186,12 +193,14 @@ describe('series detail page', () => {
           issues: [
             {
               id: 1,
+              series_id: 1,
               number: '1',
               title: null,
               cover_date: null,
               cover_url: null,
               cv_issue_id: null,
               metron_issue_id: null,
+              summary: null,
               created_at: '2026-05-20 00:00:00',
               updated_at: '2026-05-20 00:00:00',
               file: {
@@ -379,10 +388,9 @@ describe('series detail page', () => {
       filtered_publisher: 0,
       filtered_in_library: 0
     });
-    vi.mocked(setSeriesCvId).mockResolvedValue({
-      ...seriesDetail({ cv_id: picked.cv_id, title: picked.name }),
-      issues: undefined as never
-    });
+    vi.mocked(setSeriesCvId).mockResolvedValue(
+      seriesDetail({ cv_id: picked.cv_id, title: picked.name })
+    );
 
     render(Page, pageData(seriesDetail({ id: 7, cv_id: null, title: 'Wolverine' })));
     await fireEvent.click(screen.getByRole('button', { name: /Fix match/ }));

@@ -54,5 +54,9 @@ jobs:
           cache-dependency-path: longbox-frontend/pnpm-lock.yaml
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm check
+      - name: Test
+        run: pnpm test
       - name: Build
         run: pnpm build

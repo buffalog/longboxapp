@@ -116,7 +116,7 @@
 
   function addDays(isoDate: string, days: number): string {
     const [y, m, d] = isoDate.split('-').map(Number);
-    const dt = new Date(y, m - 1, d + days);
+    const dt = new Date(y ?? NaN, (m ?? NaN) - 1, (d ?? NaN) + days);
     return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
   }
 
