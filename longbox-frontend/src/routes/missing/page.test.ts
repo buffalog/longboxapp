@@ -119,7 +119,7 @@ describe('missing page series grouping', () => {
     expect(screen.getByText(/1 missing/)).toBeInTheDocument();
   });
 
-  it('opens the Interactive Search modal from a missing-issue row', async () => {
+  it('opens the Manual Search modal from a missing-issue row', async () => {
     render(
       MissingPage,
       pageData([
@@ -127,10 +127,10 @@ describe('missing page series grouping', () => {
       ])
     );
     await fireEvent.click(
-      screen.getByRole('button', { name: /Interactive search for Saga #12/i })
+      screen.getByRole('button', { name: /^Manual search for Saga #12$/i })
     );
     await waitFor(() =>
-      expect(screen.getByText(/Interactive Search — Saga #12/)).toBeInTheDocument()
+      expect(screen.getByText(/Manual Search — Saga #12/)).toBeInTheDocument()
     );
   });
 
@@ -214,7 +214,7 @@ describe('missing page series grouping', () => {
     );
   });
 
-  it('per-series Search button fires searchSeriesNow for that series only', async () => {
+  it('per-series Auto search button fires searchSeriesNow for that series only', async () => {
     vi.mocked(searchSeriesNow).mockResolvedValue({ queued: 3, note: null });
     render(
       MissingPage,
@@ -224,7 +224,7 @@ describe('missing page series grouping', () => {
       ])
     );
 
-    const buttons = screen.getAllByRole('button', { name: 'Search' });
+    const buttons = screen.getAllByRole('button', { name: 'Auto search' });
     expect(buttons).toHaveLength(2);
     await fireEvent.click(buttons[0]!);
 
