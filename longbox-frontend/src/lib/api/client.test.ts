@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiFetch } from './client';
 
-declare global {
-  // eslint-disable-next-line no-var
-  var fetch: typeof global.fetch;
-}
-
 describe('apiFetch', () => {
   let originalFetch: typeof global.fetch;
 

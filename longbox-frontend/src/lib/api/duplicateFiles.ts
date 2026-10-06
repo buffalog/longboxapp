@@ -82,6 +82,7 @@ export interface ResolveResult {
   kept_file_id: number | null;
   deleted_file_ids: number[];
   failed: { file_id: number; error: string }[];
+  orphaned: { file_id: number; error: string }[];
   reason: string | null;
 }
 

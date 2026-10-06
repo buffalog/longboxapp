@@ -211,7 +211,7 @@
   // immediately, error banner shown, focus stays where it was.
   function nextFileIdAfter(id: number): number | null {
     const idx = data.files.findIndex((f) => f.id === id);
-    return idx >= 0 && idx < data.files.length - 1 ? data.files[idx + 1].id : null;
+    return idx >= 0 && idx < data.files.length - 1 ? (data.files[idx + 1]?.id ?? null) : null;
   }
 
   function focusPrimaryButton(fileId: number): void {

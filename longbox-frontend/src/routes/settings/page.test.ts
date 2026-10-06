@@ -9,6 +9,7 @@ import type { Settings } from '$lib/api/settings';
 import { updateSetting } from '$lib/api/settings';
 import { invalidateAll } from '$app/navigation';
 import Page from './+page.svelte';
+import type { PageData } from './$types';
 
 vi.mock('$lib/api/settings', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/settings')>()),
@@ -55,10 +56,11 @@ function settings(over: Partial<Settings> = {}): Settings {
   };
 }
 
-function pageData(over: Partial<Settings> = {}) {
+function pageData(over: Partial<Settings> = {}): { props: { data: PageData } } {
   return {
     props: {
       data: {
+        libraryRoot: null,
         settings: settings(over),
         publisherFilters: [],
         recommendedPublishers: [],

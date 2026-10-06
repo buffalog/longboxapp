@@ -10,6 +10,7 @@ import type { MissingIssue, MissingResponse } from '$lib/api/missing';
 import { searchAllMissing } from '$lib/api/missing';
 import { searchSeriesNow } from '$lib/api/pull';
 import MissingPage from './+page.svelte';
+import type { PageData } from './$types';
 
 // goto is called only when a sort/filter control changes; not exercised
 // here but the import is reachable, so stub it for safety.
@@ -53,24 +54,16 @@ function missingIssue(over: Partial<MissingIssue> & {
   };
 }
 
-function pageData(missing: MissingIssue[]): {
-  props: {
-    data: {
-      missing: MissingResponse;
-      allSeries: never[];
-      sort: 'series' | 'cover_date';
-      seriesIdFilter: number | null;
-    };
-  };
-} {
+function pageData(missing: MissingIssue[]) {
   return {
     props: {
       data: {
+        libraryRoot: null,
         missing: { missing, total: missing.length },
         allSeries: [],
         sort: 'series',
         seriesIdFilter: null
-      }
+      } satisfies PageData
     }
   };
 }
