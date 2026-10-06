@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pull_attempts\n           WHERE status = 'grabbed'\n             AND attempted_at < datetime('now', '-24 hours')\n             AND NOT EXISTS (\n               SELECT 1 FROM issue_ownership o\n               WHERE o.issue_id = pull_attempts.issue_id AND o.is_owned = 1\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "5f891d832380a3376c23497937c6a0765288200ee3d23cfa1f4f17d05bd928ba"
+}

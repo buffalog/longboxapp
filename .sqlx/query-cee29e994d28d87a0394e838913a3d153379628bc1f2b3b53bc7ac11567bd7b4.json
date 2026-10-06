@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
+  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM issue_ownership o\n               WHERE o.issue_id = i.id AND o.is_owned = 1\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -76,5 +76,5 @@
       false
     ]
   },
-  "hash": "3302a62f515632f7f70e7b97cd6e504d8dae127c081eac945518c7c183b6e412"
+  "hash": "cee29e994d28d87a0394e838913a3d153379628bc1f2b3b53bc7ac11567bd7b4"
 }

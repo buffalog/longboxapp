@@ -48,8 +48,8 @@ where
            FROM issues i
            WHERE i.credits_fetched = 0
              AND i.cv_issue_id IS NOT NULL
-             AND EXISTS (SELECT 1 FROM files f
-                         WHERE f.issue_id = i.id AND f.status = 'owned' AND f.is_present = 1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o
+                         WHERE o.issue_id = i.id AND o.is_owned = 1)
            ORDER BY i.id ASC
            LIMIT ?"#,
         limit,
@@ -161,8 +161,8 @@ where
            JOIN issue_credits ic ON ic.creator_id = c.id
            JOIN issues i         ON i.id = ic.issue_id
            WHERE c.name LIKE ? COLLATE NOCASE
-             AND EXISTS (SELECT 1 FROM files f
-                         WHERE f.issue_id = i.id AND f.status='owned' AND f.is_present=1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o
+                         WHERE o.issue_id = i.id AND o.is_owned = 1)
            GROUP BY c.id
            -- ORDER BY repeats the aggregate: the sqlx type-cast alias
            -- ("issue_count!: i64") isn't a plain column name, so it can't be
@@ -205,7 +205,7 @@ pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail
         r#"SELECT ic.role AS "role!", COUNT(DISTINCT ic.issue_id) AS "count!: i64"
            FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id
            WHERE ic.creator_id = ?
-             AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o WHERE o.issue_id = i.id AND o.is_owned = 1)
            GROUP BY ic.role
            -- ORDER BY repeats the aggregate: the sqlx type-cast alias
            -- ("count!: i64") isn't a plain column name, so it can't be
@@ -227,7 +227,7 @@ pub async fn creator_detail(pool: &Pool, id: i64) -> Result<Option<CreatorDetail
                   COUNT(DISTINCT i.id) AS "issue_count!: i64"
            FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id
            WHERE ic.creator_id = ?
-             AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o WHERE o.issue_id = i.id AND o.is_owned = 1)
            GROUP BY s.id
            -- ORDER BY repeats the aggregate: the sqlx type-cast alias
            -- ("issue_count!: i64") isn't a plain column name, so it can't be
@@ -304,7 +304,7 @@ where
                   i.number AS "issue_number!", i.cover_date, i.cover_url, ic.role AS "role!"
            FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id
            WHERE ic.creator_id = ?
-             AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)
+             AND EXISTS (SELECT 1 FROM issue_ownership o WHERE o.issue_id = i.id AND o.is_owned = 1)
              AND (? IS NULL OR ic.role = ?)
              AND (? IS NULL OR i.series_id = ?)
            ORDER BY i.cover_date ASC

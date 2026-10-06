@@ -145,10 +145,8 @@ where
              AND length(i.cover_date) = 10
              AND i.cover_date <= date('now')
              AND NOT EXISTS (
-               SELECT 1 FROM files f
-               WHERE f.issue_id = i.id
-                 AND f.status = 'owned'
-                 AND f.is_present = 1
+               SELECT 1 FROM issue_ownership o
+               WHERE o.issue_id = i.id AND o.is_owned = 1
              )
            ORDER BY i.cover_date ASC, i.id ASC"#,
         series_id
@@ -184,10 +182,8 @@ where
              AND length(i.cover_date) = 10
              AND i.cover_date <= date('now')
              AND NOT EXISTS (
-               SELECT 1 FROM files f
-               WHERE f.issue_id = i.id
-                 AND f.status = 'owned'
-                 AND f.is_present = 1
+               SELECT 1 FROM issue_ownership o
+               WHERE o.issue_id = i.id AND o.is_owned = 1
              )
              AND NOT EXISTS (
                SELECT 1 FROM pull_attempts pa
@@ -222,8 +218,8 @@ where
 {
     let row = sqlx::query!(
         r#"SELECT 1 AS "x: i64"
-           FROM files
-           WHERE issue_id = ? AND status = 'owned' AND is_present = 1
+           FROM issue_ownership
+           WHERE issue_id = ? AND is_owned = 1
            LIMIT 1"#,
         issue_id
     )

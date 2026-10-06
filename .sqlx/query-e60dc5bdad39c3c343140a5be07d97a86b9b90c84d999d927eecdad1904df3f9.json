@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                     i.id AS \"issue_id!: i64\",\n                     i.number AS \"number!\",\n                     i.title AS \"title?\",\n                     i.cover_url AS \"cover_url?\",\n                     i.cover_date AS \"cover_date?\",\n                     i.created_at AS \"issue_created_at!: time::PrimitiveDateTime\",\n                     s.id AS \"series_id!: i64\",\n                     s.title AS \"series_title!\",\n                     s.sort_title AS \"series_sort_title!\",\n                     s.start_year AS \"series_start_year?: i64\"\n                   FROM issues i\n                   JOIN series s ON i.series_id = s.id\n                   WHERE s.id = ?\n                     AND NOT EXISTS (\n                       SELECT 1 FROM files f\n                       WHERE f.issue_id = i.id\n                         AND f.status = 'owned'\n                         AND f.is_present = 1\n                     )\n                   ORDER BY i.cover_date ASC NULLS LAST, i.id ASC",
+  "query": "SELECT\n                     i.id AS \"issue_id!: i64\",\n                     i.number AS \"number!\",\n                     i.title AS \"title?\",\n                     i.cover_url AS \"cover_url?\",\n                     i.cover_date AS \"cover_date?\",\n                     i.created_at AS \"issue_created_at!: time::PrimitiveDateTime\",\n                     s.id AS \"series_id!: i64\",\n                     s.title AS \"series_title!\",\n                     s.sort_title AS \"series_sort_title!\",\n                     s.start_year AS \"series_start_year?: i64\"\n                   FROM issues i\n                   JOIN series s ON i.series_id = s.id\n                   WHERE s.id = ?\n                     AND NOT EXISTS (\n                       SELECT 1 FROM issue_ownership o\n                       WHERE o.issue_id = i.id AND o.is_owned = 1\n                     )\n                   ORDER BY i.cover_date ASC NULLS LAST, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "685b84c1d054975d6c7ca5b472733db785efa190e4b2f154f617b2f297219d48"
+  "hash": "e60dc5bdad39c3c343140a5be07d97a86b9b90c84d999d927eecdad1904df3f9"
 }

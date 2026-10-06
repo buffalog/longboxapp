@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.id AS \"issue_id!: i64\", s.title AS \"series_name!\",\n                  i.number AS \"issue_number!\", i.cover_date, i.cover_url, ic.role AS \"role!\"\n           FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id\n           WHERE ic.creator_id = ?\n             AND EXISTS (SELECT 1 FROM files f WHERE f.issue_id=i.id AND f.status='owned' AND f.is_present=1)\n             AND (? IS NULL OR ic.role = ?)\n             AND (? IS NULL OR i.series_id = ?)\n           ORDER BY i.cover_date ASC\n           LIMIT 50 OFFSET ?",
+  "query": "SELECT i.id AS \"issue_id!: i64\", s.title AS \"series_name!\",\n                  i.number AS \"issue_number!\", i.cover_date, i.cover_url, ic.role AS \"role!\"\n           FROM issue_credits ic JOIN issues i ON i.id = ic.issue_id JOIN series s ON s.id = i.series_id\n           WHERE ic.creator_id = ?\n             AND EXISTS (SELECT 1 FROM issue_ownership o WHERE o.issue_id = i.id AND o.is_owned = 1)\n             AND (? IS NULL OR ic.role = ?)\n             AND (? IS NULL OR i.series_id = ?)\n           ORDER BY i.cover_date ASC\n           LIMIT 50 OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "84300f6c32b81bdad713e06d0b9a162ef126b52c821e2af2feae326dfe95293b"
+  "hash": "dd4a650fbc440c2c578994abbfea4d79c7515c4078182866b8ef8d74c2ad2556"
 }

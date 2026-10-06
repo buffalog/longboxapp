@@ -435,6 +435,16 @@ pub struct SeriesWithCounts {
 /// counts. `missing_count` is "issues for which no present owned file
 /// exists" — not derivable from `total_count - owned_count`, because that
 /// conflates with needs_review and ignored.
+/// Note on the ownership predicates inside: the `missing_count` and
+/// `solicited_count` columns go through the `issue_ownership` view, but
+/// `owned_count` deliberately does NOT -- and the reason is forward-
+/// looking, not arithmetic. Measured on a duplicate-heavy fixture, the
+/// view form and this CASE form agree on every series TODAY. The point
+/// is what happens next: `owned_count` is one arm of a per-STATUS
+/// breakdown (it sits beside needs_review/ignored/unmatched) and must
+/// keep meaning "has an owned file", while `missing_count` will come to
+/// mean "not owned AND not covered". Converting this would silently
+/// enrol it in that future change. Do not "finish the job".
 pub async fn find_all_with_counts<'e, E>(executor: E) -> Result<Vec<SeriesWithCounts>>
 where
     E: SqliteExecutor<'e>,
@@ -462,18 +472,14 @@ where
                THEN i.id END) AS "unmatched_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                THEN i.id END) AS "missing_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                AND i.cover_date IS NOT NULL
                AND i.cover_date >= date('now')
@@ -549,18 +555,14 @@ where
                THEN i.id END) AS "unmatched_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                THEN i.id END) AS "missing_count!: i64",
              COUNT(DISTINCT CASE
                WHEN NOT EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.issue_id = i.id
-                   AND f2.status = 'owned'
-                   AND f2.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                AND i.cover_date IS NOT NULL
                AND i.cover_date >= date('now')
@@ -812,6 +814,9 @@ pub async fn refresh_last_matched_counts<'e, E>(executor: E) -> Result<u64>
 where
     E: SqliteExecutor<'e>,
 {
+    // Counts owned FILES, not owned ISSUES. Two files on one issue
+    // count twice here and once in `issue_ownership`, so the view
+    // cannot express this and must not be substituted in.
     let result = sqlx::query!(
         r#"UPDATE series SET last_matched_count = (
                SELECT COUNT(*) FROM files f

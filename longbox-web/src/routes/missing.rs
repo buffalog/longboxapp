@@ -91,10 +91,8 @@ async fn handler(
                    JOIN series s ON i.series_id = s.id
                    WHERE s.id = ?
                      AND NOT EXISTS (
-                       SELECT 1 FROM files f
-                       WHERE f.issue_id = i.id
-                         AND f.status = 'owned'
-                         AND f.is_present = 1
+                       SELECT 1 FROM issue_ownership o
+                       WHERE o.issue_id = i.id AND o.is_owned = 1
                      )
                    ORDER BY i.cover_date ASC NULLS LAST, i.id ASC"#,
                 sid
@@ -119,10 +117,8 @@ async fn handler(
                    JOIN series s ON i.series_id = s.id
                    WHERE s.id = ?
                      AND NOT EXISTS (
-                       SELECT 1 FROM files f
-                       WHERE f.issue_id = i.id
-                         AND f.status = 'owned'
-                         AND f.is_present = 1
+                       SELECT 1 FROM issue_ownership o
+                       WHERE o.issue_id = i.id AND o.is_owned = 1
                      )
                    ORDER BY s.sort_title ASC, i.id ASC"#,
                 sid
@@ -147,10 +143,8 @@ async fn handler(
                FROM issues i
                JOIN series s ON i.series_id = s.id
                WHERE NOT EXISTS (
-                 SELECT 1 FROM files f
-                 WHERE f.issue_id = i.id
-                   AND f.status = 'owned'
-                   AND f.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                ORDER BY i.cover_date ASC NULLS LAST, i.id ASC"#
         )
@@ -173,10 +167,8 @@ async fn handler(
                FROM issues i
                JOIN series s ON i.series_id = s.id
                WHERE NOT EXISTS (
-                 SELECT 1 FROM files f
-                 WHERE f.issue_id = i.id
-                   AND f.status = 'owned'
-                   AND f.is_present = 1
+                 SELECT 1 FROM issue_ownership o
+                 WHERE o.issue_id = i.id AND o.is_owned = 1
                )
                ORDER BY s.sort_title ASC, i.id ASC"#
         )
