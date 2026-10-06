@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { CircleSlash, FileImage, Search } from 'lucide-svelte';
+  import { CircleSlash, FileImage, Search, Zap } from 'lucide-svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import AlphaScrubber from '$lib/components/AlphaScrubber.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -258,11 +258,11 @@
             <button
               type="button"
               onclick={() => openInteractiveSearch(m)}
-              aria-label={`Interactive search for ${m.series.title} #${m.number}`}
+              aria-label={`Manual search for ${m.series.title} #${m.number}`}
               class="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <Search class="size-3" aria-hidden="true" />
-              Search…
+              Manual search
             </button>
           </li>
         {/each}
@@ -295,8 +295,8 @@
                 disabled={searchingSeries.has(g.series_id) || searchingAll}
                 onclick={() => handleSearchSeries(g.series_id, g.series_title)}
               >
-                <Search class="size-3" aria-hidden="true" />
-                Search
+                <Zap class="size-3" aria-hidden="true" />
+                Auto search
               </Button>
             </h2>
             <ul class="divide-y divide-slate-100">
@@ -322,11 +322,11 @@
                   <button
                     type="button"
                     onclick={() => openInteractiveSearch(m)}
-                    aria-label={`Interactive search for ${m.series.title} #${m.number}`}
+                    aria-label={`Manual search for ${m.series.title} #${m.number}`}
                     class="inline-flex flex-shrink-0 items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <Search class="size-3" aria-hidden="true" />
-                    Search…
+                    Manual search
                   </button>
                 </li>
               {/each}

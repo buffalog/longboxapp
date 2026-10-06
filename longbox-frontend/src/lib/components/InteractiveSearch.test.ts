@@ -61,6 +61,11 @@ beforeEach(() => {
 });
 
 describe('InteractiveSearch modal', () => {
+  it('titles the modal Manual Search for the issue', () => {
+    renderModal();
+    expect(screen.getByText('Manual Search — Saga #12')).toBeInTheDocument();
+  });
+
   it('warns when the library already owns the issue, without hiding results', async () => {
     // The warning is advisory. Interactive Search exists for the case where
     // the engine got it wrong, and "I already have it" is often exactly why
