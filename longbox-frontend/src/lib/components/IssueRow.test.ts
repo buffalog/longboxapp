@@ -49,7 +49,7 @@ describe('IssueRow Search button', () => {
     // derived status. seriesId present → button surfaces.
     renderRow({ issue: issue({ file: null }), seriesId: 42 });
     expect(
-      screen.getByRole('button', { name: /Search for issue 4/i })
+      screen.getByRole('button', { name: /^Auto search for issue 4$/i })
     ).toBeInTheDocument();
   });
 
@@ -66,7 +66,7 @@ describe('IssueRow Search button', () => {
       seriesId: 42
     });
     expect(
-      screen.queryByRole('button', { name: /Search for issue 4/i })
+      screen.queryByRole('button', { name: /^Auto search for issue 4$/i })
     ).not.toBeInTheDocument();
   });
 
@@ -78,7 +78,7 @@ describe('IssueRow Search button', () => {
       seriesId: 42
     });
     expect(
-      screen.queryByRole('button', { name: /Search for issue 4/i })
+      screen.queryByRole('button', { name: /^Auto search for issue 4$/i })
     ).not.toBeInTheDocument();
   });
 
@@ -88,7 +88,7 @@ describe('IssueRow Search button', () => {
     // URL, so the button is hidden rather than rendered broken.
     renderRow({ issue: issue({ file: null }) });
     expect(
-      screen.queryByRole('button', { name: /Search for issue/i })
+      screen.queryByRole('button', { name: /^Auto search for issue/i })
     ).not.toBeInTheDocument();
   });
 
@@ -97,7 +97,7 @@ describe('IssueRow Search button', () => {
     renderRow({ issue: issue({ id: 7, number: '4' }), seriesId: 42 });
 
     await fireEvent.click(
-      screen.getByRole('button', { name: /Search for issue 4/i })
+      screen.getByRole('button', { name: /^Auto search for issue 4$/i })
     );
 
     await waitFor(() => expect(searchIssueNow).toHaveBeenCalledTimes(1));
@@ -108,7 +108,7 @@ describe('IssueRow Search button', () => {
     vi.mocked(searchIssueNow).mockResolvedValue(undefined);
     renderRow({ issue: issue(), seriesId: 42 });
 
-    const btn = screen.getByRole('button', { name: /Search for issue 4/i });
+    const btn = screen.getByRole('button', { name: /^Auto search for issue 4$/i });
     await fireEvent.click(btn);
 
     // The 15s timer is still running well after the API resolves —
@@ -124,7 +124,7 @@ describe('IssueRow Search button', () => {
     renderRow({ issue: issue(), seriesId: 42 });
 
     await fireEvent.click(
-      screen.getByRole('button', { name: /Search for issue 4/i })
+      screen.getByRole('button', { name: /^Auto search for issue 4$/i })
     );
     await waitFor(() =>
       expect(toast.warning).toHaveBeenCalledWith(
@@ -140,7 +140,7 @@ describe('IssueRow Interactive search button', () => {
     render(IssueRow, {
       props: { issue: issue({ file: null }), seriesId: 42, onInteractiveSearch }
     });
-    const btn = screen.getByRole('button', { name: /Interactive search for issue 4/i });
+    const btn = screen.getByRole('button', { name: /^Manual search for issue 4$/i });
     await fireEvent.click(btn);
     expect(onInteractiveSearch).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }));
   });
@@ -148,7 +148,7 @@ describe('IssueRow Interactive search button', () => {
   it('is absent when no onInteractiveSearch callback is wired', () => {
     renderRow({ issue: issue({ file: null }), seriesId: 42 });
     expect(
-      screen.queryByRole('button', { name: /Interactive search for issue/i })
+      screen.queryByRole('button', { name: /^Manual search for issue/i })
     ).not.toBeInTheDocument();
   });
 });

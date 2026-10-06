@@ -8,6 +8,7 @@
     ExternalLink,
     FileImage,
     Search,
+    Zap,
     BookOpen
   } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
@@ -26,8 +27,8 @@
      *  needs-attention listing); when absent, the Search button is
      *  hidden. */
     seriesId?: number;
-    /** When provided, a Missing row shows an "Interactive search" button
-     *  (distinct from the auto-grab Search button above) that calls back
+    /** When provided, a Missing row shows a "Manual search" button
+     *  (distinct from the "Auto search" button above) that calls back
      *  with the issue so the parent can open the search modal. */
     onInteractiveSearch?: (issue: IssueWithFile) => void;
   }
@@ -203,22 +204,22 @@
           type="button"
           onclick={handleSearchNow}
           disabled={searching}
-          aria-label={`Search for issue ${issue.number}`}
+          aria-label={`Auto search for issue ${issue.number}`}
           class="inline-flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <Search class="size-3" aria-hidden="true" />
-          Search
+          <Zap class="size-3" aria-hidden="true" />
+          Auto search
         </button>
       {/if}
       {#if showInteractiveButton}
         <button
           type="button"
           onclick={() => onInteractiveSearch?.(issue)}
-          aria-label={`Interactive search for issue ${issue.number}`}
+          aria-label={`Manual search for issue ${issue.number}`}
           class="inline-flex items-center gap-1 rounded border border-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           <Search class="size-3" aria-hidden="true" />
-          Search…
+          Manual search
         </button>
       {/if}
     </div>

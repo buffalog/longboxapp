@@ -124,7 +124,7 @@
   }
 </script>
 
-<Modal {open} {onClose} maxWidth="max-w-4xl" title={`Interactive Search — ${seriesTitle} #${issueNumber}`}>
+<Modal {open} {onClose} maxWidth="max-w-4xl" title={`Manual Search — ${seriesTitle} #${issueNumber}`}>
   <form
     class="mb-3 flex gap-2"
     onsubmit={(e) => {
