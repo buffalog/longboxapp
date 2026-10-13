@@ -80,6 +80,8 @@ pub struct AppState {
     /// to attempt anything if the 6c.1 columns are missing, so this
     /// handle is safe to expose regardless of schema state.
     pub enrichment: longbox_cv_enrichment::EnrichmentHandle,
+    /// Full catalog refresh task (`POST /api/refresh/all`, progress).
+    pub refresh: crate::refresh::RefreshHandle,
     /// Process boot time. Captured once at bootstrap and never
     /// mutated; `GET /api/health` subtracts from `now_utc()` to derive
     /// `uptime_seconds`. `OffsetDateTime` (UTC) rather than

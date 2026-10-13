@@ -855,24 +855,22 @@ async fn refresh(
     let updated = series_repo::update(&mut *tx, id, update_input).await?;
 
     // Upsert issues by cv_issue_id so existing issues get refreshed and new
-    // ones are added.
-    for cv_issue in cv_issues {
-        issue_repo::upsert_by_cv_id(
-            &mut *tx,
-            NewIssue {
-                series_id: updated.id,
-                cv_issue_id: Some(cv_issue.cv_issue_id),
-                metron_issue_id: None,
-                number: cv_issue.issue_number,
-                title: cv_issue.name,
-                cover_date: cv_issue.cover_date,
-                summary: cv_issue.description,
-                cover_url: cv_issue.cover_url,
-                store_date: cv_issue.store_date,
-            },
-        )
-        .await?;
-    }
+    // ones are added. Same path the scheduled catalog refresh uses.
+    let issues = cv_issues
+        .into_iter()
+        .map(|cv_issue| NewIssue {
+            series_id: updated.id,
+            cv_issue_id: Some(cv_issue.cv_issue_id),
+            metron_issue_id: None,
+            number: cv_issue.issue_number,
+            title: cv_issue.name,
+            cover_date: cv_issue.cover_date,
+            summary: cv_issue.description,
+            cover_url: cv_issue.cover_url,
+            store_date: cv_issue.store_date,
+        })
+        .collect();
+    crate::refresh::apply_issues(&mut tx, issues).await?;
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
     // Refresh can introduce new issues (CV published #194 since last

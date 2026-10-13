@@ -159,7 +159,7 @@ pub async fn build_test_app() -> TestApp {
     // default slots they just sleep — tests never wait on them. The
     // pull handle is what the `/pull/check` route exercises; the scan
     // scheduler gets a no-op closure.
-    let pull = longbox_pull::start(longbox_pull::PullConfig::default(), pool.clone());
+    let pull = longbox_pull::start(longbox_pull::PullConfig::default(), pool.clone(), None);
     let pull_search = longbox_pull::PullSearchHandle::new(pool.clone());
     let scan_scheduler = longbox_scan_scheduler::start(
         longbox_scan_scheduler::ScanSchedulerConfig::default(),
@@ -175,11 +175,22 @@ pub async fn build_test_app() -> TestApp {
     })
     .unwrap();
     let cv_direct_arc = Arc::new(cv_direct);
+    // One shared background client, as in bootstrap. 1s spacing (the
+    // gate's floor) keeps refresh tests fast.
+    let bg_cv =
+        longbox_cv_enrichment::BackgroundCvClient::new(Arc::clone(&cv_arc), Duration::from_secs(1));
     let enrichment = longbox_cv_enrichment::spawn(
         pool.clone(),
-        Arc::clone(&cv_arc),
+        bg_cv.clone(),
         std::path::PathBuf::from("/tmp/longbox-test-library"),
     );
+    let scanner = Arc::new(scanner);
+    let refresh = longbox_web::refresh::RefreshHandle::new(longbox_web::refresh::RefreshDeps {
+        db: pool.clone(),
+        bg: bg_cv,
+        scanner: Arc::clone(&scanner),
+        pull_search: pull_search.clone(),
+    });
 
     let state = AppState {
         db: pool,
@@ -190,7 +201,7 @@ pub async fn build_test_app() -> TestApp {
         // a Some(client) backed by a wiremock server for forward-week
         // calendar behavior.
         metron: None,
-        scanner: Arc::new(scanner),
+        scanner,
         config: Arc::new(config),
         delete_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         scan_status: Arc::new(RwLock::new(ScanStatus::default())),
@@ -201,6 +212,7 @@ pub async fn build_test_app() -> TestApp {
         pull_search,
         scan_scheduler,
         enrichment,
+        refresh,
         start_time: time::OffsetDateTime::now_utc(),
         cv_resolve_gate: Arc::new(tokio::sync::Semaphore::new(3)),
         subscribe_status: Arc::new(RwLock::new(longbox_web::SubscribeStatus::default())),

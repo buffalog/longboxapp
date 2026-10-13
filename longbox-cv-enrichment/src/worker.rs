@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use longbox_comicvine::{
-    enrichment::pick_volume, ComicVineClient, CvIssueDetail, CvVolumeDetail,
-    EnrichmentCandidateInput, PickOutcome, SeriesSearchResult,
+    enrichment::pick_volume, CvIssueDetail, CvVolumeDetail, EnrichmentCandidateInput, PickOutcome,
+    SeriesSearchResult,
 };
 use longbox_core::LibraryPath;
 use longbox_db::{
@@ -64,20 +64,25 @@ impl EnrichmentHandle {
 /// assertion (see [`assert_schema`]) before doing any other work;
 /// if assertion fails, the worker refuses to start, logs at ERROR,
 /// and the returned handle's `request_run` will be a no-op.
-pub fn spawn(db: Pool, inner_cv: Arc<ComicVineClient>, library_root: PathBuf) -> EnrichmentHandle {
+///
+/// `bg` is the process-wide background CV client, shared with the
+/// credits resolver and the catalog refresh so their calls queue on one
+/// gate instead of each spending its own budget against the shared
+/// 180/h limiter.
+pub fn spawn(db: Pool, bg: BackgroundCvClient, library_root: PathBuf) -> EnrichmentHandle {
     let running = Arc::new(AtomicBool::new(false));
     let (trigger, rx) = mpsc::channel::<()>(1);
     let handle = EnrichmentHandle {
         trigger,
         running: Arc::clone(&running),
     };
-    tokio::spawn(worker_loop(db, inner_cv, library_root, running, rx));
+    tokio::spawn(worker_loop(db, bg, library_root, running, rx));
     handle
 }
 
 async fn worker_loop(
     db: Pool,
-    inner_cv: Arc<ComicVineClient>,
+    bg: BackgroundCvClient,
     library_root: PathBuf,
     running: Arc<AtomicBool>,
     mut trigger: mpsc::Receiver<()>,
@@ -149,11 +154,6 @@ async fn worker_loop(
             }
             continue;
         }
-
-        let bg = BackgroundCvClient::new(
-            Arc::clone(&inner_cv),
-            Duration::from_secs(config.request_interval_seconds),
-        );
 
         let candidates = match list_candidates(&db, &config).await {
             Ok(c) => c,

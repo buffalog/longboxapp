@@ -12,10 +12,9 @@
 //!    and recorded as a `submitted` attempt.
 //!
 //! No ComicVine: the sweep acts only on issues already in the catalog.
-//! A subscribed series whose newly-*announced* issues have not been
-//! refreshed into the catalog will not have them pulled — the user must
-//! refresh that series. Phase A.8 Step 8's release calendar is the
-//! intended discovery path; closing that gap is out of Step 6's scope.
+//! Discovery is the web layer's catalog refresh: a store_date delta run
+//! through the scheduler's `PreSweep` hook before every sweep, plus a
+//! weekly full pass over the pull list.
 
 use std::cmp::Ordering;
 use std::path::Path;

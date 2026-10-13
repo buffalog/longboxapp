@@ -116,6 +116,36 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //    Web boot is unaffected either way — Phase B is best-effort.
     start_phase_b(&config, &db, Arc::clone(&pending_cache)).await;
 
+    // 7b. The ONE background CV client. Enrichment, the credits resolver
+    //     and the catalog refresh share its gate, so together they spend
+    //     one background budget (~120/h at the default 30s) against the
+    //     shared 180/h limiter instead of one budget each.
+    //     ponytail: the interval is read once here. The worker used to
+    //     re-read it every cycle; a change now needs a restart.
+    let cv_arc = Arc::new(cv);
+    let bg_interval: u64 = settings_repo::get_or_default(
+        &db,
+        settings_repo::KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS,
+        30,
+    )
+    .await?;
+    let bg_cv = longbox_cv_enrichment::BackgroundCvClient::new(
+        Arc::clone(&cv_arc),
+        Duration::from_secs(bg_interval),
+    );
+
+    // On-demand single-series search tracker. Spawns its own short-
+    // lived tokio task per accepted search; the pool clone is what
+    // they run against. Built before the pull engine because the
+    // catalog refresh (its pre-sweep hook) fires these searches.
+    let pull_search = longbox_pull::PullSearchHandle::new(db.clone());
+    let refresh = crate::refresh::RefreshHandle::new(crate::refresh::RefreshDeps {
+        db: db.clone(),
+        bg: bg_cv.clone(),
+        scanner: Arc::clone(&scanner),
+        pull_search: pull_search.clone(),
+    });
+
     // 8. Pull engine — the Phase A.8 scheduled auto-download workflow.
     //    Always started: the scheduler is a cheap sleeping task and
     //    each sweep no-ops gracefully when no downloader or indexers
@@ -134,11 +164,18 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
                 .map(|raw| std::path::PathBuf::from(crate::config::normalize_path(raw))),
         },
         db.clone(),
+        // Catalog delta refresh, inline before each sweep's Phase 1.
+        Some({
+            let refresh = refresh.clone();
+            Arc::new(move || {
+                let refresh = refresh.clone();
+                Box::pin(async move { refresh.before_sweep().await })
+            })
+        }),
     );
-    // On-demand single-series search tracker. Spawns its own short-
-    // lived tokio task per accepted search; the pool clone is what
-    // they run against.
-    let pull_search = longbox_pull::PullSearchHandle::new(db.clone());
+    // First boot (or a week since the last pass): start the full
+    // refresh now rather than waiting for the next daily sweep.
+    refresh.start_full_if_due().await;
 
     // 9. Library Tidy scheduled scan. The scan-with-status logic is a
     //    closure built here — it needs `scan_status`, a web-layer type
@@ -169,8 +206,6 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //     refuses to start, logs at ERROR, and the returned handle's
     //     request_run() is a no-op — the rest of the web layer
     //     continues running.
-    let cv_arc = Arc::new(cv);
-
     // Direct/interactive CV client — higher rate limit, short wait-for-slot.
     // Used by user-initiated routes (Library Tidy cv-id picks) so they never
     // queue behind the enrichment worker's 30-60s token wait.
@@ -185,13 +220,10 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     let cv_direct_arc = Arc::new(cv_direct);
     let enrichment = longbox_cv_enrichment::spawn(
         db.clone(),
-        Arc::clone(&cv_arc),
+        bg_cv.clone(),
         std::path::PathBuf::from(&configured),
     );
-    longbox_cv_enrichment::credits_resolver::spawn_credits_resolver(
-        db.clone(),
-        Arc::clone(&cv_arc),
-    );
+    longbox_cv_enrichment::credits_resolver::spawn_credits_resolver(db.clone(), bg_cv);
 
     // 11. Metron client (Item A v2). Kill switch is the construction
     //     gate: `metron_enabled = false` (the migration default) skips
@@ -244,6 +276,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         pull_search,
         scan_scheduler,
         enrichment,
+        refresh,
         start_time: time::OffsetDateTime::now_utc(),
         // 3 permits: background pull-list CV resolutions run at most 3
         // at a time — the cure for the rate-limiter stampede (the old

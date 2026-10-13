@@ -5,6 +5,8 @@
 //! the next daily fire time or a manual trigger — runs one sweep, and
 //! loops.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +16,12 @@ use tokio::sync::mpsc;
 
 use crate::config::PullConfig;
 use crate::engine;
+
+/// Work the web layer runs at the top of every sweep, before Phase 1,
+/// while the sweep holds `running`: the catalog delta refresh, so issues
+/// CV just published are candidates in the same sweep. Injected because
+/// this crate never talks to ComicVine.
+pub type PreSweep = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Handle to a running pull engine. Cheap to clone — the web layer
 /// parks one in its shared state for the manual "Check now" route.
@@ -50,14 +58,14 @@ impl PullHandle {
 }
 
 /// Spawn the scheduler task and return its handle.
-pub fn spawn(config: PullConfig, db: longbox_db::Pool) -> PullHandle {
+pub fn spawn(config: PullConfig, db: longbox_db::Pool, pre_sweep: Option<PreSweep>) -> PullHandle {
     let running = Arc::new(AtomicBool::new(false));
     let (trigger, rx) = mpsc::channel::<()>(1);
     let handle = PullHandle {
         trigger,
         running: Arc::clone(&running),
     };
-    tokio::spawn(scheduler_loop(config, db, running, rx));
+    tokio::spawn(scheduler_loop(config, db, pre_sweep, running, rx));
     handle
 }
 
@@ -68,6 +76,7 @@ pub fn spawn(config: PullConfig, db: longbox_db::Pool) -> PullHandle {
 async fn scheduler_loop(
     config: PullConfig,
     db: longbox_db::Pool,
+    pre_sweep: Option<PreSweep>,
     running: Arc<AtomicBool>,
     mut trigger: mpsc::Receiver<()>,
 ) {
@@ -88,6 +97,9 @@ async fn scheduler_loop(
         }
 
         running.store(true, Ordering::SeqCst);
+        if let Some(pre) = &pre_sweep {
+            pre().await;
+        }
         match engine::sweep(&db, config.watch_root.as_deref()).await {
             Ok(s) => tracing::info!(
                 target: "longbox_pull",

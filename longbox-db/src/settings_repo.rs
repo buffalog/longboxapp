@@ -138,6 +138,16 @@ pub const KEY_MIN_FILE_SIZE_MB: &str = "min_file_size_mb";
 /// `opds_users` table, not here.
 pub const KEY_OPDS_ENABLED: &str = "opds_enabled";
 
+/// Catalog delta refresh window, in days either side of today. Each
+/// scheduled sweep asks CV for every issue whose `store_date` falls in
+/// `[today - back, today + ahead]` and upserts the ones on tracked
+/// volumes. Read per sweep.
+pub const KEY_REFRESH_DELTA_DAYS_BACK: &str = "refresh_delta_days_back";
+pub const KEY_REFRESH_DELTA_DAYS_AHEAD: &str = "refresh_delta_days_ahead";
+/// Unix-seconds completion time of the last full catalog refresh. No
+/// row means it has never run, which triggers one at boot.
+pub const KEY_LAST_FULL_REFRESH_AT: &str = "last_full_refresh_at";
+
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where
     E: SqliteExecutor<'e>,

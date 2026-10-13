@@ -8375,3 +8375,233 @@ async fn missing_endpoint_returns_store_date() {
         assert_eq!(row["store_date"], "2020-05-13", "{query}");
     }
 }
+
+// ----- catalog refresh (delta + full) -----
+
+async fn seed_cv_series(app: &common::TestApp, title: &str, cv_id: i64, pulled: bool) -> i64 {
+    let sid = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(cv_id),
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2003),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    if pulled {
+        pull_list_repo::add(
+            &app.state.db,
+            NewPullEntry {
+                series_id: sid,
+                start_issue: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sid
+}
+
+fn refresh_deps(app: &common::TestApp) -> longbox_web::refresh::RefreshDeps {
+    longbox_web::refresh::RefreshDeps {
+        db: app.state.db.clone(),
+        bg: longbox_cv_enrichment::BackgroundCvClient::new(
+            std::sync::Arc::clone(&app.state.cv),
+            std::time::Duration::from_secs(1),
+        ),
+        scanner: std::sync::Arc::clone(&app.state.scanner),
+        pull_search: app.state.pull_search.clone(),
+    }
+}
+
+/// Counts are right, and a number collision (a number-only row already
+/// holding that number) is skipped without aborting the batch or
+/// touching the existing row.
+#[tokio::test]
+async fn apply_issues_counts_and_skips_number_collisions() {
+    let app = build_test_app().await;
+    let sid = seed_cv_series(&app, "TWD", 2127, false).await;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2003-10-08"), None).await;
+    let shallow = insert_dated_issue(&app, sid, "3", None, None, None).await;
+
+    let new = |cv: i64, number: &str, store: &str| NewIssue {
+        series_id: sid,
+        cv_issue_id: Some(cv),
+        metron_issue_id: None,
+        number: number.into(),
+        title: None,
+        cover_date: None,
+        summary: None,
+        cover_url: None,
+        store_date: Some(store.into()),
+    };
+    let mut tx = app.state.db.begin().await.unwrap();
+    let counts = longbox_web::refresh::apply_issues(
+        &mut tx,
+        vec![
+            new(10003, "3", "2003-12-01"),
+            new(10001, "1", "2003-10-01"),
+            new(10002, "2", "2003-11-05"),
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(counts.inserted, 1, "#2");
+    assert_eq!(counts.updated, 1, "#1");
+    assert_eq!(counts.store_dates_set, 2);
+    assert_eq!(counts.number_collisions, 1, "#3");
+    let row = issue_repo::find_by_id(&app.state.db, shallow)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.cv_issue_id, None, "number-only row left untouched");
+    assert!(issue_repo::find_by_cv_issue_id(&app.state.db, 10002)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// The delta upserts calendar issues on tracked volumes only, and an
+/// issue on sale with its cover date still ahead becomes a pull
+/// candidate: the original bug, end to end.
+#[tokio::test]
+async fn delta_refresh_makes_on_sale_issues_pull_candidates() {
+    let app = build_test_app().await;
+    let sid = seed_cv_series(&app, "TWD", 2127, true).await;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2099-07-01"), None).await;
+    assert!(issue_repo::list_pull_candidates(&app.state.db, sid)
+        .await
+        .unwrap()
+        .is_empty());
+
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+          { "id": 10001, "issue_number": "1", "name": null, "cover_date": "2099-07-01",
+            "store_date": "2020-05-13", "description": null, "image": null,
+            "volume": { "id": 2127, "name": "TWD" }, "site_detail_url": "https://cv/10001/" },
+          { "id": 10002, "issue_number": "2", "name": "New One", "cover_date": "2099-08-01",
+            "store_date": "2020-06-10", "description": null, "image": null,
+            "volume": { "id": 2127, "name": "TWD" }, "site_detail_url": "https://cv/10002/" },
+          { "id": 99001, "issue_number": "77", "name": null, "cover_date": null,
+            "store_date": "2020-06-10", "description": null, "image": null,
+            "volume": { "id": 555, "name": "Untracked" }, "site_detail_url": "https://cv/99001/" }
+        ]"#,
+    )
+    .await;
+
+    let summary = longbox_web::refresh::run_delta(&refresh_deps(&app)).await;
+    assert_eq!(summary.series_refreshed, 1);
+    assert_eq!(summary.issues_inserted, 1);
+    assert_eq!(summary.issues_updated, 1);
+    assert_eq!(summary.store_dates_set, 2);
+    assert_eq!(summary.number_collisions, 0);
+    assert_eq!(summary.cv_errors, 0);
+
+    assert!(issue_repo::find_by_cv_issue_id(&app.state.db, 99001)
+        .await
+        .unwrap()
+        .is_none());
+    let new = issue_repo::find_by_cv_issue_id(&app.state.db, 10002)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(new.title.as_deref(), Some("New One"));
+    assert_eq!(new.cover_date.as_deref(), Some("2099-08-01"));
+    let candidates: Vec<String> = issue_repo::list_pull_candidates(&app.state.db, sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(candidates, vec!["1", "2"]);
+}
+
+async fn wait_for_full_refresh(app: &common::TestApp) {
+    for _ in 0..500 {
+        if app.state.refresh.progress().is_none() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("full refresh never finished");
+}
+
+/// The full pass refreshes pull-list series only, records completion,
+/// and refuses a second start while running.
+#[tokio::test]
+async fn full_refresh_covers_pull_list_and_records_completion() {
+    let app = build_test_app().await;
+    let pulled = seed_cv_series(&app, "TWD", 2127, true).await;
+    let unpulled = seed_cv_series(&app, "Other", 3000, false).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .and(query_param("filter", "volume:2127"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(TWD_ISSUES_WITH_STORE_DATES))
+        .expect(1)
+        .mount(&app.cv_server)
+        .await;
+    // Any other volume fetch (the unpulled series) lands here and fails
+    // the test on drop. Lower priority than the specific mock above.
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(404))
+        .with_priority(10)
+        .expect(0)
+        .mount(&app.cv_server)
+        .await;
+
+    assert!(app.state.refresh.try_start_full());
+    assert!(!app.state.refresh.try_start_full(), "already running");
+    wait_for_full_refresh(&app).await;
+
+    let issues = issue_repo::list_by_series(&app.state.db, pulled)
+        .await
+        .unwrap();
+    let dates: Vec<_> = issues.iter().map(|i| i.store_date.as_deref()).collect();
+    assert_eq!(dates, vec![Some("2003-10-01"), Some("2003-11-05")]);
+    assert!(issue_repo::list_by_series(&app.state.db, unpulled)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(longbox_web::refresh::last_full_refresh_at(&app.state.db)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// Due when it never ran or ran over a week ago; not due inside a week.
+#[tokio::test]
+async fn full_refresh_is_due_when_never_run_or_a_week_old() {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    for (stored, due) in [
+        (None, true),
+        (Some(now - 60), false),
+        (Some(now - 8 * 86_400), true),
+    ] {
+        let app = build_test_app().await;
+        if let Some(t) = stored {
+            longbox_db::settings_repo::set(
+                &app.state.db,
+                longbox_db::settings_repo::KEY_LAST_FULL_REFRESH_AT,
+                &t.to_string(),
+            )
+            .await
+            .unwrap();
+        }
+        app.state.refresh.start_full_if_due().await;
+        // try_start_full flips `running` before spawning, and nothing has
+        // yielded since, so this reads the decision, not the outcome.
+        assert_eq!(app.state.refresh.progress().is_some(), due, "{stored:?}");
+        wait_for_full_refresh(&app).await;
+    }
+}

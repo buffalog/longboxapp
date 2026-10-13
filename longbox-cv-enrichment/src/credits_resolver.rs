@@ -2,18 +2,15 @@
 //! whose `credits_fetched = 0` by fetching their per-issue `person_credits`
 //! behind the shared `BackgroundCvClient` throttle (~120 req/h, leaving the
 //! interactive 180/h budget headroom). Fire-and-forget; no settings gate.
-use std::sync::Arc;
 use std::time::Duration;
 
-use longbox_comicvine::{ComicVineClient, CvError};
+use longbox_comicvine::CvError;
 use longbox_db::{creator_repo, Pool};
 
 use crate::background::BackgroundCvClient;
 
 /// Idle re-check interval when there's no work (new subscribes show up here).
 const IDLE_SLEEP: Duration = Duration::from_secs(300);
-/// Background call spacing (matches the enrichment worker default).
-const REQUEST_INTERVAL: Duration = Duration::from_secs(30);
 /// Issues per work-list batch.
 const BATCH: i64 = 50;
 
@@ -30,14 +27,14 @@ fn is_terminal(e: &CvError) -> bool {
     }
 }
 
-/// Spawn the resolver onto the tokio runtime. `inner_cv` is the shared
-/// 180/h CV client (same Arc the enrichment worker uses).
-pub fn spawn_credits_resolver(db: Pool, inner_cv: Arc<ComicVineClient>) {
-    tokio::spawn(credits_loop(db, inner_cv));
+/// Spawn the resolver onto the tokio runtime. `bg` is the process-wide
+/// background CV client (shared with the enrichment worker and the
+/// catalog refresh).
+pub fn spawn_credits_resolver(db: Pool, bg: BackgroundCvClient) {
+    tokio::spawn(credits_loop(db, bg));
 }
 
-async fn credits_loop(db: Pool, inner_cv: Arc<ComicVineClient>) {
-    let bg = BackgroundCvClient::new(inner_cv, REQUEST_INTERVAL);
+async fn credits_loop(db: Pool, bg: BackgroundCvClient) {
     loop {
         let batch = match creator_repo::list_issues_needing_credits(&db, BATCH).await {
             Ok(b) => b,
