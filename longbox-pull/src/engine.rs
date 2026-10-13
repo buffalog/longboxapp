@@ -293,13 +293,12 @@ pub async fn sweep(db: &Pool, watch_root: Option<&Path>) -> Result<SweepSummary,
 /// to the daily scheduler. Returns `NotOnPullList` when the series
 /// has no pull-list entry.
 ///
-/// Documented race: if the daily scheduler is mid-sweep on the same
-/// series at the moment this fires, both could query indexers for the
-/// same candidates and try to submit duplicate `pull_attempts`. The
-/// unique key on `(series_id, issue_id)` absorbs the collision — the
-/// second INSERT errors out and the per-issue code path logs and moves
-/// on. Window is bounded (each sweep_series call is short); cost on
-/// collision is one wasted indexer query.
+/// Race: if the daily scheduler is mid-sweep on the same series when this
+/// fires, both can pick the same candidate and BOTH submit it to the
+/// downloader. Nothing absorbs that: `idx_pull_attempts_series_issue` is
+/// not unique, and the attempt row is written after the submit. Callers
+/// that can avoid overlapping a sweep should (the catalog refresh checks
+/// `PullHandle::is_sweeping`); a manual Search-now click can still race.
 pub async fn sweep_single_series(db: &Pool, series_id: i64) -> Result<SweepSummary, PullError> {
     let mut summary = SweepSummary::default();
     let entry = pull_list_repo::get(db, series_id)

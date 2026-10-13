@@ -190,6 +190,7 @@ pub async fn build_test_app() -> TestApp {
         bg: bg_cv,
         scanner: Arc::clone(&scanner),
         pull_search: pull_search.clone(),
+        pull: Arc::new(std::sync::OnceLock::from(pull.clone())),
     });
 
     let state = AppState {

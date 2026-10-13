@@ -8418,6 +8418,7 @@ fn refresh_deps(app: &common::TestApp) -> longbox_web::refresh::RefreshDeps {
         ),
         scanner: std::sync::Arc::clone(&app.state.scanner),
         pull_search: app.state.pull_search.clone(),
+        pull: Default::default(),
     }
 }
 
@@ -8500,6 +8501,21 @@ async fn delta_refresh_makes_on_sale_issues_pull_candidates() {
     .await;
 
     let summary = longbox_web::refresh::run_delta(&refresh_deps(&app)).await;
+    // The window: seeded defaults, today -14 .. +28 days.
+    let today = time::OffsetDateTime::now_utc().date();
+    let want = format!(
+        "store_date:{}|{}",
+        today - time::Duration::days(14),
+        today + time::Duration::days(28)
+    );
+    let requests = app.cv_server.received_requests().await.unwrap();
+    let filters: Vec<String> = requests
+        .iter()
+        .flat_map(|r| r.url.query_pairs())
+        .filter(|(k, _)| k == "filter")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    assert_eq!(filters, vec![want]);
     assert_eq!(summary.series_refreshed, 1);
     assert_eq!(summary.issues_inserted, 1);
     assert_eq!(summary.issues_updated, 1);
@@ -8667,4 +8683,58 @@ async fn refresh_all_starts_once_and_reports_progress() {
     assert_eq!(done["running"], false);
     assert!(done["done"].is_null());
     assert!(done["last_full_refresh_at"].as_i64().unwrap() > 0);
+}
+
+/// A pass where every series failed (CV down, bad key) doesn't count as
+/// done: no completion timestamp, so the next sweep tries again.
+#[tokio::test]
+async fn full_refresh_with_every_fetch_failing_records_no_completion() {
+    let app = build_test_app().await;
+    seed_cv_series(&app, "TWD", 2127, true).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&app.cv_server)
+        .await;
+
+    assert!(app.state.refresh.try_start_full());
+    wait_for_full_refresh(&app).await;
+    assert!(longbox_web::refresh::last_full_refresh_at(&app.state.db)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// A hand-edited absurd window clamps to a year instead of overflowing
+/// date arithmetic, which would panic inside the sweep and kill the pull
+/// scheduler.
+#[tokio::test]
+async fn delta_window_clamps_absurd_settings() {
+    let app = build_test_app().await;
+    longbox_db::settings_repo::set(
+        &app.state.db,
+        longbox_db::settings_repo::KEY_REFRESH_DELTA_DAYS_BACK,
+        "999999999",
+    )
+    .await
+    .unwrap();
+    mount_cv_calendar_any(&app, "[]").await;
+
+    longbox_web::refresh::run_delta(&refresh_deps(&app)).await;
+    let today = time::OffsetDateTime::now_utc().date();
+    let requests = app.cv_server.received_requests().await.unwrap();
+    let filter = requests[0]
+        .url
+        .query_pairs()
+        .find(|(k, _)| k == "filter")
+        .unwrap()
+        .1
+        .into_owned();
+    assert!(
+        filter.starts_with(&format!(
+            "store_date:{}|",
+            today - time::Duration::days(365)
+        )),
+        "{filter}"
+    );
 }

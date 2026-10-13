@@ -11,15 +11,16 @@
 //!   `fetch_issues` each. Runs at boot when it has never run, then weekly,
 //!   and on `POST /api/refresh/all`. It is not inside the sweep: a series
 //!   that gains issues is rematched and searched as soon as it is done, so
-//!   downloads flow during the ~2h pass instead of after it.
+//!   downloads flow during the multi-hour pass instead of after it.
 //!
-//! All CV calls go through the process-wide [`BackgroundCvClient`], so a
-//! refresh queues behind (and alongside) enrichment and the credits
-//! resolver instead of starving interactive calls.
+//! All CV calls go through the process-wide [`BackgroundCvClient`], whose
+//! gate admits one logical call at a time alongside enrichment and the
+//! credits resolver. The gate is per call, not per page: a multi-page
+//! fetch pages on the shared 180/h limiter.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use longbox_cv_enrichment::BackgroundCvClient;
 use longbox_db::{issue_repo, pull_list_repo, series_repo, settings_repo, DbError, NewIssue, Pool};
@@ -36,9 +37,10 @@ pub struct ApplyCounts {
     pub updated: usize,
     /// Rows whose `store_date` went from NULL to a value.
     pub store_dates_set: usize,
-    /// Inserts refused because the series already holds that issue
-    /// number on a row with no `cv_issue_id` (a number-only row from a
-    /// bulk-convert link). Logged and skipped; nothing is overwritten.
+    /// Writes refused because another row in the series already holds
+    /// that issue number: a number-only row from a bulk-convert link, a
+    /// CV renumbering, or a CV volume listing one number twice. Logged and
+    /// skipped; nothing is overwritten.
     pub number_collisions: usize,
     /// Series that gained at least one row.
     pub series_with_inserts: HashSet<i64>,
@@ -75,14 +77,16 @@ pub async fn apply_issues(
                     counts.store_dates_set += 1;
                 }
             }
-            Err(DbError::UniqueViolation { .. }) => {
+            Err(DbError::UniqueViolation {
+                field: "issues_series_id_number",
+            }) => {
                 counts.number_collisions += 1;
                 tracing::warn!(
                     target: "longbox_web",
                     series_id,
                     cv_issue_id,
                     number = %number,
-                    "refresh.number_collision (series already holds this number without a cv_issue_id; skipped)"
+                    "refresh.number_collision (another row in this series already holds this issue number; skipped)"
                 );
             }
             Err(e) => return Err(e),
@@ -134,6 +138,10 @@ pub struct RefreshDeps {
     pub bg: BackgroundCvClient,
     pub scanner: Arc<longbox_scanner::Scanner>,
     pub pull_search: longbox_pull::PullSearchHandle,
+    /// The pull engine, set once it has started (it starts after this
+    /// handle, which its pre-sweep hook captures). Empty means "no sweep
+    /// known to be running".
+    pub pull: Arc<OnceLock<longbox_pull::PullHandle>>,
 }
 
 /// Handle to the full-refresh task, parked in `AppState`. Cheap to clone.
@@ -236,29 +244,43 @@ pub async fn last_full_refresh_at(db: &Pool) -> Result<Option<OffsetDateTime>, D
         .and_then(|secs| OffsetDateTime::from_unix_timestamp(secs).ok()))
 }
 
-/// After a series gains issues: rematch first, so needs-review files can
-/// claim the new rows before a search would download duplicates; then
-/// search it now if it's an active pull-list series. Awaited, not
-/// spawned, for the same ordering reason.
-async fn after_insert(deps: &RefreshDeps, series_id: i64, search: bool) {
+/// Rematch a series that gained issues, so needs-review files claim the
+/// new rows before a search could download duplicates. `false` when the
+/// scanner was busy (a running scan holds it) and the rematch didn't run;
+/// a scan that loaded its candidates before the insert won't see the rows.
+async fn rematch(deps: &RefreshDeps, series_id: i64) -> bool {
     match deps.scanner.rematch_for_series(series_id).await {
-        Ok(report) => tracing::info!(
-            target: "longbox_web",
-            series_id,
-            matched = report.matched_owned,
-            caller = "catalog_refresh",
-            "auto-rematch completed"
-        ),
-        // Another scan holds the scanner; the scan itself will match.
-        Err(e) => tracing::warn!(
-            target: "longbox_web",
-            series_id,
-            error = %e,
-            caller = "catalog_refresh",
-            "auto-rematch skipped"
-        ),
+        Ok(report) => {
+            tracing::info!(
+                target: "longbox_web",
+                series_id,
+                matched = report.matched_owned,
+                caller = "catalog_refresh",
+                "auto-rematch completed"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "longbox_web",
+                series_id,
+                error = %e,
+                caller = "catalog_refresh",
+                "auto-rematch skipped"
+            );
+            false
+        }
     }
-    if !search {
+}
+
+/// Search one series now if it's an active pull-list series and no sweep
+/// is running. Skipped during a sweep because nothing stops a sweep and
+/// this search from submitting the same issue twice: `pull_attempts` has
+/// no unique key and the engine submits before it records the attempt.
+/// The next sweep covers a skipped series.
+async fn search_now(deps: &RefreshDeps, series_id: i64) {
+    if deps.pull.get().is_some_and(|p| p.is_sweeping()) {
+        tracing::info!(target: "longbox_web", series_id, "refresh.search_deferred (sweep running)");
         return;
     }
     match pull_list_repo::get(&deps.db, series_id).await {
@@ -284,11 +306,13 @@ pub async fn run_delta(deps: &RefreshDeps) -> PassSummary {
     let back: i64 =
         settings_repo::get_or_default(&deps.db, settings_repo::KEY_REFRESH_DELTA_DAYS_BACK, 14)
             .await
-            .unwrap_or(14);
+            .unwrap_or(14)
+            .clamp(0, 365);
     let ahead: i64 =
         settings_repo::get_or_default(&deps.db, settings_repo::KEY_REFRESH_DELTA_DAYS_AHEAD, 28)
             .await
-            .unwrap_or(28);
+            .unwrap_or(28)
+            .clamp(0, 365);
     let today = OffsetDateTime::now_utc().date();
     let from = (today - Duration::days(back)).to_string();
     let to = (today + Duration::days(ahead)).to_string();
@@ -346,13 +370,21 @@ pub async fn run_delta(deps: &RefreshDeps) -> PassSummary {
     summary.add(&counts);
     // No search here: the sweep's Phase 2 runs right after the delta.
     for series_id in &counts.series_with_inserts {
-        after_insert(deps, *series_id, false).await;
+        rematch(deps, *series_id).await;
     }
     summary
 }
 
 async fn apply_in_tx(db: &Pool, issues: Vec<NewIssue>) -> Result<ApplyCounts, DbError> {
     let mut tx = db.begin().await?;
+    // Take the write lock first. sqlx's BEGIN is deferred and apply_issues
+    // reads before it writes; in WAL, upgrading a read snapshot that
+    // another writer has since moved past fails at once with "database is
+    // locked", busy_timeout notwithstanding. A no-op write as the first
+    // statement makes contention wait on busy_timeout instead.
+    sqlx::query("UPDATE issues SET id = id WHERE 0")
+        .execute(&mut *tx)
+        .await?;
     let counts = apply_issues(&mut tx, issues).await?;
     tx.commit().await?;
     Ok(counts)
@@ -394,8 +426,12 @@ async fn run_full(inner: &Inner) {
                     Ok(counts) => {
                         summary.series_refreshed += 1;
                         summary.add(&counts);
-                        if counts.inserted > 0 {
-                            after_insert(deps, series_id, true).await;
+                        // Search on new rows, and on rows whose store_date
+                        // just landed (they may have just become
+                        // eligible). Not if the rematch was skipped.
+                        let rematched = counts.inserted == 0 || rematch(deps, series_id).await;
+                        if rematched && (counts.inserted > 0 || counts.store_dates_set > 0) {
+                            search_now(deps, series_id).await;
                         }
                     }
                     Err(e) => {
@@ -413,12 +449,15 @@ async fn run_full(inner: &Inner) {
     }
 
     // Written on completion even with per-series failures (counted
-    // above); otherwise one dead volume would rerun the pass every sweep.
-    let now = OffsetDateTime::now_utc().unix_timestamp().to_string();
-    if let Err(e) =
-        settings_repo::set(&deps.db, settings_repo::KEY_LAST_FULL_REFRESH_AT, &now).await
-    {
-        tracing::warn!(target: "longbox_web", error = %e, "refresh.last_full_write_failed");
+    // above), or one dead volume would rerun the pass every sweep. But not
+    // when every series failed (CV down, bad key): that pass didn't happen.
+    if summary.series_refreshed > 0 || inner.total.load(Ordering::SeqCst) == 0 {
+        let now = OffsetDateTime::now_utc().unix_timestamp().to_string();
+        if let Err(e) =
+            settings_repo::set(&deps.db, settings_repo::KEY_LAST_FULL_REFRESH_AT, &now).await
+        {
+            tracing::warn!(target: "longbox_web", error = %e, "refresh.last_full_write_failed");
+        }
     }
     summary.log("full");
 }

@@ -139,11 +139,13 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     // they run against. Built before the pull engine because the
     // catalog refresh (its pre-sweep hook) fires these searches.
     let pull_search = longbox_pull::PullSearchHandle::new(db.clone());
+    let pull_cell = Arc::new(std::sync::OnceLock::new());
     let refresh = crate::refresh::RefreshHandle::new(crate::refresh::RefreshDeps {
         db: db.clone(),
         bg: bg_cv.clone(),
         scanner: Arc::clone(&scanner),
         pull_search: pull_search.clone(),
+        pull: Arc::clone(&pull_cell),
     });
 
     // 8. Pull engine — the Phase A.8 scheduled auto-download workflow.
@@ -173,6 +175,8 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
             })
         }),
     );
+    // The refresh defers its immediate searches while a sweep runs.
+    let _ = pull_cell.set(pull.clone());
     // First boot (or a week since the last pass): start the full
     // refresh now rather than waiting for the next daily sweep.
     refresh.start_full_if_due().await;
