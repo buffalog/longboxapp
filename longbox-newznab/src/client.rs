@@ -589,8 +589,8 @@ pub struct SearchAllOutcome {
 ///
 /// The query is searched exactly as given (the client pre-normalizes); no
 /// padded/unpadded variation. Each indexer's `maxage` is widened for
-/// back-catalog issues via [`effective_maxage`] from the issue's
-/// `cover_date`, so an old issue's NZBs aren't server-side filtered — the
+/// back-catalog issues via [`effective_maxage`] from the issue's release
+/// date (`store_date`, else `cover_date`), so an old issue's NZBs aren't server-side filtered — the
 /// same fix the engine path uses.
 pub async fn search_all_indexers(
     indexers: &[IndexerConfig],

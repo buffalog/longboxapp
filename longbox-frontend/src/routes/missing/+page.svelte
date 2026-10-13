@@ -169,9 +169,11 @@
   <h1 class="text-2xl font-bold">Missing</h1>
   <div class="flex items-center gap-3">
     <span class="text-sm text-slate-500">
-      {data.missing.total} missing issue{data.missing.total === 1 ? '' : 's'}
+      <!-- Shipped-only count, same number as the dashboard's missing tile;
+           solicited issues are listed separately below. -->
+      {actionableRows.length} missing issue{actionableRows.length === 1 ? '' : 's'}
       {#if solicitedRows.length > 0}
-        <span class="text-slate-400">({solicitedRows.length} solicited)</span>
+        <span class="text-slate-400">(+{solicitedRows.length} solicited)</span>
       {/if}
     </span>
     {#if actionableRows.length > 0}
@@ -221,7 +223,7 @@
         onchange={(e) => setSort((e.target as HTMLSelectElement).value as MissingSort)}
       >
         <option value="series">Series</option>
-        <option value="cover_date">Cover date</option>
+        <option value="cover_date">Release date</option>
       </select>
     </label>
   </div>
@@ -252,7 +254,7 @@
                   <span class="font-mono text-slate-500">#{m.number}</span>
                 </div>
                 <div class="truncate text-xs text-slate-500">
-                  {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
+                  {m.title ?? '—'}{releaseDate(m) ? ` · ${releaseDate(m)}` : ''}
                 </div>
               </div>
               <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m)}</span>
@@ -316,7 +318,7 @@
                   <span class="w-16 font-mono text-sm">#{m.number}</span>
                   <span class="min-w-0 flex-1 truncate text-sm">{m.title ?? '—'}</span>
                   <span class="w-24 whitespace-nowrap text-xs text-slate-500">
-                    {m.cover_date ?? '—'}
+                    {releaseDate(m) ?? '—'}
                   </span>
                   <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
                     {missingAge(m)}
@@ -384,7 +386,7 @@
                     <span class="font-mono text-slate-500">#{m.number}</span>
                   </div>
                   <div class="truncate text-xs text-slate-500">
-                    {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
+                    {m.title ?? '—'}{releaseDate(m) ? ` · ${releaseDate(m)}` : ''}
                   </div>
                 </div>
                 <span class="whitespace-nowrap text-xs text-slate-500">Solicited</span>
@@ -417,7 +419,7 @@
                     <span class="w-16 font-mono text-sm">#{m.number}</span>
                     <span class="min-w-0 flex-1 truncate text-sm">{m.title ?? '—'}</span>
                     <span class="w-24 whitespace-nowrap text-xs text-slate-500">
-                      {m.cover_date ?? '—'}
+                      {releaseDate(m) ?? '—'}
                     </span>
                     <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
                       Solicited

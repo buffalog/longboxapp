@@ -92,11 +92,12 @@ async fn interactive_search(
             id: body.series_id.to_string(),
         })?;
 
-    // The issue's cover_date widens each indexer's maxage for back-catalog
-    // issues (same fix the engine uses) so old NZBs aren't filtered out.
+    // The issue's release date (store_date, else cover_date) widens each
+    // indexer's maxage for back-catalog issues (same input the engine
+    // uses) so old NZBs aren't filtered out.
     let cover_date = issue_repo::find_by_id(&state.db, body.issue_id)
         .await?
-        .and_then(|issue| issue.cover_date);
+        .and_then(|issue| issue.release_date().map(str::to_owned));
 
     // Reuses the pull engine's own on-demand ownership check rather than
     // re-deriving "owned" here — one definition, so the warning cannot drift

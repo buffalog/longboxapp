@@ -692,3 +692,28 @@ async fn upsert_by_cv_id_some_overwrites_existing_values() {
     assert_eq!(row.cover_date.as_deref(), Some("2026-08-01"));
     assert_eq!(row.store_date.as_deref(), Some("2026-06-10"));
 }
+
+/// The enrichment upsert carries store_date and never blanks it.
+#[tokio::test]
+async fn enrichment_upsert_carries_and_preserves_store_date() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+    let first = issue_repo::upsert_by_series_id_and_number_with_cv_fields(
+        &pool,
+        NewIssue {
+            store_date: Some("2026-05-13".into()),
+            ..new_issue(series_id, "1", Some(7001))
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.store_date.as_deref(), Some("2026-05-13"));
+    let again = issue_repo::upsert_by_series_id_and_number_with_cv_fields(
+        &pool,
+        new_issue(series_id, "1", Some(7001)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.store_date.as_deref(), Some("2026-05-13"));
+}

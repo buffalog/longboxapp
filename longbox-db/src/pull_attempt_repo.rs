@@ -513,7 +513,7 @@ pub struct AttemptBlockers {
 ///
 /// This does NOT cover the series-level exclusions — pull-list
 /// membership, `paused`, the `start_issue` floor — or the issue's own
-/// `cover_date`. Those live on rows the caller already holds.
+/// release date. Those live on rows the caller already holds.
 pub async fn attempt_blockers<'e, E>(executor: E, issue_id: i64) -> Result<AttemptBlockers>
 where
     E: SqliteExecutor<'e>,

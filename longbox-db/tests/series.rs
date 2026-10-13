@@ -607,6 +607,9 @@ async fn pull_candidates_and_missing_key_off_store_date() {
     .await;
     let fallback = dated_issue(&pool, series_id, "3", Some("2020-02-01"), None).await;
     let _undated = dated_issue(&pool, series_id, "4", None, None).await;
+    // Partial past date: no full date, so never a candidate. Pins the
+    // `length(..) = 10` guard ("2010-05" <= today as text).
+    let _partial = dated_issue(&pool, series_id, "5", Some("2010-05"), None).await;
 
     let candidates: Vec<i64> = issue_repo::list_pull_candidates(&pool, series_id)
         .await

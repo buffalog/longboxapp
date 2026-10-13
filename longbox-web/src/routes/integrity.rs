@@ -809,6 +809,18 @@ mod outlook_tests {
         AttemptBlockers::default()
     }
 
+    /// On sale with the cover date still ahead: the sweep searches it,
+    /// so the outlook must not claim it has no usable date.
+    #[test]
+    fn on_sale_issue_with_future_cover_date_will_search() {
+        let mut on_sale = issue("5", Some("2999-01-01"));
+        on_sale.store_date = Some("2020-01-01".to_owned());
+        assert_eq!(
+            search_outlook(&on_sale, Some(&entry(false, None)), &clear()),
+            SearchOutlook::WillSearch
+        );
+    }
+
     /// Every variant is reachable, and reachable for its own reason.
     #[test]
     fn each_reason_is_reported() {

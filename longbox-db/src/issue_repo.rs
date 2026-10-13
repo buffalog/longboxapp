@@ -398,6 +398,11 @@ where
 /// (`COALESCE(excluded.col, issues.col)`). The delta refresh feeds this
 /// from the release-calendar projection, which can lack fields the
 /// per-volume fetch carries.
+///
+/// ponytail: the ceiling is that CV can never CLEAR a value. A store_date
+/// CV later withdraws stays, so the issue keeps reading as shipped. Add an
+/// explicit "authoritative full fetch" mode that writes NULLs if that
+/// ever shows up in practice.
 pub async fn upsert_by_cv_id<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,

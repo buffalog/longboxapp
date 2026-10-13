@@ -2992,16 +2992,24 @@ async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
 async fn stats_missing_excludes_solicited_by_release_date() {
     // Missing = no owned file AND not solicited, keyed off
     // COALESCE(store_date, cover_date) — the series-card split. Cases are
-    // asymmetric on purpose: the real predicate counts 2, a cover-only
-    // predicate 1, and the old unfiltered count 3.
+    // asymmetric on purpose: the real predicate counts 3, a cover-only
+    // predicate 2, and the old unfiltered count 5. The partial-date row
+    // pins the full-date guard (as text "2099-07" sorts after today, so a
+    // bare NULL check would call it solicited); the today row pins `<` vs
+    // `<=` (today is solicited).
     let app = build_test_app().await;
     // #1 undated: missing (no date never reads as solicited).
     let (sid, _) = seed_series_and_issue(&app, "Dated", "1").await;
+    let today = time::OffsetDateTime::now_utc().date().to_string();
     for (number, cover, store) in [
         // On sale, cover still ahead: missing.
         ("2", Some("2099-07-01"), Some("2020-05-13")),
         // Cover-only, future: solicited, not missing.
         ("3", Some("2099-07-01"), None),
+        // Partial date: not a full date, so not solicited — missing.
+        ("4", Some("2099-07"), None),
+        // On sale today: solicited (today-inclusive), not missing.
+        ("5", Some("2099-07-01"), Some(today.as_str())),
     ] {
         issue_repo::insert(
             &app.state.db,
@@ -3022,7 +3030,10 @@ async fn stats_missing_excludes_solicited_by_release_date() {
     }
 
     let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
-    assert_eq!(body["missing_issues"], 2, "#1 and #2; #3 is solicited");
+    assert_eq!(
+        body["missing_issues"], 3,
+        "#1, #2 and #4; #3 and #5 are solicited"
+    );
     assert_eq!(body["series_with_missing"], 1);
 }
 
@@ -8186,4 +8197,181 @@ async fn creators_discover_empty_when_no_cv_person_id() {
     let body = response_json(resp).await;
     assert_eq!(body["results"].as_array().unwrap().len(), 0);
     assert_eq!(body["filtered_count"].as_u64().unwrap(), 0);
+}
+
+// ----- store_date: write paths and release-date consumers -----
+
+async fn insert_dated_issue(
+    app: &common::TestApp,
+    series_id: i64,
+    number: &str,
+    cv_issue_id: Option<i64>,
+    cover_date: Option<&str>,
+    store_date: Option<&str>,
+) -> i64 {
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id,
+            cv_issue_id,
+            metron_issue_id: None,
+            number: number.into(),
+            title: Some(format!("Issue {number}")),
+            cover_date: cover_date.map(Into::into),
+            summary: None,
+            cover_url: None,
+            store_date: store_date.map(Into::into),
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+async fn mount_cv_volume_and_issues(app: &common::TestApp, cv_id: i64, issues_json: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/volume/4050-{cv_id}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{
+                "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": {{
+                    "id": {cv_id}, "name": "The Walking Dead", "start_year": "2003",
+                    "publisher": {{ "id": 1, "name": "Image" }},
+                    "description": null, "image": null,
+                    "site_detail_url": "https://cv/wd/4050-{cv_id}/"
+                }}
+            }}"#
+        )))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(issues_json.to_owned()))
+        .mount(&app.cv_server)
+        .await;
+}
+
+const TWD_ISSUES_WITH_STORE_DATES: &str = r#"{
+    "status_code": 1, "error": "OK",
+    "number_of_total_results": 2, "limit": 100, "offset": 0,
+    "results": [
+        { "id": 10001, "issue_number": "1", "name": null,
+          "cover_date": "2003-10-08", "store_date": "2003-10-01",
+          "description": null, "image": null,
+          "site_detail_url": "https://cv/4000-10001/" },
+        { "id": 10002, "issue_number": "2", "name": null,
+          "cover_date": "2003-11-12", "store_date": "2003-11-05",
+          "description": null, "image": null,
+          "site_detail_url": "https://cv/4000-10002/" }
+    ]
+}"#;
+
+/// Per-series refresh backfills store_date on an existing row, inserts
+/// the new one with it, and a CV `name: null` does not blank the title.
+#[tokio::test]
+async fn refresh_backfills_store_date_without_blanking_fields() {
+    let app = build_test_app().await;
+    let sid = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "The Walking Dead".into(),
+            sort_title: "walking dead".into(),
+            start_year: Some(2003),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2003-10-08"), None).await;
+    mount_cv_volume_and_issues(&app, 2127, TWD_ISSUES_WITH_STORE_DATES).await;
+
+    let resp = app
+        .request(empty_request("POST", &format!("/api/series/{sid}/refresh")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["id"], sid, "a series row, not the SPA fallback");
+
+    let issues = issue_repo::list_by_series(&app.state.db, sid)
+        .await
+        .unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].store_date.as_deref(), Some("2003-10-01"));
+    assert_eq!(issues[0].title.as_deref(), Some("Issue 1"));
+    assert_eq!(issues[1].store_date.as_deref(), Some("2003-11-05"));
+}
+
+/// Set-cv-id rebuilds the issue list from CV, store_date included.
+#[tokio::test]
+async fn set_cv_id_persists_store_date() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Shallow", "1").await;
+    mount_cv_volume_and_issues(&app, 2127, TWD_ISSUES_WITH_STORE_DATES).await;
+
+    let resp = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/series/{sid}/cv-id"),
+            r#"{"cv_id": 2127}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["cv_id"], 2127);
+
+    let issues = issue_repo::list_by_series(&app.state.db, sid)
+        .await
+        .unwrap();
+    let dates: Vec<_> = issues.iter().map(|i| i.store_date.as_deref()).collect();
+    assert_eq!(dates, vec![Some("2003-10-01"), Some("2003-11-05")]);
+}
+
+/// On sale with the cover date still ahead: searched, not skipped.
+#[tokio::test]
+async fn search_all_missing_keys_off_store_date() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "On Sale").await;
+    insert_dated_issue(&app, sid, "1", None, Some("2999-01-01"), Some("2020-05-13")).await;
+
+    let body = response_json(
+        app.request(empty_request("POST", "/api/pull/search-all-missing"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["searched"], 1);
+    assert_eq!(body["skipped_solicited"], 0);
+}
+
+/// /missing hands the frontend store_date so its solicited split can
+/// prefer it.
+#[tokio::test]
+async fn missing_endpoint_returns_store_date() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Dated", "1").await;
+    insert_dated_issue(&app, sid, "2", None, Some("2999-01-01"), Some("2020-05-13")).await;
+
+    // Four SELECTs: {all, one series} x {series, cover_date} sort.
+    for query in [
+        "sort=series".to_owned(),
+        "sort=cover_date".to_owned(),
+        format!("series_id={sid}&sort=series"),
+        format!("series_id={sid}&sort=cover_date"),
+    ] {
+        let body = response_json(
+            app.request(empty_request("GET", &format!("/api/missing?{query}")))
+                .await,
+        )
+        .await;
+        let row = body["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["number"] == "2")
+            .unwrap();
+        assert_eq!(row["store_date"], "2020-05-13", "{query}");
+    }
 }

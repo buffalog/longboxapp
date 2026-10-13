@@ -201,8 +201,8 @@ const RESULT_LIMIT: u32 = 100;
 /// back-catalog issues automatically extend the window so old NZB
 /// postings aren't filtered out at the indexer.
 ///
-/// `cover_date` is the catalog issue's `YYYY-MM-DD` cover-date
-/// string.
+/// `cover_date` is the catalog issue's `YYYY-MM-DD` release date
+/// (`store_date`, else `cover_date`; callers pass `IssueRow::release_date`).
 ///
 /// Formula: `max(configured, days_since_cover + ISSUE_AGE_SLACK_DAYS)`
 /// where `days_since_cover` is the integer days between today and the
