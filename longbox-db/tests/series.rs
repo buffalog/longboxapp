@@ -509,3 +509,119 @@ async fn get_aliases_drops_short_junk_entries() {
         vec!["Collider".to_string(), "Real Name".to_string()]
     );
 }
+
+async fn dated_issue(
+    pool: &sqlx::SqlitePool,
+    series_id: i64,
+    number: &str,
+    cover_date: Option<&str>,
+    store_date: Option<&str>,
+) -> i64 {
+    issue_repo::insert(
+        pool,
+        NewIssue {
+            series_id,
+            cv_issue_id: None,
+            metron_issue_id: None,
+            number: number.into(),
+            title: None,
+            cover_date: cover_date.map(|s| s.into()),
+            summary: None,
+            cover_url: None,
+            store_date: store_date.map(|s| s.into()),
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn solicited_count_keys_off_store_date_before_cover_date() {
+    //   #1 on sale (past store), cover still ahead → NOT solicited
+    //   #2 not on sale (future store), cover past  → solicited
+    //   #3 no store_date, future cover             → solicited (fallback)
+    //   #4 partial future date                     → NOT solicited (full-date guard)
+    //   #5 same shape as #1                       → NOT solicited
+    // Two #1-shaped rows so the cover-only predicate counts 3, not 2:
+    // #1 and #2 alone cancel out and would pass against cover_date.
+    let pool = fresh_pool().await;
+    let series_id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
+    dated_issue(
+        &pool,
+        series_id,
+        "1",
+        Some("2099-07-01"),
+        Some("2020-05-13"),
+    )
+    .await;
+    dated_issue(
+        &pool,
+        series_id,
+        "2",
+        Some("2020-01-01"),
+        Some("2099-05-13"),
+    )
+    .await;
+    dated_issue(&pool, series_id, "3", Some("2099-07-01"), None).await;
+    dated_issue(&pool, series_id, "4", Some("2099-07"), None).await;
+    dated_issue(
+        &pool,
+        series_id,
+        "5",
+        Some("2099-08-01"),
+        Some("2020-06-10"),
+    )
+    .await;
+
+    for rows in [
+        series_repo::find_all_with_counts(&pool).await.unwrap(),
+        series_repo::list_recent_with_counts(&pool, 10)
+            .await
+            .unwrap(),
+    ] {
+        let row = rows.iter().find(|r| r.series.id == series_id).unwrap();
+        assert_eq!(row.solicited_count, 2, "#2 and #3 only");
+    }
+}
+
+#[tokio::test]
+async fn pull_candidates_and_missing_key_off_store_date() {
+    let pool = fresh_pool().await;
+    let series_id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
+    let on_sale = dated_issue(
+        &pool,
+        series_id,
+        "1",
+        Some("2099-07-01"),
+        Some("2020-05-13"),
+    )
+    .await;
+    let _not_yet = dated_issue(
+        &pool,
+        series_id,
+        "2",
+        Some("2020-01-01"),
+        Some("2099-05-13"),
+    )
+    .await;
+    let fallback = dated_issue(&pool, series_id, "3", Some("2020-02-01"), None).await;
+    let _undated = dated_issue(&pool, series_id, "4", None, None).await;
+
+    let candidates: Vec<i64> = issue_repo::list_pull_candidates(&pool, series_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    // Ordered by release date: #1 (store 2020-05-13) after #3 (cover 2020-02-01).
+    assert_eq!(candidates, vec![fallback, on_sale]);
+
+    let missing: Vec<i64> = issue_repo::list_missing_for_series(&pool, series_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(missing, vec![fallback, on_sale]);
+}

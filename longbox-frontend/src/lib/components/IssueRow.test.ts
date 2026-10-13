@@ -26,6 +26,7 @@ function issue(over: Partial<IssueWithFile> = {}): IssueWithFile {
     number: '4',
     title: 'The Fourth Issue',
     cover_date: '2024-01-15',
+    store_date: null,
     summary: null,
     cover_url: null,
     created_at: '2026-01-01T00:00:00',
@@ -80,6 +81,18 @@ describe('IssueRow Search button', () => {
     expect(
       screen.queryByRole('button', { name: /^Auto search for issue 4$/i })
     ).not.toBeInTheDocument();
+  });
+
+  it('shows for an issue on sale whose cover date is still ahead', () => {
+    // store_date past, cover_date future: on shelves, so 'missing' and
+    // searchable. Keyed off cover_date alone it would read 'solicited'.
+    renderRow({
+      issue: issue({ file: null, store_date: '2020-05-13', cover_date: '2099-01-01' }),
+      seriesId: 42
+    });
+    expect(
+      screen.getByRole('button', { name: /^Auto search for issue 4$/i })
+    ).toBeInTheDocument();
   });
 
   it('hides when seriesId is omitted (context lacks a parent series)', () => {

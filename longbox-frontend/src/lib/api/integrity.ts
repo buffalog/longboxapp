@@ -195,7 +195,7 @@ export function describeRevert(r: RevertedIssue | null): string {
     case 'below_series_start_issue':
       return `${base}. It falls below this series' start issue, so the sweep skips it.`;
     case 'no_usable_cover_date':
-      return `${base}. It has no usable cover date, so the sweep never treats it as a candidate.`;
+      return `${base}. It has no usable release date, so the sweep never treats it as a candidate.`;
     case 'retries_exhausted':
       return `${base}. Previous attempts failed too many times, so the sweep has stopped retrying it.`;
     case 'grab_in_flight':

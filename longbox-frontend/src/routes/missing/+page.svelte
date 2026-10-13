@@ -8,7 +8,7 @@
   import { ApiError } from '$lib/api/client';
   import { searchAllMissing, type MissingIssue, type MissingSort } from '$lib/api/missing';
   import { searchSeriesNow } from '$lib/api/pull';
-  import { isSolicited } from '$lib/solicitation';
+  import { isSolicited, releaseDate } from '$lib/solicitation';
   import { toast } from '$lib/stores/toast.svelte';
 
   let { data } = $props();
@@ -42,16 +42,18 @@
     void goto(url.pathname + url.search, { replaceState: true });
   }
 
-  // "Missing for X" — best-effort age from cover_date. Solicited issues
-  // (cover_date today-or-future, not shipped yet) show "Solicited"
-  // rather than a nonsense negative age — via the shared `isSolicited`
-  // predicate, the same one /series/[id] uses. Null cover_date → "—".
-  function missingAge(coverDate: string | null): string {
-    if (!coverDate) return '—';
-    if (isSolicited(coverDate)) return 'Solicited';
-    const cover = Date.parse(coverDate + 'T00:00:00Z');
-    if (Number.isNaN(cover)) return '—';
-    const diffMs = Date.now() - cover;
+  // "Missing for X" — best-effort age from the release date (store_date,
+  // else cover_date). Solicited issues (release date today-or-future,
+  // not shipped yet) show "Solicited" rather than a nonsense negative
+  // age — via the shared `isSolicited` predicate, the same one
+  // /series/[id] uses. No release date → "—".
+  function missingAge(m: MissingIssue): string {
+    const date = releaseDate(m);
+    if (!date) return '—';
+    if (isSolicited(m)) return 'Solicited';
+    const released = Date.parse(date + 'T00:00:00Z');
+    if (Number.isNaN(released)) return '—';
+    const diffMs = Date.now() - released;
     const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     if (days < 31) return `${days}d`;
     const months = Math.floor(days / 30);
@@ -77,10 +79,10 @@
   // subset renders as its own section at the bottom for visibility
   // without ever counting against "searchable."
   const actionableRows = $derived(
-    data.missing.missing.filter((m) => !isSolicited(m.cover_date))
+    data.missing.missing.filter((m) => !isSolicited(m))
   );
   const solicitedRows = $derived(
-    data.missing.missing.filter((m) => isSolicited(m.cover_date))
+    data.missing.missing.filter((m) => isSolicited(m))
   );
 
   // Map-based grouper keyed by series.id — robust to any sort order in
@@ -253,7 +255,7 @@
                   {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
                 </div>
               </div>
-              <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m.cover_date)}</span>
+              <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m)}</span>
             </a>
             <button
               type="button"
@@ -317,7 +319,7 @@
                     {m.cover_date ?? '—'}
                   </span>
                   <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
-                    {missingAge(m.cover_date)}
+                    {missingAge(m)}
                   </span>
                   <button
                     type="button"

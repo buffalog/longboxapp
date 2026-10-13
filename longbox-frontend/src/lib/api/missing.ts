@@ -6,6 +6,7 @@ export interface MissingIssue {
   title: string | null;
   cover_url: string | null;
   cover_date: string | null;
+  store_date: string | null;
   issue_created_at: string;
   series: {
     id: number;
@@ -39,7 +40,7 @@ export interface SearchAllMissingSummary {
   /** Issues for which an indexer search was dispatched. */
   searched: number;
   /** Solicited issues skipped because they haven't shipped yet
-   *  (cover_date is today or later). */
+   *  (release date is today or later). */
   skipped_solicited: number;
 }
 

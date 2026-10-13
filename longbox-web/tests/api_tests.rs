@@ -2989,6 +2989,44 @@ async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
 }
 
 #[tokio::test]
+async fn stats_missing_excludes_solicited_by_release_date() {
+    // Missing = no owned file AND not solicited, keyed off
+    // COALESCE(store_date, cover_date) — the series-card split. Cases are
+    // asymmetric on purpose: the real predicate counts 2, a cover-only
+    // predicate 1, and the old unfiltered count 3.
+    let app = build_test_app().await;
+    // #1 undated: missing (no date never reads as solicited).
+    let (sid, _) = seed_series_and_issue(&app, "Dated", "1").await;
+    for (number, cover, store) in [
+        // On sale, cover still ahead: missing.
+        ("2", Some("2099-07-01"), Some("2020-05-13")),
+        // Cover-only, future: solicited, not missing.
+        ("3", Some("2099-07-01"), None),
+    ] {
+        issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: sid,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: number.into(),
+                title: None,
+                cover_date: cover.map(Into::into),
+                summary: None,
+                cover_url: None,
+                store_date: store.map(Into::into),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(body["missing_issues"], 2, "#1 and #2; #3 is solicited");
+    assert_eq!(body["series_with_missing"], 1);
+}
+
+#[tokio::test]
 async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
     let app = build_test_app().await;
 

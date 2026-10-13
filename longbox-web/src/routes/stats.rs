@@ -13,7 +13,9 @@ pub fn router() -> Router<AppState> {
 /// Workspace-wide aggregates for the dashboard. `total_*` are
 /// series/issue rollups; `*_files` are the per-status file counts;
 /// `missing_issues` counts issues with no present owned file (distinct
-/// from "file rows with is_present=0").
+/// from "file rows with is_present=0") that aren't solicited — the
+/// effective release date `COALESCE(store_date, cover_date)` isn't a full
+/// date today or later.
 ///
 /// The pull/needs-attention counts here are what previously required
 /// three additional HTTP round-trips per dashboard load (one each for
@@ -80,14 +82,24 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
                 WHERE f.issue_id = i.id
                   AND f.status = 'owned'
                   AND f.is_present = 1
-              )) AS "missing_issues!: i64",
+              )
+                -- Not solicited: same split as series_repo's
+                -- solicited_count and the frontend's isSolicited, so
+                -- undated issues still count as missing.
+                AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10
+                     OR COALESCE(i.store_date, i.cover_date) < date('now'))) AS "missing_issues!: i64",
              (SELECT COUNT(DISTINCT i.series_id) FROM issues i
               WHERE NOT EXISTS (
                 SELECT 1 FROM files f
                 WHERE f.issue_id = i.id
                   AND f.status = 'owned'
                   AND f.is_present = 1
-              )) AS "series_with_missing!: i64",
+              )
+                -- Not solicited: same split as series_repo's
+                -- solicited_count and the frontend's isSolicited, so
+                -- undated issues still count as missing.
+                AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10
+                     OR COALESCE(i.store_date, i.cover_date) < date('now'))) AS "series_with_missing!: i64",
              (SELECT COUNT(*) FROM pull_list) AS "pull_list_count!: i64",
              -- Failure-class pull attempts, one row per issue (latest
              -- attempt semantics — matches `pull_attempt_repo::list_failed`).

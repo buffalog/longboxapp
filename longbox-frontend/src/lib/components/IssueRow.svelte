@@ -43,11 +43,11 @@
   let searching = $state(false);
 
   // A file-present row keeps its actionable status. A no-file row
-  // splits into 'solicited' (cover_date today-or-future — not shipped
+  // splits into 'solicited' (release date today-or-future — not shipped
   // yet) vs plain 'missing'.
   const status = $derived.by(() => {
     if (!issue.file) {
-      return isSolicited(issue.cover_date) ? ('solicited' as const) : ('missing' as const);
+      return isSolicited(issue) ? ('solicited' as const) : ('missing' as const);
     }
     return issue.file.status;
   });

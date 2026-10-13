@@ -699,7 +699,9 @@ async fn attempt_pull_for_candidate(
         patterns,
         similarity_threshold,
         exclusion_keywords,
-        issue.cover_date.as_deref(),
+        // Release date, not cover date: NZBs post at on-sale, which CV
+        // dates 1-2 months before the cover. Only ever widens maxage.
+        issue.release_date(),
         min_size_bytes,
         &aliases,
     )

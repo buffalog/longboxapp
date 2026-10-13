@@ -10,17 +10,15 @@
 
   // Issue-status taxonomy, all derived (nothing is stored on the issue):
   //   Available = owned_count
-  //   Solicited = solicited_count       (cover_date in the future; +N, blue)
+  //   Solicited = solicited_count       (release date in the future; +N, blue)
   //   Released  = available = total - solicited   (issues that should exist)
   //   Missing   = available - owned      (released but not owned; red)
   // `available` is the badge denominator so owning everything *shipped*
   // reads as fine even while a future issue sits in the catalog.
   //
-  // Caveat: "solicited" keys off `cover_date`, not the on-sale
-  // `store_date` (which isn't persisted per issue). Comic cover dates run
-  // ~1–2 months ahead of on-sale, so the solicited/released boundary is
-  // approximate. Fixing it means storing store_date — a CV-cache change,
-  // out of scope here.
+  // "Release date" is the on-sale `store_date`, else `cover_date` (which
+  // runs ~1–2 months later). The server computes solicited_count with
+  // the same COALESCE.
   const available = $derived(series.total_count - series.solicited_count);
   const solicited = $derived(series.solicited_count);
   // `finished` is the Metron Completed|Cancelled signal (GH #7). Always

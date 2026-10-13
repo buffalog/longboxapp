@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url, i.store_date,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
+  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url, i.store_date,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND length(COALESCE(i.store_date, i.cover_date)) = 10\n             AND COALESCE(i.store_date, i.cover_date) <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n           ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -82,5 +82,5 @@
       false
     ]
   },
-  "hash": "47627d414f845903de7903e491e207d53689f0074dde036a0804816dc4abf685"
+  "hash": "2295e28d9673971c628377fd239c8b740418a977520c201d23f6e9d9492ccb14"
 }

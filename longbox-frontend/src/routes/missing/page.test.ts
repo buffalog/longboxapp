@@ -44,6 +44,7 @@ function missingIssue(over: Partial<MissingIssue> & {
     title: over.title ?? null,
     cover_url: over.cover_url ?? null,
     cover_date: over.cover_date ?? null,
+    store_date: over.store_date ?? null,
     issue_created_at: '2026-01-01T00:00:00',
     series: {
       id: over.series_id,

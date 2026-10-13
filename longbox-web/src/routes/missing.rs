@@ -15,7 +15,8 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct MissingParams {
     series_id: Option<i64>,
-    /// `series` (default) or `cover_date`. Unknown values fall back to
+    /// `series` (default) or `cover_date` (sorts by release date,
+    /// `store_date` else `cover_date`). Unknown values fall back to
     /// `series`.
     sort: Option<String>,
 }
@@ -33,6 +34,8 @@ struct MissingIssue {
     title: Option<String>,
     cover_url: Option<String>,
     cover_date: Option<String>,
+    /// CV on-sale date; the frontend's solicited split prefers it.
+    store_date: Option<String>,
     /// When the issue was added to the catalog. Frontend uses this as a
     /// "missing for" lower bound when `cover_date` is null.
     issue_created_at: PrimitiveDateTime,
@@ -53,6 +56,7 @@ struct MissingRow {
     title: Option<String>,
     cover_url: Option<String>,
     cover_date: Option<String>,
+    store_date: Option<String>,
     issue_created_at: PrimitiveDateTime,
     series_id: i64,
     series_title: String,
@@ -82,6 +86,7 @@ async fn handler(
                      i.title AS "title?",
                      i.cover_url AS "cover_url?",
                      i.cover_date AS "cover_date?",
+                     i.store_date AS "store_date?",
                      i.created_at AS "issue_created_at!: time::PrimitiveDateTime",
                      s.id AS "series_id!: i64",
                      s.title AS "series_title!",
@@ -96,7 +101,7 @@ async fn handler(
                          AND f.status = 'owned'
                          AND f.is_present = 1
                      )
-                   ORDER BY i.cover_date ASC NULLS LAST, i.id ASC"#,
+                   ORDER BY COALESCE(i.store_date, i.cover_date) ASC NULLS LAST, i.id ASC"#,
                 sid
             )
             .fetch_all(&state.db)
@@ -110,6 +115,7 @@ async fn handler(
                      i.title AS "title?",
                      i.cover_url AS "cover_url?",
                      i.cover_date AS "cover_date?",
+                     i.store_date AS "store_date?",
                      i.created_at AS "issue_created_at!: time::PrimitiveDateTime",
                      s.id AS "series_id!: i64",
                      s.title AS "series_title!",
@@ -139,6 +145,7 @@ async fn handler(
                  i.title AS "title?",
                  i.cover_url AS "cover_url?",
                  i.cover_date AS "cover_date?",
+                 i.store_date AS "store_date?",
                  i.created_at AS "issue_created_at!: time::PrimitiveDateTime",
                  s.id AS "series_id!: i64",
                  s.title AS "series_title!",
@@ -152,7 +159,7 @@ async fn handler(
                    AND f.status = 'owned'
                    AND f.is_present = 1
                )
-               ORDER BY i.cover_date ASC NULLS LAST, i.id ASC"#
+               ORDER BY COALESCE(i.store_date, i.cover_date) ASC NULLS LAST, i.id ASC"#
         )
         .fetch_all(&state.db)
         .await
@@ -165,6 +172,7 @@ async fn handler(
                  i.title AS "title?",
                  i.cover_url AS "cover_url?",
                  i.cover_date AS "cover_date?",
+                 i.store_date AS "store_date?",
                  i.created_at AS "issue_created_at!: time::PrimitiveDateTime",
                  s.id AS "series_id!: i64",
                  s.title AS "series_title!",
@@ -213,6 +221,7 @@ async fn handler(
             title: r.title,
             cover_url: r.cover_url,
             cover_date: r.cover_date,
+            store_date: r.store_date,
             issue_created_at: r.issue_created_at,
             series: MissingIssueSeries {
                 id: r.series_id,

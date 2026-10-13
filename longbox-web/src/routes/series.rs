@@ -274,8 +274,9 @@ async fn spawn_auto_pull_search(
         return Ok(0);
     }
     // Same predicate the per-series Search-missing button uses
-    // (`issue_repo::list_missing_for_series`): cover_date present and
-    // `<= today` (shipped), no owned-and-present file. The freshly-
+    // (`issue_repo::list_missing_for_series`): release date
+    // (`store_date`, else `cover_date`) present and `<= today` (shipped),
+    // no owned-and-present file. The freshly-
     // added series typically has every issue in this state.
     let missing = issue_repo::list_missing_for_series(&state.db, series_id).await?;
     if missing.is_empty() {

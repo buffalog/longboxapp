@@ -22,6 +22,15 @@ pub struct IssueRow {
     pub updated_at: PrimitiveDateTime,
 }
 
+impl IssueRow {
+    /// Effective release date: CV's on-sale `store_date`, falling back to
+    /// `cover_date`. The Rust twin of the SQL `COALESCE(store_date,
+    /// cover_date)` every eligibility and solicited predicate uses.
+    pub fn release_date(&self) -> Option<&str> {
+        self.store_date.as_deref().or(self.cover_date.as_deref())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewIssue {
     pub series_id: i64,
@@ -120,8 +129,9 @@ where
 
 /// Every "missing" issue for one series — mirrors the frontend
 /// IssueRow's status derivation exactly: a row has status `missing`
-/// when there's no owned-and-present file row AND the cover date is
-/// today or earlier (i.e. the issue has shipped — not solicited).
+/// when there's no owned-and-present file row AND the effective release
+/// date (`COALESCE(store_date, cover_date)`) is a full date, today or
+/// earlier (i.e. the issue has shipped — not solicited).
 ///
 /// Distinct from [`list_pull_candidates`] in two ways: this does
 /// NOT exclude issues with in-flight attempts (the per-issue
@@ -145,16 +155,15 @@ where
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
-             AND i.cover_date IS NOT NULL
-             AND length(i.cover_date) = 10
-             AND i.cover_date <= date('now')
+             AND length(COALESCE(i.store_date, i.cover_date)) = 10
+             AND COALESCE(i.store_date, i.cover_date) <= date('now')
              AND NOT EXISTS (
                SELECT 1 FROM files f
                WHERE f.issue_id = i.id
                  AND f.status = 'owned'
                  AND f.is_present = 1
              )
-           ORDER BY i.cover_date ASC, i.id ASC"#,
+           ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC"#,
         series_id
     )
     .fetch_all(executor)
@@ -163,7 +172,8 @@ where
 }
 
 /// Issues eligible for an auto-pull attempt for one series: shipped
-/// (`cover_date` a full `YYYY-MM-DD`, today or earlier), not already
+/// (effective release date `COALESCE(store_date, cover_date)` a full
+/// `YYYY-MM-DD`, today or earlier), not already
 /// owned, and not already settled or parked in `pull_attempts`.
 ///
 /// Excluded `pull_attempts` states: in-flight (`pending`/`submitted`),
@@ -184,9 +194,8 @@ where
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
-             AND i.cover_date IS NOT NULL
-             AND length(i.cover_date) = 10
-             AND i.cover_date <= date('now')
+             AND length(COALESCE(i.store_date, i.cover_date)) = 10
+             AND COALESCE(i.store_date, i.cover_date) <= date('now')
              AND NOT EXISTS (
                SELECT 1 FROM files f
                WHERE f.issue_id = i.id
@@ -203,7 +212,7 @@ where
                    OR pa.retry_count >= 3
                  )
              )
-           ORDER BY i.cover_date ASC, i.id ASC"#,
+           ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC"#,
         series_id
     )
     .fetch_all(executor)
