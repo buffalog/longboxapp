@@ -1094,6 +1094,7 @@ mod tests {
             cover_date: Some("2012-03-14".into()),
             summary: Some("Galactic war epic.".into()),
             cover_url: None,
+            store_date: None,
             created_at: datetime!(2026-01-01 00:00:00),
             updated_at: datetime!(2026-01-01 00:00:00),
         }

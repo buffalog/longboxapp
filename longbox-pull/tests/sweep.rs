@@ -58,6 +58,7 @@ async fn seed_catalog() -> (Pool, i64, i64) {
             cover_date: Some("2012-07-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -456,6 +457,7 @@ async fn sweep_single_issue_404s_when_issue_belongs_to_different_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

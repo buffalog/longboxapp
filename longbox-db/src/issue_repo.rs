@@ -15,6 +15,9 @@ pub struct IssueRow {
     pub cover_date: Option<String>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
+    /// CV on-sale date (`YYYY-MM-DD`). Runs ahead of `cover_date`;
+    /// eligibility uses `COALESCE(store_date, cover_date)`.
+    pub store_date: Option<String>,
     pub created_at: PrimitiveDateTime,
     pub updated_at: PrimitiveDateTime,
 }
@@ -29,6 +32,7 @@ pub struct NewIssue {
     pub cover_date: Option<String>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
+    pub store_date: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +51,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE id = ?"#,
         id
@@ -65,7 +69,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE cv_issue_id = ?"#,
         cv_issue_id
@@ -86,7 +90,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE metron_issue_id = ?"#,
         metron_issue_id
@@ -104,7 +108,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE series_id = ? ORDER BY id"#,
         series_id
@@ -137,7 +141,7 @@ where
         IssueRow,
         r#"SELECT i.id AS "id!: i64", i.series_id AS "series_id!: i64",
                   i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,
-                  i.summary, i.cover_url,
+                  i.summary, i.cover_url, i.store_date,
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
@@ -176,7 +180,7 @@ where
         IssueRow,
         r#"SELECT i.id AS "id!: i64", i.series_id AS "series_id!: i64",
                   i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,
-                  i.summary, i.cover_url,
+                  i.summary, i.cover_url, i.store_date,
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
@@ -263,11 +267,11 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -276,7 +280,8 @@ where
         input.title,
         input.cover_date,
         input.summary,
-        input.cover_url
+        input.cover_url,
+        input.store_date
     )
     .fetch_one(executor)
     .await?;
@@ -314,7 +319,7 @@ where
 
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
         "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number, \
-         title, cover_date, summary, cover_url) ",
+         title, cover_date, summary, cover_url, store_date) ",
     );
 
     qb.push_values(inputs, |mut b, input| {
@@ -325,12 +330,13 @@ where
             .push_bind(input.title)
             .push_bind(input.cover_date)
             .push_bind(input.summary)
-            .push_bind(input.cover_url);
+            .push_bind(input.cover_url)
+            .push_bind(input.store_date);
     });
 
     qb.push(
         " RETURNING id, series_id, cv_issue_id, metron_issue_id, number, \
-          title, cover_date, summary, cover_url, created_at, updated_at",
+          title, cover_date, summary, cover_url, store_date, created_at, updated_at",
     );
 
     let rows: Vec<IssueRow> = qb.build_query_as().fetch_all(executor).await?;
@@ -378,6 +384,11 @@ where
 /// when re-fetching from ComicVine: existing rows have their mutable fields
 /// refreshed, new rows are inserted. `cv_issue_id` MUST be `Some(...)` — the
 /// upsert keys on it and a `None` would never conflict.
+///
+/// Null-safe: a `None` in the input never blanks an existing value
+/// (`COALESCE(excluded.col, issues.col)`). The delta refresh feeds this
+/// from the release-calendar projection, which can lack fields the
+/// per-volume fetch carries.
 pub async fn upsert_by_cv_id<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,
@@ -385,18 +396,19 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(cv_issue_id) DO UPDATE
            SET number = excluded.number,
-               title = excluded.title,
-               cover_date = excluded.cover_date,
-               summary = excluded.summary,
-               cover_url = excluded.cover_url,
+               title = COALESCE(excluded.title, issues.title),
+               cover_date = COALESCE(excluded.cover_date, issues.cover_date),
+               summary = COALESCE(excluded.summary, issues.summary),
+               cover_url = COALESCE(excluded.cover_url, issues.cover_url),
+               store_date = COALESCE(excluded.store_date, issues.store_date),
                updated_at = CURRENT_TIMESTAMP
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -405,7 +417,8 @@ where
         input.title,
         input.cover_date,
         input.summary,
-        input.cover_url
+        input.cover_url,
+        input.store_date
     )
     .fetch_one(executor)
     .await?;
@@ -451,18 +464,19 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(series_id, canonical_number) DO UPDATE
            SET cv_issue_id = excluded.cv_issue_id,
                title = excluded.title,
                cover_date = excluded.cover_date,
                summary = excluded.summary,
                cover_url = excluded.cover_url,
+               store_date = COALESCE(excluded.store_date, issues.store_date),
                updated_at = CURRENT_TIMESTAMP
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -472,6 +486,7 @@ where
         input.cover_date,
         input.summary,
         input.cover_url,
+        input.store_date,
     )
     .fetch_one(executor)
     .await?;
@@ -490,7 +505,7 @@ where
            WHERE id = ?
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         patch.title,
         patch.cover_date,

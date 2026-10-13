@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,\n                               title, cover_date, summary, cover_url)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     cv_issue_id, metron_issue_id, number, title, cover_date,\n                     summary, cover_url,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
+  "query": "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,\n                               title, cover_date, summary, cover_url, store_date)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     cv_issue_id, metron_issue_id, number, title, cover_date,\n                     summary, cover_url, store_date,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
   "describe": {
     "columns": [
       {
@@ -49,18 +49,23 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: _",
+        "name": "store_date",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 10,
         "type_info": "Datetime"
       },
       {
         "name": "updated_at: _",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Datetime"
       }
     ],
     "parameters": {
-      "Right": 8
+      "Right": 9
     },
     "nullable": [
       false,
@@ -72,9 +77,10 @@
       true,
       true,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "e29e3a4dd6590c4a86152b9d013a15739c93bb8a1f4b56ae75231fe9398ae747"
+  "hash": "62f0d6bbef17d03f803df2e734ab5b244cb072f60c75f50b067e7ec52b422290"
 }

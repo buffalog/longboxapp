@@ -1052,6 +1052,7 @@ mod tests {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
             created_at: datetime!(2026-01-01 0:00),
             updated_at: datetime!(2026-01-01 0:00),
         }

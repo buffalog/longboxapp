@@ -57,6 +57,7 @@ async fn seed_issue(db: &longbox_db::Pool, cover_url: Option<&str>) -> i64 {
             cover_date: None,
             summary: None,
             cover_url: cover_url.map(str::to_owned),
+            store_date: None,
         },
     )
     .await

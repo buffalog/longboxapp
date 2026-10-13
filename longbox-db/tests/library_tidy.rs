@@ -169,6 +169,7 @@ async fn list_phantoms_excludes_series_with_an_owned_file() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -276,6 +277,7 @@ async fn give_owned_file(pool: &SqlitePool, series_id: i64) {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -334,6 +336,7 @@ async fn give_file_with_status_and_presence(
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -507,6 +510,7 @@ async fn auto_tidy_never_marks_a_series_awaiting_a_first_download() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -942,6 +946,7 @@ async fn upsert_number_only_returning_creates_missing_and_preserves_existing() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

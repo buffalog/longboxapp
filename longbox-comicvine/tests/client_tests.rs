@@ -162,6 +162,7 @@ async fn fetch_issues_single_page() {
                 "issue_number": "1",
                 "name": null,
                 "cover_date": "2012-03-14",
+                "store_date": "2012-02-08",
                 "description": null,
                 "image": null,
                 "site_detail_url": "https://cv/saga-1/4000-20001/"
@@ -192,6 +193,9 @@ async fn fetch_issues_single_page() {
     assert_eq!(issues.len(), 2);
     assert_eq!(issues[0].cv_issue_id, 20001);
     assert_eq!(issues[1].issue_number, "2");
+    // On-sale date threads through; absent field projects to None.
+    assert_eq!(issues[0].store_date.as_deref(), Some("2012-02-08"));
+    assert_eq!(issues[1].store_date, None);
 }
 
 #[tokio::test]

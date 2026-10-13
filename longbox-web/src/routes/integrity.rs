@@ -774,6 +774,7 @@ mod outlook_tests {
             cover_date: cover_date.map(str::to_owned),
             summary: None,
             cover_url: None,
+            store_date: None,
             created_at: now,
             updated_at: now,
         }

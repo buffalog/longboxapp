@@ -119,6 +119,7 @@ async fn insert_issue(db: &Pool, series_id: i64, number: &str, cover_date: &str)
             cover_date: Some(cover_date.into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

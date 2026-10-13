@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,\n                               title, cover_date, summary, cover_url)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT(series_id, canonical_number) DO UPDATE\n           SET cv_issue_id = excluded.cv_issue_id,\n               title = excluded.title,\n               cover_date = excluded.cover_date,\n               summary = excluded.summary,\n               cover_url = excluded.cover_url,\n               updated_at = CURRENT_TIMESTAMP\n           RETURNING id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                     cv_issue_id, metron_issue_id, number, title, cover_date,\n                     summary, cover_url,\n                     created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"",
+  "query": "SELECT i.id AS \"id!: i64\", i.series_id AS \"series_id!: i64\",\n                  i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,\n                  i.summary, i.cover_url, i.store_date,\n                  i.created_at AS \"created_at: _\", i.updated_at AS \"updated_at: _\"\n           FROM issues i\n           WHERE i.series_id = ?\n             AND i.cover_date IS NOT NULL\n             AND length(i.cover_date) = 10\n             AND i.cover_date <= date('now')\n             AND NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n             )\n           ORDER BY i.cover_date ASC, i.id ASC",
   "describe": {
     "columns": [
       {
@@ -49,25 +49,31 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: _",
+        "name": "store_date",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 10,
         "type_info": "Datetime"
       },
       {
         "name": "updated_at: _",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Datetime"
       }
     ],
     "parameters": {
-      "Right": 8
+      "Right": 1
     },
     "nullable": [
-      false,
+      true,
       false,
       true,
       true,
       false,
+      true,
       true,
       true,
       true,
@@ -76,5 +82,5 @@
       false
     ]
   },
-  "hash": "edcd04d1b56530663b4704a07444803f94e63a9fe141b297c0954e8dfd46bc27"
+  "hash": "47627d414f845903de7903e491e207d53689f0074dde036a0804816dc4abf685"
 }

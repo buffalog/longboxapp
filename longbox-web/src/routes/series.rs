@@ -339,6 +339,7 @@ pub(crate) async fn add_or_get_from_cv(
             cover_date: i.cover_date,
             summary: i.description,
             cover_url: i.cover_url,
+            store_date: i.store_date,
         })
         .collect();
     if !new_issues.is_empty() {
@@ -714,6 +715,7 @@ async fn set_cv_id(
             cover_date: i.cover_date,
             summary: i.description,
             cover_url: i.cover_url,
+            store_date: i.store_date,
         })
         .collect();
     if !new_issues.is_empty() {
@@ -865,6 +867,7 @@ async fn refresh(
                 cover_date: cv_issue.cover_date,
                 summary: cv_issue.description,
                 cover_url: cv_issue.cover_url,
+                store_date: cv_issue.store_date,
             },
         )
         .await?;

@@ -41,6 +41,8 @@ pub struct CvIssueDetail {
     pub issue_number: String,
     pub name: Option<String>,
     pub cover_date: Option<String>,
+    /// On-sale date (`YYYY-MM-DD`); absent on many older / indie issues.
+    pub store_date: Option<String>,
     pub description: Option<String>,
     pub cover_url: Option<String>,
     pub site_detail_url: String,
@@ -167,6 +169,7 @@ pub(crate) fn project_issue(item: CvIssueFull) -> CvIssueDetail {
         issue_number: item.issue_number,
         name: item.name,
         cover_date: item.cover_date,
+        store_date: item.store_date,
         description: item.description,
         cover_url: extract_cover(item.image),
         site_detail_url: item.site_detail_url,

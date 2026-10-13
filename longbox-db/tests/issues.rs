@@ -34,6 +34,7 @@ fn new_issue(series_id: i64, number: &str, cv: Option<i64>) -> NewIssue {
         cover_date: None,
         summary: None,
         cover_url: None,
+        store_date: None,
     }
 }
 
@@ -241,6 +242,7 @@ fn cv_filled_issue(series_id: i64, number: &str, cv_id: i64) -> NewIssue {
         cover_date: Some("2024-01-15".to_string()),
         summary: Some(format!("CV summary for #{number}")),
         cover_url: Some(format!("https://cv.example/cover-{number}.jpg")),
+        store_date: None,
     }
 }
 
@@ -281,6 +283,7 @@ async fn upsert_with_cv_fields_preserves_row_id_on_existing_match() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -325,6 +328,7 @@ async fn upsert_with_cv_fields_keeps_files_issue_id_attached() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -417,6 +421,7 @@ async fn upsert_with_cv_fields_handles_fractional_issue_number() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -434,6 +439,7 @@ async fn upsert_with_cv_fields_handles_fractional_issue_number() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -532,6 +538,7 @@ async fn upsert_with_cv_fields_disagreement_coexists_no_silent_collapse() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -580,6 +587,7 @@ async fn upsert_with_cv_fields_disagreement_coexists_no_silent_collapse() {
             cover_date: Some("2000-06-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -626,4 +634,61 @@ async fn upsert_with_cv_fields_disagreement_coexists_no_silent_collapse() {
     assert!(numbers.contains(&"½"));
     assert!(numbers.contains(&"1/2"));
     assert_eq!(listed.len(), 2, "two distinct issue numbers expected");
+}
+
+/// A `None` in an upsert never blanks an existing value. The delta
+/// refresh feeds this from the release-calendar projection, which can
+/// lack fields the per-volume fetch carries.
+#[tokio::test]
+async fn upsert_by_cv_id_none_preserves_existing_values() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+    let full = NewIssue {
+        title: Some("Chapter One".into()),
+        cover_date: Some("2026-07-01".into()),
+        summary: Some("summary".into()),
+        cover_url: Some("https://cdn/1.jpg".into()),
+        store_date: Some("2026-05-13".into()),
+        ..new_issue(series_id, "1", Some(9001))
+    };
+    let first = issue_repo::upsert_by_cv_id(&pool, full).await.unwrap();
+
+    let sparse = issue_repo::upsert_by_cv_id(&pool, new_issue(series_id, "1", Some(9001)))
+        .await
+        .unwrap();
+    assert_eq!(sparse.id, first.id);
+    assert_eq!(sparse.title.as_deref(), Some("Chapter One"));
+    assert_eq!(sparse.cover_date.as_deref(), Some("2026-07-01"));
+    assert_eq!(sparse.summary.as_deref(), Some("summary"));
+    assert_eq!(sparse.cover_url.as_deref(), Some("https://cdn/1.jpg"));
+    assert_eq!(sparse.store_date.as_deref(), Some("2026-05-13"));
+}
+
+/// A `Some` still overwrites: null-safety must not freeze the row.
+#[tokio::test]
+async fn upsert_by_cv_id_some_overwrites_existing_values() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool).await;
+    issue_repo::upsert_by_cv_id(
+        &pool,
+        NewIssue {
+            cover_date: Some("2026-07-01".into()),
+            store_date: Some("2026-05-13".into()),
+            ..new_issue(series_id, "1", Some(9001))
+        },
+    )
+    .await
+    .unwrap();
+    let row = issue_repo::upsert_by_cv_id(
+        &pool,
+        NewIssue {
+            cover_date: Some("2026-08-01".into()),
+            store_date: Some("2026-06-10".into()),
+            ..new_issue(series_id, "1", Some(9001))
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.cover_date.as_deref(), Some("2026-08-01"));
+    assert_eq!(row.store_date.as_deref(), Some("2026-06-10"));
 }

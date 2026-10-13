@@ -47,6 +47,7 @@ async fn seed_issue(pool: &SqlitePool, series_id: i64, number: &str) -> i64 {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

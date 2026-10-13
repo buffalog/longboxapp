@@ -666,7 +666,8 @@ async fn add_series_happy_path() {
                 "number_of_total_results": 2, "limit": 100, "offset": 0,
                 "results": [
                     { "id": 10001, "issue_number": "1", "name": "Days Gone Bye",
-                      "cover_date": "2003-10-08", "description": null,
+                      "cover_date": "2003-10-08", "store_date": "2003-10-08",
+                      "description": null,
                       "image": { "medium_url": "https://example.com/wd-1.jpg" },
                       "site_detail_url": "https://cv/4000-10001/" },
                     { "id": 10002, "issue_number": "2", "name": null,
@@ -695,6 +696,9 @@ async fn add_series_happy_path() {
         .await
         .unwrap();
     assert_eq!(issues.len(), 2);
+    // The on-sale date is persisted, not dropped at the NewIssue boundary.
+    assert_eq!(issues[0].store_date.as_deref(), Some("2003-10-08"));
+    assert_eq!(issues[1].store_date, None);
 }
 
 #[tokio::test]
@@ -974,6 +978,7 @@ async fn list_series_computes_owned_and_total_counts() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -1019,6 +1024,7 @@ async fn series_detail_orders_issues_naturally() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -1160,6 +1166,7 @@ async fn force_delete_series_unlinks_owned_files_and_succeeds() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1342,6 +1349,7 @@ async fn delete_files_succeeds_when_series_has_owned_present_files() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1655,6 +1663,7 @@ async fn patch_file_manual_rematch_sets_issue_and_owned() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2105,6 +2114,7 @@ async fn match_from_cv_reuses_existing_series_no_cv_call() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2208,6 +2218,7 @@ async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -2225,6 +2236,7 @@ async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2320,6 +2332,7 @@ async fn missing_filters_by_series_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2335,6 +2348,7 @@ async fn missing_filters_by_series_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2386,6 +2400,7 @@ async fn missing_sorts_by_cover_date_when_requested() {
                 cover_date: Some(d.into()),
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -2449,6 +2464,7 @@ async fn dashboard_activity_lists_recent_series_and_matches() {
             cover_date: None,
             summary: None,
             cover_url: Some("https://example.com/saga-1.jpg".into()),
+            store_date: None,
         },
     )
     .await
@@ -3020,6 +3036,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -3036,6 +3053,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -3281,6 +3299,7 @@ async fn match_folder_does_not_touch_owned_files() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4145,6 +4164,7 @@ async fn pull_search_202_dispatches_per_missing_issue_for_unsubscribed_series() 
                 cover_date: Some("2020-01-01".into()),
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -4182,6 +4202,7 @@ async fn pull_search_skips_solicited_and_owned_issues() {
             cover_date: Some("2020-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4198,6 +4219,7 @@ async fn pull_search_skips_solicited_and_owned_issues() {
             cover_date: Some("2099-12-31".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4255,6 +4277,7 @@ async fn pull_search_issue_202_accepts_for_an_issue_belonging_to_the_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4299,6 +4322,7 @@ async fn pull_search_issue_404_when_issue_belongs_to_different_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4345,6 +4369,7 @@ async fn pull_search_issue_works_when_series_is_NOT_on_pull_list() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4386,6 +4411,7 @@ async fn insert_issue(
             cover_date: cover_date.map(str::to_owned),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -5178,6 +5204,7 @@ async fn seed_series_with_owned_file(
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -7612,6 +7639,7 @@ async fn seed_series_and_issue(app: &common::TestApp, title: &str, number: &str)
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -7647,6 +7675,7 @@ async fn needs_attention_pull_failures_lists_categorized_failures() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

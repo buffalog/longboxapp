@@ -25,6 +25,7 @@ async fn metron_issue_link_candidates_writer_and_marker() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -256,6 +257,7 @@ async fn seeded_issue(
             cover_date: cover_date.map(|s| s.into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

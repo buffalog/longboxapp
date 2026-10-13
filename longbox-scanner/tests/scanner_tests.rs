@@ -149,6 +149,7 @@ async fn tier1_cv_url_falls_through_when_id_not_in_db() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -214,6 +215,7 @@ async fn tier1_metron_url_passively_ingested() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -477,6 +479,7 @@ async fn scan_series_folder_imports_undiscovered_on_disk_files() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1097,6 +1100,7 @@ async fn seed_two_authority_volumes(pool: &longbox_db::Pool, number: &str) -> (i
                     cover_date: None,
                     summary: None,
                     cover_url: None,
+                    store_date: None,
                 },
             )
             .await

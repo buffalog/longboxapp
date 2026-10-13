@@ -66,6 +66,7 @@ async fn seed_series_issue(db: &longbox_db::Pool) -> (i64, i64) {
             cover_date: Some("2012-03-14".to_owned()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -358,6 +359,7 @@ async fn ownership_is_scoped_to_the_issue_asked_about() {
             cover_date: Some("2012-04-18".to_owned()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

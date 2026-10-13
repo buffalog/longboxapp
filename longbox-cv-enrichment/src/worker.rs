@@ -740,6 +740,7 @@ async fn commit_merge(
                 cover_date: cv_issue.cover_date,
                 summary: cv_issue.description,
                 cover_url: cv_issue.cover_url,
+                store_date: cv_issue.store_date,
             },
         )
         .await?;
