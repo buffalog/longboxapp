@@ -62,6 +62,27 @@ export function checkPull(): Promise<void> {
   return apiFetch('/pull/check', { method: 'POST' });
 }
 
+/** Full catalog refresh state. `done`/`total` are series counts while it
+ *  runs (`total` is 0 for the instant before targets load); null when
+ *  idle. `last_full_refresh_at` is Unix seconds, null if never. */
+export interface RefreshStatus {
+  running: boolean;
+  done: number | null;
+  total: number | null;
+  last_full_refresh_at: number | null;
+}
+
+/** Start a full catalog refresh (every pull-list series' issues from
+ *  ComicVine). Rejects with `ApiError` (409, `conflict.refresh_running`)
+ *  when one is already running. Independent of the pull sweep. */
+export function refreshAll(): Promise<void> {
+  return apiFetch('/refresh/all', { method: 'POST' });
+}
+
+export function getRefreshStatus(): Promise<RefreshStatus> {
+  return apiFetch('/refresh/status');
+}
+
 /** Summary of an on-demand series-search dispatch. `queued` is the
  *  count of missing issues the engine kicked off searches for;
  *  `note` is populated only on the zero-queued path (e.g. "no missing

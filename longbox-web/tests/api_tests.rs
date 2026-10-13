@@ -8605,3 +8605,66 @@ async fn full_refresh_is_due_when_never_run_or_a_week_old() {
         wait_for_full_refresh(&app).await;
     }
 }
+
+/// Refresh-all starts the full pass (202), 409s with its own code while
+/// it runs, and the status route reports progress, then completion.
+/// Bodies are checked, not just codes: the SPA fallback 200s unknown
+/// /api paths.
+#[tokio::test]
+async fn refresh_all_starts_once_and_reports_progress() {
+    let app = build_test_app().await;
+    seed_cv_series(&app, "TWD", 2127, true).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(TWD_ISSUES_WITH_STORE_DATES)
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .mount(&app.cv_server)
+        .await;
+
+    let idle = response_json(
+        app.request(empty_request("GET", "/api/refresh/status"))
+            .await,
+    )
+    .await;
+    assert_eq!(idle["running"], false);
+    assert!(idle["last_full_refresh_at"].is_null());
+
+    let resp = app.request(empty_request("POST", "/api/refresh/all")).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let resp = app.request(empty_request("POST", "/api/refresh/all")).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(resp).await["error"]["code"],
+        "conflict.refresh_running"
+    );
+
+    // `total` lands once the task has loaded its targets (status reads
+    // 0 of 0 for that instant; the UI shows "Starting").
+    let mut running = serde_json::Value::Null;
+    for _ in 0..200 {
+        running = response_json(
+            app.request(empty_request("GET", "/api/refresh/status"))
+                .await,
+        )
+        .await;
+        if running["total"] == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(running["running"], true);
+    assert_eq!(running["total"], 1);
+
+    wait_for_full_refresh(&app).await;
+    let done = response_json(
+        app.request(empty_request("GET", "/api/refresh/status"))
+            .await,
+    )
+    .await;
+    assert_eq!(done["running"], false);
+    assert!(done["done"].is_null());
+    assert!(done["last_full_refresh_at"].as_i64().unwrap() > 0);
+}

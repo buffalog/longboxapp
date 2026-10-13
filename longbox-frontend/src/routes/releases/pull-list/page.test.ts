@@ -5,10 +5,13 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   checkPull,
+  getRefreshStatus,
+  refreshAll,
   removeFromPullList,
   searchSeriesNow,
   setPullPaused,
-  type PullListEntry
+  type PullListEntry,
+  type RefreshStatus
 } from '$lib/api/pull';
 import { ApiError } from '$lib/api/client';
 import PullListPage from './+page.svelte';
@@ -17,6 +20,8 @@ import type { PageData } from './$types';
 vi.mock('$lib/api/pull', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api/pull')>()),
   checkPull: vi.fn(),
+  refreshAll: vi.fn(),
+  getRefreshStatus: vi.fn(),
   removeFromPullList: vi.fn(),
   searchSeriesNow: vi.fn(),
   setPullPaused: vi.fn()
@@ -45,9 +50,18 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-function pageData(entries: PullListEntry[]) {
+const IDLE: RefreshStatus = {
+  running: false,
+  done: null,
+  total: null,
+  last_full_refresh_at: null
+};
+
+function pageData(entries: PullListEntry[], refreshStatus: RefreshStatus = IDLE) {
   return {
-    props: { data: { libraryRoot: null, entries, pullFailureCount: 0 } satisfies PageData }
+    props: {
+      data: { libraryRoot: null, entries, pullFailureCount: 0, refreshStatus } satisfies PageData
+    }
   };
 }
 
@@ -135,5 +149,60 @@ describe('pull-list page', () => {
         expect.stringContaining('A search is already running for Saga')
       )
     );
+  });
+
+  describe('full catalog refresh', () => {
+    it('shows progress while running and disables the button', () => {
+      render(
+        PullListPage,
+        pageData([], { running: true, done: 3, total: 10, last_full_refresh_at: null })
+      );
+      expect(screen.getByTestId('refresh-status')).toHaveTextContent(
+        'Full refresh in progress: 3 of 10 series'
+      );
+      expect(screen.getByRole('button', { name: 'Refresh all' })).toBeDisabled();
+    });
+
+    it('says starting before the target count lands', () => {
+      render(PullListPage, pageData([], { running: true, done: 0, total: 0, last_full_refresh_at: null }));
+      expect(screen.getByTestId('refresh-status')).toHaveTextContent('Full refresh starting');
+    });
+
+    it('shows never, then a relative time, when idle', () => {
+      const { unmount } = render(PullListPage, pageData([]));
+      expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last full refresh: never');
+      unmount();
+      const twoHoursAgo = Math.floor(Date.now() / 1000) - 2 * 3600;
+      render(PullListPage, pageData([], { ...IDLE, last_full_refresh_at: twoHoursAgo }));
+      expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last full refresh: 2h ago');
+    });
+
+    it('starts a refresh and reads the new status', async () => {
+      vi.mocked(refreshAll).mockResolvedValue(undefined);
+      vi.mocked(getRefreshStatus).mockResolvedValue({
+        running: true,
+        done: 0,
+        total: 5,
+        last_full_refresh_at: null
+      });
+      render(PullListPage, pageData([]));
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh all' }));
+      expect(refreshAll).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(screen.getByTestId('refresh-status')).toHaveTextContent('0 of 5 series')
+      );
+    });
+
+    it('warns on 409 instead of erroring', async () => {
+      const { toast } = await import('$lib/stores/toast.svelte');
+      vi.mocked(refreshAll).mockRejectedValue(
+        new ApiError(409, 'conflict.refresh_running', 'running')
+      );
+      render(PullListPage, pageData([]));
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh all' }));
+      await waitFor(() =>
+        expect(toast.warning).toHaveBeenCalledWith('A full catalog refresh is already running.')
+      );
+    });
   });
 });

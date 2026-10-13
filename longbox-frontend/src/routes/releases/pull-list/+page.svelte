@@ -5,11 +5,14 @@
   import {
     checkPull,
     exportPullList,
+    getRefreshStatus,
+    refreshAll,
     importPullList,
     removeFromPullList,
     searchSeriesNow,
     setPullPaused,
-    type PullListEntry
+    type PullListEntry,
+    type RefreshStatus
   } from '$lib/api/pull';
   import { formatRelative } from '$lib/format';
   import { toast } from '$lib/stores/toast.svelte';
@@ -19,6 +22,45 @@
   let { data } = $props();
 
   let entries = $state<PullListEntry[]>([...data.entries]);
+  let refresh = $state<RefreshStatus>(data.refreshStatus);
+
+  // Poll while a full refresh runs so "N of M" moves; stops when it ends.
+  const REFRESH_POLL_MS = 5_000;
+  $effect(() => {
+    if (!refresh.running) return;
+    const timer = setInterval(async () => {
+      try {
+        refresh = await getRefreshStatus();
+      } catch {
+        // Transient; the next tick retries.
+      }
+    }, REFRESH_POLL_MS);
+    return () => clearInterval(timer);
+  });
+
+  const refreshLine = $derived.by(() => {
+    if (refresh.running) {
+      return refresh.total
+        ? `Full refresh in progress: ${refresh.done} of ${refresh.total} series`
+        : 'Full refresh starting…';
+    }
+    const last = refresh.last_full_refresh_at;
+    return `Last full refresh: ${last ? formatRelative(new Date(last * 1000).toISOString()) : 'never'}`;
+  });
+
+  async function handleRefreshAll(): Promise<void> {
+    try {
+      await refreshAll();
+      toast.success('Full catalog refresh started.');
+      refresh = await getRefreshStatus();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        toast.warning('A full catalog refresh is already running.');
+      } else {
+        toast.error(e instanceof ApiError ? e.message : 'Could not start a catalog refresh.');
+      }
+    }
+  }
   let busy = $state(false);
   let error = $state<ApiError | null>(null);
   // Per-row debounce for the Search-now button. 15 s covers a typical
@@ -180,6 +222,9 @@
   <div class="flex gap-2">
     <Button variant="ghost" size="sm" onclick={handleExport}>Export</Button>
     <Button variant="ghost" size="sm" onclick={triggerImport}>Import</Button>
+    <Button variant="secondary" onclick={handleRefreshAll} disabled={refresh.running}>
+      Refresh all
+    </Button>
     <Button variant="secondary" onclick={handleCheckNow}>Check now</Button>
   </div>
 </div>
@@ -192,8 +237,10 @@
 />
 <p class="mb-4 text-sm text-slate-600">
   Series subscribed for auto-download. The pull engine sweeps daily; "Check now" forces an
-  immediate sweep. Subscribe to a series from its detail page.
+  immediate sweep. "Refresh all" re-reads every subscribed series' issue list from ComicVine
+  (it also runs weekly). Subscribe to a series from its detail page.
 </p>
+<p class="mb-4 text-xs text-slate-500" data-testid="refresh-status">{refreshLine}</p>
 
 {#if data.pullFailureCount > 0}
   <p class="mb-3 text-sm">

@@ -22,6 +22,8 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pull/check", post(check_now))
+        .route("/refresh/all", post(refresh_all))
+        .route("/refresh/status", get(refresh_status))
         .route("/pull/search/:series_id", post(search_now))
         .route(
             "/pull/search/:series_id/issue/:issue_id",
@@ -72,6 +74,45 @@ async fn check_now(State(state): State<AppState>) -> Result<StatusCode, ApiError
             details: serde_json::Value::Null,
         })
     }
+}
+
+/// Start a full catalog refresh (every pull-list series' issue list from
+/// CV). Its own task, not a sweep: `202` when started, `409` only when a
+/// full refresh is already running. A running pull sweep doesn't block it.
+async fn refresh_all(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    if state.refresh.try_start_full() {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::Conflict {
+            code: "conflict.refresh_running",
+            message: "A full catalog refresh is already running.".into(),
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshStatusResponse {
+    running: bool,
+    /// Series done / total in the running pass; `null` when idle.
+    done: Option<usize>,
+    total: Option<usize>,
+    /// Unix seconds the last full pass completed; `null` if never.
+    last_full_refresh_at: Option<i64>,
+}
+
+/// Full catalog refresh progress and last completion, for the pull-list page.
+async fn refresh_status(
+    State(state): State<AppState>,
+) -> Result<Json<RefreshStatusResponse>, ApiError> {
+    let progress = state.refresh.progress();
+    let last = crate::refresh::last_full_refresh_at(&state.db).await?;
+    Ok(Json(RefreshStatusResponse {
+        running: progress.is_some(),
+        done: progress.map(|p| p.0),
+        total: progress.map(|p| p.1),
+        last_full_refresh_at: last.map(|t| t.unix_timestamp()),
+    }))
 }
 
 #[derive(Debug, Serialize)]
