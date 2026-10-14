@@ -97,6 +97,11 @@ pub struct CvLanesSnapshot {
     /// Includes the delta's requests: they spend the interactive bucket.
     pub interactive: CvRateLimitSnapshot,
     pub background: CvRateLimitSnapshot,
+    /// Time left before background work may resume after the last
+    /// interactive request (zero when it isn't yielding).
+    pub yielding_for: Duration,
+    /// Time left on a 429 pause (zero when not paused).
+    pub paused_for: Duration,
 }
 
 pub struct CvCoordinator {
@@ -232,7 +237,24 @@ impl CvCoordinator {
     }
 
     pub fn snapshot(&self) -> CvLanesSnapshot {
+        let (yielding_for, paused_for) = {
+            let gates = self.gates();
+            let now = Instant::now();
+            let left = |at: Option<Instant>| {
+                at.map_or(Duration::ZERO, |t| t.saturating_duration_since(now))
+            };
+            (
+                left(
+                    gates
+                        .last_interactive
+                        .map(|at| at + self.config.background_yield),
+                ),
+                left(gates.paused_until),
+            )
+        };
         CvLanesSnapshot {
+            yielding_for,
+            paused_for,
             interactive: self
                 .interactive_calls
                 .snapshot(self.config.interactive_rate_per_hour),

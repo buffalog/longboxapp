@@ -20,6 +20,34 @@
   let addedIds = $state<Set<number>>(new Set());
   let error = $state<ApiError | null>(null);
   let successMessage = $state<string | null>(null);
+  let busyMessage = $state<string | null>(null);
+  // Bumped per search so a slow older response can't overwrite a newer one.
+  let searchSeq = 0;
+
+  // ComicVine busy (the interactive lane is out of tokens, or both lanes
+  // are paused on a 429): the 503 carries retry_after_seconds. Returns the
+  // wait, capped at 30s, or null for any other error.
+  function busyRetryAfter(e: unknown): number | null {
+    if (!(e instanceof ApiError) || e.status !== 503 || e.code !== 'rate_limited') return null;
+    const s = (e.details as { retry_after_seconds?: unknown } | undefined)?.retry_after_seconds;
+    return typeof s === 'number' ? Math.min(Math.max(s, 1), 30) : 1;
+  }
+
+  // Say ComicVine is busy, wait it out, retry once. A second failure (or
+  // `stillWanted()` going false during the wait) throws as usual.
+  async function withBusyRetry<T>(call: () => Promise<T>, stillWanted: () => boolean = () => true): Promise<T> {
+    try {
+      return await call();
+    } catch (e) {
+      const wait = busyRetryAfter(e);
+      if (wait === null) throw e;
+      busyMessage = `ComicVine is busy, retrying in ${wait}s…`;
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      busyMessage = null;
+      if (!stillWanted()) throw e;
+      return await call();
+    }
+  }
 
   // "14 hidden (11 publisher blocklist, 3 already in library)" — each clause
   // dropped when its count is zero, so the two reasons never collapse into
@@ -37,6 +65,8 @@
     if (debounce) clearTimeout(debounce);
     const q = query.trim();
     if (!q) {
+      searchSeq++;
+      busyMessage = null;
       results = [];
       filteredPublisher = 0;
       filteredInLibrary = 0;
@@ -48,20 +78,24 @@
   }
 
   async function runSearch(q: string): Promise<void> {
+    const seq = ++searchSeq;
+    const current = (): boolean => seq === searchSeq;
     searching = true;
     error = null;
     try {
-      const r = await searchVolumes(q, { showFiltered });
+      const r = await withBusyRetry(() => searchVolumes(q, { showFiltered }), current);
+      if (!current()) return;
       results = r.results;
       filteredPublisher = r.filtered_publisher;
       filteredInLibrary = r.filtered_in_library;
     } catch (e) {
+      if (!current()) return;
       error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
       results = [];
       filteredPublisher = 0;
       filteredInLibrary = 0;
     } finally {
-      searching = false;
+      if (current()) searching = false;
     }
   }
 
@@ -76,7 +110,7 @@
     error = null;
     successMessage = null;
     try {
-      const result = await addSeries(cvId);
+      const result = await withBusyRetry(() => addSeries(cvId));
       addedIds = new Set(addedIds).add(cvId);
       // Build the success message based on what the auto-search did.
       // `pull_search_queued === 0` covers both (a) no missing-and-shipped
@@ -103,6 +137,15 @@
 
 {#if error}
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
+{/if}
+{#if busyMessage}
+  <div
+    class="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800"
+    role="status"
+    data-testid="cv-busy"
+  >
+    {busyMessage}
+  </div>
 {/if}
 {#if successMessage}
   <div

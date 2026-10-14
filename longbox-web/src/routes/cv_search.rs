@@ -14,24 +14,45 @@ pub fn router() -> Router<AppState> {
         .route("/cv/rate-limit", get(rate_limit))
 }
 
-/// Read-only view of the ComicVine client's sliding-window call
-/// counter. Drives the dashboard / Settings chip that surfaces "42/100
-/// this hour" so the user can see when they're nearing the quota.
-/// `window_started_at` is a unix-second timestamp; the frontend
-/// formats it relative.
+/// Read-only view of the ComicVine lanes: each lane's sliding-window
+/// call count against its hourly budget, plus whether background work is
+/// yielding to the user or both lanes are paused on a 429. Drives the
+/// nav-bar chip. `window_started_at_unix` is a unix-second timestamp.
 #[derive(Debug, Serialize)]
 struct RateLimitResponse {
+    /// Includes the delta refresh, which spends the interactive budget.
+    interactive: LaneCount,
+    background: LaneCount,
+    yielding_seconds: u64,
+    paused_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LaneCount {
     count: u32,
     limit_per_hour: u32,
     window_started_at_unix: i64,
 }
 
+impl From<longbox_comicvine::CvRateLimitSnapshot> for LaneCount {
+    fn from(s: longbox_comicvine::CvRateLimitSnapshot) -> Self {
+        Self {
+            count: s.count,
+            limit_per_hour: s.limit_per_hour,
+            window_started_at_unix: s.window_started_at_unix,
+        }
+    }
+}
+
 async fn rate_limit(State(state): State<AppState>) -> Json<RateLimitResponse> {
-    let snap = state.cv.coordinator().snapshot().interactive;
+    let snap = state.cv.coordinator().snapshot();
+    // Round up so a pause with 0.4s left still reads "paused".
+    let secs = |d: std::time::Duration| d.as_secs() + u64::from(d.subsec_nanos() > 0);
     Json(RateLimitResponse {
-        count: snap.count,
-        limit_per_hour: snap.limit_per_hour,
-        window_started_at_unix: snap.window_started_at_unix,
+        interactive: snap.interactive.into(),
+        background: snap.background.into(),
+        yielding_seconds: secs(snap.yielding_for),
+        paused_seconds: secs(snap.paused_for),
     })
 }
 

@@ -144,9 +144,16 @@ async fn cv_rate_limit_endpoint_returns_snapshot_shape() {
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
-    assert!(body["count"].as_u64().is_some());
-    assert!(body["limit_per_hour"].as_u64().unwrap() > 0);
-    assert!(body["window_started_at_unix"].as_i64().is_some());
+    for lane in ["interactive", "background"] {
+        assert!(body[lane]["count"].as_u64().is_some(), "{lane}: {body}");
+        assert!(body[lane]["limit_per_hour"].as_u64().unwrap() > 0, "{lane}");
+        assert!(
+            body[lane]["window_started_at_unix"].as_i64().is_some(),
+            "{lane}"
+        );
+    }
+    assert!(body["yielding_seconds"].as_u64().is_some(), "{body}");
+    assert!(body["paused_seconds"].as_u64().is_some(), "{body}");
 }
 
 // -------- CV search --------
