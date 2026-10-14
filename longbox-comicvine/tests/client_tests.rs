@@ -33,6 +33,7 @@ fn client_for(server: &MockServer) -> ComicVineClient {
         interactive_burst: 100,
         interactive_max_wait: Duration::from_secs(1),
         background_rate_per_hour: 360_000,
+        background_yield: Duration::ZERO,
         min_spacing: Duration::ZERO,
     }));
     ComicVineClient::new(config, coord).expect("test client construction")

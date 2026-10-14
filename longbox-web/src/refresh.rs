@@ -192,16 +192,20 @@ impl RefreshHandle {
         self.inner.done.store(0, Ordering::SeqCst);
         self.inner.total.store(0, Ordering::SeqCst);
         let inner = Arc::clone(&self.inner);
+        // The credits resolver holds off while this is set.
+        inner.deps.bg.coordinator().set_full_refresh_running(true);
         tokio::spawn(async move {
-            // Clears `running` even if the pass panics, so a crashed pass
-            // can't wedge Refresh-all behind a permanent 409.
-            struct Reset<'a>(&'a AtomicBool);
+            // Clears both flags even if the pass panics, so a crashed pass
+            // can't wedge Refresh-all behind a permanent 409 or park the
+            // credits resolver forever.
+            struct Reset<'a>(&'a Inner);
             impl Drop for Reset<'_> {
                 fn drop(&mut self) {
-                    self.0.store(false, Ordering::SeqCst);
+                    self.0.running.store(false, Ordering::SeqCst);
+                    self.0.deps.bg.coordinator().set_full_refresh_running(false);
                 }
             }
-            let _reset = Reset(&inner.running);
+            let _reset = Reset(&inner);
             run_full(&inner).await;
         });
         true

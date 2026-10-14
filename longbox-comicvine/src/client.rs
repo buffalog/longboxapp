@@ -298,26 +298,37 @@ impl ComicVineClient {
         let resp = self.send(&url).await?;
 
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(&resp);
-            warn!(
-                target: "longbox_comicvine",
-                retry_after_secs = retry_after.as_secs(),
-                "received 429; sleeping and retrying once"
-            );
-            tokio::time::sleep(retry_after).await;
-
+            // A real 429 means our budget math is wrong: pause both lanes
+            // for Retry-After, then retry once. The retry's acquire waits
+            // out the pause, or fails fast on the interactive lane when
+            // the pause is longer than its max wait.
+            self.pause_for_429(&url, &resp, "pausing both lanes and retrying once");
             self.coord.acquire(self.lane).await?;
             let resp2 = self.send(&url).await?;
             if resp2.status() == StatusCode::TOO_MANY_REQUESTS {
-                let secs = parse_retry_after(&resp2).as_secs();
+                let retry_after = self.pause_for_429(&url, &resp2, "pausing both lanes");
                 return Err(CvError::RateLimited {
-                    retry_after_seconds: secs,
+                    retry_after_seconds: retry_after.as_secs(),
                 });
             }
             return handle_response(resp2).await;
         }
 
         handle_response(resp).await
+    }
+
+    fn pause_for_429(&self, url: &Url, resp: &Response, action: &str) -> Duration {
+        let retry_after = parse_retry_after(resp);
+        // `url.path()` is the CV resource (no query string, so no api_key).
+        warn!(
+            target: "longbox_comicvine",
+            resource = url.path(),
+            lane = ?self.lane,
+            retry_after_secs = retry_after.as_secs(),
+            "received 429; {action}"
+        );
+        self.coord.pause(retry_after);
+        retry_after
     }
 
     async fn send(&self, url: &Url) -> Result<Response, CvError> {

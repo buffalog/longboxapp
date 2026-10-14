@@ -9,9 +9,16 @@
 //!   also runs per-second "velocity detection" on top of its hourly
 //!   per-resource cap, and a lane burst must not turn into a
 //!   same-second burst on the wire;
+//! - background *yield*: every interactive request stamps
+//!   `last_interactive`, and background requests hold off until
+//!   `background_yield` has passed since the last one, so a user adding
+//!   series back to back runs at interactive speed;
+//! - the shared *429 pause*: a real 429 from ComicVine means our budget
+//!   math is wrong, so both lanes stop for its `Retry-After`;
+//! - the "full refresh running" flag the credits resolver defers to;
 //! - the per-lane call counters behind the rate-limit chip.
 
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -23,18 +30,21 @@ use crate::rate_limit::CvRateLimiter;
 /// Which budget a request spends, and how it waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
-    /// User-initiated routes. Interactive bucket; a request that can't get
-    /// a token within `interactive_max_wait` fails fast with
+    /// User-initiated routes. Interactive bucket; stamps user activity. A
+    /// request that can't go out within `interactive_max_wait` (no token,
+    /// or a 429 pause longer than that) fails fast with
     /// [`CvError::RateLimited`] instead of hanging the page.
     Interactive,
     /// Enrichment, the credits resolver, the full catalog refresh and the
-    /// calendar's bulk-subscribe resolves. Background bucket; waits as long
-    /// as it takes.
+    /// calendar's bulk-subscribe resolves. Background bucket; yields to
+    /// recent interactive activity; waits as long as it takes.
     Background,
     /// The delta refresh at the top of each pull sweep. Spends the
     /// *interactive* bucket, because its ~10 calendar pages would take
-    /// ~7 minutes at the background rate, but waits like background
-    /// (never fails a sweep with `RateLimited`).
+    /// ~7 minutes at the background rate. Does not stamp user activity and
+    /// does not yield to it (a sweep's ~10 calls shouldn't stall behind a
+    /// user adding series), honors the 429 pause, and waits like
+    /// background (never fails a sweep with `RateLimited`).
     Delta,
 }
 
@@ -45,6 +55,8 @@ pub struct CvLanesConfig {
     pub interactive_burst: u32,
     pub interactive_max_wait: Duration,
     pub background_rate_per_hour: u32,
+    /// How long background requests hold off after an interactive one.
+    pub background_yield: Duration,
     /// Minimum gap between any two CV requests, either lane.
     pub min_spacing: Duration,
 }
@@ -58,6 +70,7 @@ impl Default for CvLanesConfig {
             interactive_burst: 10,
             interactive_max_wait: Duration::from_secs(10),
             background_rate_per_hour: 80,
+            background_yield: Duration::from_secs(300),
             min_spacing: Duration::from_secs(1),
         }
     }
@@ -92,8 +105,16 @@ pub struct CvCoordinator {
     background: CvRateLimiter,
     interactive_calls: CallCounter,
     background_calls: CallCounter,
+    gates: Mutex<Gates>,
+    full_refresh_running: AtomicBool,
+}
+
+#[derive(Default)]
+struct Gates {
     /// Earliest instant the next request may go out (the pacer).
-    next_slot: Mutex<Option<Instant>>,
+    next_slot: Option<Instant>,
+    last_interactive: Option<Instant>,
+    paused_until: Option<Instant>,
 }
 
 impl std::fmt::Debug for CvCoordinator {
@@ -114,13 +135,19 @@ impl CvCoordinator {
             background: CvRateLimiter::new(config.background_rate_per_hour, BACKGROUND_BURST),
             interactive_calls: CallCounter::new(),
             background_calls: CallCounter::new(),
-            next_slot: Mutex::new(None),
+            gates: Mutex::default(),
+            full_refresh_running: AtomicBool::new(false),
             config,
         }
     }
 
     /// Wait until `lane` may send one request, then count it.
     pub async fn acquire(&self, lane: Lane) -> Result<(), CvError> {
+        if lane == Lane::Interactive {
+            // Stamp before waiting: background yields from the moment the
+            // user acts, not from when their request finally goes out.
+            self.gates().last_interactive = Some(Instant::now());
+        }
         match lane {
             Lane::Interactive => {
                 self.interactive
@@ -130,6 +157,20 @@ impl CvCoordinator {
             Lane::Delta => self.interactive.acquire(PATIENT_WAIT).await?,
             Lane::Background => self.background.acquire(PATIENT_WAIT).await?,
         }
+        loop {
+            let wait = self.gate_wait(lane);
+            if wait.is_zero() {
+                break;
+            }
+            if lane == Lane::Interactive && wait > self.config.interactive_max_wait {
+                return Err(CvError::RateLimited {
+                    retry_after_seconds: ceil_secs(wait),
+                });
+            }
+            // Re-check after sleeping: a new 429 or interactive stamp may
+            // have pushed the gate further out.
+            tokio::time::sleep(wait).await;
+        }
         self.pace().await;
         match lane {
             Lane::Interactive | Lane::Delta => self.interactive_calls.consume(),
@@ -138,17 +179,56 @@ impl CvCoordinator {
         Ok(())
     }
 
+    /// How long `lane` must still hold off: the 429 pause for everyone,
+    /// plus the yield window for [`Lane::Background`].
+    fn gate_wait(&self, lane: Lane) -> Duration {
+        let gates = self.gates();
+        let now = Instant::now();
+        let paused = gates
+            .paused_until
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        let yielding = match (lane, gates.last_interactive) {
+            (Lane::Background, Some(at)) => {
+                (at + self.config.background_yield).saturating_duration_since(now)
+            }
+            _ => Duration::ZERO,
+        };
+        paused.max(yielding)
+    }
+
+    /// Stop both lanes for `retry_after` — called on a real 429. Never
+    /// shortens a pause already in force.
+    pub fn pause(&self, retry_after: Duration) {
+        let until = Instant::now() + retry_after;
+        let mut gates = self.gates();
+        gates.paused_until = Some(gates.paused_until.map_or(until, |p| p.max(until)));
+    }
+
+    pub fn set_full_refresh_running(&self, running: bool) {
+        self.full_refresh_running.store(running, Ordering::SeqCst);
+    }
+
+    /// The credits resolver holds off while this is set: credits are
+    /// cosmetic, the refresh gets comics on disk.
+    pub fn full_refresh_running(&self) -> bool {
+        self.full_refresh_running.load(Ordering::SeqCst)
+    }
+
     /// Reserve the next send slot, `min_spacing` after the previous one,
     /// and sleep until it.
     async fn pace(&self) {
         let slot = {
-            let mut next = self.next_slot.lock().expect("pacer mutex poisoned");
+            let mut gates = self.gates();
             let now = Instant::now();
-            let slot = next.map_or(now, |n| n.max(now));
-            *next = Some(slot + self.config.min_spacing);
+            let slot = gates.next_slot.map_or(now, |n| n.max(now));
+            gates.next_slot = Some(slot + self.config.min_spacing);
             slot
         };
         tokio::time::sleep_until(slot).await;
+    }
+
+    fn gates(&self) -> std::sync::MutexGuard<'_, Gates> {
+        self.gates.lock().expect("CV coordinator mutex poisoned")
     }
 
     pub fn snapshot(&self) -> CvLanesSnapshot {
@@ -161,6 +241,10 @@ impl CvCoordinator {
                 .snapshot(self.config.background_rate_per_hour),
         }
     }
+}
+
+fn ceil_secs(d: Duration) -> u64 {
+    d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0))
 }
 
 /// Sliding-window counter for "calls made in the last hour-ish."

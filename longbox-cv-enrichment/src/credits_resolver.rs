@@ -13,6 +13,8 @@ use crate::background::BackgroundCvClient;
 const IDLE_SLEEP: Duration = Duration::from_secs(300);
 /// Issues per work-list batch.
 const BATCH: i64 = 50;
+/// Re-check interval while a full catalog refresh has the background lane.
+const REFRESH_WAIT: Duration = Duration::from_secs(30);
 
 /// A per-issue error that won't resolve on retry (mark the issue done with
 /// zero credits so it stops churning the work-list). NotFound (404 / CV 101),
@@ -50,6 +52,11 @@ async fn credits_loop(db: Pool, bg: BackgroundCvClient) {
         }
         let mut processed = 0usize;
         for item in &batch {
+            // Credits are cosmetic; a full refresh gets comics on disk.
+            // Leave it the whole background lane while it runs.
+            while bg.coordinator().full_refresh_running() {
+                tokio::time::sleep(REFRESH_WAIT).await;
+            }
             match bg.fetch_issue_credits(item.cv_issue_id).await {
                 Ok(credits) => {
                     match creator_repo::insert_issue_credits(&db, item.issue_id, &credits).await {

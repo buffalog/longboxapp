@@ -110,6 +110,14 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
             lanes_default.background_rate_per_hour,
         )
         .await?,
+        background_yield: Duration::from_secs(
+            settings_repo::get_or_default(
+                &db,
+                settings_repo::KEY_CV_BACKGROUND_YIELD_SECONDS,
+                lanes_default.background_yield.as_secs(),
+            )
+            .await?,
+        ),
         ..lanes_default
     };
     info!(?lanes, "ComicVine lane budgets");
