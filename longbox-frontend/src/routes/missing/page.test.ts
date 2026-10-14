@@ -44,6 +44,7 @@ function missingIssue(over: Partial<MissingIssue> & {
     title: over.title ?? null,
     cover_url: over.cover_url ?? null,
     cover_date: over.cover_date ?? null,
+    store_date: over.store_date ?? null,
     issue_created_at: '2026-01-01T00:00:00',
     series: {
       id: over.series_id,
@@ -155,9 +156,10 @@ describe('missing page series grouping', () => {
     expect(
       screen.getByRole('button', { name: /Search 2 missing/ })
     ).toBeInTheDocument();
-    // Header carries both the gross total and the solicited subnote.
-    expect(screen.getByText(/3 missing issues/)).toBeInTheDocument();
-    expect(screen.getByText(/\(1 solicited\)/)).toBeInTheDocument();
+    // Header counts shipped issues only (the dashboard's number), with
+    // the solicited ones as a separate subnote.
+    expect(screen.getByText(/2 missing issues/)).toBeInTheDocument();
+    expect(screen.getByText(/\(\+1 solicited\)/)).toBeInTheDocument();
 
     // The actionable section's per-series count is 2 (solicited issue
     // is filtered out before grouping). The "Search 2 missing" button

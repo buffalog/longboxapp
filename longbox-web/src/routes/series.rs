@@ -274,8 +274,9 @@ async fn spawn_auto_pull_search(
         return Ok(0);
     }
     // Same predicate the per-series Search-missing button uses
-    // (`issue_repo::list_missing_for_series`): cover_date present and
-    // `<= today` (shipped), no owned-and-present file. The freshly-
+    // (`issue_repo::list_missing_for_series`): release date
+    // (`store_date`, else `cover_date`) present and `<= today` (shipped),
+    // no owned-and-present file. The freshly-
     // added series typically has every issue in this state.
     let missing = issue_repo::list_missing_for_series(&state.db, series_id).await?;
     if missing.is_empty() {
@@ -339,6 +340,7 @@ pub(crate) async fn add_or_get_from_cv(
             cover_date: i.cover_date,
             summary: i.description,
             cover_url: i.cover_url,
+            store_date: i.store_date,
         })
         .collect();
     if !new_issues.is_empty() {
@@ -714,6 +716,7 @@ async fn set_cv_id(
             cover_date: i.cover_date,
             summary: i.description,
             cover_url: i.cover_url,
+            store_date: i.store_date,
         })
         .collect();
     if !new_issues.is_empty() {
@@ -852,23 +855,22 @@ async fn refresh(
     let updated = series_repo::update(&mut *tx, id, update_input).await?;
 
     // Upsert issues by cv_issue_id so existing issues get refreshed and new
-    // ones are added.
-    for cv_issue in cv_issues {
-        issue_repo::upsert_by_cv_id(
-            &mut *tx,
-            NewIssue {
-                series_id: updated.id,
-                cv_issue_id: Some(cv_issue.cv_issue_id),
-                metron_issue_id: None,
-                number: cv_issue.issue_number,
-                title: cv_issue.name,
-                cover_date: cv_issue.cover_date,
-                summary: cv_issue.description,
-                cover_url: cv_issue.cover_url,
-            },
-        )
-        .await?;
-    }
+    // ones are added. Same path the scheduled catalog refresh uses.
+    let issues = cv_issues
+        .into_iter()
+        .map(|cv_issue| NewIssue {
+            series_id: updated.id,
+            cv_issue_id: Some(cv_issue.cv_issue_id),
+            metron_issue_id: None,
+            number: cv_issue.issue_number,
+            title: cv_issue.name,
+            cover_date: cv_issue.cover_date,
+            summary: cv_issue.description,
+            cover_url: cv_issue.cover_url,
+            store_date: cv_issue.store_date,
+        })
+        .collect();
+    crate::refresh::apply_issues(&mut tx, issues).await?;
     tx.commit().await.map_err(longbox_db::DbError::from)?;
 
     // Refresh can introduce new issues (CV published #194 since last

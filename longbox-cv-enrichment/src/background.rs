@@ -28,11 +28,15 @@ use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use longbox_comicvine::{
-    ComicVineClient, CvError, CvIssueDetail, CvPersonCredit, CvVolumeDetail, SeriesSearchResult,
+    ComicVineClient, CvCalendarItem, CvError, CvIssueDetail, CvPersonCredit, CvVolumeDetail,
+    SeriesSearchResult,
 };
 
 type BackgroundLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
+/// Cheap to clone: clones share one background gate. Build ONE per
+/// process and hand clones out, or each copy spends its own budget.
+#[derive(Clone)]
 pub struct BackgroundCvClient {
     inner: Arc<ComicVineClient>,
     background_gate: Arc<BackgroundLimiter>,
@@ -93,6 +97,18 @@ impl BackgroundCvClient {
     ) -> Result<Vec<CvPersonCredit>, CvError> {
         self.background_gate.until_ready().await;
         self.inner.fetch_issue_credits(cv_issue_id).await
+    }
+
+    /// Background `fetch_release_calendar`. Acquires the background
+    /// gate once per call, like [`Self::fetch_issues`]; the inner
+    /// client's page requests each take a slot on the shared limiter.
+    pub async fn fetch_release_calendar(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<CvCalendarItem>, CvError> {
+        self.background_gate.until_ready().await;
+        self.inner.fetch_release_calendar(from, to).await
     }
 }
 

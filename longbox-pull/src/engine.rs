@@ -12,10 +12,9 @@
 //!    and recorded as a `submitted` attempt.
 //!
 //! No ComicVine: the sweep acts only on issues already in the catalog.
-//! A subscribed series whose newly-*announced* issues have not been
-//! refreshed into the catalog will not have them pulled — the user must
-//! refresh that series. Phase A.8 Step 8's release calendar is the
-//! intended discovery path; closing that gap is out of Step 6's scope.
+//! Discovery is the web layer's catalog refresh: a store_date delta run
+//! through the scheduler's `PreSweep` hook before every sweep, plus a
+//! weekly full pass over the pull list.
 
 use std::cmp::Ordering;
 use std::path::Path;
@@ -294,13 +293,12 @@ pub async fn sweep(db: &Pool, watch_root: Option<&Path>) -> Result<SweepSummary,
 /// to the daily scheduler. Returns `NotOnPullList` when the series
 /// has no pull-list entry.
 ///
-/// Documented race: if the daily scheduler is mid-sweep on the same
-/// series at the moment this fires, both could query indexers for the
-/// same candidates and try to submit duplicate `pull_attempts`. The
-/// unique key on `(series_id, issue_id)` absorbs the collision — the
-/// second INSERT errors out and the per-issue code path logs and moves
-/// on. Window is bounded (each sweep_series call is short); cost on
-/// collision is one wasted indexer query.
+/// Race: if the daily scheduler is mid-sweep on the same series when this
+/// fires, both can pick the same candidate and BOTH submit it to the
+/// downloader. Nothing absorbs that: `idx_pull_attempts_series_issue` is
+/// not unique, and the attempt row is written after the submit. Callers
+/// that can avoid overlapping a sweep should (the catalog refresh checks
+/// `PullHandle::is_sweeping`); a manual Search-now click can still race.
 pub async fn sweep_single_series(db: &Pool, series_id: i64) -> Result<SweepSummary, PullError> {
     let mut summary = SweepSummary::default();
     let entry = pull_list_repo::get(db, series_id)
@@ -699,7 +697,9 @@ async fn attempt_pull_for_candidate(
         patterns,
         similarity_threshold,
         exclusion_keywords,
-        issue.cover_date.as_deref(),
+        // Release date, not cover date: NZBs post at on-sale, which CV
+        // dates 1-2 months before the cover. Only ever widens maxage.
+        issue.release_date(),
         min_size_bytes,
         &aliases,
     )
@@ -1052,6 +1052,7 @@ mod tests {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
             created_at: datetime!(2026-01-01 0:00),
             updated_at: datetime!(2026-01-01 0:00),
         }

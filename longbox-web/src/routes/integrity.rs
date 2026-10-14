@@ -413,7 +413,7 @@ pub(crate) struct RevertedIssue {
 ///
 /// Each variant is one exclusion the sweep applies, and every one is
 /// read from a fact rather than re-derived: the `pull_list` row, the
-/// issue's own `cover_date`, and
+/// issue's own release date (`store_date`, else `cover_date`), and
 /// [`AttemptBlockers`](longbox_db::pull_attempt_repo::AttemptBlockers).
 /// `list_pull_candidates` stays the single implementation of candidacy;
 /// this only explains an outcome, it never decides one.
@@ -435,7 +435,8 @@ pub(crate) enum SearchOutlook {
     /// Below the series' `start_issue` floor, which the sweep applies
     /// after the candidate query.
     BelowSeriesStartIssue,
-    /// No usable `cover_date` — absent, malformed, or in the future.
+    /// No usable release date (`store_date`, else `cover_date`) — absent,
+    /// malformed, or in the future. Wire name kept as `no_usable_cover_date`.
     /// The candidate query requires a well-formed date not later than
     /// today.
     NoUsableCoverDate,
@@ -496,7 +497,7 @@ fn search_outlook(
             return SearchOutlook::BelowSeriesStartIssue;
         }
     }
-    if !has_usable_cover_date(issue.cover_date.as_deref()) {
+    if !has_usable_release_date(issue.release_date()) {
         return SearchOutlook::NoUsableCoverDate;
     }
     if blockers.retries_exhausted {
@@ -515,11 +516,12 @@ fn search_outlook(
 /// no later than today.
 ///
 /// Compared as text against a UTC date, exactly as the SQL does
-/// (`length(cover_date) = 10 AND cover_date <= date('now')`), so a
+/// on the effective release date `COALESCE(store_date, cover_date)`
+/// (`length(..) = 10 AND .. <= date('now')`), so a
 /// future-dated solicitation is correctly reported as not-yet-searched
 /// rather than as a blocked one.
-fn has_usable_cover_date(cover_date: Option<&str>) -> bool {
-    let Some(d) = cover_date else {
+fn has_usable_release_date(release_date: Option<&str>) -> bool {
+    let Some(d) = release_date else {
         return false;
     };
     if d.len() != 10 {
@@ -774,6 +776,7 @@ mod outlook_tests {
             cover_date: cover_date.map(str::to_owned),
             summary: None,
             cover_url: None,
+            store_date: None,
             created_at: now,
             updated_at: now,
         }
@@ -804,6 +807,18 @@ mod outlook_tests {
 
     fn clear() -> AttemptBlockers {
         AttemptBlockers::default()
+    }
+
+    /// On sale with the cover date still ahead: the sweep searches it,
+    /// so the outlook must not claim it has no usable date.
+    #[test]
+    fn on_sale_issue_with_future_cover_date_will_search() {
+        let mut on_sale = issue("5", Some("2999-01-01"));
+        on_sale.store_date = Some("2020-01-01".to_owned());
+        assert_eq!(
+            search_outlook(&on_sale, Some(&entry(false, None)), &clear()),
+            SearchOutlook::WillSearch
+        );
     }
 
     /// Every variant is reachable, and reachable for its own reason.
@@ -909,11 +924,11 @@ mod outlook_tests {
     /// A future-dated solicitation is not yet a candidate.
     #[test]
     fn cover_date_matches_the_candidate_querys_test() {
-        assert!(has_usable_cover_date(Some("2020-01-01")));
-        assert!(!has_usable_cover_date(None));
-        assert!(!has_usable_cover_date(Some("2020-01")), "malformed");
-        assert!(!has_usable_cover_date(Some("")), "empty");
-        assert!(!has_usable_cover_date(Some("2999-01-01")), "future");
+        assert!(has_usable_release_date(Some("2020-01-01")));
+        assert!(!has_usable_release_date(None));
+        assert!(!has_usable_release_date(Some("2020-01")), "malformed");
+        assert!(!has_usable_release_date(Some("")), "empty");
+        assert!(!has_usable_release_date(Some("2999-01-01")), "future");
         let today = time::OffsetDateTime::now_utc().date();
         let today = format!(
             "{:04}-{:02}-{:02}",
@@ -921,6 +936,6 @@ mod outlook_tests {
             u8::from(today.month()),
             today.day()
         );
-        assert!(has_usable_cover_date(Some(&today)), "today is usable");
+        assert!(has_usable_release_date(Some(&today)), "today is usable");
     }
 }

@@ -70,6 +70,7 @@ async fn seed() -> Fixture {
             cover_date: Some("2012-03-14".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

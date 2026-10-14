@@ -33,6 +33,7 @@ async fn rollback_leaves_no_rows() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -62,6 +63,7 @@ async fn commit_persists_rows() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

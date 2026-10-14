@@ -56,6 +56,7 @@ async fn seed_issue(db: &longbox_db::Pool) -> i64 {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

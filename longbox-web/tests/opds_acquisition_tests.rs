@@ -68,6 +68,7 @@ async fn seed_issue(
             cover_date: cover_date.map(str::to_owned),
             summary: summary.map(str::to_owned),
             cover_url: cover_url.map(str::to_owned),
+            store_date: None,
         },
     )
     .await

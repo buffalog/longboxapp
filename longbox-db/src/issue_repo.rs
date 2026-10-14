@@ -15,8 +15,20 @@ pub struct IssueRow {
     pub cover_date: Option<String>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
+    /// CV on-sale date (`YYYY-MM-DD`). Runs ahead of `cover_date`;
+    /// eligibility uses `COALESCE(store_date, cover_date)`.
+    pub store_date: Option<String>,
     pub created_at: PrimitiveDateTime,
     pub updated_at: PrimitiveDateTime,
+}
+
+impl IssueRow {
+    /// Effective release date: CV's on-sale `store_date`, falling back to
+    /// `cover_date`. The Rust twin of the SQL `COALESCE(store_date,
+    /// cover_date)` every eligibility and solicited predicate uses.
+    pub fn release_date(&self) -> Option<&str> {
+        self.store_date.as_deref().or(self.cover_date.as_deref())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +41,7 @@ pub struct NewIssue {
     pub cover_date: Option<String>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
+    pub store_date: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +60,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE id = ?"#,
         id
@@ -65,7 +78,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE cv_issue_id = ?"#,
         cv_issue_id
@@ -86,7 +99,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE metron_issue_id = ?"#,
         metron_issue_id
@@ -104,7 +117,7 @@ where
         IssueRow,
         r#"SELECT id AS "id!: i64", series_id AS "series_id!: i64",
                   cv_issue_id, metron_issue_id, number, title, cover_date,
-                  summary, cover_url,
+                  summary, cover_url, store_date,
                   created_at AS "created_at: _", updated_at AS "updated_at: _"
            FROM issues WHERE series_id = ? ORDER BY id"#,
         series_id
@@ -116,8 +129,9 @@ where
 
 /// Every "missing" issue for one series — mirrors the frontend
 /// IssueRow's status derivation exactly: a row has status `missing`
-/// when there's no owned-and-present file row AND the cover date is
-/// today or earlier (i.e. the issue has shipped — not solicited).
+/// when there's no owned-and-present file row AND the effective release
+/// date (`COALESCE(store_date, cover_date)`) is a full date, today or
+/// earlier (i.e. the issue has shipped — not solicited).
 ///
 /// Distinct from [`list_pull_candidates`] in two ways: this does
 /// NOT exclude issues with in-flight attempts (the per-issue
@@ -137,20 +151,19 @@ where
         IssueRow,
         r#"SELECT i.id AS "id!: i64", i.series_id AS "series_id!: i64",
                   i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,
-                  i.summary, i.cover_url,
+                  i.summary, i.cover_url, i.store_date,
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
-             AND i.cover_date IS NOT NULL
-             AND length(i.cover_date) = 10
-             AND i.cover_date <= date('now')
+             AND length(COALESCE(i.store_date, i.cover_date)) = 10
+             AND COALESCE(i.store_date, i.cover_date) <= date('now')
              AND NOT EXISTS (
                SELECT 1 FROM files f
                WHERE f.issue_id = i.id
                  AND f.status = 'owned'
                  AND f.is_present = 1
              )
-           ORDER BY i.cover_date ASC, i.id ASC"#,
+           ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC"#,
         series_id
     )
     .fetch_all(executor)
@@ -159,7 +172,8 @@ where
 }
 
 /// Issues eligible for an auto-pull attempt for one series: shipped
-/// (`cover_date` a full `YYYY-MM-DD`, today or earlier), not already
+/// (effective release date `COALESCE(store_date, cover_date)` a full
+/// `YYYY-MM-DD`, today or earlier), not already
 /// owned, and not already settled or parked in `pull_attempts`.
 ///
 /// Excluded `pull_attempts` states: in-flight (`pending`/`submitted`),
@@ -176,13 +190,12 @@ where
         IssueRow,
         r#"SELECT i.id AS "id!: i64", i.series_id AS "series_id!: i64",
                   i.cv_issue_id, i.metron_issue_id, i.number, i.title, i.cover_date,
-                  i.summary, i.cover_url,
+                  i.summary, i.cover_url, i.store_date,
                   i.created_at AS "created_at: _", i.updated_at AS "updated_at: _"
            FROM issues i
            WHERE i.series_id = ?
-             AND i.cover_date IS NOT NULL
-             AND length(i.cover_date) = 10
-             AND i.cover_date <= date('now')
+             AND length(COALESCE(i.store_date, i.cover_date)) = 10
+             AND COALESCE(i.store_date, i.cover_date) <= date('now')
              AND NOT EXISTS (
                SELECT 1 FROM files f
                WHERE f.issue_id = i.id
@@ -199,7 +212,7 @@ where
                    OR pa.retry_count >= 3
                  )
              )
-           ORDER BY i.cover_date ASC, i.id ASC"#,
+           ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC"#,
         series_id
     )
     .fetch_all(executor)
@@ -263,11 +276,11 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -276,7 +289,8 @@ where
         input.title,
         input.cover_date,
         input.summary,
-        input.cover_url
+        input.cover_url,
+        input.store_date
     )
     .fetch_one(executor)
     .await?;
@@ -314,7 +328,7 @@ where
 
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
         "INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number, \
-         title, cover_date, summary, cover_url) ",
+         title, cover_date, summary, cover_url, store_date) ",
     );
 
     qb.push_values(inputs, |mut b, input| {
@@ -325,12 +339,13 @@ where
             .push_bind(input.title)
             .push_bind(input.cover_date)
             .push_bind(input.summary)
-            .push_bind(input.cover_url);
+            .push_bind(input.cover_url)
+            .push_bind(input.store_date);
     });
 
     qb.push(
         " RETURNING id, series_id, cv_issue_id, metron_issue_id, number, \
-          title, cover_date, summary, cover_url, created_at, updated_at",
+          title, cover_date, summary, cover_url, store_date, created_at, updated_at",
     );
 
     let rows: Vec<IssueRow> = qb.build_query_as().fetch_all(executor).await?;
@@ -378,6 +393,16 @@ where
 /// when re-fetching from ComicVine: existing rows have their mutable fields
 /// refreshed, new rows are inserted. `cv_issue_id` MUST be `Some(...)` — the
 /// upsert keys on it and a `None` would never conflict.
+///
+/// Null-safe: a `None` in the input never blanks an existing value
+/// (`COALESCE(excluded.col, issues.col)`). The delta refresh feeds this
+/// from the release-calendar projection, which can lack fields the
+/// per-volume fetch carries.
+///
+/// ponytail: the ceiling is that CV can never CLEAR a value. A store_date
+/// CV later withdraws stays, so the issue keeps reading as shipped. Add an
+/// explicit "authoritative full fetch" mode that writes NULLs if that
+/// ever shows up in practice.
 pub async fn upsert_by_cv_id<'e, E>(executor: E, input: NewIssue) -> Result<IssueRow>
 where
     E: SqliteExecutor<'e>,
@@ -385,18 +410,19 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(cv_issue_id) DO UPDATE
            SET number = excluded.number,
-               title = excluded.title,
-               cover_date = excluded.cover_date,
-               summary = excluded.summary,
-               cover_url = excluded.cover_url,
+               title = COALESCE(excluded.title, issues.title),
+               cover_date = COALESCE(excluded.cover_date, issues.cover_date),
+               summary = COALESCE(excluded.summary, issues.summary),
+               cover_url = COALESCE(excluded.cover_url, issues.cover_url),
+               store_date = COALESCE(excluded.store_date, issues.store_date),
                updated_at = CURRENT_TIMESTAMP
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -405,7 +431,8 @@ where
         input.title,
         input.cover_date,
         input.summary,
-        input.cover_url
+        input.cover_url,
+        input.store_date
     )
     .fetch_one(executor)
     .await?;
@@ -451,18 +478,19 @@ where
     let row = sqlx::query_as!(
         IssueRow,
         r#"INSERT INTO issues (series_id, cv_issue_id, metron_issue_id, number,
-                               title, cover_date, summary, cover_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               title, cover_date, summary, cover_url, store_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(series_id, canonical_number) DO UPDATE
            SET cv_issue_id = excluded.cv_issue_id,
                title = excluded.title,
                cover_date = excluded.cover_date,
                summary = excluded.summary,
                cover_url = excluded.cover_url,
+               store_date = COALESCE(excluded.store_date, issues.store_date),
                updated_at = CURRENT_TIMESTAMP
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         input.series_id,
         input.cv_issue_id,
@@ -472,6 +500,7 @@ where
         input.cover_date,
         input.summary,
         input.cover_url,
+        input.store_date,
     )
     .fetch_one(executor)
     .await?;
@@ -490,7 +519,7 @@ where
            WHERE id = ?
            RETURNING id AS "id!: i64", series_id AS "series_id!: i64",
                      cv_issue_id, metron_issue_id, number, title, cover_date,
-                     summary, cover_url,
+                     summary, cover_url, store_date,
                      created_at AS "created_at: _", updated_at AS "updated_at: _""#,
         patch.title,
         patch.cover_date,

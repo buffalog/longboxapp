@@ -41,6 +41,8 @@ pub struct CvIssueDetail {
     pub issue_number: String,
     pub name: Option<String>,
     pub cover_date: Option<String>,
+    /// On-sale date (`YYYY-MM-DD`); absent on many older / indie issues.
+    pub store_date: Option<String>,
     pub description: Option<String>,
     pub cover_url: Option<String>,
     pub site_detail_url: String,
@@ -59,6 +61,14 @@ pub struct CvCalendarItem {
     pub volume_name: String,
     pub cover_url: Option<String>,
     pub site_detail_url: String,
+    /// Issue fields the catalog delta refresh writes. `serde(default)`
+    /// so calendar payloads cached before they existed still load.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub cover_date: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// One atomic person+role credit on an issue (CV's comma-delimited role
@@ -167,6 +177,7 @@ pub(crate) fn project_issue(item: CvIssueFull) -> CvIssueDetail {
         issue_number: item.issue_number,
         name: item.name,
         cover_date: item.cover_date,
+        store_date: item.store_date,
         description: item.description,
         cover_url: extract_cover(item.image),
         site_detail_url: item.site_detail_url,
@@ -187,6 +198,9 @@ pub(crate) fn project_calendar_item(item: CvIssueFull) -> Option<CvCalendarItem>
         volume_name: volume.name.unwrap_or_default(),
         cover_url: extract_cover(item.image),
         site_detail_url: item.site_detail_url,
+        name: item.name,
+        cover_date: item.cover_date,
+        description: item.description,
     })
 }
 
@@ -281,6 +295,19 @@ mod tests {
             deck: None,
         };
         assert!(project_search_item(item).start_year.is_none());
+    }
+
+    /// Calendar payloads cached before the issue fields existed still
+    /// deserialize; the new fields read as `None`.
+    #[test]
+    fn calendar_item_loads_pre_issue_field_cache_payloads() {
+        let old = r#"{"cv_issue_id":1,"issue_number":"1","store_date":"2026-05-13",
+            "cv_volume_id":2,"volume_name":"Saga","cover_url":null,
+            "site_detail_url":"https://cv/1/"}"#;
+        let item: CvCalendarItem = serde_json::from_str(old).unwrap();
+        assert_eq!(item.cover_date, None);
+        assert_eq!(item.name, None);
+        assert_eq!(item.description, None);
     }
 
     #[test]

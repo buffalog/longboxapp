@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  cv_issue_id, metron_issue_id, number, title, cover_date,\n                  summary, cover_url,\n                  created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"\n           FROM issues WHERE metron_issue_id = ?",
+  "query": "SELECT id AS \"id!: i64\", series_id AS \"series_id!: i64\",\n                  cv_issue_id, metron_issue_id, number, title, cover_date,\n                  summary, cover_url, store_date,\n                  created_at AS \"created_at: _\", updated_at AS \"updated_at: _\"\n           FROM issues WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -49,13 +49,18 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: _",
+        "name": "store_date",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: _",
+        "ordinal": 10,
         "type_info": "Datetime"
       },
       {
         "name": "updated_at: _",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Datetime"
       }
     ],
@@ -63,11 +68,12 @@
       "Right": 1
     },
     "nullable": [
-      true,
+      false,
       false,
       true,
       true,
       false,
+      true,
       true,
       true,
       true,
@@ -76,5 +82,5 @@
       false
     ]
   },
-  "hash": "ccc07b58c7b974f0f64e763e3c5138d817edbac5ba220429ec0704c9980ffebc"
+  "hash": "6ffa4fe7c3c9986adc7cc99bcef38668b712c0090cc0ee5d36fb915dff73c6a4"
 }

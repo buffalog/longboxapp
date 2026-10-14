@@ -666,7 +666,8 @@ async fn add_series_happy_path() {
                 "number_of_total_results": 2, "limit": 100, "offset": 0,
                 "results": [
                     { "id": 10001, "issue_number": "1", "name": "Days Gone Bye",
-                      "cover_date": "2003-10-08", "description": null,
+                      "cover_date": "2003-10-08", "store_date": "2003-10-08",
+                      "description": null,
                       "image": { "medium_url": "https://example.com/wd-1.jpg" },
                       "site_detail_url": "https://cv/4000-10001/" },
                     { "id": 10002, "issue_number": "2", "name": null,
@@ -695,6 +696,9 @@ async fn add_series_happy_path() {
         .await
         .unwrap();
     assert_eq!(issues.len(), 2);
+    // The on-sale date is persisted, not dropped at the NewIssue boundary.
+    assert_eq!(issues[0].store_date.as_deref(), Some("2003-10-08"));
+    assert_eq!(issues[1].store_date, None);
 }
 
 #[tokio::test]
@@ -974,6 +978,7 @@ async fn list_series_computes_owned_and_total_counts() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -1019,6 +1024,7 @@ async fn series_detail_orders_issues_naturally() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -1160,6 +1166,7 @@ async fn force_delete_series_unlinks_owned_files_and_succeeds() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1342,6 +1349,7 @@ async fn delete_files_succeeds_when_series_has_owned_present_files() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1655,6 +1663,7 @@ async fn patch_file_manual_rematch_sets_issue_and_owned() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2105,6 +2114,7 @@ async fn match_from_cv_reuses_existing_series_no_cv_call() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2208,6 +2218,7 @@ async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -2225,6 +2236,7 @@ async fn missing_lists_issues_with_no_owned_file_and_natural_sorts() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2320,6 +2332,7 @@ async fn missing_filters_by_series_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2335,6 +2348,7 @@ async fn missing_filters_by_series_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -2386,6 +2400,7 @@ async fn missing_sorts_by_cover_date_when_requested() {
                 cover_date: Some(d.into()),
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -2449,6 +2464,7 @@ async fn dashboard_activity_lists_recent_series_and_matches() {
             cover_date: None,
             summary: None,
             cover_url: Some("https://example.com/saga-1.jpg".into()),
+            store_date: None,
         },
     )
     .await
@@ -2973,6 +2989,55 @@ async fn stats_total_series_excludes_unenriched_fileless_phantoms() {
 }
 
 #[tokio::test]
+async fn stats_missing_excludes_solicited_by_release_date() {
+    // Missing = no owned file AND not solicited, keyed off
+    // COALESCE(store_date, cover_date) — the series-card split. Cases are
+    // asymmetric on purpose: the real predicate counts 3, a cover-only
+    // predicate 2, and the old unfiltered count 5. The partial-date row
+    // pins the full-date guard (as text "2099-07" sorts after today, so a
+    // bare NULL check would call it solicited); the today row pins `<` vs
+    // `<=` (today is solicited).
+    let app = build_test_app().await;
+    // #1 undated: missing (no date never reads as solicited).
+    let (sid, _) = seed_series_and_issue(&app, "Dated", "1").await;
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    for (number, cover, store) in [
+        // On sale, cover still ahead: missing.
+        ("2", Some("2099-07-01"), Some("2020-05-13")),
+        // Cover-only, future: solicited, not missing.
+        ("3", Some("2099-07-01"), None),
+        // Partial date: not a full date, so not solicited — missing.
+        ("4", Some("2099-07"), None),
+        // On sale today: solicited (today-inclusive), not missing.
+        ("5", Some("2099-07-01"), Some(today.as_str())),
+    ] {
+        issue_repo::insert(
+            &app.state.db,
+            NewIssue {
+                series_id: sid,
+                cv_issue_id: None,
+                metron_issue_id: None,
+                number: number.into(),
+                title: None,
+                cover_date: cover.map(Into::into),
+                summary: None,
+                cover_url: None,
+                store_date: store.map(Into::into),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let body = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(
+        body["missing_issues"], 3,
+        "#1, #2 and #4; #3 and #5 are solicited"
+    );
+    assert_eq!(body["series_with_missing"], 1);
+}
+
+#[tokio::test]
 async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
     let app = build_test_app().await;
 
@@ -3020,6 +3085,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -3036,6 +3102,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -3281,6 +3348,7 @@ async fn match_folder_does_not_touch_owned_files() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4145,6 +4213,7 @@ async fn pull_search_202_dispatches_per_missing_issue_for_unsubscribed_series() 
                 cover_date: Some("2020-01-01".into()),
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -4182,6 +4251,7 @@ async fn pull_search_skips_solicited_and_owned_issues() {
             cover_date: Some("2020-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4198,6 +4268,7 @@ async fn pull_search_skips_solicited_and_owned_issues() {
             cover_date: Some("2099-12-31".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4255,6 +4326,7 @@ async fn pull_search_issue_202_accepts_for_an_issue_belonging_to_the_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4299,6 +4371,7 @@ async fn pull_search_issue_404_when_issue_belongs_to_different_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4345,6 +4418,7 @@ async fn pull_search_issue_works_when_series_is_NOT_on_pull_list() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -4386,6 +4460,7 @@ async fn insert_issue(
             cover_date: cover_date.map(str::to_owned),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -5178,6 +5253,7 @@ async fn seed_series_with_owned_file(
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -7612,6 +7688,7 @@ async fn seed_series_and_issue(app: &common::TestApp, title: &str, number: &str)
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -7647,6 +7724,7 @@ async fn needs_attention_pull_failures_lists_categorized_failures() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -8119,4 +8197,544 @@ async fn creators_discover_empty_when_no_cv_person_id() {
     let body = response_json(resp).await;
     assert_eq!(body["results"].as_array().unwrap().len(), 0);
     assert_eq!(body["filtered_count"].as_u64().unwrap(), 0);
+}
+
+// ----- store_date: write paths and release-date consumers -----
+
+async fn insert_dated_issue(
+    app: &common::TestApp,
+    series_id: i64,
+    number: &str,
+    cv_issue_id: Option<i64>,
+    cover_date: Option<&str>,
+    store_date: Option<&str>,
+) -> i64 {
+    issue_repo::insert(
+        &app.state.db,
+        NewIssue {
+            series_id,
+            cv_issue_id,
+            metron_issue_id: None,
+            number: number.into(),
+            title: Some(format!("Issue {number}")),
+            cover_date: cover_date.map(Into::into),
+            summary: None,
+            cover_url: None,
+            store_date: store_date.map(Into::into),
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+async fn mount_cv_volume_and_issues(app: &common::TestApp, cv_id: i64, issues_json: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/volume/4050-{cv_id}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{
+                "status_code": 1, "error": "OK", "number_of_total_results": 1,
+                "results": {{
+                    "id": {cv_id}, "name": "The Walking Dead", "start_year": "2003",
+                    "publisher": {{ "id": 1, "name": "Image" }},
+                    "description": null, "image": null,
+                    "site_detail_url": "https://cv/wd/4050-{cv_id}/"
+                }}
+            }}"#
+        )))
+        .mount(&app.cv_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(issues_json.to_owned()))
+        .mount(&app.cv_server)
+        .await;
+}
+
+const TWD_ISSUES_WITH_STORE_DATES: &str = r#"{
+    "status_code": 1, "error": "OK",
+    "number_of_total_results": 2, "limit": 100, "offset": 0,
+    "results": [
+        { "id": 10001, "issue_number": "1", "name": null,
+          "cover_date": "2003-10-08", "store_date": "2003-10-01",
+          "description": null, "image": null,
+          "site_detail_url": "https://cv/4000-10001/" },
+        { "id": 10002, "issue_number": "2", "name": null,
+          "cover_date": "2003-11-12", "store_date": "2003-11-05",
+          "description": null, "image": null,
+          "site_detail_url": "https://cv/4000-10002/" }
+    ]
+}"#;
+
+/// Per-series refresh backfills store_date on an existing row, inserts
+/// the new one with it, and a CV `name: null` does not blank the title.
+#[tokio::test]
+async fn refresh_backfills_store_date_without_blanking_fields() {
+    let app = build_test_app().await;
+    let sid = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(2127),
+            metron_id: None,
+            title: "The Walking Dead".into(),
+            sort_title: "walking dead".into(),
+            start_year: Some(2003),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2003-10-08"), None).await;
+    mount_cv_volume_and_issues(&app, 2127, TWD_ISSUES_WITH_STORE_DATES).await;
+
+    let resp = app
+        .request(empty_request("POST", &format!("/api/series/{sid}/refresh")))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["id"], sid, "a series row, not the SPA fallback");
+
+    let issues = issue_repo::list_by_series(&app.state.db, sid)
+        .await
+        .unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].store_date.as_deref(), Some("2003-10-01"));
+    assert_eq!(issues[0].title.as_deref(), Some("Issue 1"));
+    assert_eq!(issues[1].store_date.as_deref(), Some("2003-11-05"));
+}
+
+/// Set-cv-id rebuilds the issue list from CV, store_date included.
+#[tokio::test]
+async fn set_cv_id_persists_store_date() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Shallow", "1").await;
+    mount_cv_volume_and_issues(&app, 2127, TWD_ISSUES_WITH_STORE_DATES).await;
+
+    let resp = app
+        .request(json_request(
+            "PATCH",
+            &format!("/api/series/{sid}/cv-id"),
+            r#"{"cv_id": 2127}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response_json(resp).await["cv_id"], 2127);
+
+    let issues = issue_repo::list_by_series(&app.state.db, sid)
+        .await
+        .unwrap();
+    let dates: Vec<_> = issues.iter().map(|i| i.store_date.as_deref()).collect();
+    assert_eq!(dates, vec![Some("2003-10-01"), Some("2003-11-05")]);
+}
+
+/// On sale with the cover date still ahead: searched, not skipped.
+#[tokio::test]
+async fn search_all_missing_keys_off_store_date() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "On Sale").await;
+    insert_dated_issue(&app, sid, "1", None, Some("2999-01-01"), Some("2020-05-13")).await;
+
+    let body = response_json(
+        app.request(empty_request("POST", "/api/pull/search-all-missing"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["searched"], 1);
+    assert_eq!(body["skipped_solicited"], 0);
+}
+
+/// /missing hands the frontend store_date so its solicited split can
+/// prefer it.
+#[tokio::test]
+async fn missing_endpoint_returns_store_date() {
+    let app = build_test_app().await;
+    let (sid, _) = seed_series_and_issue(&app, "Dated", "1").await;
+    insert_dated_issue(&app, sid, "2", None, Some("2999-01-01"), Some("2020-05-13")).await;
+
+    // Four SELECTs: {all, one series} x {series, cover_date} sort.
+    for query in [
+        "sort=series".to_owned(),
+        "sort=cover_date".to_owned(),
+        format!("series_id={sid}&sort=series"),
+        format!("series_id={sid}&sort=cover_date"),
+    ] {
+        let body = response_json(
+            app.request(empty_request("GET", &format!("/api/missing?{query}")))
+                .await,
+        )
+        .await;
+        let row = body["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["number"] == "2")
+            .unwrap();
+        assert_eq!(row["store_date"], "2020-05-13", "{query}");
+    }
+}
+
+// ----- catalog refresh (delta + full) -----
+
+async fn seed_cv_series(app: &common::TestApp, title: &str, cv_id: i64, pulled: bool) -> i64 {
+    let sid = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(cv_id),
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(2003),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    if pulled {
+        pull_list_repo::add(
+            &app.state.db,
+            NewPullEntry {
+                series_id: sid,
+                start_issue: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sid
+}
+
+fn refresh_deps(app: &common::TestApp) -> longbox_web::refresh::RefreshDeps {
+    longbox_web::refresh::RefreshDeps {
+        db: app.state.db.clone(),
+        bg: longbox_cv_enrichment::BackgroundCvClient::new(
+            std::sync::Arc::clone(&app.state.cv),
+            std::time::Duration::from_secs(1),
+        ),
+        scanner: std::sync::Arc::clone(&app.state.scanner),
+        pull_search: app.state.pull_search.clone(),
+        pull: Default::default(),
+    }
+}
+
+/// Counts are right, and a number collision (a number-only row already
+/// holding that number) is skipped without aborting the batch or
+/// touching the existing row.
+#[tokio::test]
+async fn apply_issues_counts_and_skips_number_collisions() {
+    let app = build_test_app().await;
+    let sid = seed_cv_series(&app, "TWD", 2127, false).await;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2003-10-08"), None).await;
+    let shallow = insert_dated_issue(&app, sid, "3", None, None, None).await;
+
+    let new = |cv: i64, number: &str, store: &str| NewIssue {
+        series_id: sid,
+        cv_issue_id: Some(cv),
+        metron_issue_id: None,
+        number: number.into(),
+        title: None,
+        cover_date: None,
+        summary: None,
+        cover_url: None,
+        store_date: Some(store.into()),
+    };
+    let mut tx = app.state.db.begin().await.unwrap();
+    let counts = longbox_web::refresh::apply_issues(
+        &mut tx,
+        vec![
+            new(10003, "3", "2003-12-01"),
+            new(10001, "1", "2003-10-01"),
+            new(10002, "2", "2003-11-05"),
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(counts.inserted, 1, "#2");
+    assert_eq!(counts.updated, 1, "#1");
+    assert_eq!(counts.store_dates_set, 2);
+    assert_eq!(counts.number_collisions, 1, "#3");
+    let row = issue_repo::find_by_id(&app.state.db, shallow)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.cv_issue_id, None, "number-only row left untouched");
+    assert!(issue_repo::find_by_cv_issue_id(&app.state.db, 10002)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// The delta upserts calendar issues on tracked volumes only, and an
+/// issue on sale with its cover date still ahead becomes a pull
+/// candidate: the original bug, end to end.
+#[tokio::test]
+async fn delta_refresh_makes_on_sale_issues_pull_candidates() {
+    let app = build_test_app().await;
+    let sid = seed_cv_series(&app, "TWD", 2127, true).await;
+    insert_dated_issue(&app, sid, "1", Some(10001), Some("2099-07-01"), None).await;
+    assert!(issue_repo::list_pull_candidates(&app.state.db, sid)
+        .await
+        .unwrap()
+        .is_empty());
+
+    mount_cv_calendar_any(
+        &app,
+        r#"[
+          { "id": 10001, "issue_number": "1", "name": null, "cover_date": "2099-07-01",
+            "store_date": "2020-05-13", "description": null, "image": null,
+            "volume": { "id": 2127, "name": "TWD" }, "site_detail_url": "https://cv/10001/" },
+          { "id": 10002, "issue_number": "2", "name": "New One", "cover_date": "2099-08-01",
+            "store_date": "2020-06-10", "description": null, "image": null,
+            "volume": { "id": 2127, "name": "TWD" }, "site_detail_url": "https://cv/10002/" },
+          { "id": 99001, "issue_number": "77", "name": null, "cover_date": null,
+            "store_date": "2020-06-10", "description": null, "image": null,
+            "volume": { "id": 555, "name": "Untracked" }, "site_detail_url": "https://cv/99001/" }
+        ]"#,
+    )
+    .await;
+
+    let summary = longbox_web::refresh::run_delta(&refresh_deps(&app)).await;
+    // The window: seeded defaults, today -14 .. +28 days.
+    let today = time::OffsetDateTime::now_utc().date();
+    let want = format!(
+        "store_date:{}|{}",
+        today - time::Duration::days(14),
+        today + time::Duration::days(28)
+    );
+    let requests = app.cv_server.received_requests().await.unwrap();
+    let filters: Vec<String> = requests
+        .iter()
+        .flat_map(|r| r.url.query_pairs())
+        .filter(|(k, _)| k == "filter")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    assert_eq!(filters, vec![want]);
+    assert_eq!(summary.series_refreshed, 1);
+    assert_eq!(summary.issues_inserted, 1);
+    assert_eq!(summary.issues_updated, 1);
+    assert_eq!(summary.store_dates_set, 2);
+    assert_eq!(summary.number_collisions, 0);
+    assert_eq!(summary.cv_errors, 0);
+
+    assert!(issue_repo::find_by_cv_issue_id(&app.state.db, 99001)
+        .await
+        .unwrap()
+        .is_none());
+    let new = issue_repo::find_by_cv_issue_id(&app.state.db, 10002)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(new.title.as_deref(), Some("New One"));
+    assert_eq!(new.cover_date.as_deref(), Some("2099-08-01"));
+    let candidates: Vec<String> = issue_repo::list_pull_candidates(&app.state.db, sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(candidates, vec!["1", "2"]);
+}
+
+async fn wait_for_full_refresh(app: &common::TestApp) {
+    for _ in 0..500 {
+        if app.state.refresh.progress().is_none() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("full refresh never finished");
+}
+
+/// The full pass refreshes pull-list series only, records completion,
+/// and refuses a second start while running.
+#[tokio::test]
+async fn full_refresh_covers_pull_list_and_records_completion() {
+    let app = build_test_app().await;
+    let pulled = seed_cv_series(&app, "TWD", 2127, true).await;
+    let unpulled = seed_cv_series(&app, "Other", 3000, false).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .and(query_param("filter", "volume:2127"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(TWD_ISSUES_WITH_STORE_DATES))
+        .expect(1)
+        .mount(&app.cv_server)
+        .await;
+    // Any other volume fetch (the unpulled series) lands here and fails
+    // the test on drop. Lower priority than the specific mock above.
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(404))
+        .with_priority(10)
+        .expect(0)
+        .mount(&app.cv_server)
+        .await;
+
+    assert!(app.state.refresh.try_start_full());
+    assert!(!app.state.refresh.try_start_full(), "already running");
+    wait_for_full_refresh(&app).await;
+
+    let issues = issue_repo::list_by_series(&app.state.db, pulled)
+        .await
+        .unwrap();
+    let dates: Vec<_> = issues.iter().map(|i| i.store_date.as_deref()).collect();
+    assert_eq!(dates, vec![Some("2003-10-01"), Some("2003-11-05")]);
+    assert!(issue_repo::list_by_series(&app.state.db, unpulled)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(longbox_web::refresh::last_full_refresh_at(&app.state.db)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// Due when it never ran or ran over a week ago; not due inside a week.
+#[tokio::test]
+async fn full_refresh_is_due_when_never_run_or_a_week_old() {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    for (stored, due) in [
+        (None, true),
+        (Some(now - 60), false),
+        (Some(now - 8 * 86_400), true),
+    ] {
+        let app = build_test_app().await;
+        if let Some(t) = stored {
+            longbox_db::settings_repo::set(
+                &app.state.db,
+                longbox_db::settings_repo::KEY_LAST_FULL_REFRESH_AT,
+                &t.to_string(),
+            )
+            .await
+            .unwrap();
+        }
+        app.state.refresh.start_full_if_due().await;
+        // try_start_full flips `running` before spawning, and nothing has
+        // yielded since, so this reads the decision, not the outcome.
+        assert_eq!(app.state.refresh.progress().is_some(), due, "{stored:?}");
+        wait_for_full_refresh(&app).await;
+    }
+}
+
+/// Refresh-all starts the full pass (202), 409s with its own code while
+/// it runs, and the status route reports progress, then completion.
+/// Bodies are checked, not just codes: the SPA fallback 200s unknown
+/// /api paths.
+#[tokio::test]
+async fn refresh_all_starts_once_and_reports_progress() {
+    let app = build_test_app().await;
+    seed_cv_series(&app, "TWD", 2127, true).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(TWD_ISSUES_WITH_STORE_DATES)
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .mount(&app.cv_server)
+        .await;
+
+    let idle = response_json(
+        app.request(empty_request("GET", "/api/refresh/status"))
+            .await,
+    )
+    .await;
+    assert_eq!(idle["running"], false);
+    assert!(idle["last_full_refresh_at"].is_null());
+
+    let resp = app.request(empty_request("POST", "/api/refresh/all")).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let resp = app.request(empty_request("POST", "/api/refresh/all")).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(resp).await["error"]["code"],
+        "conflict.refresh_running"
+    );
+
+    // `total` lands once the task has loaded its targets (status reads
+    // 0 of 0 for that instant; the UI shows "Starting").
+    let mut running = serde_json::Value::Null;
+    for _ in 0..200 {
+        running = response_json(
+            app.request(empty_request("GET", "/api/refresh/status"))
+                .await,
+        )
+        .await;
+        if running["total"] == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(running["running"], true);
+    assert_eq!(running["total"], 1);
+
+    wait_for_full_refresh(&app).await;
+    let done = response_json(
+        app.request(empty_request("GET", "/api/refresh/status"))
+            .await,
+    )
+    .await;
+    assert_eq!(done["running"], false);
+    assert!(done["done"].is_null());
+    assert!(done["last_full_refresh_at"].as_i64().unwrap() > 0);
+}
+
+/// A pass where every series failed (CV down, bad key) doesn't count as
+/// done: no completion timestamp, so the next sweep tries again.
+#[tokio::test]
+async fn full_refresh_with_every_fetch_failing_records_no_completion() {
+    let app = build_test_app().await;
+    seed_cv_series(&app, "TWD", 2127, true).await;
+    Mock::given(method("GET"))
+        .and(path("/issues/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&app.cv_server)
+        .await;
+
+    assert!(app.state.refresh.try_start_full());
+    wait_for_full_refresh(&app).await;
+    assert!(longbox_web::refresh::last_full_refresh_at(&app.state.db)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// A hand-edited absurd window clamps to a year instead of overflowing
+/// date arithmetic, which would panic inside the sweep and kill the pull
+/// scheduler.
+#[tokio::test]
+async fn delta_window_clamps_absurd_settings() {
+    let app = build_test_app().await;
+    longbox_db::settings_repo::set(
+        &app.state.db,
+        longbox_db::settings_repo::KEY_REFRESH_DELTA_DAYS_BACK,
+        "999999999",
+    )
+    .await
+    .unwrap();
+    mount_cv_calendar_any(&app, "[]").await;
+
+    longbox_web::refresh::run_delta(&refresh_deps(&app)).await;
+    let today = time::OffsetDateTime::now_utc().date();
+    let requests = app.cv_server.received_requests().await.unwrap();
+    let filter = requests[0]
+        .url
+        .query_pairs()
+        .find(|(k, _)| k == "filter")
+        .unwrap()
+        .1
+        .into_owned();
+    assert!(
+        filter.starts_with(&format!(
+            "store_date:{}|",
+            today - time::Duration::days(365)
+        )),
+        "{filter}"
+    );
 }

@@ -306,6 +306,7 @@ async fn common_seed_three_files(app: &TestApp) -> (i64, i64, i64) {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -466,6 +467,7 @@ async fn same_size_different_bytes_produce_different_digests() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -818,6 +820,7 @@ async fn identical_content_under_two_series_is_flagged() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -1065,6 +1068,7 @@ async fn seed_bound(app: &TestApp, series_id: i64, number: &str, rel: &str) -> i
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1442,6 +1446,7 @@ async fn seed_bound_issue(app: &TestApp, series_id: i64, number: &str) -> i64 {
             cover_date: Some("2025-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

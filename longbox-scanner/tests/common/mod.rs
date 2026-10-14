@@ -132,6 +132,7 @@ pub async fn seed_walking_dead(pool: &Pool) -> SeriesRow {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await

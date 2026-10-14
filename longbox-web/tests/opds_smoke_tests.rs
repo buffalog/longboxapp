@@ -121,6 +121,7 @@ async fn full_catalog_walkthrough() {
             cover_date: Some("2012-03-14".to_owned()),
             summary: Some("Two soldiers from opposite sides.".to_owned()),
             cover_url: Some(format!("{}/cover.jpg", cdn.uri())),
+            store_date: None,
         },
     )
     .await

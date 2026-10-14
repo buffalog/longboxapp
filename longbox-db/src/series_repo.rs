@@ -394,15 +394,16 @@ where
 /// surface needs. Single JOIN'd query — no N+1.
 ///
 /// Issue-status taxonomy (all **derived** — there is no `status` column on
-/// `issues`; an issue's state is computed from its files + `cover_date`):
+/// `issues`; an issue's state is computed from its files + its effective
+/// release date `COALESCE(store_date, cover_date)`, a full `YYYY-MM-DD`):
 ///   - **Available** = `owned_count`            (has an owned, present file)
 ///   - **Solicited** = `solicited_count`        (no owned file AND
-///     `cover_date >= today` — future)
+///     effective date `>= today` — future)
 ///   - **Missing**   = `(total - solicited) - owned`  (released but not owned;
 ///     a derived render-time state)
 ///     The series-card badge denominator is `available = total - solicited`.
-///     "Solicited" keys off `cover_date` (the only date stored per issue), not
-///     the on-sale `store_date` — see `SeriesCard.svelte` for the caveat.
+///     The effective date prefers CV's on-sale `store_date`; `cover_date`
+///     (1-2 months later) is the fallback for issues CV never dated.
 ///
 /// There is no "finished/ended" signal here yet: ComicVine carries none,
 /// and the Metron `status` (Completed | Cancelled) that would unlock the
@@ -420,7 +421,7 @@ pub struct SeriesWithCounts {
     pub unmatched_count: i64,
     pub missing_count: i64,
     /// Subset of `missing_count`: issues with no present owned file whose
-    /// `cover_date` is today or later — i.e. solicited / pre-release. Lets
+    /// effective release date is today or later — i.e. solicited / pre-release. Lets
     /// the UI treat "owns everything that has shipped" as a green complete
     /// state rather than an orange deficit.
     pub solicited_count: i64,
@@ -475,8 +476,8 @@ where
                    AND f2.status = 'owned'
                    AND f2.is_present = 1
                )
-               AND i.cover_date IS NOT NULL
-               AND i.cover_date >= date('now')
+               AND length(COALESCE(i.store_date, i.cover_date)) = 10
+               AND COALESCE(i.store_date, i.cover_date) >= date('now')
                THEN i.id END) AS "solicited_count!: i64"
            FROM series s
            LEFT JOIN issues i ON i.series_id = s.id
@@ -562,8 +563,8 @@ where
                    AND f2.status = 'owned'
                    AND f2.is_present = 1
                )
-               AND i.cover_date IS NOT NULL
-               AND i.cover_date >= date('now')
+               AND length(COALESCE(i.store_date, i.cover_date)) = 10
+               AND COALESCE(i.store_date, i.cover_date) >= date('now')
                THEN i.id END) AS "solicited_count!: i64"
            FROM series s
            LEFT JOIN issues i ON i.series_id = s.id

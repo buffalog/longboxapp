@@ -44,6 +44,7 @@ async fn seed(pool: &SqlitePool) -> (i64, i64, i64) {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -506,6 +507,7 @@ async fn upsert_imported_changed_issue_bumps_matched_at() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -902,6 +904,7 @@ async fn unlink_by_series_reaches_files_outside_the_series_folder() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

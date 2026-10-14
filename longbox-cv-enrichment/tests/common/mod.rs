@@ -49,6 +49,7 @@ pub async fn seed_shallow_series_with_issues(
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await

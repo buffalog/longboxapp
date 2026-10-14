@@ -38,8 +38,8 @@ export interface SeriesWithCounts extends Series {
   ignored_count: number;
   unmatched_count: number;
   missing_count: number;
-  /// Subset of `missing_count`: issues whose `cover_date` is today or
-  /// later. UI treats `available = total_count - solicited_count` as the
+  /// Subset of `missing_count`: issues whose release date (`store_date`,
+  /// else `cover_date`) is today or later. UI treats `available = total_count - solicited_count` as the
   /// denominator so "owns everything that has shipped" reads as complete
   /// rather than as a deficit.
   solicited_count: number;
@@ -59,6 +59,8 @@ export interface Issue {
   number: string;
   title: string | null;
   cover_date: string | null;
+  /** CV on-sale date; drives solicited/missing ahead of `cover_date`. */
+  store_date: string | null;
   summary: string | null;
   cover_url: string | null;
   created_at: string;

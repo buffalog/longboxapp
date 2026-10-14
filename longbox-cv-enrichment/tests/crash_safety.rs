@@ -79,6 +79,7 @@ async fn orphan_numbers_post_upsert_excludes_matched_rows() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await
@@ -225,6 +226,7 @@ async fn cancelled_mid_transaction_rolls_back_outcome_with_data() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -328,6 +330,7 @@ async fn committed_enrichment_is_durable() {
                 cover_date: None,
                 summary: None,
                 cover_url: None,
+                store_date: None,
             },
         )
         .await

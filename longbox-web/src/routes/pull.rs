@@ -22,6 +22,8 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pull/check", post(check_now))
+        .route("/refresh/all", post(refresh_all))
+        .route("/refresh/status", get(refresh_status))
         .route("/pull/search/:series_id", post(search_now))
         .route(
             "/pull/search/:series_id/issue/:issue_id",
@@ -38,14 +40,17 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Rust port of the frontend `isSolicited` predicate. A "solicited"
-/// issue is one with a fully-specified `YYYY-MM-DD` cover_date on or
-/// after `today` — it hasn't shipped yet, so the pull engine has nothing
+/// issue is one whose effective release date
+/// (`COALESCE(store_date, cover_date)`) is a fully-specified `YYYY-MM-DD`
+/// on or after `today` — it hasn't shipped yet, so the pull engine has nothing
 /// to find. Anything that isn't a clean `YYYY-MM-DD` (null, partial,
 /// garbage) is treated as NOT solicited — same lenient classification
 /// as the frontend, so a back-end skip on Search-all and a front-end
 /// "this looks searchable" badge can't diverge.
-fn is_solicited(cover_date: Option<&str>, today: time::Date) -> bool {
-    let Some(raw) = cover_date else { return false };
+fn is_solicited(release_date: Option<&str>, today: time::Date) -> bool {
+    let Some(raw) = release_date else {
+        return false;
+    };
     if raw.len() != 10 {
         return false;
     }
@@ -69,6 +74,45 @@ async fn check_now(State(state): State<AppState>) -> Result<StatusCode, ApiError
             details: serde_json::Value::Null,
         })
     }
+}
+
+/// Start a full catalog refresh (every pull-list series' issue list from
+/// CV). Its own task, not a sweep: `202` when started, `409` only when a
+/// full refresh is already running. A running pull sweep doesn't block it.
+async fn refresh_all(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    if state.refresh.try_start_full() {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::Conflict {
+            code: "conflict.refresh_running",
+            message: "A full catalog refresh is already running.".into(),
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshStatusResponse {
+    running: bool,
+    /// Series done / total in the running pass; `null` when idle.
+    done: Option<usize>,
+    total: Option<usize>,
+    /// Unix seconds the last full pass completed; `null` if never.
+    last_full_refresh_at: Option<i64>,
+}
+
+/// Full catalog refresh progress and last completion, for the pull-list page.
+async fn refresh_status(
+    State(state): State<AppState>,
+) -> Result<Json<RefreshStatusResponse>, ApiError> {
+    let progress = state.refresh.progress();
+    let last = crate::refresh::last_full_refresh_at(&state.db).await?;
+    Ok(Json(RefreshStatusResponse {
+        running: progress.is_some(),
+        done: progress.map(|p| p.0),
+        total: progress.map(|p| p.1),
+        last_full_refresh_at: last.map(|t| t.unix_timestamp()),
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -179,7 +223,7 @@ async fn search_issue_now(
 struct SearchAllMissingResponse {
     /// Issues for which a per-issue search was dispatched.
     searched: usize,
-    /// Issues whose cover_date is today or later — skipped because the
+    /// Issues whose effective release date is today or later — skipped because the
     /// release hasn't happened yet, so the indexer call would be pure
     /// noise. Matches the frontend's `isSolicited` predicate exactly.
     skipped_solicited: usize,
@@ -201,12 +245,12 @@ struct SearchAllMissingResponse {
 async fn search_all_missing(State(state): State<AppState>) -> Result<Response, ApiError> {
     // Same "missing" predicate as routes/missing.rs and stats.rs — no
     // owned, present file matches this issue. We only need
-    // (series_id, issue_id, cover_date); skip the join with the
+    // (series_id, issue_id, release date); skip the join with the
     // series table because the per-issue search call doesn't use it.
     let rows = sqlx::query!(
         r#"SELECT i.id AS "issue_id!: i64",
                   i.series_id AS "series_id!: i64",
-                  i.cover_date
+                  COALESCE(i.store_date, i.cover_date) AS "release_date?: String"
            FROM issues i
            WHERE NOT EXISTS (
                SELECT 1 FROM files f
@@ -226,7 +270,7 @@ async fn search_all_missing(State(state): State<AppState>) -> Result<Response, A
     let mut searched = 0usize;
     let mut skipped_solicited = 0usize;
     for row in rows {
-        if is_solicited(row.cover_date.as_deref(), today) {
+        if is_solicited(row.release_date.as_deref(), today) {
             skipped_solicited += 1;
             continue;
         }

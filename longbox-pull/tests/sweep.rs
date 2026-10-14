@@ -58,6 +58,7 @@ async fn seed_catalog() -> (Pool, i64, i64) {
             cover_date: Some("2012-07-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -456,6 +457,7 @@ async fn sweep_single_issue_404s_when_issue_belongs_to_different_series() {
             cover_date: Some("2024-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1495,4 +1497,33 @@ async fn unrecognised_content_end_to_end_is_not_condemned() {
         attempts[0].status, "submitted",
         "the release must not be suppressed — the comic may be inside the rar"
     );
+}
+
+/// The injected pre-sweep hook (the web layer's catalog delta refresh)
+/// runs on every triggered sweep.
+#[tokio::test]
+async fn pre_sweep_hook_runs_on_a_triggered_sweep() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db = longbox_db::open(":memory:").await.unwrap();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let hook: longbox_pull::PreSweep = {
+        let ran = Arc::clone(&ran);
+        Arc::new(move || {
+            let ran = Arc::clone(&ran);
+            Box::pin(async move {
+                ran.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    };
+    let handle = longbox_pull::start(longbox_pull::PullConfig::default(), db, Some(hook));
+    assert!(handle.request_sweep());
+    for _ in 0..500 {
+        if ran.load(Ordering::SeqCst) == 1 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("pre-sweep hook never ran");
 }

@@ -71,6 +71,7 @@ async fn seed_basic_fixture() -> Fixture {
             cover_date: Some("2012-03-14".into()),
             summary: Some("<p>Galactic war epic.</p>".into()),
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -174,6 +175,7 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
             cover_date: Some("2012-04-14".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -387,6 +389,7 @@ async fn tier1_handles_bare_folder_name_with_no_year() {
             cover_date: Some("2006-02-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1059,6 +1062,7 @@ async fn ambiguous_match_is_never_trusted_through_by_a_pull_attempt() {
             cover_date: Some("2012-04-11".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -1181,6 +1185,7 @@ async fn ambiguous_folder_match_is_never_trusted_through_by_a_pull_attempt() {
             cover_date: Some("2024-01-10".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

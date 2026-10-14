@@ -15,6 +15,7 @@ pub mod frontend;
 pub mod integrity_scan;
 pub mod metron_link;
 pub(crate) mod pathsafe;
+pub mod refresh;
 pub mod routes;
 pub mod state;
 pub mod tracing_setup;

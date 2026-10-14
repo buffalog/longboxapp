@@ -8,7 +8,7 @@
   import { ApiError } from '$lib/api/client';
   import { searchAllMissing, type MissingIssue, type MissingSort } from '$lib/api/missing';
   import { searchSeriesNow } from '$lib/api/pull';
-  import { isSolicited } from '$lib/solicitation';
+  import { isSolicited, releaseDate } from '$lib/solicitation';
   import { toast } from '$lib/stores/toast.svelte';
 
   let { data } = $props();
@@ -42,16 +42,18 @@
     void goto(url.pathname + url.search, { replaceState: true });
   }
 
-  // "Missing for X" — best-effort age from cover_date. Solicited issues
-  // (cover_date today-or-future, not shipped yet) show "Solicited"
-  // rather than a nonsense negative age — via the shared `isSolicited`
-  // predicate, the same one /series/[id] uses. Null cover_date → "—".
-  function missingAge(coverDate: string | null): string {
-    if (!coverDate) return '—';
-    if (isSolicited(coverDate)) return 'Solicited';
-    const cover = Date.parse(coverDate + 'T00:00:00Z');
-    if (Number.isNaN(cover)) return '—';
-    const diffMs = Date.now() - cover;
+  // "Missing for X" — best-effort age from the release date (store_date,
+  // else cover_date). Solicited issues (release date today-or-future,
+  // not shipped yet) show "Solicited" rather than a nonsense negative
+  // age — via the shared `isSolicited` predicate, the same one
+  // /series/[id] uses. No release date → "—".
+  function missingAge(m: MissingIssue): string {
+    const date = releaseDate(m);
+    if (!date) return '—';
+    if (isSolicited(m)) return 'Solicited';
+    const released = Date.parse(date + 'T00:00:00Z');
+    if (Number.isNaN(released)) return '—';
+    const diffMs = Date.now() - released;
     const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     if (days < 31) return `${days}d`;
     const months = Math.floor(days / 30);
@@ -77,10 +79,10 @@
   // subset renders as its own section at the bottom for visibility
   // without ever counting against "searchable."
   const actionableRows = $derived(
-    data.missing.missing.filter((m) => !isSolicited(m.cover_date))
+    data.missing.missing.filter((m) => !isSolicited(m))
   );
   const solicitedRows = $derived(
-    data.missing.missing.filter((m) => isSolicited(m.cover_date))
+    data.missing.missing.filter((m) => isSolicited(m))
   );
 
   // Map-based grouper keyed by series.id — robust to any sort order in
@@ -167,9 +169,11 @@
   <h1 class="text-2xl font-bold">Missing</h1>
   <div class="flex items-center gap-3">
     <span class="text-sm text-slate-500">
-      {data.missing.total} missing issue{data.missing.total === 1 ? '' : 's'}
+      <!-- Shipped-only count, same number as the dashboard's missing tile;
+           solicited issues are listed separately below. -->
+      {actionableRows.length} missing issue{actionableRows.length === 1 ? '' : 's'}
       {#if solicitedRows.length > 0}
-        <span class="text-slate-400">({solicitedRows.length} solicited)</span>
+        <span class="text-slate-400">(+{solicitedRows.length} solicited)</span>
       {/if}
     </span>
     {#if actionableRows.length > 0}
@@ -219,7 +223,7 @@
         onchange={(e) => setSort((e.target as HTMLSelectElement).value as MissingSort)}
       >
         <option value="series">Series</option>
-        <option value="cover_date">Cover date</option>
+        <option value="cover_date">Release date</option>
       </select>
     </label>
   </div>
@@ -250,10 +254,10 @@
                   <span class="font-mono text-slate-500">#{m.number}</span>
                 </div>
                 <div class="truncate text-xs text-slate-500">
-                  {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
+                  {m.title ?? '—'}{releaseDate(m) ? ` · ${releaseDate(m)}` : ''}
                 </div>
               </div>
-              <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m.cover_date)}</span>
+              <span class="whitespace-nowrap text-xs text-slate-500">{missingAge(m)}</span>
             </a>
             <button
               type="button"
@@ -314,10 +318,10 @@
                   <span class="w-16 font-mono text-sm">#{m.number}</span>
                   <span class="min-w-0 flex-1 truncate text-sm">{m.title ?? '—'}</span>
                   <span class="w-24 whitespace-nowrap text-xs text-slate-500">
-                    {m.cover_date ?? '—'}
+                    {releaseDate(m) ?? '—'}
                   </span>
                   <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
-                    {missingAge(m.cover_date)}
+                    {missingAge(m)}
                   </span>
                   <button
                     type="button"
@@ -382,7 +386,7 @@
                     <span class="font-mono text-slate-500">#{m.number}</span>
                   </div>
                   <div class="truncate text-xs text-slate-500">
-                    {m.title ?? '—'}{m.cover_date ? ` · ${m.cover_date}` : ''}
+                    {m.title ?? '—'}{releaseDate(m) ? ` · ${releaseDate(m)}` : ''}
                   </div>
                 </div>
                 <span class="whitespace-nowrap text-xs text-slate-500">Solicited</span>
@@ -415,7 +419,7 @@
                     <span class="w-16 font-mono text-sm">#{m.number}</span>
                     <span class="min-w-0 flex-1 truncate text-sm">{m.title ?? '—'}</span>
                     <span class="w-24 whitespace-nowrap text-xs text-slate-500">
-                      {m.cover_date ?? '—'}
+                      {releaseDate(m) ?? '—'}
                     </span>
                     <span class="w-16 whitespace-nowrap text-right text-xs text-slate-500">
                       Solicited

@@ -42,6 +42,7 @@ async fn seed_owned_issue(pool: &sqlx::SqlitePool, cv_issue_id: i64) -> i64 {
             cover_date: Some("2014-01-01".into()),
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -162,6 +163,7 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await
@@ -225,6 +227,7 @@ async fn list_issues_needing_credits_filters_owned_unfetched_with_cv_id() {
             cover_date: None,
             summary: None,
             cover_url: None,
+            store_date: None,
         },
     )
     .await

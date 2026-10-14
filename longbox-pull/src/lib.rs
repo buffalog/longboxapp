@@ -12,8 +12,10 @@
 //! parks in its shared state for the manual "Check now" trigger.
 //!
 //! Crate boundary — like Phase B, the pull engine never talks to
-//! ComicVine. It acts only on issues already in the catalog; see
-//! [`engine`] for the consequence and the intended discovery path.
+//! ComicVine. It acts only on issues already in the catalog. Discovery
+//! (getting newly published issues INTO the catalog) is the web layer's
+//! catalog refresh, which the scheduler runs through the injected
+//! [`PreSweep`] hook at the top of every sweep.
 
 mod config;
 mod dispatch;
@@ -26,12 +28,12 @@ mod search;
 pub use config::PullConfig;
 pub use engine::{sweep, sweep_single_issue, sweep_single_series, SweepSummary};
 pub use error::PullError;
-pub use schedule::PullHandle;
+pub use schedule::{PreSweep, PullHandle};
 pub use search::{fire_issue_search, PullSearchHandle};
 
 /// Start the pull engine: spawn the daily scheduler task and return a
 /// handle for manual sweep triggering. Called once at web-layer boot;
 /// the scheduler task runs for the lifetime of the process.
-pub fn start(config: PullConfig, db: longbox_db::Pool) -> PullHandle {
-    schedule::spawn(config, db)
+pub fn start(config: PullConfig, db: longbox_db::Pool, pre_sweep: Option<PreSweep>) -> PullHandle {
+    schedule::spawn(config, db, pre_sweep)
 }

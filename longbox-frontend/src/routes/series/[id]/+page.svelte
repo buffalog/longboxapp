@@ -87,7 +87,7 @@
   // when there's at least one such issue — otherwise the button
   // would no-match every call and clutter the header.
   const hasMissingIssues = $derived(
-    data.series.issues.some((i) => !i.file && !isSolicited(i.cover_date))
+    data.series.issues.some((i) => !i.file && !isSolicited(i))
   );
 
   async function handleRefresh(): Promise<void> {
