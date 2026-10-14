@@ -387,7 +387,9 @@ fn parse_retry_after(resp: &Response) -> Duration {
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+        // Capped at an hour: an absurd header would overflow the pause's
+        // Instant math and kill the calling task.
+        .map(|s| Duration::from_secs(s.min(3600)))
         .unwrap_or_else(|| Duration::from_secs(60))
 }
 

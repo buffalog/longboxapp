@@ -8625,7 +8625,8 @@ async fn full_refresh_is_due_when_never_run_or_a_week_old() {
 }
 
 /// Refresh-all starts the full pass (202), 409s with its own code while
-/// it runs, and the status route reports progress, then completion.
+/// it runs, and the status route reports progress, then completion. The
+/// coordinator's full-refresh flag tracks the pass.
 /// Bodies are checked, not just codes: the SPA fallback 200s unknown
 /// /api paths.
 #[tokio::test]
@@ -8675,8 +8676,13 @@ async fn refresh_all_starts_once_and_reports_progress() {
     }
     assert_eq!(running["running"], true);
     assert_eq!(running["total"], 1);
+    // The credits resolver holds off while the pass runs, and resumes
+    // after it.
+    let coord = app.state.cv.coordinator();
+    assert!(coord.full_refresh_running());
 
     wait_for_full_refresh(&app).await;
+    assert!(!coord.full_refresh_running());
     let done = response_json(
         app.request(empty_request("GET", "/api/refresh/status"))
             .await,

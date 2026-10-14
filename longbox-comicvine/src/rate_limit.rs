@@ -130,7 +130,7 @@ mod tests {
         }
         assert!(
             elapsed < Duration::from_millis(500),
-            "should bail quickly when wait exceeds max_wait_for_slot, got {elapsed:?}"
+            "should bail quickly when wait exceeds max_wait, got {elapsed:?}"
         );
     }
 

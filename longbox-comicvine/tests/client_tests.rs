@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use longbox_comicvine::{
-    ComicVineClient, ComicVineClientConfig, CvCoordinator, CvError, CvLanesConfig,
+    ComicVineClient, ComicVineClientConfig, CvCoordinator, CvError, CvLanesConfig, Lane,
 };
 use pretty_assertions::assert_eq;
 use wiremock::matchers::{method, path, query_param};
@@ -327,6 +327,52 @@ async fn rate_limited_429_twice_surfaces_as_rate_limited() {
     let client = client_for(&server);
     let err = client.search_volumes("walking dead").await.unwrap_err();
     assert!(matches!(err, CvError::RateLimited { .. }), "got {err:?}");
+}
+
+/// A real 429 means our budget math is wrong, so it stops BOTH lanes: a
+/// background request sent while an interactive call sits out a 2s
+/// Retry-After waits for that pause, not just its own bucket.
+#[tokio::test]
+async fn a_429_on_one_lane_pauses_the_other() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "2"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(fixture("search_walking_dead.json")),
+        )
+        .mount(&server)
+        .await;
+
+    let interactive = client_for(&server);
+    let background = interactive.with_lane(Lane::Background);
+    let start = std::time::Instant::now();
+    let (i, b) = tokio::join!(interactive.search_volumes("walking dead"), async {
+        // Let the interactive request receive its 429 first.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        background.search_volumes("walking dead").await
+    });
+    // The 2s pause is longer than the test's 1s interactive max wait: fail fast.
+    assert!(
+        matches!(
+            i,
+            Err(CvError::RateLimited {
+                retry_after_seconds: 2
+            })
+        ),
+        "got {i:?}"
+    );
+    b.expect("background waits the pause out, then succeeds");
+    assert!(
+        start.elapsed() >= Duration::from_millis(1900),
+        "background didn't wait for the pause: {:?}",
+        start.elapsed()
+    );
 }
 
 // ---------- 5xx / timeout / unparseable ----------

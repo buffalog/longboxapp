@@ -201,8 +201,10 @@ impl RefreshHandle {
             struct Reset<'a>(&'a Inner);
             impl Drop for Reset<'_> {
                 fn drop(&mut self) {
-                    self.0.running.store(false, Ordering::SeqCst);
+                    // Flag first: once `running` clears, a new pass may
+                    // start and set it again, and we mustn't clobber that.
                     self.0.deps.bg.coordinator().set_full_refresh_running(false);
+                    self.0.running.store(false, Ordering::SeqCst);
                 }
             }
             let _reset = Reset(&inner);

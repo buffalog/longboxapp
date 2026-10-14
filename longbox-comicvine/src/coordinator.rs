@@ -53,6 +53,9 @@ pub enum Lane {
 pub struct CvLanesConfig {
     pub interactive_rate_per_hour: u32,
     pub interactive_burst: u32,
+    /// Must exceed one token period (3600 / rate seconds), or a request
+    /// arriving after the burst is spent can never get a token in time.
+    /// [`Self::interactive_max_wait_for`] derives it.
     pub interactive_max_wait: Duration,
     pub background_rate_per_hour: u32,
     /// How long background requests hold off after an interactive one.
@@ -68,11 +71,19 @@ impl Default for CvLanesConfig {
         Self {
             interactive_rate_per_hour: 100,
             interactive_burst: 10,
-            interactive_max_wait: Duration::from_secs(10),
+            interactive_max_wait: Self::interactive_max_wait_for(100),
             background_rate_per_hour: 80,
             background_yield: Duration::from_secs(300),
             min_spacing: Duration::from_secs(1),
         }
+    }
+}
+
+impl CvLanesConfig {
+    /// One token period plus 10s: the next token is always reachable,
+    /// while a long 429 pause still fails fast. 46s at 100/h.
+    pub fn interactive_max_wait_for(rate_per_hour: u32) -> Duration {
+        Duration::from_secs(3600 / u64::from(rate_per_hour.max(1)) + 10)
     }
 }
 
@@ -325,5 +336,162 @@ impl CallCounter {
             limit_per_hour,
             window_started_at_unix,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Huge buckets, no pacing, no yield: tests opt into one mechanism at a
+    /// time. (Governor reads the real clock, so tests that run under
+    /// tokio's paused clock must never actually wait on a bucket.)
+    fn open() -> CvLanesConfig {
+        CvLanesConfig {
+            interactive_rate_per_hour: 360_000,
+            interactive_burst: 1_000,
+            interactive_max_wait: Duration::from_secs(10),
+            background_rate_per_hour: 360_000,
+            background_yield: Duration::ZERO,
+            min_spacing: Duration::ZERO,
+        }
+    }
+
+    /// Two interactive tokens, `BACKGROUND_BURST` background ones, ~no refill.
+    fn tight() -> CvCoordinator {
+        CvCoordinator::new(CvLanesConfig {
+            interactive_rate_per_hour: 1,
+            interactive_burst: 2,
+            interactive_max_wait: Duration::from_millis(50),
+            background_rate_per_hour: 1,
+            ..open()
+        })
+    }
+
+    async fn blocks(c: &CvCoordinator, lane: Lane) -> bool {
+        tokio::time::timeout(Duration::from_millis(100), c.acquire(lane))
+            .await
+            .is_err()
+    }
+
+    #[tokio::test]
+    async fn a_drained_background_lane_does_not_slow_interactive() {
+        let c = tight();
+        for _ in 0..BACKGROUND_BURST {
+            c.acquire(Lane::Background).await.unwrap();
+        }
+        assert!(
+            blocks(&c, Lane::Background).await,
+            "background bucket should be empty"
+        );
+
+        c.acquire(Lane::Interactive).await.unwrap();
+        c.acquire(Lane::Interactive).await.unwrap();
+        let err = c.acquire(Lane::Interactive).await.unwrap_err();
+        assert!(matches!(err, CvError::RateLimited { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn delta_spends_the_interactive_bucket_not_the_background_one() {
+        let c = tight();
+        c.acquire(Lane::Background).await.unwrap();
+        c.acquire(Lane::Background).await.unwrap();
+        c.acquire(Lane::Delta).await.unwrap();
+        c.acquire(Lane::Delta).await.unwrap();
+        // Interactive is now empty too, and delta waits rather than failing.
+        assert!(blocks(&c, Lane::Delta).await);
+        assert!(c.acquire(Lane::Interactive).await.is_err());
+        assert_eq!(c.snapshot().interactive.count, 2);
+        assert_eq!(c.snapshot().background.count, 2);
+    }
+
+    /// The burst is spent; the next request must still get a token. A max
+    /// wait shorter than one token period fails this every time.
+    #[tokio::test]
+    async fn an_interactive_request_after_the_burst_still_gets_a_token() {
+        for rate in [1, 80, 100, 180, 3600] {
+            assert!(
+                CvLanesConfig::interactive_max_wait_for(rate)
+                    > Duration::from_secs(3600 / u64::from(rate)),
+                "rate {rate}"
+            );
+        }
+        let c = CvCoordinator::new(CvLanesConfig {
+            interactive_rate_per_hour: 3600, // one token a second
+            interactive_burst: 2,
+            interactive_max_wait: CvLanesConfig::interactive_max_wait_for(3600),
+            ..open()
+        });
+        for _ in 0..3 {
+            c.acquire(Lane::Interactive).await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_yields_to_interactive_activity_but_delta_does_not() {
+        let c = CvCoordinator::new(CvLanesConfig {
+            background_yield: Duration::from_secs(300),
+            ..open()
+        });
+
+        // Delta is not user activity: background isn't held off by it.
+        c.acquire(Lane::Delta).await.unwrap();
+        let t = Instant::now();
+        c.acquire(Lane::Background).await.unwrap();
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+
+        c.acquire(Lane::Interactive).await.unwrap();
+        assert!(c.snapshot().yielding_for > Duration::from_secs(299));
+
+        let t = Instant::now();
+        c.acquire(Lane::Delta).await.unwrap();
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "delta yielded: {:?}",
+            t.elapsed()
+        );
+
+        let t = Instant::now();
+        c.acquire(Lane::Background).await.unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(299), "{:?}", t.elapsed());
+        assert_eq!(c.snapshot().yielding_for, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_pause_holds_every_lane() {
+        let c = CvCoordinator::new(open());
+        c.pause(Duration::from_secs(30));
+        // A shorter pause never shortens one in force.
+        c.pause(Duration::from_secs(5));
+        assert!(c.snapshot().paused_for > Duration::from_secs(29));
+
+        // Longer than interactive's 10s max wait: fail fast with the real wait.
+        match c.acquire(Lane::Interactive).await.unwrap_err() {
+            CvError::RateLimited {
+                retry_after_seconds,
+            } => assert_eq!(retry_after_seconds, 30),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+
+        let t = Instant::now();
+        c.acquire(Lane::Delta).await.unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(29), "{:?}", t.elapsed());
+        // The pause is over; background goes straight out.
+        let t = Instant::now();
+        c.acquire(Lane::Background).await.unwrap();
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_pacer_spaces_requests_across_lanes() {
+        let c = CvCoordinator::new(CvLanesConfig {
+            min_spacing: Duration::from_secs(1),
+            ..open()
+        });
+        let t = Instant::now();
+        c.acquire(Lane::Interactive).await.unwrap();
+        c.acquire(Lane::Background).await.unwrap();
+        c.acquire(Lane::Delta).await.unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(2), "{:?}", t.elapsed());
     }
 }

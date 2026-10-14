@@ -110,15 +110,23 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
             lanes_default.background_rate_per_hour,
         )
         .await?,
+        // Capped at an hour: an absurd value would overflow Instant math.
         background_yield: Duration::from_secs(
             settings_repo::get_or_default(
                 &db,
                 settings_repo::KEY_CV_BACKGROUND_YIELD_SECONDS,
                 lanes_default.background_yield.as_secs(),
             )
-            .await?,
+            .await?
+            .min(3600),
         ),
         ..lanes_default
+    };
+    let lanes = CvLanesConfig {
+        interactive_max_wait: CvLanesConfig::interactive_max_wait_for(
+            lanes.interactive_rate_per_hour,
+        ),
+        ..lanes
     };
     info!(?lanes, "ComicVine lane budgets");
     let cv = ComicVineClient::new(
