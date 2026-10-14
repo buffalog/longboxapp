@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::stream::{self, StreamExt};
+use longbox_comicvine::ComicVineClient;
 use longbox_core::{normalize_title, IssueNumber};
 use longbox_db::{
     downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
@@ -188,7 +189,7 @@ async fn add(
         });
     }
 
-    let (inserted, _was_new) = add_or_get_from_cv(&state, body.cv_id).await?;
+    let (inserted, _was_new) = add_or_get_from_cv(&state, &state.cv, body.cv_id).await?;
 
     // Pre-create the on-disk series folder so the user can drop files
     // into it immediately without waiting for the next scan or for the
@@ -305,16 +306,21 @@ async fn spawn_auto_pull_search(
 /// The `bool` is `true` when this call inserted the series and its issues
 /// from a fresh ComicVine fetch; `false` when an existing series was
 /// returned untouched (no CV calls were made).
+///
+/// `cv` picks the lane: user-initiated callers pass `&state.cv`
+/// (interactive); the calendar's background resolver passes a
+/// background-lane handle.
 pub(crate) async fn add_or_get_from_cv(
     state: &AppState,
+    cv: &ComicVineClient,
     cv_volume_id: i64,
 ) -> Result<(SeriesRow, bool), ApiError> {
     if let Some(existing) = series_repo::find_by_cv_id(&state.db, cv_volume_id).await? {
         return Ok((existing, false));
     }
 
-    let volume = state.cv.fetch_volume(cv_volume_id).await?;
-    let cv_issues = state.cv.fetch_issues(cv_volume_id).await?;
+    let volume = cv.fetch_volume(cv_volume_id).await?;
+    let cv_issues = cv.fetch_issues(cv_volume_id).await?;
 
     let new_series = NewSeries {
         cv_id: Some(volume.cv_id),
@@ -655,11 +661,8 @@ async fn set_cv_id(
     // Fetch BEFORE any DB write. If CV is down or rate-limited the
     // user can retry without the catalog landing in a half-wiped
     // state.
-    // Use the unthrottled cv_direct client — this is a user-initiated
-    // interactive request; it must not queue behind the enrichment worker's
-    // 30-60s rate-limiter slot wait.
-    let volume = state.cv_direct.fetch_volume(body.cv_id).await?;
-    let cv_issues = state.cv_direct.fetch_issues(body.cv_id).await?;
+    let volume = state.cv.fetch_volume(body.cv_id).await?;
+    let cv_issues = state.cv.fetch_issues(body.cv_id).await?;
 
     let mut tx = state.db.begin().await.map_err(longbox_db::DbError::from)?;
 

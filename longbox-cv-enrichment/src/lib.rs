@@ -28,11 +28,10 @@
 //!    refuses when two candidates compete.
 //!
 //! **Background priority.** CV calls from the worker go through
-//! [`background::BackgroundCvClient`], a layered rate limiter that
-//! enforces 30s spacing on background callers in front of the
-//! shared 180/h limiter. Interactive callers (refresh, add, search)
-//! continue to use the bare client and get the original
-//! next-slot latency — they do not queue behind background tokens.
+//! [`background::BackgroundCvClient`], the background lane of the
+//! shared CV coordinator. It has its own bucket, so interactive
+//! callers (add, search, per-series refresh) never queue behind
+//! background tokens.
 
 pub mod background;
 pub mod config;

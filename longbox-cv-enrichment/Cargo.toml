@@ -13,7 +13,6 @@ workspace = true
 longbox-comicvine = { path = "../longbox-comicvine" }
 longbox-core = { path = "../longbox-core" }
 longbox-db = { path = "../longbox-db" }
-governor = "0.6"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 time = { version = "0.3", features = ["serde", "macros", "serde-human-readable"] }
 thiserror = "1"

@@ -68,8 +68,6 @@ pub const KEY_CV_ENRICHMENT_COUNT_WINDOW_YEAR_UNKNOWN: &str =
     "cv_enrichment_count_window_year_unknown";
 pub const KEY_CV_ENRICHMENT_DOMINANT_GAP: &str = "cv_enrichment_dominant_gap";
 pub const KEY_CV_ENRICHMENT_COOLDOWN_DAYS: &str = "cv_enrichment_cooldown_days";
-pub const KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS: &str =
-    "cv_enrichment_request_interval_seconds";
 /// Bounded-sample gate enforcing the 6c.3 observation step
 /// structurally. Worker stops after this many attempts per cycle;
 /// 0 disables the bound (full backlog).
@@ -147,6 +145,14 @@ pub const KEY_REFRESH_DELTA_DAYS_AHEAD: &str = "refresh_delta_days_ahead";
 /// Unix-seconds completion time of the last full catalog refresh. No
 /// row means it has never run, which triggers one at boot.
 pub const KEY_LAST_FULL_REFRESH_AT: &str = "last_full_refresh_at";
+
+/// ComicVine lane budgets (`longbox_comicvine::CvLanesConfig`). Read at
+/// boot; a change needs a restart.
+pub const KEY_CV_INTERACTIVE_RATE_PER_HOUR: &str = "cv_interactive_rate_per_hour";
+pub const KEY_CV_INTERACTIVE_BURST: &str = "cv_interactive_burst";
+pub const KEY_CV_BACKGROUND_RATE_PER_HOUR: &str = "cv_background_rate_per_hour";
+/// How long background CV work holds off after any interactive request.
+pub const KEY_CV_BACKGROUND_YIELD_SECONDS: &str = "cv_background_yield_seconds";
 
 pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
 where

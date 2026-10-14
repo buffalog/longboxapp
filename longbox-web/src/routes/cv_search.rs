@@ -27,7 +27,7 @@ struct RateLimitResponse {
 }
 
 async fn rate_limit(State(state): State<AppState>) -> Json<RateLimitResponse> {
-    let snap = state.cv.rate_limit_snapshot();
+    let snap = state.cv.coordinator().snapshot().interactive;
     Json(RateLimitResponse {
         count: snap.count,
         limit_per_hour: snap.limit_per_hour,

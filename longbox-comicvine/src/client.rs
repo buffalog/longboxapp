@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Client as HttpClient, Response, StatusCode};
@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use tracing::{debug, instrument, warn};
 use url::Url;
 
+use crate::coordinator::{CvCoordinator, Lane};
 use crate::error::{excerpt, CvError};
 use crate::models::{
     CvIssueCreditsRaw, CvIssueFull, CvPersonSearchItem, CvPersonVolumeCreditsRaw, CvResponse,
@@ -17,12 +18,10 @@ use crate::projection::{
     CvIssueDetail, CvPersonCredit, CvPersonSearchResult, CvVolumeCredit, CvVolumeDetail,
     SeriesSearchResult,
 };
-use crate::rate_limit::CvRateLimiter;
 
 const DEFAULT_BASE_URL: &str = "https://comicvine.gamespot.com/api/";
 const DEFAULT_USER_AGENT: &str = "longbox/0.1 (https://github.com/jeremyp/longbox)";
 const PAGE_LIMIT: u32 = 100;
-const BURST_CAPACITY: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct ComicVineClientConfig {
@@ -35,8 +34,6 @@ pub struct ComicVineClientConfig {
     /// retries and glibc resolver chains, dragging the enrichment
     /// worker's pace.
     pub connect_timeout: Duration,
-    pub rate_limit_per_hour: u32,
-    pub max_wait_for_slot: Duration,
     pub user_agent: String,
 }
 
@@ -47,92 +44,22 @@ impl Default for ComicVineClientConfig {
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(5),
-            rate_limit_per_hour: 180,
-            max_wait_for_slot: Duration::from_secs(60),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
         }
     }
 }
 
-/// Snapshot of the per-hour call counter — what the `/api/cv/rate-limit`
-/// endpoint reflects up to the frontend. `count` is the number of
-/// successful `acquire()` calls inside the current sliding window;
-/// `limit_per_hour` is the configured cap; `window_started_at` is the
-/// unix-second when the current window opened (first call after the
-/// previous window expired, or process boot for the very first call).
-#[derive(Debug, Clone, Copy)]
-pub struct CvRateLimitSnapshot {
-    pub count: u32,
-    pub limit_per_hour: u32,
-    pub window_started_at_unix: i64,
-}
-
-/// Sliding-window counter for "calls made in the last hour-ish."
-/// Pragmatic implementation: a single atomic counter + a window-start
-/// timestamp. Rolls over when the window expires on the next
-/// `consume` call. Not strictly a 60-minute trailing window — closer
-/// to "since the last roll-over" — but plenty accurate for a UI
-/// chip.
-struct CallCounter {
-    count: AtomicU32,
-    window_started_at: AtomicI64,
-}
-
-impl CallCounter {
-    const WINDOW_SECS: i64 = 3600;
-
-    fn new() -> Self {
-        Self {
-            count: AtomicU32::new(0),
-            window_started_at: AtomicI64::new(0),
-        }
-    }
-
-    fn now_unix_secs() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-            .unwrap_or(0)
-    }
-
-    /// Increment, rolling the window if it has expired. The atomic
-    /// ordering is loose because the counter is advisory — strict
-    /// linearizability between concurrent increments isn't worth the
-    /// fence overhead for a UI display.
-    fn consume(&self) {
-        let now = Self::now_unix_secs();
-        let start = self.window_started_at.load(Ordering::Acquire);
-        if start == 0 || now - start >= Self::WINDOW_SECS {
-            self.window_started_at.store(now, Ordering::Release);
-            self.count.store(1, Ordering::Release);
-        } else {
-            self.count.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    fn snapshot(&self, limit_per_hour: u32) -> CvRateLimitSnapshot {
-        let now = Self::now_unix_secs();
-        let start = self.window_started_at.load(Ordering::Acquire);
-        let (count, window_started_at_unix) = if start == 0 || now - start >= Self::WINDOW_SECS {
-            (0, now)
-        } else {
-            (self.count.load(Ordering::Acquire), start)
-        };
-        CvRateLimitSnapshot {
-            count,
-            limit_per_hour,
-            window_started_at_unix,
-        }
-    }
-}
-
+/// A ComicVine client handle bound to one [`Lane`]. Cheap to clone; every
+/// clone shares the HTTP pool and the [`CvCoordinator`], so all handles in
+/// the process spend one set of budgets. Use [`Self::with_lane`] to get a
+/// handle on another lane.
+#[derive(Clone)]
 pub struct ComicVineClient {
     http: HttpClient,
     base_url: Url,
     api_key: String,
-    limiter: CvRateLimiter,
-    calls: CallCounter,
-    rate_limit_per_hour: u32,
+    coord: Arc<CvCoordinator>,
+    lane: Lane,
 }
 
 impl std::fmt::Debug for ComicVineClient {
@@ -140,14 +67,15 @@ impl std::fmt::Debug for ComicVineClient {
         f.debug_struct("ComicVineClient")
             .field("base_url", &self.base_url.as_str())
             .field("api_key", &"REDACTED")
+            .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
 }
 
 impl ComicVineClient {
-    /// Construct a client. Returns an error if `api_key` is empty or
-    /// `base_url` is not a valid URL.
-    pub fn new(config: ComicVineClientConfig) -> Result<Self, CvError> {
+    /// Construct an [`Lane::Interactive`] client over `coord`. Returns an
+    /// error if `api_key` is empty or `base_url` is not a valid URL.
+    pub fn new(config: ComicVineClientConfig, coord: Arc<CvCoordinator>) -> Result<Self, CvError> {
         if config.api_key.trim().is_empty() {
             return Err(CvError::Auth);
         }
@@ -160,25 +88,29 @@ impl ComicVineClient {
             .connect_timeout(config.connect_timeout)
             .user_agent(config.user_agent)
             .build()?;
-        let limiter = CvRateLimiter::new(
-            config.rate_limit_per_hour,
-            BURST_CAPACITY,
-            config.max_wait_for_slot,
-        );
         Ok(Self {
             http,
             base_url,
             api_key: config.api_key,
-            limiter,
-            calls: CallCounter::new(),
-            rate_limit_per_hour: config.rate_limit_per_hour,
+            coord,
+            lane: Lane::Interactive,
         })
     }
 
-    /// Read-only view of the rolling per-hour call count. Drives the
-    /// frontend's CV rate-limit chip.
-    pub fn rate_limit_snapshot(&self) -> CvRateLimitSnapshot {
-        self.calls.snapshot(self.rate_limit_per_hour)
+    /// The same client on another lane.
+    pub fn with_lane(&self, lane: Lane) -> Self {
+        Self {
+            lane,
+            ..self.clone()
+        }
+    }
+
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    pub fn coordinator(&self) -> &Arc<CvCoordinator> {
+        &self.coord
     }
 
     #[instrument(target = "longbox_comicvine", skip(self), fields(query = %query))]
@@ -362,8 +294,7 @@ impl ComicVineClient {
     }
 
     async fn execute_with_retry(&self, url: Url) -> Result<String, CvError> {
-        self.limiter.acquire().await?;
-        self.calls.consume();
+        self.coord.acquire(self.lane).await?;
         let resp = self.send(&url).await?;
 
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
@@ -375,8 +306,7 @@ impl ComicVineClient {
             );
             tokio::time::sleep(retry_after).await;
 
-            self.limiter.acquire().await?;
-            self.calls.consume();
+            self.coord.acquire(self.lane).await?;
             let resp2 = self.send(&url).await?;
             if resp2.status() == StatusCode::TOO_MANY_REQUESTS {
                 let secs = parse_retry_after(&resp2).as_secs();
@@ -499,7 +429,8 @@ mod tests {
             api_key: "  ".into(),
             ..Default::default()
         };
-        let err = ComicVineClient::new(cfg).unwrap_err();
+        let coord = Arc::new(CvCoordinator::new(Default::default()));
+        let err = ComicVineClient::new(cfg, coord).unwrap_err();
         assert!(matches!(err, CvError::Auth));
     }
 }

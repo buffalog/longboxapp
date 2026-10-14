@@ -1,7 +1,7 @@
 //! Continuous low-priority credits resolver. Drains owned, CV-keyed issues
 //! whose `credits_fetched = 0` by fetching their per-issue `person_credits`
-//! behind the shared `BackgroundCvClient` throttle (~120 req/h, leaving the
-//! interactive 180/h budget headroom). Fire-and-forget; no settings gate.
+//! on the shared `BackgroundCvClient` lane, which has its own budget apart
+//! from interactive requests. Fire-and-forget; no settings gate.
 use std::time::Duration;
 
 use longbox_comicvine::CvError;

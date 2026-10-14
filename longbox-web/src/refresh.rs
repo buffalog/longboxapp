@@ -13,10 +13,10 @@
 //!   that gains issues is rematched and searched as soon as it is done, so
 //!   downloads flow during the multi-hour pass instead of after it.
 //!
-//! All CV calls go through the process-wide [`BackgroundCvClient`], whose
-//! gate admits one logical call at a time alongside enrichment and the
-//! credits resolver. The gate is per call, not per page: a multi-page
-//! fetch pages on the shared 180/h limiter.
+//! The full pass calls CV on the background lane ([`BackgroundCvClient`]),
+//! sharing that budget with enrichment and the credits resolver. The
+//! delta uses [`BackgroundCvClient::delta`]: the interactive bucket, so
+//! its calendar pages don't take minutes inside the sweep.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -317,7 +317,7 @@ pub async fn run_delta(deps: &RefreshDeps) -> PassSummary {
     let from = (today - Duration::days(back)).to_string();
     let to = (today + Duration::days(ahead)).to_string();
 
-    let items = match deps.bg.fetch_release_calendar(&from, &to).await {
+    let items = match deps.bg.delta().fetch_release_calendar(&from, &to).await {
         Ok(items) => items,
         Err(e) => {
             summary.cv_errors += 1;

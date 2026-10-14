@@ -136,10 +136,8 @@ async fn health_reflects_enrichment_queue_depth() {
 #[tokio::test]
 async fn cv_rate_limit_endpoint_returns_snapshot_shape() {
     // We don't exercise the counter increment here (that lives inside
-    // the CV client's execute_with_retry path, gated by a wiremock
-    // hit). Just lock the response shape and the default limit
-    // reflected from config (3600/hr for cv_direct; the primary
-    // `cv` client is 180/hr but the route surfaces `state.cv`).
+    // the CV coordinator, gated by a wiremock hit). Just lock the
+    // response shape and a non-zero limit.
     let app = build_test_app().await;
     let resp = app
         .request(empty_request("GET", "/api/cv/rate-limit"))
@@ -8412,10 +8410,7 @@ async fn seed_cv_series(app: &common::TestApp, title: &str, cv_id: i64, pulled: 
 fn refresh_deps(app: &common::TestApp) -> longbox_web::refresh::RefreshDeps {
     longbox_web::refresh::RefreshDeps {
         db: app.state.db.clone(),
-        bg: longbox_cv_enrichment::BackgroundCvClient::new(
-            std::sync::Arc::clone(&app.state.cv),
-            std::time::Duration::from_secs(1),
-        ),
+        bg: longbox_cv_enrichment::BackgroundCvClient::new(&app.state.cv),
         scanner: std::sync::Arc::clone(&app.state.scanner),
         pull_search: app.state.pull_search.clone(),
         pull: Default::default(),

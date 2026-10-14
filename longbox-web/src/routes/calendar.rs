@@ -15,7 +15,7 @@ use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{self, StreamExt};
-use longbox_comicvine::CvCalendarItem;
+use longbox_comicvine::{ComicVineClient, CvCalendarItem, Lane};
 use longbox_core::normalize_title;
 use longbox_db::{
     cv_volume_cache_repo, metron_calendar_cache_repo, pull_list_repo, release_cache_repo,
@@ -222,13 +222,17 @@ async fn calendar(
 /// Returns the series id and whether the subscription was newly
 /// `added` or the series was `already_on_list`. Both halves are
 /// idempotent; shared by the single and bulk add handlers.
-async fn try_add_one(state: &AppState, cv_volume_id: i64) -> Result<(i64, &'static str), ApiError> {
+async fn try_add_one(
+    state: &AppState,
+    cv: &ComicVineClient,
+    cv_volume_id: i64,
+) -> Result<(i64, &'static str), ApiError> {
     if cv_volume_id <= 0 {
         return Err(ApiError::BadRequest {
             message: "cv_volume_id must be > 0".into(),
         });
     }
-    let (series, was_new) = add_or_get_from_cv(state, cv_volume_id).await?;
+    let (series, was_new) = add_or_get_from_cv(state, cv, cv_volume_id).await?;
     if was_new {
         // A freshly created series: match any of its files already on
         // disk, same as the /files and Library Tidy add paths.
@@ -267,7 +271,7 @@ async fn add_to_pull_list(
     State(state): State<AppState>,
     Json(body): Json<AddToPullBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (series_id, _status) = resolve_and_subscribe(&state, &body).await?;
+    let (series_id, _status) = resolve_and_subscribe(&state, &state.cv, &body).await?;
     Ok(Json(serde_json::json!({ "series_id": series_id })))
 }
 
@@ -279,10 +283,11 @@ async fn add_to_pull_list(
 /// request thread, behind [`AppState::cv_resolve_gate`].
 async fn resolve_and_subscribe(
     state: &AppState,
+    cv: &ComicVineClient,
     body: &AddToPullBody,
 ) -> Result<(i64, &'static str), ApiError> {
     let (cv_volume_id, metron_origin, finished) = resolve_subscription_target(state, body).await?;
-    let (series_id, status) = try_add_one(state, cv_volume_id).await?;
+    let (series_id, status) = try_add_one(state, cv, cv_volume_id).await?;
     if let Some(metron_series_id) = metron_origin {
         // We fetched the Metron series detail to resolve this — persist its
         // `finished` flag (GH #7) alongside the metron_id cross-reference,
@@ -351,7 +356,7 @@ async fn add_to_pull_list_bulk(
             if series_repo::find_by_cv_id(&state.db, cv).await?.is_some() {
                 // Local: try_add_one re-reads find_by_cv_id (cheap) and
                 // subscribes; no CV fetch happens.
-                results.push(match try_add_one(&state, cv).await {
+                results.push(match try_add_one(&state, &state.cv, cv).await {
                     Ok((series_id, status)) => BulkAddResult {
                         cv_volume_id: Some(cv),
                         metron_series_id: None,
@@ -439,7 +444,10 @@ fn spawn_background_resolve(state: AppState, item: AddToPullBody, key: String) {
             .acquire()
             .await
             .expect("cv_resolve_gate is never closed");
-        let outcome = match resolve_and_subscribe(&state, &item).await {
+        // Background lane: a bulk subscribe is not user activity on the
+        // interactive budget, and it waits for tokens instead of failing.
+        let cv = state.cv.with_lane(Lane::Background);
+        let outcome = match resolve_and_subscribe(&state, &cv, &item).await {
             Ok((series_id, status)) => SubscribeOutcome {
                 status: status.to_string(),
                 series_id: Some(series_id),

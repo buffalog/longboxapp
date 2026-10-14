@@ -3,7 +3,11 @@
 
 use std::time::Duration;
 
-use longbox_comicvine::{ComicVineClient, ComicVineClientConfig, CvError};
+use std::sync::Arc;
+
+use longbox_comicvine::{
+    ComicVineClient, ComicVineClientConfig, CvCoordinator, CvError, CvLanesConfig,
+};
 use pretty_assertions::assert_eq;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -21,12 +25,17 @@ fn client_for(server: &MockServer) -> ComicVineClient {
         base_url: format!("{}/", server.uri()),
         timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(1),
-        // Massive rate so the limiter is effectively a no-op in tests.
-        rate_limit_per_hour: 360_000,
-        max_wait_for_slot: Duration::from_secs(1),
         user_agent: "longbox-test/0.0".into(),
     };
-    ComicVineClient::new(config).expect("test client construction")
+    // Massive rates and no pacing so the coordinator is a no-op in tests.
+    let coord = Arc::new(CvCoordinator::new(CvLanesConfig {
+        interactive_rate_per_hour: 360_000,
+        interactive_burst: 100,
+        interactive_max_wait: Duration::from_secs(1),
+        background_rate_per_hour: 360_000,
+        min_spacing: Duration::ZERO,
+    }));
+    ComicVineClient::new(config, coord).expect("test client construction")
 }
 
 // ---------- search_volumes ----------
