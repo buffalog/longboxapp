@@ -163,6 +163,14 @@ impl CvCoordinator {
             // Stamp before waiting: background yields from the moment the
             // user acts, not from when their request finally goes out.
             self.gates().last_interactive = Some(Instant::now());
+            // Fail fast before taking a token: during a long 429 pause,
+            // every keystroke would otherwise drain the burst for nothing.
+            let wait = self.gate_wait(lane);
+            if wait > self.config.interactive_max_wait {
+                return Err(CvError::RateLimited {
+                    retry_after_seconds: ceil_secs(wait),
+                });
+            }
         }
         match lane {
             Lane::Interactive => {
@@ -480,6 +488,19 @@ mod tests {
         let t = Instant::now();
         c.acquire(Lane::Background).await.unwrap();
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    /// Requests refused during a long pause don't spend the bucket.
+    #[tokio::test]
+    async fn interactive_requests_refused_by_a_pause_keep_their_tokens() {
+        let c = tight();
+        c.pause(Duration::from_millis(200));
+        for _ in 0..5 {
+            assert!(c.acquire(Lane::Interactive).await.is_err());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        c.acquire(Lane::Interactive).await.unwrap();
+        c.acquire(Lane::Interactive).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

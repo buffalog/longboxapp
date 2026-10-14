@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { BookPlus, Search } from 'lucide-svelte';
   import { ApiError } from '$lib/api/client';
   import { searchVolumes } from '$lib/api/cv';
@@ -21,8 +22,11 @@
   let error = $state<ApiError | null>(null);
   let successMessage = $state<string | null>(null);
   let busyMessage = $state<string | null>(null);
-  // Bumped per search so a slow older response can't overwrite a newer one.
+  // Bumped on every keystroke and on leaving the page, so a slow older
+  // response can't overwrite a newer one, and a busy search the user has
+  // moved on from doesn't spend a ComicVine call on its retry.
   let searchSeq = 0;
+  onDestroy(() => searchSeq++);
 
   // ComicVine busy (the interactive lane is out of tokens, or both lanes
   // are paused on a 429): the 503 carries retry_after_seconds. Returns the
@@ -41,9 +45,11 @@
     } catch (e) {
       const wait = busyRetryAfter(e);
       if (wait === null) throw e;
-      busyMessage = `ComicVine is busy, retrying in ${wait}s…`;
+      const msg = `ComicVine is busy, retrying in ${wait}s…`;
+      busyMessage = msg;
       await new Promise((r) => setTimeout(r, wait * 1000));
-      busyMessage = null;
+      // Only clear our own notice, not a newer call's.
+      if (busyMessage === msg) busyMessage = null;
       if (!stillWanted()) throw e;
       return await call();
     }
@@ -63,9 +69,10 @@
 
   function handleInput(): void {
     if (debounce) clearTimeout(debounce);
+    searchSeq++;
     const q = query.trim();
     if (!q) {
-      searchSeq++;
+      searching = false;
       busyMessage = null;
       results = [];
       filteredPublisher = 0;
@@ -81,6 +88,7 @@
     const seq = ++searchSeq;
     const current = (): boolean => seq === searchSeq;
     searching = true;
+    busyMessage = null;
     error = null;
     try {
       const r = await withBusyRetry(() => searchVolumes(q, { showFiltered }), current);

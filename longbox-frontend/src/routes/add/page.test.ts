@@ -99,4 +99,35 @@ describe('Add page', () => {
     expect(screen.queryByText('Old Result')).toBeNull();
     expect(screen.getByText('New Result')).toBeInTheDocument();
   });
+
+  it('shows the empty state, not a spinner, when the box is cleared mid-search', async () => {
+    let resolveOld: (r: CvSearchResponse) => void = () => {};
+    vi.mocked(searchVolumes).mockImplementationOnce(() => new Promise((r) => (resolveOld = r)));
+    render(AddPage);
+
+    await type('saga');
+    await waitFor(() => expect(searchVolumes).toHaveBeenCalledTimes(1));
+    await type('');
+    resolveOld(response('Saga'));
+
+    expect(await screen.findByText('Search ComicVine')).toBeInTheDocument();
+    expect(screen.queryByText('Saga')).toBeNull();
+  });
+
+  it('skips the retry of a busy search the user has typed past', async () => {
+    vi.mocked(searchVolumes)
+      .mockRejectedValueOnce(busy())
+      .mockResolvedValue(response('Newer'));
+    render(AddPage);
+
+    await type('old');
+    await screen.findByTestId('cv-busy');
+    // A keystroke late in the 1s wait, so the old retry fires inside the
+    // new query's 400ms debounce: only the keystroke itself marks the old
+    // search as superseded.
+    await new Promise((r) => setTimeout(r, 750));
+    await type('older query');
+    await new Promise((r) => setTimeout(r, 600));
+    expect(vi.mocked(searchVolumes).mock.calls.filter((c) => c[0] === 'old')).toHaveLength(1);
+  });
 });
