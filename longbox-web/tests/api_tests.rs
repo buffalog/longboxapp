@@ -136,19 +136,24 @@ async fn health_reflects_enrichment_queue_depth() {
 #[tokio::test]
 async fn cv_rate_limit_endpoint_returns_snapshot_shape() {
     // We don't exercise the counter increment here (that lives inside
-    // the CV client's execute_with_retry path, gated by a wiremock
-    // hit). Just lock the response shape and the default limit
-    // reflected from config (3600/hr for cv_direct; the primary
-    // `cv` client is 180/hr but the route surfaces `state.cv`).
+    // the CV coordinator, gated by a wiremock hit). Just lock the
+    // response shape and a non-zero limit.
     let app = build_test_app().await;
     let resp = app
         .request(empty_request("GET", "/api/cv/rate-limit"))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
-    assert!(body["count"].as_u64().is_some());
-    assert!(body["limit_per_hour"].as_u64().unwrap() > 0);
-    assert!(body["window_started_at_unix"].as_i64().is_some());
+    for lane in ["interactive", "background"] {
+        assert!(body[lane]["count"].as_u64().is_some(), "{lane}: {body}");
+        assert!(body[lane]["limit_per_hour"].as_u64().unwrap() > 0, "{lane}");
+        assert!(
+            body[lane]["window_started_at_unix"].as_i64().is_some(),
+            "{lane}"
+        );
+    }
+    assert!(body["yielding_seconds"].as_u64().is_some(), "{body}");
+    assert!(body["paused_seconds"].as_u64().is_some(), "{body}");
 }
 
 // -------- CV search --------
@@ -8412,10 +8417,7 @@ async fn seed_cv_series(app: &common::TestApp, title: &str, cv_id: i64, pulled: 
 fn refresh_deps(app: &common::TestApp) -> longbox_web::refresh::RefreshDeps {
     longbox_web::refresh::RefreshDeps {
         db: app.state.db.clone(),
-        bg: longbox_cv_enrichment::BackgroundCvClient::new(
-            std::sync::Arc::clone(&app.state.cv),
-            std::time::Duration::from_secs(1),
-        ),
+        bg: longbox_cv_enrichment::BackgroundCvClient::new(&app.state.cv),
         scanner: std::sync::Arc::clone(&app.state.scanner),
         pull_search: app.state.pull_search.clone(),
         pull: Default::default(),
@@ -8623,7 +8625,8 @@ async fn full_refresh_is_due_when_never_run_or_a_week_old() {
 }
 
 /// Refresh-all starts the full pass (202), 409s with its own code while
-/// it runs, and the status route reports progress, then completion.
+/// it runs, and the status route reports progress, then completion. The
+/// coordinator's full-refresh flag tracks the pass.
 /// Bodies are checked, not just codes: the SPA fallback 200s unknown
 /// /api paths.
 #[tokio::test]
@@ -8673,8 +8676,13 @@ async fn refresh_all_starts_once_and_reports_progress() {
     }
     assert_eq!(running["running"], true);
     assert_eq!(running["total"], 1);
+    // The credits resolver holds off while the pass runs, and resumes
+    // after it.
+    let coord = app.state.cv.coordinator();
+    assert!(coord.full_refresh_running());
 
     wait_for_full_refresh(&app).await;
+    assert!(!coord.full_refresh_running());
     let done = response_json(
         app.request(empty_request("GET", "/api/refresh/status"))
             .await,

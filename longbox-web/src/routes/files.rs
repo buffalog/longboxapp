@@ -367,7 +367,7 @@ async fn match_from_cv(
             id: id.to_string(),
         })?;
 
-    let (series, _was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
+    let (series, _was_new) = add_or_get_from_cv(&state, &state.cv, body.cv_volume_id).await?;
 
     let patterns = load_enabled_patterns(&state).await?;
     let raw_number = try_resolve_issue_number(&file, body.issue_number.as_deref(), &patterns)
@@ -532,7 +532,7 @@ async fn match_folder_from_cv(
         });
     }
 
-    let (series, _was_new) = add_or_get_from_cv(&state, body.cv_volume_id).await?;
+    let (series, _was_new) = add_or_get_from_cv(&state, &state.cv, body.cv_volume_id).await?;
     let candidates = issue_repo::list_by_series(&state.db, series.id).await?;
 
     // Substring-equality prefix match avoids the LIKE-wildcard escaping

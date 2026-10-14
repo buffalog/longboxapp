@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use longbox_comicvine::{ComicVineClient, ComicVineClientConfig};
+use longbox_comicvine::{ComicVineClient, ComicVineClientConfig, CvCoordinator, CvLanesConfig};
 use longbox_db::{library_root_repo, settings_repo, NewLibraryRoot};
 use longbox_metron::{MetronClient, MetronClientConfig};
 use longbox_scanner::{Scanner, ScannerConfig};
@@ -86,14 +86,57 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         }
     };
 
-    // 4. ComicVine client.
-    let cv = ComicVineClient::new(ComicVineClientConfig {
-        api_key: config.comicvine_api_key.clone(),
-        timeout: Duration::from_secs(30),
-        rate_limit_per_hour: 180,
-        max_wait_for_slot: Duration::from_secs(60),
-        ..Default::default()
-    })
+    // 4. ComicVine client. One coordinator for the whole process: every
+    //    CV handle (interactive here, background via `bg_cv` below) spends
+    //    its lane budgets. Budgets are read once at boot; a settings
+    //    change needs a restart.
+    let lanes_default = CvLanesConfig::default();
+    let lanes = CvLanesConfig {
+        interactive_rate_per_hour: settings_repo::get_or_default(
+            &db,
+            settings_repo::KEY_CV_INTERACTIVE_RATE_PER_HOUR,
+            lanes_default.interactive_rate_per_hour,
+        )
+        .await?,
+        interactive_burst: settings_repo::get_or_default(
+            &db,
+            settings_repo::KEY_CV_INTERACTIVE_BURST,
+            lanes_default.interactive_burst,
+        )
+        .await?,
+        background_rate_per_hour: settings_repo::get_or_default(
+            &db,
+            settings_repo::KEY_CV_BACKGROUND_RATE_PER_HOUR,
+            lanes_default.background_rate_per_hour,
+        )
+        .await?,
+        // Capped at an hour: an absurd value would overflow Instant math.
+        background_yield: Duration::from_secs(
+            settings_repo::get_or_default(
+                &db,
+                settings_repo::KEY_CV_BACKGROUND_YIELD_SECONDS,
+                lanes_default.background_yield.as_secs(),
+            )
+            .await?
+            .min(3600),
+        ),
+        ..lanes_default
+    };
+    let lanes = CvLanesConfig {
+        interactive_max_wait: CvLanesConfig::interactive_max_wait_for(
+            lanes.interactive_rate_per_hour,
+        ),
+        ..lanes
+    };
+    info!(?lanes, "ComicVine lane budgets");
+    let cv = ComicVineClient::new(
+        ComicVineClientConfig {
+            api_key: config.comicvine_api_key.clone(),
+            timeout: Duration::from_secs(30),
+            ..Default::default()
+        },
+        Arc::new(CvCoordinator::new(lanes)),
+    )
     .map_err(BootstrapError::Cv)?;
 
     // 5. Scanner.
@@ -116,23 +159,10 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //    Web boot is unaffected either way — Phase B is best-effort.
     start_phase_b(&config, &db, Arc::clone(&pending_cache)).await;
 
-    // 7b. The ONE background CV client. Enrichment, the credits resolver
-    //     and the catalog refresh share its gate, so together they spend
-    //     one background budget (~120/h at the default 30s) against the
-    //     shared 180/h limiter instead of one budget each.
-    //     ponytail: the interval is read once here. The worker used to
-    //     re-read it every cycle; a change now needs a restart.
+    // 7b. The background-lane handle. Enrichment, the credits resolver
+    //     and the catalog refresh all spend the background budget.
     let cv_arc = Arc::new(cv);
-    let bg_interval: u64 = settings_repo::get_or_default(
-        &db,
-        settings_repo::KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS,
-        30,
-    )
-    .await?;
-    let bg_cv = longbox_cv_enrichment::BackgroundCvClient::new(
-        Arc::clone(&cv_arc),
-        Duration::from_secs(bg_interval),
-    );
+    let bg_cv = longbox_cv_enrichment::BackgroundCvClient::new(&cv_arc);
 
     // On-demand single-series search tracker. Spawns its own short-
     // lived tokio task per accepted search; the pool clone is what
@@ -210,18 +240,6 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     //     refuses to start, logs at ERROR, and the returned handle's
     //     request_run() is a no-op — the rest of the web layer
     //     continues running.
-    // Direct/interactive CV client — higher rate limit, short wait-for-slot.
-    // Used by user-initiated routes (Library Tidy cv-id picks) so they never
-    // queue behind the enrichment worker's 30-60s token wait.
-    let cv_direct = ComicVineClient::new(ComicVineClientConfig {
-        api_key: config.comicvine_api_key.clone(),
-        timeout: Duration::from_secs(30),
-        rate_limit_per_hour: 3_600,
-        max_wait_for_slot: Duration::from_secs(3),
-        ..Default::default()
-    })
-    .map_err(BootstrapError::Cv)?;
-    let cv_direct_arc = Arc::new(cv_direct);
     let enrichment = longbox_cv_enrichment::spawn(
         db.clone(),
         bg_cv.clone(),
@@ -267,7 +285,6 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     Ok(AppState {
         db,
         cv: cv_arc,
-        cv_direct: cv_direct_arc,
         metron,
         scanner,
         config: Arc::new(config),
@@ -285,9 +302,8 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         // 3 permits: background pull-list CV resolutions run at most 3
         // at a time — the cure for the rate-limiter stampede (the old
         // 10-wide fan-out) while still letting a light add slip past a
-        // back-catalog giant mid-fetch. Under the calendar client's
-        // burst=5 / 60s-max-wait, 3 concurrent (≈6 token requests) stays
-        // below the RateLimited threshold, so it won't reintroduce the bug.
+        // back-catalog giant mid-fetch. They run on the background lane,
+        // which waits for tokens rather than failing with RateLimited.
         cv_resolve_gate: Arc::new(tokio::sync::Semaphore::new(3)),
         subscribe_status: Arc::new(RwLock::new(crate::state::SubscribeStatus::default())),
     })

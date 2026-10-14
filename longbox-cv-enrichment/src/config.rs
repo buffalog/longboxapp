@@ -16,7 +16,6 @@ pub struct EnrichmentConfig {
     pub enabled: bool,
     pub thresholds: EnrichmentThresholds,
     pub cooldown_days: i64,
-    pub request_interval_seconds: u64,
     pub max_run: i64,
     pub first_run_sample_mode: bool,
     pub first_run_easy_quota: i64,
@@ -64,12 +63,6 @@ impl EnrichmentConfig {
         let cooldown_days: i64 =
             settings_repo::get_or_default(db, settings_repo::KEY_CV_ENRICHMENT_COOLDOWN_DAYS, 7)
                 .await?;
-        let request_interval_seconds: u64 = settings_repo::get_or_default(
-            db,
-            settings_repo::KEY_CV_ENRICHMENT_REQUEST_INTERVAL_SECONDS,
-            30,
-        )
-        .await?;
         let max_run: i64 =
             settings_repo::get_or_default(db, settings_repo::KEY_CV_ENRICHMENT_MAX_RUN, 20).await?;
 
@@ -97,7 +90,6 @@ impl EnrichmentConfig {
                 dominant_gap,
             },
             cooldown_days,
-            request_interval_seconds,
             max_run,
             first_run_sample_mode,
             first_run_easy_quota,

@@ -9,12 +9,9 @@ use crate::config::AppConfig;
 #[derive(Clone)]
 pub struct AppState {
     pub db: longbox_db::Pool,
+    /// The interactive-lane CV client, for user-initiated routes. Background
+    /// work gets its own lane via `cv.with_lane(..)` / `BackgroundCvClient`.
     pub cv: Arc<longbox_comicvine::ComicVineClient>,
-    /// Unthrottled CV client for interactive/user-initiated requests (e.g.,
-    /// Library Tidy manual cv-id picks). Rate-limited to 3600/hr (practically
-    /// unlimited for one-at-a-time user actions) with a short 3s wait-for-slot
-    /// so the handler fails fast rather than blocking for 30-60s.
-    pub cv_direct: Arc<longbox_comicvine::ComicVineClient>,
     /// Metron forward-calendar client (Item A v2). `None` when the
     /// `metron_enabled` settings row is `false` OR when credentials are
     /// missing/invalid (degraded boot path). Forward-week calendar
@@ -91,11 +88,10 @@ pub struct AppState {
     pub start_time: time::OffsetDateTime,
     /// Bounds background pull-list resolutions that need a ComicVine
     /// fetch (not-yet-local volumes added from the Release Calendar) to a
-    /// few at a time, so a bulk add never stampedes the rate limiter's
-    /// burst and trips `max_wait_for_slot` (the silent-`RateLimited`
-    /// partial-failure bug the old 10-wide fan-out caused). Set to 3 in
-    /// `bootstrap` — low enough to stay under the burst ceiling, high
-    /// enough that a light add isn't head-of-line-blocked behind a
+    /// few at a time (the old 10-wide fan-out stampeded the rate limiter
+    /// into silent `RateLimited` partial failures). They run on the
+    /// background lane, which waits for tokens. Set to 3 in `bootstrap`,
+    /// high enough that a light add isn't head-of-line-blocked behind a
     /// back-catalog giant mid-fetch. ponytail: a fixed small bound, not
     /// adaptive; revisit only if CV's limits or the cap change.
     pub cv_resolve_gate: Arc<Semaphore>,

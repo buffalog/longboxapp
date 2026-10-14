@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::Request;
 use axum::Router;
-use longbox_comicvine::{ComicVineClient, ComicVineClientConfig};
+use longbox_comicvine::{ComicVineClient, ComicVineClientConfig, CvCoordinator, CvLanesConfig};
 use longbox_db::{library_root_repo, NewLibraryRoot, Pool};
 use longbox_metron::{MetronClient, MetronClientConfig};
 use longbox_scanner::{Scanner, ScannerConfig};
@@ -119,16 +119,16 @@ pub async fn build_test_app() -> TestApp {
     .id;
 
     let cv_server = MockServer::start().await;
-    let cv = ComicVineClient::new(ComicVineClientConfig {
-        api_key: "test-key".into(),
-        base_url: format!("{}/", cv_server.uri()),
-        timeout: Duration::from_secs(2),
-        connect_timeout: Duration::from_secs(1),
-        // Effectively unbounded for tests.
-        rate_limit_per_hour: 360_000,
-        max_wait_for_slot: Duration::from_secs(1),
-        user_agent: "longbox-test/0.0".into(),
-    })
+    let cv = ComicVineClient::new(
+        ComicVineClientConfig {
+            api_key: "test-key".into(),
+            base_url: format!("{}/", cv_server.uri()),
+            timeout: Duration::from_secs(2),
+            connect_timeout: Duration::from_secs(1),
+            user_agent: "longbox-test/0.0".into(),
+        },
+        Arc::new(CvCoordinator::new(unthrottled_lanes())),
+    )
     .unwrap();
 
     let scanner = Scanner::new(pool.clone(), ScannerConfig::default());
@@ -166,19 +166,8 @@ pub async fn build_test_app() -> TestApp {
         || async {},
     );
     let cv_arc = Arc::new(cv);
-    // Tests use the same wiremock server for cv_direct — rate limit is moot in tests.
-    let cv_direct = ComicVineClient::new(ComicVineClientConfig {
-        api_key: "test-key".to_string(),
-        base_url: format!("{}/", cv_server.uri()),
-        max_wait_for_slot: Duration::from_secs(3),
-        ..Default::default()
-    })
-    .unwrap();
-    let cv_direct_arc = Arc::new(cv_direct);
-    // One shared background client, as in bootstrap. 1s spacing (the
-    // gate's floor) keeps refresh tests fast.
-    let bg_cv =
-        longbox_cv_enrichment::BackgroundCvClient::new(Arc::clone(&cv_arc), Duration::from_secs(1));
+    // One shared background-lane handle, as in bootstrap.
+    let bg_cv = longbox_cv_enrichment::BackgroundCvClient::new(&cv_arc);
     let enrichment = longbox_cv_enrichment::spawn(
         pool.clone(),
         bg_cv.clone(),
@@ -196,7 +185,6 @@ pub async fn build_test_app() -> TestApp {
     let state = AppState {
         db: pool,
         cv: cv_arc,
-        cv_direct: cv_direct_arc,
         // Item A v2: tests don't exercise the Metron path. Disabled is
         // the default — piece 3 will add tests that explicitly construct
         // a Some(client) backed by a wiremock server for forward-week
@@ -262,4 +250,17 @@ pub async fn response_text(resp: axum::response::Response) -> String {
         .await
         .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// Lane budgets that never throttle: huge rates, no pacing. Tests that
+/// exercise the lanes build their own coordinator.
+pub fn unthrottled_lanes() -> CvLanesConfig {
+    CvLanesConfig {
+        interactive_rate_per_hour: 360_000,
+        interactive_burst: 100,
+        interactive_max_wait: Duration::from_secs(1),
+        background_rate_per_hour: 360_000,
+        background_yield: Duration::ZERO,
+        min_spacing: Duration::ZERO,
+    }
 }

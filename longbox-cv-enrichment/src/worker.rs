@@ -65,10 +65,9 @@ impl EnrichmentHandle {
 /// if assertion fails, the worker refuses to start, logs at ERROR,
 /// and the returned handle's `request_run` will be a no-op.
 ///
-/// `bg` is the process-wide background CV client, shared with the
-/// credits resolver and the catalog refresh so their calls queue on one
-/// gate instead of each spending its own budget against the shared
-/// 180/h limiter.
+/// `bg` is the process-wide background-lane CV client, shared with the
+/// credits resolver and the catalog refresh: together they spend the one
+/// background budget.
 pub fn spawn(db: Pool, bg: BackgroundCvClient, library_root: PathBuf) -> EnrichmentHandle {
     let running = Arc::new(AtomicBool::new(false));
     let (trigger, rx) = mpsc::channel::<()>(1);
@@ -120,8 +119,8 @@ async fn worker_loop(
         // Wait for a manual trigger OR run continuously if there is
         // backlog. Heuristic: if max_run > 0 and a candidate cycle
         // produces 0 attempts, sleep 5 minutes before re-checking;
-        // otherwise loop immediately and let the per-attempt
-        // background gate enforce 30s spacing.
+        // otherwise loop immediately and let the background lane
+        // pace the CV calls.
         let config = match EnrichmentConfig::load(&db).await {
             Ok(c) => c,
             Err(e) => {
@@ -545,7 +544,7 @@ async fn attempt_one(
         return outcome;
     }
 
-    // Phase 1.b: CV search. Background-throttled (30s floor).
+    // Phase 1.b: CV search. Background lane.
     let pool: Vec<SeriesSearchResult> = match bg.search_volumes(&candidate.title).await {
         Ok(p) => p,
         Err(e) => {
@@ -622,8 +621,8 @@ async fn attempt_one(
         }
     }
 
-    // Phase 1.e: CV volume + issues fetch. Both calls
-    // background-throttled by separate 30s slots.
+    // Phase 1.e: CV volume + issues fetch, both on the background
+    // lane, which paces each page.
     let volume: CvVolumeDetail = match bg.fetch_volume(cv_id).await {
         Ok(v) => v,
         Err(e) => {

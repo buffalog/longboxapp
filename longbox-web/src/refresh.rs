@@ -13,10 +13,10 @@
 //!   that gains issues is rematched and searched as soon as it is done, so
 //!   downloads flow during the multi-hour pass instead of after it.
 //!
-//! All CV calls go through the process-wide [`BackgroundCvClient`], whose
-//! gate admits one logical call at a time alongside enrichment and the
-//! credits resolver. The gate is per call, not per page: a multi-page
-//! fetch pages on the shared 180/h limiter.
+//! The full pass calls CV on the background lane ([`BackgroundCvClient`]),
+//! sharing that budget with enrichment and the credits resolver. The
+//! delta uses [`BackgroundCvClient::delta`]: the interactive bucket, so
+//! its calendar pages don't take minutes inside the sweep.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -192,16 +192,22 @@ impl RefreshHandle {
         self.inner.done.store(0, Ordering::SeqCst);
         self.inner.total.store(0, Ordering::SeqCst);
         let inner = Arc::clone(&self.inner);
+        // The credits resolver holds off while this is set.
+        inner.deps.bg.coordinator().set_full_refresh_running(true);
         tokio::spawn(async move {
-            // Clears `running` even if the pass panics, so a crashed pass
-            // can't wedge Refresh-all behind a permanent 409.
-            struct Reset<'a>(&'a AtomicBool);
+            // Clears both flags even if the pass panics, so a crashed pass
+            // can't wedge Refresh-all behind a permanent 409 or park the
+            // credits resolver forever.
+            struct Reset<'a>(&'a Inner);
             impl Drop for Reset<'_> {
                 fn drop(&mut self) {
-                    self.0.store(false, Ordering::SeqCst);
+                    // Flag first: once `running` clears, a new pass may
+                    // start and set it again, and we mustn't clobber that.
+                    self.0.deps.bg.coordinator().set_full_refresh_running(false);
+                    self.0.running.store(false, Ordering::SeqCst);
                 }
             }
-            let _reset = Reset(&inner.running);
+            let _reset = Reset(&inner);
             run_full(&inner).await;
         });
         true
@@ -317,7 +323,7 @@ pub async fn run_delta(deps: &RefreshDeps) -> PassSummary {
     let from = (today - Duration::days(back)).to_string();
     let to = (today + Duration::days(ahead)).to_string();
 
-    let items = match deps.bg.fetch_release_calendar(&from, &to).await {
+    let items = match deps.bg.delta().fetch_release_calendar(&from, &to).await {
         Ok(items) => items,
         Err(e) => {
             summary.cv_errors += 1;

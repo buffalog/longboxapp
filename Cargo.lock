@@ -1313,7 +1313,6 @@ dependencies = [
 name = "longbox-cv-enrichment"
 version = "2.1.0"
 dependencies = [
- "governor",
  "longbox-comicvine",
  "longbox-core",
  "longbox-db",
