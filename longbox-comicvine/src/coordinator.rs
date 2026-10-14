@@ -35,10 +35,15 @@ pub enum Lane {
     /// or a 429 pause longer than that) fails fast with
     /// [`CvError::RateLimited`] instead of hanging the page.
     Interactive,
-    /// Enrichment, the credits resolver, the full catalog refresh and the
-    /// calendar's bulk-subscribe resolves. Background bucket; yields to
-    /// recent interactive activity; waits as long as it takes.
+    /// Enrichment, the credits resolver and the full catalog refresh.
+    /// Background bucket; yields to recent interactive activity; waits as
+    /// long as it takes.
     Background,
+    /// The calendar's bulk-subscribe resolves. Background bucket (a big
+    /// bulk add would otherwise drain the interactive budget for an hour),
+    /// but does not yield: the user is usually still browsing the calendar
+    /// that started it. Honors the 429 pause; waits like background.
+    Bulk,
     /// The delta refresh at the top of each pull sweep. Spends the
     /// *interactive* bucket, because its ~10 calendar pages would take
     /// ~7 minutes at the background rate. Does not stamp user activity and
@@ -179,7 +184,7 @@ impl CvCoordinator {
                     .await?
             }
             Lane::Delta => self.interactive.acquire(PATIENT_WAIT).await?,
-            Lane::Background => self.background.acquire(PATIENT_WAIT).await?,
+            Lane::Background | Lane::Bulk => self.background.acquire(PATIENT_WAIT).await?,
         }
         loop {
             let wait = self.gate_wait(lane);
@@ -198,7 +203,7 @@ impl CvCoordinator {
         self.pace().await;
         match lane {
             Lane::Interactive | Lane::Delta => self.interactive_calls.consume(),
-            Lane::Background => self.background_calls.consume(),
+            Lane::Background | Lane::Bulk => self.background_calls.consume(),
         }
         Ok(())
     }
@@ -400,7 +405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delta_spends_the_interactive_bucket_not_the_background_one() {
+    async fn delta_spends_the_interactive_bucket_and_bulk_the_background_one() {
         let c = tight();
         c.acquire(Lane::Background).await.unwrap();
         c.acquire(Lane::Background).await.unwrap();
@@ -409,8 +414,10 @@ mod tests {
         // Interactive is now empty too, and delta waits rather than failing.
         assert!(blocks(&c, Lane::Delta).await);
         assert!(c.acquire(Lane::Interactive).await.is_err());
+        // Bulk spends the background bucket, which still has tokens.
+        assert!(!blocks(&c, Lane::Bulk).await);
         assert_eq!(c.snapshot().interactive.count, 2);
-        assert_eq!(c.snapshot().background.count, 2);
+        assert_eq!(c.snapshot().background.count, 3);
     }
 
     /// The burst is spent; the next request must still get a token. A max
@@ -436,7 +443,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn background_yields_to_interactive_activity_but_delta_does_not() {
+    async fn background_yields_to_interactive_activity_but_delta_and_bulk_do_not() {
         let c = CvCoordinator::new(CvLanesConfig {
             background_yield: Duration::from_secs(300),
             ..open()
@@ -456,6 +463,13 @@ mod tests {
         assert!(
             t.elapsed() < Duration::from_secs(1),
             "delta yielded: {:?}",
+            t.elapsed()
+        );
+        let t = Instant::now();
+        c.acquire(Lane::Bulk).await.unwrap();
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "bulk yielded: {:?}",
             t.elapsed()
         );
 

@@ -444,9 +444,10 @@ fn spawn_background_resolve(state: AppState, item: AddToPullBody, key: String) {
             .acquire()
             .await
             .expect("cv_resolve_gate is never closed");
-        // Background lane: a bulk subscribe is not user activity on the
-        // interactive budget, and it waits for tokens instead of failing.
-        let cv = state.cv.with_lane(Lane::Background);
+        // Bulk lane: background bucket, so a big bulk subscribe can't drain
+        // the interactive budget; no yield, since the user is usually still
+        // browsing the calendar; waits for tokens instead of failing.
+        let cv = state.cv.with_lane(Lane::Bulk);
         let outcome = match resolve_and_subscribe(&state, &cv, &item).await {
             Ok((series_id, status)) => SubscribeOutcome {
                 status: status.to_string(),
