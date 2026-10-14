@@ -222,6 +222,46 @@ async fn sweep_now_tallies_outcomes_across_the_watch_folder() {
 }
 
 #[tokio::test]
+async fn sweep_now_skips_a_sabnzbd_unpack_folder_until_it_is_renamed() {
+    // SAB extracts into `_UNPACK_<job>/` and renames it to `<job>/`
+    // when done. Reading mid-extraction failed good downloads as
+    // "unreadable"; the file must wait for the rename.
+    let f = seed_basic_fixture().await;
+    longbox_db::settings_repo::set(&f.db, "min_file_size_mb", "0")
+        .await
+        .unwrap();
+    let staging = f._watch.path().join("_UNPACK_Saga 001");
+    write_cbz(&staging.join("Saga 001.cbz"), None);
+    let cache = Arc::new(PendingInterventionsCache::new());
+    let sweep = || {
+        longbox_postprocess::sweep_now(
+            f.library.path(),
+            f.library_root_id,
+            f._watch.path(),
+            f.db.clone(),
+            Arc::clone(&cache),
+        )
+    };
+
+    let summary = sweep().await.unwrap();
+    assert_eq!(
+        summary.processed + summary.skipped + summary.failed,
+        0,
+        "{summary:?}"
+    );
+    assert!(staging.join("Saga 001.cbz").exists());
+
+    let done = f._watch.path().join("Saga 001");
+    std::fs::rename(&staging, &done).unwrap();
+    let summary = sweep().await.unwrap();
+    assert_eq!(summary.processed, 1, "{summary:?}");
+    assert!(
+        !done.join("Saga 001.cbz").exists(),
+        "must move into the library"
+    );
+}
+
+#[tokio::test]
 async fn sweep_now_400s_when_watch_path_is_missing() {
     let f = seed_basic_fixture().await;
     let nonexistent = f.library.path().join("does-not-exist");

@@ -16,6 +16,11 @@ use std::path::Path;
 pub enum SkipReason {
     /// Filename starts with `.` (.DS_Store, .AppleDouble, etc.).
     Dotfile,
+    /// Under a SABnzbd job folder that is still unpacking (`_UNPACK_*`)
+    /// or failed (`_FAILED_*`). Archives there can be half-written;
+    /// SAB renames the folder to its final name when it's done, and the
+    /// files then show up as new paths.
+    SabnzbdStaging,
     /// Filename ends with a downloader's in-progress suffix
     /// (`.partial`, `.crdownload`, `.!ut`) — case-insensitive.
     InProgress,
@@ -40,6 +45,14 @@ pub fn should_skip(path: &Path) -> Option<SkipReason> {
 
     if name.starts_with('.') {
         return Some(SkipReason::Dotfile);
+    }
+
+    if path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|c| c.starts_with("_UNPACK_") || c.starts_with("_FAILED_"))
+    }) {
+        return Some(SkipReason::SabnzbdStaging);
     }
 
     // In-progress suffixes: case-insensitive ends_with. Some downloaders
@@ -148,6 +161,33 @@ mod tests {
                 should_skip(Path::new(n)),
                 Some(SkipReason::InProgress),
                 "expected InProgress for {n:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sabnzbd_staging_folders_skipped_until_renamed() {
+        for n in [
+            "/watch/_UNPACK_Saga 001/Saga 001.cbz",
+            "/watch/_FAILED_Saga 001/Saga 001.cbr",
+            "/watch/_UNPACK_Saga 001/sub/Saga 001.cbz",
+        ] {
+            assert_eq!(
+                should_skip(Path::new(n)),
+                Some(SkipReason::SabnzbdStaging),
+                "expected SabnzbdStaging for {n:?}"
+            );
+        }
+        // The renamed final folder, and the prefix anywhere but the
+        // start of a component, are candidates.
+        for n in [
+            "/watch/Saga 001/Saga 001.cbz",
+            "/watch/Saga_UNPACK_001/Saga 001.cbz",
+        ] {
+            assert_eq!(
+                should_skip(Path::new(n)),
+                None,
+                "expected candidate for {n:?}"
             );
         }
     }
