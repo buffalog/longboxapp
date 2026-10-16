@@ -870,19 +870,18 @@ async fn enrich(
 ///     `metron_calendar_cache_ttl_hours` (default 24h), deserialize the
 ///     payload and return.
 ///   - Cache miss / stale: fetch the issue list, hydrate each issue's
-///     detail in parallel (`buffer_unordered(20)` matching Metron's
-///     20-burst quota — first 20 fire concurrently, subsequent calls
-///     pace at the rate-limiter's sustained refill), serialize, store,
-///     return.
+///     detail one at a time (the Metron gate allows one request in
+///     flight, paced at 15/min), serialize, store, return.
 ///
-/// Cold-cache wall time at the rate-limit shape: ~55-60s for a typical
-/// 70-issue forward week. Subsequent loads within the TTL window are
-/// instant. Per piece-3 sign-off (cold-cache option 1): we accept the
-/// first-load cost and don't pre-build async/polling infrastructure.
+/// Cold-cache wall time at 15/min: ~4s per issue, so ~5 minutes for a
+/// typical 70-issue forward week. Subsequent loads within the TTL window
+/// are instant.
 ///
 /// Per-issue hydration failures are logged-and-dropped — a partial
-/// hydration is better than a failed calendar response. Empty lists
-/// also cache to avoid retrying empty CV-side weeks on every page load.
+/// hydration is better than a failed calendar response — but a partial
+/// week is NOT cached, so the next load fills the gaps instead of serving
+/// them for a whole TTL. Empty lists still cache to avoid retrying empty
+/// weeks on every page load.
 async fn load_metron_calendar(
     state: &AppState,
     client: &MetronClient,
@@ -909,16 +908,17 @@ async fn load_metron_calendar(
     let total = list.len();
     let hydration_results: Vec<Result<MetronCalendarItem, longbox_metron::MetronError>> =
         stream::iter(list)
-            .map(|item| async move { client.fetch_issue_detail(item.metron_issue_id).await })
-            .buffer_unordered(20)
+            .then(|item| async move { client.fetch_issue_detail(item.metron_issue_id).await })
             .collect()
             .await;
 
     let mut hydrated: Vec<MetronCalendarItem> = Vec::with_capacity(total);
+    let mut failed = 0usize;
     for result in hydration_results {
         match result {
             Ok(item) => hydrated.push(item),
             Err(e) => {
+                failed += 1;
                 tracing::warn!(
                     target: "longbox_web",
                     error = %e,
@@ -926,6 +926,10 @@ async fn load_metron_calendar(
                 );
             }
         }
+    }
+
+    if failed > 0 {
+        return project_metron_items(state, hydrated).await;
     }
 
     // Cache the hydrated payload — opaque JSON, read back by deserialize

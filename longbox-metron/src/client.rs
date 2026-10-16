@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Client as HttpClient, Response, StatusCode};
@@ -6,6 +7,7 @@ use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::error::{excerpt, MetronError};
+use crate::gate::{Gate, Lane};
 use crate::models::{
     MetronIssueDetailRow, MetronIssueListRow, MetronList, MetronSeriesDetailRow,
     MetronSeriesListRow,
@@ -15,12 +17,10 @@ use crate::projection::{
     project_series_detail, project_series_ref, MetronCalendarItem, MetronIssueRef,
     MetronSeriesDetail, MetronSeriesRef,
 };
-use crate::rate_limit::MetronRateLimiter;
 
 const DEFAULT_BASE_URL: &str = "https://metron.cloud/api/";
 const DEFAULT_USER_AGENT: &str = "longbox/0.1 (https://github.com/jeremyp/longbox)";
 const PAGE_LIMIT: u32 = 500;
-const BURST_CAPACITY: u32 = 20;
 
 /// Configuration for [`MetronClient`].
 ///
@@ -38,8 +38,12 @@ pub struct MetronClientConfig {
     pub base_url: String,
     pub timeout: Duration,
     pub connect_timeout: Duration,
-    pub rate_limit_per_hour: u32,
-    pub max_wait_for_slot: Duration,
+    /// Minimum gap between request starts, across every caller.
+    pub min_interval: Duration,
+    /// Requests per UTC day before the client refuses with `RateLimited`.
+    pub daily_budget: u32,
+    /// Upper bound of the random extra wait added to a 429's `Retry-After`.
+    pub jitter_max: Duration,
     pub user_agent: String,
 }
 
@@ -52,23 +56,26 @@ impl Default for MetronClientConfig {
             timeout: Duration::from_secs(30),
             // Same 5s connect bound as the Bug 5 fix put on the CV client.
             connect_timeout: Duration::from_secs(5),
-            // 3600/hour ≈ 1/sec sustained, comfortably under Metron's
-            // observed 5000/day ceiling regardless of window
-            // interpretation. The 20-burst cap matches Metron's reported
-            // burst-limit header.
-            rate_limit_per_hour: 3_600,
-            max_wait_for_slot: Duration::from_secs(60),
+            // 15/min against Metron's published 20/min burst, and 4,000
+            // a day against its 5,000/day sustained limit.
+            min_interval: Duration::from_secs(4),
+            daily_budget: 4_000,
+            jitter_max: Duration::from_secs(5),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
         }
     }
 }
 
+/// Cheap to clone: every clone, and every [`Self::with_lane`] handle,
+/// shares one [`Gate`], so all Metron traffic is coordinated.
+#[derive(Clone)]
 pub struct MetronClient {
     http: HttpClient,
     base_url: Url,
     username: String,
     password: String,
-    limiter: MetronRateLimiter,
+    gate: Arc<Gate>,
+    lane: Lane,
 }
 
 impl std::fmt::Debug for MetronClient {
@@ -77,6 +84,7 @@ impl std::fmt::Debug for MetronClient {
             .field("base_url", &self.base_url.as_str())
             .field("username", &self.username)
             .field("password", &"REDACTED")
+            .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
 }
@@ -98,18 +106,24 @@ impl MetronClient {
             .connect_timeout(config.connect_timeout)
             .user_agent(config.user_agent)
             .build()?;
-        let limiter = MetronRateLimiter::new(
-            config.rate_limit_per_hour,
-            BURST_CAPACITY,
-            config.max_wait_for_slot,
-        );
+        let gate = Gate::new(config.min_interval, config.daily_budget, config.jitter_max);
         Ok(Self {
             http,
             base_url,
             username: config.username,
             password: config.password,
-            limiter,
+            gate: Arc::new(gate),
+            lane: Lane::Interactive,
         })
+    }
+
+    /// A handle on the same gate that calls Metron from `lane`. A new
+    /// client starts on [`Lane::Interactive`].
+    pub fn with_lane(&self, lane: Lane) -> Self {
+        Self {
+            lane,
+            ..self.clone()
+        }
     }
 
     /// Fetch issues with `store_date` in `[after, before]`. Paginated like
@@ -263,32 +277,33 @@ impl MetronClient {
         Ok(url)
     }
 
-    /// Send the request, handle 429 with one retry honoring `Retry-After`,
-    /// then surface clean errors. Mirrors `longbox-comicvine`'s
-    /// `execute_with_retry` shape.
+    /// Send through the gate, holding the slot until the body is read.
+    /// A 429 pauses every caller (see [`Gate::note_429`]); this request
+    /// then retries once, through the gate like any other.
     async fn execute_with_retry(&self, url: Url) -> Result<String, MetronError> {
-        self.limiter.acquire().await?;
-        let resp = self.send(&url).await?;
-
-        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(&resp);
+        let mut retried = false;
+        loop {
+            let _slot = self.gate.acquire(self.lane).await?;
+            let resp = self.send(&url).await?;
+            self.gate.note_headers(resp.headers());
+            if resp.status() != StatusCode::TOO_MANY_REQUESTS {
+                return handle_response(resp).await;
+            }
+            let pause = self.gate.note_429(parse_retry_after(&resp));
             warn!(
                 target: "longbox_metron",
-                retry_after_secs = retry_after.as_secs(),
-                "received 429; sleeping and retrying once"
+                lane = ?self.lane,
+                pause_secs = pause.as_secs(),
+                retried,
+                "received 429; pausing all Metron callers"
             );
-            tokio::time::sleep(retry_after).await;
-            self.limiter.acquire().await?;
-            let resp2 = self.send(&url).await?;
-            if resp2.status() == StatusCode::TOO_MANY_REQUESTS {
-                let secs = parse_retry_after(&resp2).as_secs();
+            if retried {
                 return Err(MetronError::RateLimited {
-                    retry_after_seconds: secs,
+                    retry_after_seconds: pause.as_secs(),
                 });
             }
-            return handle_response(resp2).await;
+            retried = true;
         }
-        handle_response(resp).await
     }
 
     async fn send(&self, url: &Url) -> Result<Response, MetronError> {

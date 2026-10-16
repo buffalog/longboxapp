@@ -56,16 +56,20 @@ struct EnrichFinishedResponse {
 /// that have a `metron_id` but aren't finished yet, fetches each one's
 /// Metron series detail, and flips `finished` for Completed | Cancelled.
 ///
-/// Every Metron call goes through the shared `MetronClient` rate limiter
-/// (never bypassed); concurrency is capped at 2 because Metron's limits
-/// are stricter than CV's. Per-series failures (fetch error, bad
+/// Every Metron call goes through the shared `MetronClient` gate on the
+/// background lane, so the sweep runs one request at a time and yields to
+/// the calendar. Per-series failures (fetch error, bad
 /// metron_id, write hiccup) are logged and skipped — they never abort the
 /// sweep. Metron-optional: returns `503 metron_not_configured` when no
 /// client is configured. Idempotent: finished series leave the work-list.
 async fn enrich_finished(
     State(state): State<AppState>,
 ) -> Result<Json<EnrichFinishedResponse>, ApiError> {
-    let Some(client) = state.metron.clone() else {
+    let Some(client) = state
+        .metron
+        .as_ref()
+        .map(|m| m.with_lane(longbox_metron::Lane::Background))
+    else {
         return Err(ApiError::ServiceUnavailable {
             code: "metron_not_configured",
             message: "Metron integration is not configured.".into(),

@@ -6626,6 +6626,79 @@ async fn forward_week_hydrates_publisher_inline_from_metron_detail() {
     assert_eq!(cache_count, 1, "cache row written on miss");
 }
 
+/// A week where some issue details failed to hydrate is returned but NOT
+/// cached: caching it would serve the gaps for a whole TTL (2026-10-14:
+/// two forward weeks cached with a third of their issues missing).
+#[tokio::test]
+async fn forward_week_with_a_failed_hydration_is_not_cached() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    let list_row = |id: i64| {
+        serde_json::json!({
+            "id": id,
+            "series": {"name": "Saga", "volume": 1, "year_began": 2012},
+            "number": "1",
+            "issue": "Saga (2012) #1",
+            "cover_date": "2099-03-01",
+            "store_date": "2099-01-03",
+            "image": null,
+            "cover_hash": null,
+            "modified": null
+        })
+    };
+    let list = serde_json::json!({
+        "count": 2, "next": null, "previous": null,
+        "results": [list_row(1), list_row(2)]
+    });
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(list))
+        .mount(&metron_server)
+        .await;
+    let detail = serde_json::json!({
+        "id": 1,
+        "publisher": {"id": 2, "name": "Image"},
+        "imprint": null,
+        "series": {"id": 10, "name": "Saga", "sort_name": "Saga", "volume": 1, "year_began": 2012},
+        "number": "1", "alt_number": "", "title": "",
+        "cover_date": "2099-03-01", "store_date": "2099-01-03", "foc_date": null,
+        "price": "3.99", "desc": "", "image": null, "cv_id": null, "gcd_id": null,
+        "resource_url": "https://metron.cloud/issue/1", "modified": null
+    });
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/1/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(detail))
+        .mount(&metron_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/2/"))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .mount(&metron_server)
+        .await;
+
+    let body = response_json(
+        app.request(empty_request(
+            "GET",
+            "/api/releases/calendar?from=2099-01-01&to=2099-01-07",
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        1,
+        "the hydrated row still returns"
+    );
+
+    let cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metron_calendar_cache")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(cache_count, 0, "a partial week must not be cached");
+}
+
 /// Current-week request must NOT route through Metron even when it's
 /// enabled. The CV path stays unchanged; the dispatch boundary is
 /// strictly `from > today_utc()`.

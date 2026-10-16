@@ -92,8 +92,10 @@ impl TestApp {
             base_url: format!("{}/", server.uri()),
             timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(1),
-            rate_limit_per_hour: 360_000,
-            max_wait_for_slot: Duration::from_secs(1),
+            // No pacing or jitter: the gate's own tests cover those.
+            min_interval: Duration::ZERO,
+            daily_budget: u32::MAX,
+            jitter_max: Duration::ZERO,
             user_agent: "longbox-test/0.0".into(),
         })
         .unwrap();
