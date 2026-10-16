@@ -5,9 +5,9 @@
 
 use std::time::Duration;
 
-use longbox_metron::{MetronClient, MetronClientConfig, MetronError};
+use longbox_metron::{Lane, MetronClient, MetronClientConfig, MetronError};
 use pretty_assertions::assert_eq;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client_for(server: &MockServer) -> MetronClient {
@@ -19,10 +19,10 @@ fn client_for(server: &MockServer) -> MetronClient {
         base_url: format!("{}/", server.uri()),
         timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(1),
-        // Effectively unbounded for tests — the limiter shouldn't gate
-        // anything we're testing here.
-        rate_limit_per_hour: 360_000,
-        max_wait_for_slot: Duration::from_secs(1),
+        // No pacing or jitter: the gate's own tests cover those.
+        min_interval: Duration::ZERO,
+        daily_budget: u32::MAX,
+        jitter_max: Duration::ZERO,
         user_agent: "longbox-metron-test/0.0".into(),
     };
     MetronClient::new(config).expect("test client construction")
@@ -406,6 +406,71 @@ async fn http_429_retries_once_then_returns_rate_limited() {
         other => panic!("expected RateLimited, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_429_pauses_every_caller_and_the_retry_is_not_a_herd() {
+    let server = MockServer::start().await;
+    // First request gets a 429 with Retry-After: 1, everything after is 200.
+    Mock::given(method("GET"))
+        .and(path("/series/1/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/series/\d+/$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SERIES_BODY))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let bg = client.with_lane(Lane::Background);
+    let t0 = std::time::Instant::now();
+    let (a, b, c) = tokio::join!(
+        client.fetch_series_detail(1),
+        client.fetch_series_detail(2),
+        bg.fetch_series_detail(3),
+    );
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
+    // The 429 paused all three callers, not just the one that got it...
+    assert!(t0.elapsed() >= Duration::from_secs(1), "{:?}", t0.elapsed());
+    // ...and nothing piled on: one 429, one retry, two others = 4 requests.
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn requests_never_overlap() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/series/\d+/$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(200))
+                .set_body_string(SERIES_BODY),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let t0 = std::time::Instant::now();
+    let (a, b, c) = tokio::join!(
+        client.fetch_series_detail(1),
+        client.fetch_series_detail(2),
+        client.fetch_series_detail(3),
+    );
+    assert!(a.is_ok() && b.is_ok() && c.is_ok());
+    // Three 200ms responses one at a time, not in parallel.
+    assert!(
+        t0.elapsed() >= Duration::from_millis(600),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+const SERIES_BODY: &str = r#"{"id":1,"name":"S","sort_name":"S","volume":1,"year_began":2020,"year_end":null,"publisher":null,"imprint":null,"cv_id":null,"gcd_id":null,"issue_count":1}"#;
 
 #[tokio::test]
 async fn malformed_json_response_returns_malformed_error() {
