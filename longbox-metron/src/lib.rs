@@ -15,9 +15,10 @@ pub mod client;
 pub mod error;
 pub mod projection;
 
+mod gate;
 mod models;
-mod rate_limit;
 
 pub use client::{MetronClient, MetronClientConfig};
 pub use error::MetronError;
+pub use gate::Lane;
 pub use projection::{MetronCalendarItem, MetronIssueRef, MetronSeriesDetail, MetronSeriesRef};

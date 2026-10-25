@@ -40,6 +40,7 @@ services:
       # settings row is the actual gate; bad/missing credentials with
       # the row flipped on degrade to "forward weeks return empty" with
       # a single warn log at boot.
+      METRON_API_TOKEN: ${METRON_API_TOKEN:-}
       METRON_API_USER: ${METRON_API_USER:-}
       METRON_API_PASSWORD: ${METRON_API_PASSWORD:-}
       # Phase B: when set, web spawns the post-process watcher at boot.

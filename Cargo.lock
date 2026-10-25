@@ -1360,7 +1360,6 @@ dependencies = [
 name = "longbox-metron"
 version = "2.1.0"
 dependencies = [
- "governor",
  "pretty_assertions",
  "reqwest",
  "serde",

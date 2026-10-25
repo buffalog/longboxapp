@@ -257,6 +257,7 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
         settings_repo::get_or_default(&db, settings_repo::KEY_METRON_ENABLED, false).await?;
     let metron = build_metron_client(
         metron_enabled,
+        config.metron_api_token.as_deref(),
         config.metron_api_user.as_deref(),
         config.metron_api_password.as_deref(),
     );
@@ -275,10 +276,12 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
 
     // 12b. Metron series-linking resolver. Drains the work-list of
     //      CV-linked series not yet checked against Metron. Gated on
-    //      the Metron client existing — no client, no spawn.
+    //      the Metron client existing — no client, no spawn. Both run on
+    //      the background lane, so they yield to the calendar.
     if let Some(ref m) = metron {
-        crate::metron_link::spawn_metron_linker(db.clone(), Arc::clone(m));
-        crate::metron_link::spawn_metron_issue_linker(db.clone(), Arc::clone(m));
+        let bg = Arc::new(m.with_lane(longbox_metron::Lane::Background));
+        crate::metron_link::spawn_metron_linker(db.clone(), Arc::clone(&bg));
+        crate::metron_link::spawn_metron_issue_linker(db.clone(), bg);
     }
 
     // 13. Compose state.
@@ -375,6 +378,7 @@ fn spawn_wal_checkpoint(db: longbox_db::Pool) {
 /// credentials, ok) are exercised in tests below.
 fn build_metron_client(
     enabled: bool,
+    token: Option<&str>,
     user: Option<&str>,
     password: Option<&str>,
 ) -> Option<Arc<MetronClient>> {
@@ -382,12 +386,17 @@ fn build_metron_client(
         return None;
     }
     let config = MetronClientConfig {
+        api_token: token.unwrap_or_default().to_owned(),
         username: user.unwrap_or_default().to_owned(),
         password: password.unwrap_or_default().to_owned(),
         ..Default::default()
     };
     match MetronClient::new(config) {
-        Ok(c) => Some(Arc::new(c)),
+        Ok(c) => {
+            // The mode only, never the credential.
+            info!(target: "longbox_web", auth = c.auth_mode(), "metron client ready");
+            Some(Arc::new(c))
+        }
         Err(e) => {
             warn!(
                 target: "longbox_web",
@@ -484,7 +493,7 @@ mod tests {
         // Even with valid credentials present, kill switch off short-
         // circuits before any config touch. Pass deliberately-invalid
         // credentials to prove they're never used.
-        let result = build_metron_client(false, Some("user"), Some("pass"));
+        let result = build_metron_client(false, None, Some("user"), Some("pass"));
         assert!(
             result.is_none(),
             "disabled kill switch must collapse to None"
@@ -493,7 +502,7 @@ mod tests {
 
     #[test]
     fn metron_enabled_with_missing_user_degrades_to_none() {
-        let result = build_metron_client(true, None, Some("pass"));
+        let result = build_metron_client(true, None, None, Some("pass"));
         assert!(
             result.is_none(),
             "enabled + missing user must degrade to None (not panic, not error)"
@@ -502,13 +511,13 @@ mod tests {
 
     #[test]
     fn metron_enabled_with_missing_password_degrades_to_none() {
-        let result = build_metron_client(true, Some("user"), None);
+        let result = build_metron_client(true, None, Some("user"), None);
         assert!(result.is_none());
     }
 
     #[test]
     fn metron_enabled_with_whitespace_credentials_degrades_to_none() {
-        let result = build_metron_client(true, Some("   "), Some("   "));
+        let result = build_metron_client(true, None, Some("   "), Some("   "));
         assert!(
             result.is_none(),
             "MetronClient::new rejects whitespace-only credentials; bootstrap collapses"
@@ -517,10 +526,20 @@ mod tests {
 
     #[test]
     fn metron_enabled_with_valid_credentials_returns_some() {
-        let result = build_metron_client(true, Some("real_user"), Some("real_pass"));
+        let result = build_metron_client(true, None, Some("real_user"), Some("real_pass"));
         assert!(
             result.is_some(),
             "enabled + non-empty credentials must yield a constructed client handle"
         );
+        assert_eq!(result.unwrap().auth_mode(), "basic");
+    }
+
+    #[test]
+    fn metron_token_wins_and_needs_no_user_or_password() {
+        let result = build_metron_client(true, Some("tok"), None, None)
+            .expect("a token alone must yield a client");
+        assert_eq!(result.auth_mode(), "token");
+        let result = build_metron_client(true, Some("tok"), Some("u"), Some("p")).unwrap();
+        assert_eq!(result.auth_mode(), "token");
     }
 }

@@ -87,13 +87,16 @@ impl TestApp {
     #[allow(dead_code)]
     pub fn enable_metron(&mut self, server: &MockServer) {
         let metron = MetronClient::new(MetronClientConfig {
+            api_token: String::new(),
             username: "test_user".into(),
             password: "test_pass".into(),
             base_url: format!("{}/", server.uri()),
             timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(1),
-            rate_limit_per_hour: 360_000,
-            max_wait_for_slot: Duration::from_secs(1),
+            // No pacing or jitter: the gate's own tests cover those.
+            min_interval: Duration::ZERO,
+            daily_budget: u32::MAX,
+            jitter_max: Duration::ZERO,
             user_agent: "longbox-test/0.0".into(),
         })
         .unwrap();
@@ -142,6 +145,7 @@ pub async fn build_test_app() -> TestApp {
         match_threshold: 0.85,
         cors_permissive: false,
         download_watch_path: None,
+        metron_api_token: None,
         metron_api_user: None,
         metron_api_password: None,
         pull_schedule_time: time::macros::time!(05:00),

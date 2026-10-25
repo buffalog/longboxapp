@@ -190,6 +190,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.75}
       COMICVINE_API_KEY: ${COMICVINE_API_KEY}
+      METRON_API_TOKEN: ${METRON_API_TOKEN:-}
       METRON_API_USER: ${METRON_API_USER:-}
       METRON_API_PASSWORD: ${METRON_API_PASSWORD:-}
       DOWNLOAD_WATCH_PATH: ${DOWNLOAD_WATCH_PATH:-}
@@ -248,7 +249,9 @@ HOST_LIBRARY_PATH=/paste/your/library/path/here
 # DOWNLOAD_WATCH_HOST=/path/to/sabnzbd/complete
 # DOWNLOAD_WATCH_PATH=/watch
 
-# OPTIONAL: Metron credentials for the release calendar.
+# OPTIONAL: Metron credentials for the release calendar. A token wins;
+# user + password are only the fallback when no token is set.
+# METRON_API_TOKEN=
 # METRON_API_USER=
 # METRON_API_PASSWORD=
 
@@ -470,12 +473,13 @@ Notes:
 
 ### Metron release calendar
 
-For the release calendar feature (new issues on sale this week), create a free account at [https://metron.cloud/](https://metron.cloud/) and add your credentials to `.env`:
+For the release calendar feature (new issues on sale this week), create a free account at [https://metron.cloud/](https://metron.cloud/), generate an API token in your account settings, and add it to `.env`:
 
 ```env
-METRON_API_USER=your_username
-METRON_API_PASSWORD=your_password
+METRON_API_TOKEN=your_token
 ```
+
+LongBox sends it as `Authorization: Bearer <token>`. Username and password (`METRON_API_USER` / `METRON_API_PASSWORD`, Basic Auth) still work, but only as a fallback when no token is set.
 
 Then restart the container: `docker compose down && docker compose up -d`
 

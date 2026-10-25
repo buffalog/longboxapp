@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Client as HttpClient, Response, StatusCode};
@@ -6,6 +7,7 @@ use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::error::{excerpt, MetronError};
+use crate::gate::{Gate, Lane};
 use crate::models::{
     MetronIssueDetailRow, MetronIssueListRow, MetronList, MetronSeriesDetailRow,
     MetronSeriesListRow,
@@ -15,80 +17,116 @@ use crate::projection::{
     project_series_detail, project_series_ref, MetronCalendarItem, MetronIssueRef,
     MetronSeriesDetail, MetronSeriesRef,
 };
-use crate::rate_limit::MetronRateLimiter;
 
 const DEFAULT_BASE_URL: &str = "https://metron.cloud/api/";
 const DEFAULT_USER_AGENT: &str = "longbox/0.1 (https://github.com/jeremyp/longbox)";
 const PAGE_LIMIT: u32 = 500;
-const BURST_CAPACITY: u32 = 20;
 
 /// Configuration for [`MetronClient`].
 ///
-/// Metron uses HTTP Basic Auth with username + password (an account-level
-/// credential, not an API key). For piece 2's wiring, these come from
-/// `METRON_API_USER` / `METRON_API_PASSWORD` env vars in
-/// `docker-compose.yml` (matching the existing `COMICVINE_API_KEY`
-/// pattern). Settings-table storage was considered and rejected — secrets
-/// stay out of the DB; restart cycle to rotate credentials is acceptable
-/// for a human-managed account.
-#[derive(Debug, Clone)]
+/// Auth: a revocable API token (`METRON_API_TOKEN`) is sent as
+/// `Authorization: Bearer <token>`, per Metron's API docs
+/// (<https://github.com/Metron-Project/metron/blob/master/api/README.md>,
+/// "Token Authentication"). When a token is set, Basic Auth is never
+/// sent. Basic Auth with username + password (`METRON_API_USER` /
+/// `METRON_API_PASSWORD`) is only the fallback when no token is set.
+/// Settings-table storage was considered and rejected — secrets stay out
+/// of the DB; restart cycle to rotate credentials is acceptable for a
+/// human-managed account.
+#[derive(Clone)]
 pub struct MetronClientConfig {
+    /// Metron API token. When non-empty it wins: `username` and
+    /// `password` are ignored.
+    pub api_token: String,
     pub username: String,
     pub password: String,
     pub base_url: String,
     pub timeout: Duration,
     pub connect_timeout: Duration,
-    pub rate_limit_per_hour: u32,
-    pub max_wait_for_slot: Duration,
+    /// Minimum gap between request starts, across every caller.
+    pub min_interval: Duration,
+    /// Requests per UTC day before the client refuses with `RateLimited`.
+    pub daily_budget: u32,
+    /// Upper bound of the random extra wait added to a 429's `Retry-After`.
+    pub jitter_max: Duration,
     pub user_agent: String,
+}
+
+/// Redacts the token and password so a `?config` log can't leak them.
+impl std::fmt::Debug for MetronClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetronClientConfig")
+            .field("api_token", &"REDACTED")
+            .field("username", &self.username)
+            .field("password", &"REDACTED")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for MetronClientConfig {
     fn default() -> Self {
         Self {
+            api_token: String::new(),
             username: String::new(),
             password: String::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout: Duration::from_secs(30),
             // Same 5s connect bound as the Bug 5 fix put on the CV client.
             connect_timeout: Duration::from_secs(5),
-            // 3600/hour ≈ 1/sec sustained, comfortably under Metron's
-            // observed 5000/day ceiling regardless of window
-            // interpretation. The 20-burst cap matches Metron's reported
-            // burst-limit header.
-            rate_limit_per_hour: 3_600,
-            max_wait_for_slot: Duration::from_secs(60),
+            // 15/min against Metron's published 20/min burst, and 4,000
+            // a day against its 5,000/day sustained limit.
+            min_interval: Duration::from_secs(4),
+            daily_budget: 4_000,
+            jitter_max: Duration::from_secs(5),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
         }
     }
 }
 
+#[derive(Clone)]
+enum Auth {
+    Token(String),
+    Basic { username: String, password: String },
+}
+
+/// Cheap to clone: every clone, and every [`Self::with_lane`] handle,
+/// shares one [`Gate`], so all Metron traffic is coordinated.
+#[derive(Clone)]
 pub struct MetronClient {
     http: HttpClient,
     base_url: Url,
-    username: String,
-    password: String,
-    limiter: MetronRateLimiter,
+    auth: Auth,
+    gate: Arc<Gate>,
+    lane: Lane,
 }
 
 impl std::fmt::Debug for MetronClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetronClient")
             .field("base_url", &self.base_url.as_str())
-            .field("username", &self.username)
-            .field("password", &"REDACTED")
+            .field("auth", &self.auth_mode())
+            .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
 }
 
 impl MetronClient {
-    /// Construct a client. Returns [`MetronError::Auth`] if credentials
-    /// are missing — surface this at boot so the feature can be cleanly
-    /// gated rather than failing per-request.
+    /// Construct a client. Returns [`MetronError::Auth`] if there's
+    /// neither a token nor a username + password — surface this at boot
+    /// so the feature can be cleanly gated rather than failing per-request.
     pub fn new(config: MetronClientConfig) -> Result<Self, MetronError> {
-        if config.username.trim().is_empty() || config.password.trim().is_empty() {
+        let token = config.api_token.trim();
+        let auth = if !token.is_empty() {
+            Auth::Token(token.to_owned())
+        } else if config.username.trim().is_empty() || config.password.trim().is_empty() {
             return Err(MetronError::Auth);
-        }
+        } else {
+            Auth::Basic {
+                username: config.username,
+                password: config.password,
+            }
+        };
         let base_url = Url::parse(&config.base_url).map_err(|e| MetronError::Malformed {
             message: format!("invalid base_url: {e}"),
             raw_excerpt: None,
@@ -98,18 +136,32 @@ impl MetronClient {
             .connect_timeout(config.connect_timeout)
             .user_agent(config.user_agent)
             .build()?;
-        let limiter = MetronRateLimiter::new(
-            config.rate_limit_per_hour,
-            BURST_CAPACITY,
-            config.max_wait_for_slot,
-        );
+        let gate = Gate::new(config.min_interval, config.daily_budget, config.jitter_max);
         Ok(Self {
             http,
             base_url,
-            username: config.username,
-            password: config.password,
-            limiter,
+            auth,
+            gate: Arc::new(gate),
+            lane: Lane::Interactive,
         })
+    }
+
+    /// Which credential this client sends: `"token"` or `"basic"`.
+    /// Never the credential itself.
+    pub fn auth_mode(&self) -> &'static str {
+        match self.auth {
+            Auth::Token(_) => "token",
+            Auth::Basic { .. } => "basic",
+        }
+    }
+
+    /// A handle on the same gate that calls Metron from `lane`. A new
+    /// client starts on [`Lane::Interactive`].
+    pub fn with_lane(&self, lane: Lane) -> Self {
+        Self {
+            lane,
+            ..self.clone()
+        }
     }
 
     /// Fetch issues with `store_date` in `[after, before]`. Paginated like
@@ -263,45 +315,45 @@ impl MetronClient {
         Ok(url)
     }
 
-    /// Send the request, handle 429 with one retry honoring `Retry-After`,
-    /// then surface clean errors. Mirrors `longbox-comicvine`'s
-    /// `execute_with_retry` shape.
+    /// Send through the gate, holding the slot until the body is read.
+    /// A 429 pauses every caller (see [`Gate::note_429`]); this request
+    /// then retries once, through the gate like any other.
     async fn execute_with_retry(&self, url: Url) -> Result<String, MetronError> {
-        self.limiter.acquire().await?;
-        let resp = self.send(&url).await?;
-
-        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(&resp);
+        let mut retried = false;
+        loop {
+            let _slot = self.gate.acquire(self.lane).await?;
+            let resp = self.send(&url).await?;
+            self.gate.note_headers(resp.headers());
+            if resp.status() != StatusCode::TOO_MANY_REQUESTS {
+                return handle_response(resp).await;
+            }
+            let pause = self.gate.note_429(parse_retry_after(&resp));
             warn!(
                 target: "longbox_metron",
-                retry_after_secs = retry_after.as_secs(),
-                "received 429; sleeping and retrying once"
+                lane = ?self.lane,
+                pause_secs = pause.as_secs(),
+                retried,
+                "received 429; pausing all Metron callers"
             );
-            tokio::time::sleep(retry_after).await;
-            self.limiter.acquire().await?;
-            let resp2 = self.send(&url).await?;
-            if resp2.status() == StatusCode::TOO_MANY_REQUESTS {
-                let secs = parse_retry_after(&resp2).as_secs();
+            if retried {
                 return Err(MetronError::RateLimited {
-                    retry_after_seconds: secs,
+                    retry_after_seconds: pause.as_secs(),
                 });
             }
-            return handle_response(resp2).await;
+            retried = true;
         }
-        handle_response(resp).await
     }
 
     async fn send(&self, url: &Url) -> Result<Response, MetronError> {
         if tracing::enabled!(target: "longbox_metron", tracing::Level::DEBUG) {
             debug!(target: "longbox_metron", url = %url, "sending Metron request");
         }
-        Ok(self
-            .http
-            .get(url.clone())
-            .basic_auth(&self.username, Some(&self.password))
-            .header("Accept", "application/json")
-            .send()
-            .await?)
+        let req = self.http.get(url.clone());
+        let req = match &self.auth {
+            Auth::Token(token) => req.bearer_auth(token),
+            Auth::Basic { username, password } => req.basic_auth(username, Some(password)),
+        };
+        Ok(req.header("Accept", "application/json").send().await?)
     }
 }
 
