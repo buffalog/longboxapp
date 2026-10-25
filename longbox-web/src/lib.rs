@@ -17,6 +17,7 @@ pub mod metron_link;
 pub(crate) mod pathsafe;
 pub mod refresh;
 pub mod routes;
+pub mod shutdown;
 pub mod state;
 pub mod tracing_setup;
 

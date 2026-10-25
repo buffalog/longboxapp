@@ -1,12 +1,21 @@
 use std::future::IntoFuture;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use longbox_db::scan_run_repo;
 use longbox_web::{
-    bootstrap_run, build_opds_router, build_router, config::AppConfig, tracing_setup,
+    bootstrap_run, build_opds_router, build_router, config::AppConfig, shutdown, tracing_setup,
 };
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// How long in-flight requests get to finish after SIGTERM. A cold
+/// Metron calendar week can take minutes; it's dropped, not waited on.
+/// With [`DB_CLOSE_WAIT`] this stays well under `docker stop`'s 10s.
+const DRAIN: Duration = Duration::from_secs(5);
+/// How long workers get to hand back DB connections before the checkpoint.
+const DB_CLOSE_WAIT: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -82,16 +91,59 @@ async fn main() -> ExitCode {
     };
     info!(target: "longbox_web", addr = %opds_bind, "OPDS listening");
 
+    let db = state.db.clone();
     let router = build_router(state.clone());
     let opds_router = build_opds_router(state);
 
     // Run both listeners concurrently; if either exits (error), bring the
-    // process down so the orchestrator restarts a clean instance.
-    let app = axum::serve(listener, router).into_future();
-    let opds = axum::serve(opds_listener, opds_router).into_future();
-    if let Err(e) = tokio::try_join!(app, opds) {
-        error!(target: "longbox_web", err = %e, "server exited with error");
-        return ExitCode::from(1);
+    // process down so the orchestrator restarts a clean instance. On
+    // SIGTERM / Ctrl-C both stop accepting and drain for up to DRAIN.
+    let stop = CancellationToken::new();
+    let app = axum::serve(listener, router)
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future();
+    let opds = axum::serve(opds_listener, opds_router)
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future();
+    let servers = async { tokio::try_join!(app, opds) };
+    tokio::pin!(servers);
+
+    let served = tokio::select! {
+        r = &mut servers => r,
+        () = shutdown::signal() => {
+            stop.cancel();
+            tokio::time::timeout(DRAIN, &mut servers).await.unwrap_or_else(|_| {
+                warn!(
+                    target: "longbox_web",
+                    drain_secs = DRAIN.as_secs(),
+                    "requests still in flight after drain; dropping them"
+                );
+                Ok(((), ()))
+            })
+        }
+    };
+    let code = match served {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!(target: "longbox_web", err = %e, "server exited with error");
+            ExitCode::from(1)
+        }
+    };
+
+    match shutdown::close_db(&db, DB_CLOSE_WAIT).await {
+        Ok((busy, log_pages, checkpointed_pages)) => info!(
+            target: "longbox_web",
+            busy,
+            log_pages,
+            checkpointed_pages,
+            "database closed and WAL checkpointed; exiting"
+        ),
+        Err(e) => warn!(target: "longbox_web", error = %e, "shutdown checkpoint failed; exiting"),
     }
-    ExitCode::SUCCESS
+
+    // Exit here rather than returning: dropping the runtime waits on any
+    // spawn_blocking work still running (archive reads, pdftoppm), which
+    // could outlast docker's grace and end in SIGKILL anyway. The DB is
+    // closed; the remaining worker tasks have nothing left to flush.
+    std::process::exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }
