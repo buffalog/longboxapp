@@ -24,15 +24,20 @@ const PAGE_LIMIT: u32 = 500;
 
 /// Configuration for [`MetronClient`].
 ///
-/// Metron uses HTTP Basic Auth with username + password (an account-level
-/// credential, not an API key). For piece 2's wiring, these come from
-/// `METRON_API_USER` / `METRON_API_PASSWORD` env vars in
-/// `docker-compose.yml` (matching the existing `COMICVINE_API_KEY`
-/// pattern). Settings-table storage was considered and rejected — secrets
-/// stay out of the DB; restart cycle to rotate credentials is acceptable
-/// for a human-managed account.
-#[derive(Debug, Clone)]
+/// Auth: a revocable API token (`METRON_API_TOKEN`) is sent as
+/// `Authorization: Bearer <token>`, per Metron's API docs
+/// (<https://github.com/Metron-Project/metron/blob/master/api/README.md>,
+/// "Token Authentication"). When a token is set, Basic Auth is never
+/// sent. Basic Auth with username + password (`METRON_API_USER` /
+/// `METRON_API_PASSWORD`) is only the fallback when no token is set.
+/// Settings-table storage was considered and rejected — secrets stay out
+/// of the DB; restart cycle to rotate credentials is acceptable for a
+/// human-managed account.
+#[derive(Clone)]
 pub struct MetronClientConfig {
+    /// Metron API token. When non-empty it wins: `username` and
+    /// `password` are ignored.
+    pub api_token: String,
     pub username: String,
     pub password: String,
     pub base_url: String,
@@ -47,9 +52,22 @@ pub struct MetronClientConfig {
     pub user_agent: String,
 }
 
+/// Redacts the token and password so a `?config` log can't leak them.
+impl std::fmt::Debug for MetronClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetronClientConfig")
+            .field("api_token", &"REDACTED")
+            .field("username", &self.username)
+            .field("password", &"REDACTED")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for MetronClientConfig {
     fn default() -> Self {
         Self {
+            api_token: String::new(),
             username: String::new(),
             password: String::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
@@ -66,14 +84,19 @@ impl Default for MetronClientConfig {
     }
 }
 
+#[derive(Clone)]
+enum Auth {
+    Token(String),
+    Basic { username: String, password: String },
+}
+
 /// Cheap to clone: every clone, and every [`Self::with_lane`] handle,
 /// shares one [`Gate`], so all Metron traffic is coordinated.
 #[derive(Clone)]
 pub struct MetronClient {
     http: HttpClient,
     base_url: Url,
-    username: String,
-    password: String,
+    auth: Auth,
     gate: Arc<Gate>,
     lane: Lane,
 }
@@ -82,21 +105,28 @@ impl std::fmt::Debug for MetronClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetronClient")
             .field("base_url", &self.base_url.as_str())
-            .field("username", &self.username)
-            .field("password", &"REDACTED")
+            .field("auth", &self.auth_mode())
             .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
 }
 
 impl MetronClient {
-    /// Construct a client. Returns [`MetronError::Auth`] if credentials
-    /// are missing — surface this at boot so the feature can be cleanly
-    /// gated rather than failing per-request.
+    /// Construct a client. Returns [`MetronError::Auth`] if there's
+    /// neither a token nor a username + password — surface this at boot
+    /// so the feature can be cleanly gated rather than failing per-request.
     pub fn new(config: MetronClientConfig) -> Result<Self, MetronError> {
-        if config.username.trim().is_empty() || config.password.trim().is_empty() {
+        let token = config.api_token.trim();
+        let auth = if !token.is_empty() {
+            Auth::Token(token.to_owned())
+        } else if config.username.trim().is_empty() || config.password.trim().is_empty() {
             return Err(MetronError::Auth);
-        }
+        } else {
+            Auth::Basic {
+                username: config.username,
+                password: config.password,
+            }
+        };
         let base_url = Url::parse(&config.base_url).map_err(|e| MetronError::Malformed {
             message: format!("invalid base_url: {e}"),
             raw_excerpt: None,
@@ -110,11 +140,19 @@ impl MetronClient {
         Ok(Self {
             http,
             base_url,
-            username: config.username,
-            password: config.password,
+            auth,
             gate: Arc::new(gate),
             lane: Lane::Interactive,
         })
+    }
+
+    /// Which credential this client sends: `"token"` or `"basic"`.
+    /// Never the credential itself.
+    pub fn auth_mode(&self) -> &'static str {
+        match self.auth {
+            Auth::Token(_) => "token",
+            Auth::Basic { .. } => "basic",
+        }
     }
 
     /// A handle on the same gate that calls Metron from `lane`. A new
@@ -310,13 +348,12 @@ impl MetronClient {
         if tracing::enabled!(target: "longbox_metron", tracing::Level::DEBUG) {
             debug!(target: "longbox_metron", url = %url, "sending Metron request");
         }
-        Ok(self
-            .http
-            .get(url.clone())
-            .basic_auth(&self.username, Some(&self.password))
-            .header("Accept", "application/json")
-            .send()
-            .await?)
+        let req = self.http.get(url.clone());
+        let req = match &self.auth {
+            Auth::Token(token) => req.bearer_auth(token),
+            Auth::Basic { username, password } => req.basic_auth(username, Some(password)),
+        };
+        Ok(req.header("Accept", "application/json").send().await?)
     }
 }
 

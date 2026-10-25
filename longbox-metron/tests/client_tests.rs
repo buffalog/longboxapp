@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client_for(server: &MockServer) -> MetronClient {
     let config = MetronClientConfig {
+        api_token: String::new(),
         username: "tester".into(),
         password: "secret".into(),
         // wiremock's URI doesn't include a trailing slash; client expects
@@ -498,28 +499,71 @@ async fn malformed_json_response_returns_malformed_error() {
     }
 }
 
-#[tokio::test]
-async fn requests_carry_basic_auth_header() {
-    let server = MockServer::start().await;
-    // wiremock matches require the Authorization header to be present
-    // and start with "Basic " — the value itself is base64(user:pass).
-    // We verify the prefix, which is enough proof that basic_auth() is
-    // wired into the request builder.
+/// Mount an empty `/issue/` page, make one request with `config`, and
+/// return the `Authorization` headers Metron received.
+async fn auth_headers_sent(mut config: MetronClientConfig, server: &MockServer) -> Vec<String> {
     Mock::given(method("GET"))
         .and(path("/issue/"))
-        .and(wiremock::matchers::header_exists("authorization"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(r#"{"count":0,"next":null,"previous":null,"results":[]}"#),
         )
-        .mount(&server)
+        .mount(server)
         .await;
-
-    let client = client_for(&server);
-    // Will succeed if the matcher matched; will surface a wiremock error
-    // (probably 404 from the catch-all if no matcher hit) otherwise.
-    let _ = client
+    config.base_url = format!("{}/", server.uri());
+    MetronClient::new(config)
+        .expect("test client construction")
         .fetch_issues_by_store_date_range("2026-06-01", "2026-06-07")
         .await
-        .expect("auth header must be on the request");
+        .expect("request succeeds");
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1);
+    requests[0]
+        .headers
+        .get_all("authorization")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_owned())
+        .collect()
+}
+
+fn test_config() -> MetronClientConfig {
+    MetronClientConfig {
+        username: "tester".into(),
+        password: "secret".into(),
+        min_interval: Duration::ZERO,
+        jitter_max: Duration::ZERO,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn token_is_sent_as_bearer_and_basic_is_not_sent() {
+    let server = MockServer::start().await;
+    // Username + password are set too: the token must still win.
+    let config = MetronClientConfig {
+        api_token: "tok-abc123".into(),
+        ..test_config()
+    };
+    let sent = auth_headers_sent(config, &server).await;
+    assert_eq!(sent, vec!["Bearer tok-abc123".to_owned()]);
+    assert!(!sent.iter().any(|v| v.starts_with("Basic")));
+}
+
+#[tokio::test]
+async fn basic_auth_is_used_when_no_token_is_set() {
+    let server = MockServer::start().await;
+    let sent = auth_headers_sent(test_config(), &server).await;
+    // base64("tester:secret")
+    assert_eq!(sent, vec!["Basic dGVzdGVyOnNlY3JldA==".to_owned()]);
+}
+
+#[tokio::test]
+async fn whitespace_token_falls_back_to_basic() {
+    let server = MockServer::start().await;
+    let config = MetronClientConfig {
+        api_token: "   ".into(),
+        ..test_config()
+    };
+    let sent = auth_headers_sent(config, &server).await;
+    assert_eq!(sent, vec!["Basic dGVzdGVyOnNlY3JldA==".to_owned()]);
 }

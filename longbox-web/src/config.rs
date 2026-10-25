@@ -16,7 +16,10 @@ pub struct AppConfig {
     /// starts the post-process watcher at boot. Unset = Phase B not
     /// enabled; unreadable = warn-and-skip.
     pub download_watch_path: Option<String>,
-    /// Metron API username (Basic Auth). Optional — the
+    /// Metron API token, sent as `Authorization: Bearer`. When set, it
+    /// wins and Basic Auth is never sent. Source: `METRON_API_TOKEN`.
+    pub metron_api_token: Option<String>,
+    /// Metron API username (Basic Auth fallback when no token is set). Optional — the
     /// `metron_enabled` settings row is the actual gate. When
     /// `metron_enabled = true` AND this is None/empty, bootstrap
     /// logs warn and degrades to None on the MetronClient handle.
@@ -120,6 +123,7 @@ impl AppConfig {
         // `metron_enabled` settings row is the actual feature gate;
         // bootstrap collapses any (enabled, missing-creds) state to
         // a None MetronClient handle with a warn log, no hard fail.
+        let metron_api_token = optional("METRON_API_TOKEN");
         let metron_api_user = optional("METRON_API_USER");
         let metron_api_password = optional("METRON_API_PASSWORD");
 
@@ -172,6 +176,7 @@ impl AppConfig {
             match_threshold,
             cors_permissive,
             download_watch_path,
+            metron_api_token,
             metron_api_user,
             metron_api_password,
             pull_schedule_time,

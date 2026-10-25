@@ -87,6 +87,7 @@ impl TestApp {
     #[allow(dead_code)]
     pub fn enable_metron(&mut self, server: &MockServer) {
         let metron = MetronClient::new(MetronClientConfig {
+            api_token: String::new(),
             username: "test_user".into(),
             password: "test_pass".into(),
             base_url: format!("{}/", server.uri()),
@@ -144,6 +145,7 @@ pub async fn build_test_app() -> TestApp {
         match_threshold: 0.85,
         cors_permissive: false,
         download_watch_path: None,
+        metron_api_token: None,
         metron_api_user: None,
         metron_api_password: None,
         pull_schedule_time: time::macros::time!(05:00),
