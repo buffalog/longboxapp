@@ -41,6 +41,7 @@ const SAMPLE = {
       size_bytes: 45234567,
       age_days: 412,
       confidence: 0.91,
+      rejected_reason: null,
       nzb_url: 'https://idx/nzb/saga'
     },
     {
@@ -49,6 +50,7 @@ const SAMPLE = {
       size_bytes: 50000000,
       age_days: 100,
       confidence: 0.2,
+      rejected_reason: null,
       nzb_url: 'https://idx/nzb/batman'
     }
   ],
@@ -122,6 +124,33 @@ describe('InteractiveSearch modal', () => {
     await waitFor(() => {
       expect(screen.queryByText(/you already have this issue/i)).not.toBeInTheDocument();
     });
+  });
+
+  it('lists a release auto-pull would refuse, marked with the reason and still grabbable', async () => {
+    const title = 'Saga 012 - The War for Phang (2013) (digital).cbz';
+    vi.mocked(interactiveSearch).mockResolvedValue({
+      ...SAMPLE,
+      results: [
+        {
+          title,
+          indexer: 'NZBGeek',
+          size_bytes: 45234567,
+          age_days: 9,
+          confidence: 1,
+          rejected_reason: 'subtitle "The War for Phang" after the issue number',
+          nzb_url: 'https://idx/nzb/phang'
+        }
+      ]
+    });
+    renderModal();
+
+    await fireEvent.click(screen.getByRole('button', { name: /^Search$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(title)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Auto-pull skips this: subtitle "The War for Phang"/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Grab/i })).toBeEnabled();
   });
 
   it('pre-populates the query from series title + issue number', () => {

@@ -1493,3 +1493,175 @@ async fn rewrite_failure_surfaces_as_outcome_failed() {
     // Suppress unused-field warnings for fixture handles.
     let _ = (f.series_id, f.issue_id);
 }
+
+/// Seed a series and its issues as `(number, cover_date, store_date)`.
+async fn seed_volume(
+    db: &Pool,
+    cv_id: i64,
+    title: &str,
+    start_year: i32,
+    issues: &[(&str, &str, Option<&str>)],
+) -> (i64, Vec<i64>) {
+    let series_id = series_repo::insert(
+        db,
+        NewSeries {
+            cv_id: Some(cv_id),
+            metron_id: None,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            start_year: Some(start_year),
+            publisher: Some("DC Comics".into()),
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let mut ids = Vec::new();
+    for (i, (number, cover, store)) in issues.iter().enumerate() {
+        ids.push(
+            issue_repo::insert(
+                db,
+                NewIssue {
+                    series_id,
+                    cv_issue_id: Some(cv_id * 1000 + i as i64),
+                    metron_issue_id: None,
+                    number: (*number).into(),
+                    title: None,
+                    cover_date: Some((*cover).into()),
+                    summary: None,
+                    cover_url: None,
+                    store_date: store.map(Into::into),
+                },
+            )
+            .await
+            .unwrap()
+            .id,
+        );
+    }
+    (series_id, ids)
+}
+
+/// Green Lantern (2005) and (2023) as the live catalog has them around #26:
+/// the 2005 volume is the bigger catalog, so issue count alone picks it.
+async fn seed_green_lanterns(db: &Pool) -> (Vec<i64>, Vec<i64>) {
+    let (_, gl2005) = seed_volume(
+        db,
+        18216,
+        "Green Lantern",
+        2005,
+        &[
+            ("24", "2007-12-01", None),
+            ("25", "2008-01-01", None),
+            ("26", "2008-02-01", None),
+            ("27", "2008-03-01", None),
+            ("28", "2008-04-01", None),
+            ("29", "2008-05-01", None),
+        ],
+    )
+    .await;
+    let (_, gl2023) = seed_volume(
+        db,
+        150172,
+        "Green Lantern",
+        2023,
+        &[
+            ("25", "2025-09-01", Some("2025-07-23")),
+            ("26", "2025-10-01", Some("2025-08-27")),
+            ("27", "2025-11-01", Some("2025-09-24")),
+            ("29", "2026-01-01", Some("2025-11-26")),
+        ],
+    )
+    .await;
+    (gl2005, gl2023)
+}
+
+#[tokio::test]
+async fn release_year_files_into_the_volume_whose_issue_it_fits_not_the_bigger_catalog() {
+    // Step 0 (2026-10-26): every GL (2023) download Phase B imported went to
+    // GL (2005) on catalog size. 2025 is GL (2023) #26's on-sale year; GL
+    // (2005) #26 went on sale in 2008. The #26 names are the files SAB left
+    // in the `Green Lantern 26` job folder for NZB `Green_Lantern_026__2025...`.
+    // The #29 name is constructed: on sale 2025-11-26 with a 2026 cover, a
+    // 2025 file fits only on the store date, as the pull gate reads it.
+    // Indices into `seed_green_lanterns`: #26 is [2] in 2005 and [1] in 2023.
+    for (folder, basename, i2005, i2023) in [
+        (
+            "Green Lantern 26",
+            "Green Lantern 026 (2025) (digital) (Son of Ultron-Empire).cbz",
+            2,
+            1,
+        ),
+        (
+            "Green Lantern 26",
+            "Green Lantern 026 (2025) (Webrip) (The Last Kryptonian-DCP).cbz",
+            2,
+            1,
+        ),
+        (
+            "Green Lantern 29",
+            "Green Lantern 029 (2025) (digital) (Son of Ultron-Empire).cbz",
+            5,
+            3,
+        ),
+    ] {
+        let f = seed_basic_fixture().await;
+        let (gl2005, gl2023) = seed_green_lanterns(&f.db).await;
+        let (old, want) = (gl2005[i2005], gl2023[i2023]);
+        // The SAB job folder is the bare query, with no year.
+        let source = f._watch.path().join(folder).join(basename);
+        write_cbz(&source, None);
+
+        let outcome = processor::process_one(
+            &source,
+            f.library.path(),
+            f.library_root_id,
+            &f.db,
+            longbox_core::DEFAULT_MATCH_THRESHOLD,
+            0,
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            Outcome::Imported { issue_id, .. } => assert_eq!(
+                issue_id, want,
+                "{basename}: filed into issue {issue_id} (GL 2005's is {old}), not GL (2023)"
+            ),
+            other => panic!("{basename}: expected an import into GL (2023), got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn release_year_that_fits_no_volume_is_held_not_sized() {
+    // 2019 is neither volume's #26 on-sale year (or the year after), and no
+    // volume starts in 2019. Nothing decides, so the file is held, even
+    // though GL (2005) is the bigger catalog.
+    let f = seed_basic_fixture().await;
+    seed_green_lanterns(&f.db).await;
+    let source = f
+        ._watch
+        .path()
+        .join("Green Lantern 26")
+        .join("Green Lantern 026 (2019) (digital) (Zone-Empire).cbz");
+    write_cbz(&source, None);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome, Outcome::Skipped { .. }),
+        "an unsettled volume question must be held; got {outcome:?}"
+    );
+    assert!(source.exists(), "the file must stay in the watch folder");
+}

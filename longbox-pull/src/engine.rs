@@ -103,6 +103,9 @@ pub struct SweepSummary {
     /// stream of abstentions forever. Non-zero here means the feature
     /// is not working, not that it is being careful.
     pub landed_unresolved: usize,
+    /// Releases refused only for a ` - Subtitle` after the issue number
+    /// (each logged as `pull.subtitle_rejected`): what that rule costs.
+    pub subtitle_rejected: usize,
 }
 
 /// Per-sweep context: the rebuilt downloader, the enabled indexers,
@@ -690,7 +693,7 @@ async fn attempt_pull_for_candidate(
         .count() as i64;
 
     let aliases = series_repo::get_aliases(db, series.id).await?;
-    match longbox_newznab::find_release_excluding_filtered(
+    let found = longbox_newznab::find_release_counted(
         indexers,
         &series.title,
         &issue.number,
@@ -706,7 +709,11 @@ async fn attempt_pull_for_candidate(
         &aliases,
     )
     .await
-    {
+    .map(|(outcome, rejected)| {
+        summary.subtitle_rejected += rejected;
+        outcome
+    });
+    match found {
         Ok(FindOutcome::Match {
             indexer: indexer_id,
             release,

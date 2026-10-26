@@ -113,6 +113,7 @@ async fn scheduler_loop(
                 completed_without_comics = s.completed_without_comics,
                 landed_abstained = s.landed_abstained,
                 landed_unresolved = s.landed_unresolved,
+                subtitle_rejected = s.subtitle_rejected,
                 "pull.sweep_complete"
             ),
             Err(e) => {
