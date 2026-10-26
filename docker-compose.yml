@@ -6,6 +6,9 @@ services:
       dockerfile: Dockerfile
     container_name: longbox
     restart: unless-stopped
+    # tini as PID 1: forwards docker stop's SIGTERM to the app, which
+    # drains and checkpoints the WAL instead of being SIGKILLed at 10s.
+    init: true
     ports:
       - "3000:3000"
       - "8096:8096"
