@@ -155,6 +155,11 @@ impl MetronClient {
         }
     }
 
+    /// The lane this handle calls Metron from.
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
     /// A handle on the same gate that calls Metron from `lane`. A new
     /// client starts on [`Lane::Interactive`].
     pub fn with_lane(&self, lane: Lane) -> Self {

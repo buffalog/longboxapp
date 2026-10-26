@@ -145,7 +145,7 @@ async fn measure_recall() {
             &indexers,
             &series_title,
             &number,
-            None, // year gate off: measuring recall, not volume disambiguation
+            longbox_newznab::YearGate::OPEN, // year gate off: measuring recall, not volume disambiguation
             &[],
             &patterns,
             threshold,

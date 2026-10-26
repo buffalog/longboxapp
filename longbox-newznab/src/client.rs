@@ -8,7 +8,7 @@ use longbox_core::ParsingPattern;
 use crate::error::{IndexerError, NewznabError};
 use crate::parse::parse_response;
 use crate::query::{build_url, effective_maxage, result_limit, search_ladder, MaxAge};
-use crate::select::{filter_by_series_title, select_best, MismatchDiagnostic};
+use crate::select::{filter_by_series_title, select_best, MismatchDiagnostic, YearGate};
 use crate::types::{IndexerConfig, IndexerId, Release};
 
 /// Outcome of a multi-indexer search with the Bug 3 series-title filter.
@@ -131,7 +131,7 @@ pub(crate) struct SurvivalTest<'a> {
     pub patterns: &'a [ParsingPattern],
     pub series: &'a str,
     pub issue: &'a str,
-    pub year: Option<i32>,
+    pub year: YearGate,
     pub threshold: f64,
     pub exclusion_keywords: &'a [String],
     pub min_size_bytes: Option<i64>,
@@ -438,7 +438,7 @@ pub async fn find_release_excluding_filtered(
     indexers: &[IndexerConfig],
     series: &str,
     issue: &str,
-    year: Option<i32>,
+    year: YearGate,
     exclude_guids: &[String],
     patterns: &[ParsingPattern],
     similarity_threshold: f64,
@@ -772,7 +772,7 @@ mod tests {
             &indexers,
             "Odin",
             "1",
-            None,
+            YearGate::OPEN,
             &[],
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
@@ -819,7 +819,7 @@ mod tests {
             &indexers,
             "Odin",
             "1",
-            None,
+            YearGate::OPEN,
             &[],
             &patterns,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,

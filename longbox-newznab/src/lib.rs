@@ -30,5 +30,7 @@ pub use client::{
     search_indexer, test_connection, FindOutcome, SearchAllOutcome,
 };
 pub use error::{IndexerError, NewznabError};
-pub use select::{normalize_scene_title, score_release_title, FilterOutcome, MismatchDiagnostic};
+pub use select::{
+    normalize_scene_title, score_release_title, FilterOutcome, MismatchDiagnostic, YearGate,
+};
 pub use types::{ArchiveFormat, IndexerConfig, IndexerId, Release};
