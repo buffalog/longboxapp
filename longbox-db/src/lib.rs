@@ -15,6 +15,7 @@ pub mod indexer_config_repo;
 pub mod issue_repo;
 pub mod library_root_repo;
 pub mod metron_calendar_cache_repo;
+pub mod metron_issue_cache_repo;
 pub mod opds_repo;
 pub mod opds_users_repo;
 pub mod parsing_pattern_repo;

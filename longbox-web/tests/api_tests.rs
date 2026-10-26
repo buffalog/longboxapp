@@ -6699,6 +6699,124 @@ async fn forward_week_with_a_failed_hydration_is_not_cached() {
     assert_eq!(cache_count, 0, "a partial week must not be cached");
 }
 
+/// Mount a Metron forward week of Saga issues `ids`: the list endpoint,
+/// plus a detail for each id in `details` (any other id has no mock and
+/// fails to hydrate).
+async fn mount_metron_week(server: &wiremock::MockServer, ids: &[i64], details: &[i64]) {
+    let results: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "series": {"name": "Saga", "volume": 1, "year_began": 2012},
+                "number": id.to_string(), "issue": format!("Saga (2012) #{id}"),
+                "cover_date": "2099-03-01", "store_date": "2099-01-03",
+                "image": null, "cover_hash": null, "modified": null
+            })
+        })
+        .collect();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/issue/"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": ids.len(), "next": null, "previous": null, "results": results
+            })),
+        )
+        .mount(server)
+        .await;
+    for id in details {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!("/issue/{id}/")))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": id,
+                "publisher": {"id": 2, "name": "Image"},
+                "imprint": null,
+                "series": {"id": 10, "name": "Saga", "sort_name": "Saga", "volume": 1, "year_began": 2012},
+                "number": id.to_string(), "alt_number": "", "title": "",
+                "cover_date": "2099-03-01", "store_date": "2099-01-03", "foc_date": null,
+                "price": "3.99", "desc": "", "image": null, "cv_id": null, "gcd_id": null,
+                "resource_url": format!("https://metron.cloud/issue/{id}"), "modified": null
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+}
+
+const FORWARD_WEEK: &str = "/api/releases/calendar?from=2099-01-01&to=2099-01-07";
+
+/// A week cut short keeps the issues it already hydrated, and the next
+/// load fetches only the rest: a closed tab or a shutdown mid-load no
+/// longer throws away minutes of paced Metron calls.
+#[tokio::test]
+async fn partial_forward_week_resumes_instead_of_restarting() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+
+    // First load: issue 1 hydrates, issue 2 fails.
+    mount_metron_week(&metron_server, &[1, 2], &[1]).await;
+    let body = response_json(app.request(empty_request("GET", FORWARD_WEEK)).await).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    metron_server.verify().await;
+
+    // Second load: issue 1's detail is NOT mounted, so refetching it
+    // would fail the week; only issue 2 may be fetched.
+    metron_server.reset().await;
+    mount_metron_week(&metron_server, &[1, 2], &[2]).await;
+    let body = response_json(app.request(empty_request("GET", FORWARD_WEEK)).await).await;
+    let mut ids: Vec<i64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["metron_issue_id"].as_i64().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, [1, 2], "the resumed load returns the whole week");
+    metron_server.verify().await;
+
+    let cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metron_calendar_cache")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(cache_count, 1, "the week caches once it is complete");
+}
+
+/// The background prewarm fills the same cache the calendar reads, so
+/// opening a prewarmed week makes no Metron calls at all.
+#[tokio::test]
+async fn prewarmed_forward_week_opens_without_metron() {
+    let mut app = build_test_app().await;
+    let metron_server = wiremock::MockServer::start().await;
+    app.enable_metron(&metron_server);
+    mount_metron_week(&metron_server, &[1, 2], &[1, 2]).await;
+
+    let bg = app
+        .state
+        .metron
+        .as_ref()
+        .unwrap()
+        .with_lane(longbox_metron::Lane::Background);
+    let items = longbox_web::routes::calendar::warm_metron_week(
+        &app.state.db,
+        &bg,
+        "2099-01-01",
+        "2099-01-07",
+        12,
+    )
+    .await
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    metron_server.verify().await;
+
+    // No mocks: any Metron call now fails the request.
+    metron_server.reset().await;
+    let resp = app.request(empty_request("GET", FORWARD_WEEK)).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(response_json(resp).await.as_array().unwrap().len(), 2);
+    assert!(metron_server.received_requests().await.unwrap().is_empty());
+}
+
 /// Current-week request must NOT route through Metron even when it's
 /// enabled. The CV path stays unchanged; the dispatch boundary is
 /// strictly `from > today_utc()`.

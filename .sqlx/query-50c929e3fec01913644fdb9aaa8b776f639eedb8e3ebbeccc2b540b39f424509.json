@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO metron_issue_cache (metron_issue_id, payload_json, cached_at)\n           VALUES (?, ?, CURRENT_TIMESTAMP)\n           ON CONFLICT(metron_issue_id) DO UPDATE SET\n               payload_json = excluded.payload_json,\n               cached_at = CURRENT_TIMESTAMP",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "50c929e3fec01913644fdb9aaa8b776f639eedb8e3ebbeccc2b540b39f424509"
+}
