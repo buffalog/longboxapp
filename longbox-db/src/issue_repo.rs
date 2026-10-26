@@ -177,9 +177,11 @@ where
 /// owned, and not already settled or parked in `pull_attempts`.
 ///
 /// Excluded `pull_attempts` states: in-flight (`pending`/`submitted`),
-/// done (`grabbed`), and parked — any attempt with `retry_count >= 3`,
-/// the give-up threshold. `failed` and `mismatched` (Bug 3) below the
-/// threshold leave the issue eligible (the engine retries it). The
+/// done (`grabbed`), and parked. An issue parks once an attempt reaches
+/// `retry_count >= 3`, but never for good: it is eligible again 7 days
+/// after its newest attempt, then 14 days at retry_count 4, then every
+/// 30 days. `failed` and `mismatched` (Bug 3) below the threshold leave
+/// the issue eligible (the engine retries it). The
 /// `start_issue` floor is applied by the caller — natural issue-number
 /// order isn't expressible in SQL.
 pub async fn list_pull_candidates<'e, E>(executor: E, series_id: i64) -> Result<Vec<IssueRow>>
@@ -209,8 +211,20 @@ where
                    pa.status IN ('pending', 'grabbed')
                    OR (pa.status = 'submitted'
                        AND pa.attempted_at >= datetime('now', '-6 hours'))
-                   OR pa.retry_count >= 3
                  )
+             )
+             -- Parked: backoff by highest retry_count (3: 7d, 4: 14d,
+             -- 5+: 30d) from the newest attempt. Same rule as
+             -- pull_attempt_repo::attempt_blockers.
+             AND NOT EXISTS (
+               SELECT 1 FROM (
+                 SELECT MAX(pa.retry_count) AS rc, MAX(pa.attempted_at) AS last
+                 FROM pull_attempts pa WHERE pa.issue_id = i.id
+               ) p
+               WHERE p.rc >= 3
+                 AND p.last > datetime('now', CASE p.rc WHEN 3 THEN '-7 days'
+                                                       WHEN 4 THEN '-14 days'
+                                                       ELSE '-30 days' END)
              )
            ORDER BY COALESCE(i.store_date, i.cover_date) ASC, i.id ASC"#,
         series_id

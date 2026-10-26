@@ -43,11 +43,18 @@ use crate::landed::{self, LandedVerdict};
 /// one `Unknown` is not enough to conclude the grab is lost.
 const UNKNOWN_POLL_LIMIT: i64 = 3;
 
-/// Failed-attempt count at which an issue is parked — the pull engine
-/// retries it no further. Mirrors the parking threshold baked into
-/// `issue_repo::list_pull_candidates`'s SQL; reaching it is what a
+/// Failed-attempt count at which an issue is parked. A parked issue is
+/// retried on a backoff (7 days, 14 days, then every 30 days), never
+/// dropped for good; the backoff lives in
+/// `issue_repo::list_pull_candidates`'s SQL. Reaching it is what a
 /// `pull_failed` notification reports.
 const RETRY_CAP: i64 = 3;
+
+/// The failure message for a download the downloader stopped reporting.
+/// Its release is NOT excluded from later attempts: the job vanished,
+/// which says nothing against the NZB itself.
+const LOST_TRACK_MESSAGE: &str =
+    "lost track of download — the downloader no longer reports this job";
 
 /// Tallies from one sweep — logged by the scheduler, asserted by tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -408,7 +415,7 @@ async fn poll_in_flight(
             }
             Ok(DownloadStatus::Unknown) => {
                 if attempt.unknown_polls + 1 >= UNKNOWN_POLL_LIMIT {
-                    let msg = "lost track of download — the downloader no longer reports this job";
+                    let msg = LOST_TRACK_MESSAGE;
                     pull_attempt_repo::record_failure_if_submitted(db, attempt.id, msg).await?;
                     summary.grab_failed += 1;
                     maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
@@ -681,8 +688,14 @@ async fn attempt_pull_for_candidate(
     // Retry-exclusion: skip releases already tried. Only a
     // *grab*-failed attempt carries a release_id — a submission
     // failure records none, so its release is retried as-is (the
-    // downloader, not the NZB, was the suspect).
-    let exclude: Vec<String> = prior.iter().filter_map(|a| a.release_id.clone()).collect();
+    // downloader, not the NZB, was the suspect). Same for a lost-track
+    // failure: the job vanished from the downloader, so its release
+    // stays eligible.
+    let exclude: Vec<String> = prior
+        .iter()
+        .filter(|a| a.error_message.as_deref() != Some(LOST_TRACK_MESSAGE))
+        .filter_map(|a| a.release_id.clone())
+        .collect();
     // Bug 3: failure-class for retry-count budget covers both
     // 'failed' and 'mismatched'; the candidate query parks the
     // issue once any row reaches retry_count >= 3 regardless of
@@ -691,6 +704,15 @@ async fn attempt_pull_for_candidate(
         .iter()
         .filter(|a| matches!(a.status.as_str(), "failed" | "mismatched"))
         .count() as i64;
+    // Never below the highest retry_count already stored. Older rows
+    // carry counts the row tally doesn't reproduce (three failures at 1,
+    // then a submit at 3), and the backoff keys on the maximum, so a
+    // count-based next value could stall it.
+    let max_retry = prior.iter().map(|a| a.retry_count).max().unwrap_or(0);
+    let failed_count = failed_count.max(max_retry);
+    // Coming off a backoff (see `RETRY_CAP`): a no-match must still be
+    // recorded, or the issue would be re-searched every sweep from here on.
+    let parked = max_retry >= RETRY_CAP;
 
     let aliases = series_repo::get_aliases(db, series.id).await?;
     let found = longbox_newznab::find_release_counted(
@@ -784,6 +806,22 @@ async fn attempt_pull_for_candidate(
             summary.series_mismatched += 1;
             maybe_fire_pull_failed(db, series_id, issue.id, &reason).await;
             Ok(AttemptOutcome::Failed)
+        }
+        Ok(FindOutcome::NoMatch) if parked => {
+            // A parked issue's re-check found nothing. Recorded as a
+            // mismatch so its retry_count, and with it the backoff,
+            // moves to the next step.
+            pull_attempt_repo::record_mismatch(
+                db,
+                series_id,
+                issue.id,
+                None,
+                "parked re-check: no matching release on any indexer",
+                failed_count,
+            )
+            .await?;
+            summary.no_match += 1;
+            Ok(AttemptOutcome::NoMatch)
         }
         Ok(FindOutcome::NoMatch) => {
             // No indexer match — no attempt row; retried next sweep.
@@ -964,8 +1002,9 @@ pub async fn sweep_single_issue(
 }
 
 /// Fire a `pull_failed` webhook event when this issue's failure-class
-/// attempt count has reached [`RETRY_CAP`] — the point at which the
-/// engine parks it and retries no further. A no-op below the cap.
+/// attempt count reaches [`RETRY_CAP`], the point at which the engine
+/// parks it. Fires once: the later backoff re-checks that fail again
+/// pass the cap and stay quiet.
 /// Delivery is spawned by [`dispatch::dispatch`], so this never blocks
 /// the sweep on webhook HTTP. Bug 3 widened the count to include
 /// `'mismatched'` so series-mismatches cap-cross the same way submission
@@ -981,7 +1020,7 @@ async fn maybe_fire_pull_failed(db: &Pool, series_id: i64, issue_id: i64, reason
             return;
         }
     };
-    if failed < RETRY_CAP {
+    if failed != RETRY_CAP {
         return;
     }
     let title = series_repo::find_by_id(db, series_id)
@@ -995,7 +1034,9 @@ async fn maybe_fire_pull_failed(db: &Pool, series_id: i64, issue_id: i64, reason
         webhook_config_repo::EVENT_PULL_FAILED,
         WebhookEvent {
             event: "pull_failed".into(),
-            message: format!("Pull failed permanently: {title} — {reason}"),
+            message: format!(
+                "Pull parked after {RETRY_CAP} failures: {title} — {reason}. Retrying in 7 days, then 14, then every 30."
+            ),
         },
     );
 }

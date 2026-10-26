@@ -197,7 +197,7 @@ export function describeRevert(r: RevertedIssue | null): string {
     case 'no_usable_cover_date':
       return `${base}. It has no usable release date, so the sweep never treats it as a candidate.`;
     case 'retries_exhausted':
-      return `${base}. Previous attempts failed too many times, so the sweep has stopped retrying it.`;
+      return `${base}. Previous attempts failed three or more times, so the sweep is backing off: it retries 7 days after the last attempt, then 14, then every 30.`;
     case 'grab_in_flight':
       return `${base}. It has an in-flight grab; searching resumes after the next sweep clears it.`;
     case 'recently_submitted':

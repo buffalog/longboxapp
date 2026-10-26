@@ -379,6 +379,147 @@ async fn parked_issue_at_the_retry_ceiling_is_not_re_attempted() {
     assert_eq!(summary.no_match, 0);
 }
 
+/// Seed a failed attempt at `retry_count`, dated `days_ago`.
+async fn seed_parked(db: &Pool, series_id: i64, issue_id: i64, retry_count: i64, days_ago: i64) {
+    let id = pull_attempt_repo::insert(
+        db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: None,
+            status: "failed".into(),
+            error_message: Some("gave up".into()),
+            retry_count,
+            download_handle: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    sqlx::query("UPDATE pull_attempts SET attempted_at = datetime('now', ?) WHERE id = ?")
+        .bind(format!("-{days_ago} days"))
+        .bind(id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+/// Parking is a backoff, never permanent: 7 days after the newest
+/// attempt at retry_count 3, 14 at 4, 30 at 5 and above. A due re-check
+/// that finds nothing records a mismatch, which is what moves the
+/// backoff on. `attempt_blockers` (the "why isn't this searched" view)
+/// must agree with the sweep on every case.
+#[tokio::test]
+async fn parked_issues_come_back_on_a_7_14_30_day_backoff() {
+    for (retry_count, days_ago, due) in [
+        (3, 6, false),
+        (3, 8, true),
+        (4, 13, false),
+        (4, 15, true),
+        (5, 29, false),
+        (5, 31, true),
+        (9, 29, false),
+        (9, 31, true),
+    ] {
+        let (db, series_id, issue_id) = seed_catalog().await;
+        let indexer = MockServer::start().await;
+        let downloader = MockServer::start().await;
+        indexer_returns(&indexer, "<rss><channel></channel></rss>".into()).await;
+        add_indexer(&db, indexer.uri()).await;
+        add_sab_downloader(&db, downloader.uri()).await;
+        seed_parked(&db, series_id, issue_id, retry_count, days_ago).await;
+
+        let blocked = pull_attempt_repo::attempt_blockers(&db, issue_id)
+            .await
+            .unwrap()
+            .retries_exhausted;
+        assert_eq!(blocked, !due, "blockers: rc {retry_count}, {days_ago}d ago");
+
+        sweep(&db, None).await.unwrap();
+        let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+            .await
+            .unwrap();
+        if due {
+            assert_eq!(
+                attempts.len(),
+                2,
+                "rc {retry_count}, {days_ago}d ago: re-checked"
+            );
+            let recheck = attempts.iter().find(|a| a.status == "mismatched").unwrap();
+            assert_eq!(recheck.retry_count, retry_count + 1, "the backoff moves on");
+            // Freshly re-checked, so parked again: the next sweep leaves it alone.
+            sweep(&db, None).await.unwrap();
+            let again = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+                .await
+                .unwrap();
+            assert_eq!(again.len(), 2, "rc {retry_count}: one re-check per backoff");
+        } else {
+            assert_eq!(
+                attempts.len(),
+                1,
+                "rc {retry_count}, {days_ago}d ago: still parked"
+            );
+        }
+    }
+}
+
+/// A due parked issue that finds a match is submitted like any other.
+#[tokio::test]
+async fn a_parked_issue_past_its_backoff_is_submitted() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    seed_parked(&db, series_id, issue_id, 3, 8).await;
+    indexer_returns(&indexer, rss_one("guid-saga-1")).await;
+    sab_accepts(&downloader, "nzo-p").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = sweep(&db, None).await.unwrap();
+    assert_eq!(summary.submitted, 1);
+}
+
+/// A "lost track of download" failure does not exclude its release: the
+/// job vanished from the downloader, which says nothing against the NZB.
+/// (`grab_retry_excludes_an_already_tried_release` covers a real
+/// download failure, which still excludes.)
+#[tokio::test]
+async fn a_lost_track_release_is_tried_again() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    pull_attempt_repo::insert(
+        &db,
+        NewPullAttempt {
+            series_id,
+            issue_id,
+            indexer_id: None,
+            release_id: Some("guid-saga-1".into()),
+            status: "failed".into(),
+            error_message: Some(
+                "lost track of download — the downloader no longer reports this job".into(),
+            ),
+            retry_count: 1,
+            download_handle: None,
+        },
+    )
+    .await
+    .unwrap();
+    indexer_returns(&indexer, rss_one("guid-saga-1")).await;
+    sab_accepts(&downloader, "nzo-again").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = sweep(&db, None).await.unwrap();
+    assert_eq!(summary.submitted, 1);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    let submitted = attempts.iter().find(|a| a.status == "submitted").unwrap();
+    assert_eq!(submitted.release_id.as_deref(), Some("guid-saga-1"));
+}
+
 // -------- Phase 1: polling in-flight attempts --------
 
 /// Seed one `submitted` attempt with a download handle, no indexers
