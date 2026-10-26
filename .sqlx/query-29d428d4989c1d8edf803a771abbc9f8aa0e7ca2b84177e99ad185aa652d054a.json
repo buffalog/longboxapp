@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT metron_issue_id AS \"metron_issue_id!: i64\", payload_json,\n                  cached_at AS \"cached_at: _\"\n           FROM metron_issue_cache\n           WHERE metron_issue_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "metron_issue_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "cached_at: _",
+        "ordinal": 2,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "29d428d4989c1d8edf803a771abbc9f8aa0e7ca2b84177e99ad185aa652d054a"
+}

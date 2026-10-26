@@ -276,12 +276,14 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
 
     // 12b. Metron series-linking resolver. Drains the work-list of
     //      CV-linked series not yet checked against Metron. Gated on
-    //      the Metron client existing — no client, no spawn. Both run on
+    //      the Metron client existing — no client, no spawn. All run on
     //      the background lane, so they yield to the calendar.
     if let Some(ref m) = metron {
         let bg = Arc::new(m.with_lane(longbox_metron::Lane::Background));
         crate::metron_link::spawn_metron_linker(db.clone(), Arc::clone(&bg));
-        crate::metron_link::spawn_metron_issue_linker(db.clone(), bg);
+        crate::metron_link::spawn_metron_issue_linker(db.clone(), Arc::clone(&bg));
+        // Next week's forward calendar, prewarmed daily on the same lane.
+        crate::routes::calendar::spawn_metron_prewarm(db.clone(), bg);
     }
 
     // 13. Compose state.

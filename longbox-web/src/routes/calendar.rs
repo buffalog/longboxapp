@@ -10,16 +10,16 @@
 //! rows live.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::{self, StreamExt};
 use longbox_comicvine::{ComicVineClient, CvCalendarItem, Lane};
 use longbox_core::normalize_title;
 use longbox_db::{
-    cv_volume_cache_repo, metron_calendar_cache_repo, pull_list_repo, release_cache_repo,
-    series_repo, settings_repo, NewPullEntry, NewReleaseCacheEntry,
+    cv_volume_cache_repo, metron_calendar_cache_repo, metron_issue_cache_repo, pull_list_repo,
+    release_cache_repo, series_repo, settings_repo, NewPullEntry, NewReleaseCacheEntry, Pool,
 };
 use longbox_metron::{MetronCalendarItem, MetronClient};
 use serde::{Deserialize, Serialize};
@@ -862,26 +862,9 @@ async fn enrich(
     Ok(rows)
 }
 
-/// Item A v2: forward-week calendar via Metron.
-///
-/// Two phases:
-///   - Cache lookup against `metron_calendar_cache(date_from, date_to)`.
-///     If a row exists and `cached_at` is within
-///     `metron_calendar_cache_ttl_hours` (default 24h), deserialize the
-///     payload and return.
-///   - Cache miss / stale: fetch the issue list, hydrate each issue's
-///     detail one at a time (the Metron gate allows one request in
-///     flight, paced at 15/min), serialize, store, return.
-///
-/// Cold-cache wall time at 15/min: ~4s per issue, so ~5 minutes for a
-/// typical 70-issue forward week. Subsequent loads within the TTL window
-/// are instant.
-///
-/// Per-issue hydration failures are logged-and-dropped — a partial
-/// hydration is better than a failed calendar response — but a partial
-/// week is NOT cached, so the next load fills the gaps instead of serving
-/// them for a whole TTL. Empty lists still cache to avoid retrying empty
-/// weeks on every page load.
+/// Item A v2: forward-week calendar via Metron. Fetch-or-reuse the
+/// week ([`warm_metron_week`]) inside `metron_calendar_cache_ttl_hours`
+/// (default 24h), then project it onto `CalendarRow`.
 async fn load_metron_calendar(
     state: &AppState,
     client: &MetronClient,
@@ -890,33 +873,58 @@ async fn load_metron_calendar(
 ) -> Result<Vec<CalendarRow>, ApiError> {
     let ttl_hours: i64 =
         settings_repo::get_or_default(&state.db, "metron_calendar_cache_ttl_hours", 24).await?;
+    let items = warm_metron_week(&state.db, client, from, to, ttl_hours).await?;
+    project_metron_items(state, items).await
+}
 
-    // Cache lookup — fast path for repeat loads inside the TTL window.
-    if let Some(row) = metron_calendar_cache_repo::get(&state.db, from, to).await? {
-        if is_metron_cache_fresh(row.cached_at, ttl_hours) {
-            let cached: Vec<MetronCalendarItem> =
-                serde_json::from_str(&row.payload_json).map_err(|e| ApiError::Internal {
-                    message: format!("cached metron payload is corrupt: {e}"),
-                    source: anyhow::anyhow!(e),
-                })?;
-            return project_metron_items(state, cached).await;
+/// Hydrated Metron items for one week, reusing anything cached within
+/// `max_age_hours`.
+///
+///   - A complete week in `metron_calendar_cache` is returned as is.
+///   - Otherwise: fetch the issue list, then hydrate each issue one at a
+///     time (the Metron gate allows one request in flight, paced at
+///     15/min), reusing `metron_issue_cache` and writing each fresh
+///     detail there as soon as it lands. A load cut short (closed tab,
+///     shutdown) keeps what it fetched; the next load resumes.
+///
+/// Cold wall time at 15/min: ~4s per issue, so ~5 minutes for a typical
+/// forward week. Per-issue failures are logged and dropped, and a week
+/// with a failure is NOT written to the week cache, so the next load
+/// retries only the gaps. Empty weeks still cache.
+pub async fn warm_metron_week(
+    db: &Pool,
+    client: &MetronClient,
+    from: &str,
+    to: &str,
+    max_age_hours: i64,
+) -> Result<Vec<MetronCalendarItem>, ApiError> {
+    if let Some(row) = metron_calendar_cache_repo::get(db, from, to).await? {
+        if is_metron_cache_fresh(row.cached_at, max_age_hours) {
+            return serde_json::from_str(&row.payload_json).map_err(|e| ApiError::Internal {
+                message: format!("cached metron payload is corrupt: {e}"),
+                source: anyhow::anyhow!(e),
+            });
         }
     }
 
-    // Cache miss / stale: fetch + hydrate.
     let list = client.fetch_issues_by_store_date_range(from, to).await?;
-    let total = list.len();
-    let hydration_results: Vec<Result<MetronCalendarItem, longbox_metron::MetronError>> =
-        stream::iter(list)
-            .then(|item| async move { client.fetch_issue_detail(item.metron_issue_id).await })
-            .collect()
-            .await;
-
-    let mut hydrated: Vec<MetronCalendarItem> = Vec::with_capacity(total);
+    let mut hydrated: Vec<MetronCalendarItem> = Vec::with_capacity(list.len());
     let mut failed = 0usize;
-    for result in hydration_results {
-        match result {
-            Ok(item) => hydrated.push(item),
+    for item in list {
+        let cached = metron_issue_cache_repo::get(db, item.metron_issue_id)
+            .await?
+            .filter(|row| is_metron_cache_fresh(row.cached_at, max_age_hours))
+            .and_then(|row| serde_json::from_str(&row.payload_json).ok());
+        if let Some(detail) = cached {
+            hydrated.push(detail);
+            continue;
+        }
+        match client.fetch_issue_detail(item.metron_issue_id).await {
+            Ok(detail) => {
+                metron_issue_cache_repo::upsert(db, detail.metron_issue_id, &to_json(&detail)?)
+                    .await?;
+                hydrated.push(detail);
+            }
             Err(e) => {
                 failed += 1;
                 tracing::warn!(
@@ -928,28 +936,62 @@ async fn load_metron_calendar(
         }
     }
 
-    if failed > 0 {
-        return project_metron_items(state, hydrated).await;
+    if failed == 0 {
+        metron_calendar_cache_repo::upsert(
+            db,
+            longbox_db::NewMetronCalendarCacheEntry {
+                date_from: from.to_owned(),
+                date_to: to.to_owned(),
+                payload_json: to_json(&hydrated)?,
+            },
+        )
+        .await?;
     }
+    Ok(hydrated)
+}
 
-    // Cache the hydrated payload — opaque JSON, read back by deserialize
-    // on next fresh hit. Empty results cache too: prevents retrying weeks
-    // where Metron genuinely has nothing.
-    let payload_json = serde_json::to_string(&hydrated).map_err(|e| ApiError::Internal {
+fn to_json<T: Serialize>(v: &T) -> Result<String, ApiError> {
+    serde_json::to_string(v).map_err(|e| ApiError::Internal {
         message: format!("serializing metron payload failed: {e}"),
         source: anyhow::anyhow!(e),
-    })?;
-    metron_calendar_cache_repo::upsert(
-        &state.db,
-        longbox_db::NewMetronCalendarCacheEntry {
-            date_from: from.to_owned(),
-            date_to: to.to_owned(),
-            payload_json,
-        },
-    )
-    .await?;
+    })
+}
 
-    project_metron_items(state, hydrated).await
+/// How often the prewarm runs. Each run refreshes anything older than
+/// half the TTL, so next week is rewarmed before a reader sees it stale.
+const PREWARM_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Once a day (first run at boot), load next week's forward calendar on
+/// the background lane so opening it never sits through a cold load.
+/// `client` must be the background-lane client: it yields to real
+/// calendar requests, which reuse whatever this has already hydrated.
+// ponytail: only next week; widen to `metron_calendar_forward_weeks` if
+// later weeks get opened often enough to matter.
+pub fn spawn_metron_prewarm(db: Pool, client: Arc<MetronClient>) {
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(PREWARM_EVERY);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            let (from, to) = ship_week(1);
+            let ttl_hours: i64 =
+                settings_repo::get_or_default(&db, "metron_calendar_cache_ttl_hours", 24)
+                    .await
+                    .unwrap_or(24);
+            match warm_metron_week(&db, &client, &from, &to, ttl_hours / 2).await {
+                Ok(items) => tracing::info!(
+                    target: "longbox_web",
+                    from, to, issues = items.len(),
+                    "metron.prewarm_done"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "longbox_web",
+                    from, to, error = %e,
+                    "metron.prewarm_failed"
+                ),
+            }
+        }
+    });
 }
 
 /// Project Metron items into the unified `CalendarRow` shape, applying
@@ -1042,7 +1084,12 @@ fn is_fresh(cached_at: PrimitiveDateTime) -> bool {
 /// ship Wednesday; `from` is the most-recent Wednesday at or before
 /// today.
 fn current_ship_week() -> (String, String) {
-    let today = OffsetDateTime::now_utc().date();
+    ship_week(0)
+}
+
+/// The shipping week `weeks_ahead` weeks after the current one.
+fn ship_week(weeks_ahead: i64) -> (String, String) {
+    let today = OffsetDateTime::now_utc().date() + time::Duration::weeks(weeks_ahead);
     // number_days_from_monday(): Mon=0 .. Sun=6. Wednesday is 2.
     let days_from_monday = i64::from(today.weekday().number_days_from_monday());
     let back_to_wed = (days_from_monday + 7 - 2) % 7;
