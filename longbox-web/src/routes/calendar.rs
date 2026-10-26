@@ -974,6 +974,11 @@ pub fn spawn_metron_prewarm(db: Pool, client: Arc<MetronClient>) {
         loop {
             every.tick().await;
             let (from, to) = ship_week(1);
+            tracing::info!(
+                target: "longbox_web",
+                from, to, lane = ?client.lane(),
+                "metron.prewarm_start"
+            );
             let ttl_hours: i64 =
                 settings_repo::get_or_default(&db, "metron_calendar_cache_ttl_hours", 24)
                     .await
@@ -981,12 +986,12 @@ pub fn spawn_metron_prewarm(db: Pool, client: Arc<MetronClient>) {
             match warm_metron_week(&db, &client, &from, &to, ttl_hours / 2).await {
                 Ok(items) => tracing::info!(
                     target: "longbox_web",
-                    from, to, issues = items.len(),
+                    from, to, lane = ?client.lane(), issues = items.len(),
                     "metron.prewarm_done"
                 ),
                 Err(e) => tracing::warn!(
                     target: "longbox_web",
-                    from, to, error = %e,
+                    from, to, lane = ?client.lane(), error = %e,
                     "metron.prewarm_failed"
                 ),
             }

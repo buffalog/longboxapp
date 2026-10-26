@@ -168,6 +168,40 @@ async fn submits_a_matched_release_and_records_the_attempt() {
     assert_eq!(attempts[0].download_handle.as_deref(), Some("nzo-1"));
 }
 
+/// The year gate runs in the sweep: a same-title release from another
+/// volume (here 2018 against Saga #1's 2012 on-sale year) is skipped
+/// even when it has more grabs, and the right-volume release goes out.
+#[tokio::test]
+async fn sweep_skips_a_wrong_volume_release_for_the_right_one() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    let item = |title: &str, guid: &str, grabs: u32| {
+        format!(
+            r#"<item><title>{title}</title><guid>{guid}</guid>
+                  <enclosure url="http://nzb.example/{guid}.nzb"/>
+                  <newznab:attr name="grabs" value="{grabs}"/></item>"#
+        )
+    };
+    let body = format!(
+        r#"<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+          <channel>{}{}</channel></rss>"#,
+        item("Saga 001 (2018) (digital).cbz", "guid-wrong-volume", 900),
+        item("Saga 001 (2012) (digital).cbz", "guid-right-volume", 10),
+    );
+    indexer_returns(&indexer, body).await;
+    sab_accepts(&downloader, "nzo-1").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = sweep(&db, None).await.unwrap();
+    assert_eq!(summary.submitted, 1);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].release_id.as_deref(), Some("guid-right-volume"));
+}
+
 #[tokio::test]
 async fn no_indexer_match_records_no_attempt() {
     let (db, series_id, issue_id) = seed_catalog().await;

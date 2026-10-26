@@ -304,6 +304,129 @@ fn wrap_rightmost_year(input: &str) -> String {
 ///    parenthesized year — the conditions the normalizer was
 ///    actually designed for.
 fn parse_release_title(title: &str, patterns: &[ParsingPattern]) -> Option<ParsedFilename> {
+    parse_release(title, patterns).map(|r| r.parsed)
+}
+
+/// [`parse_release_title`] plus the volume year the year gate needs.
+fn parse_release(title: &str, patterns: &[ParsingPattern]) -> Option<ParsedRelease> {
+    if let Some(parsed) = parse_publisher_scene_title(title) {
+        return Some(parsed);
+    }
+    parse_canonical_release_title(title, patterns).map(|mut parsed| {
+        // A pattern without a year group (`Powers v1 010 (2001)` through
+        // "Series Vol N #M") would otherwise let a dated title through the
+        // year gate as undated.
+        if parsed.year.is_none() {
+            parsed.year = bracketed_year(title);
+        }
+        ParsedRelease {
+            // A `vYYYY` volume (`the_woods_v2014__023`) is a volume year too.
+            volume_year: parsed.volume.filter(|v| (1900..2100).contains(v)),
+            parsed,
+        }
+    })
+}
+
+/// The first `(YYYY)` / `[YYYY]` in a title, also as `[YYYY.MM]` or
+/// `(YYYY-MM)`: `Amazing Spider-Man 022 [Marvel] [1965.03]` is a 1965 book.
+fn bracketed_year(title: &str) -> Option<i32> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[(\[]((?:19|20)\d{2})(?:[.\-]\d{1,2})?[)\]]").unwrap())
+        .captures(title)
+        .and_then(|c| c[1].parse().ok())
+}
+
+/// A parsed release plus the volume year, when the title marks one. The
+/// year gate checks a volume year against the series' start year, and a
+/// plain release year against the issue's on-sale year.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedRelease {
+    pub parsed: ParsedFilename,
+    pub volume_year: Option<i32>,
+}
+
+/// BitBook / 21A1 retail scene names, which put the publisher first and
+/// the number after `No`:
+///
+/// ```text
+/// Oni.Press.-.EC.Catacomb.of.Torment.No.13.2026.Retail.Comic.eBook-BitBook
+/// Image.Comics-Tigress.Island.No.04.2026.HYBRID.COMIC
+/// TOKYOPOP.-.Masters.of.the.Universe.Legends.of.Eternia.Issue.No.01.2026.Retail...
+/// Marvel.-.The.Amazing.Spider-Man.2022.No.26.2023.HYBRID.COMIC.eBook-21A1
+/// ```
+///
+/// The generic patterns read these as series `Oni Press - EC Catacomb of
+/// Torment No`, which scores 0.54 against the CV title. Here the
+/// publisher prefix and the `No` / `Issue No` go, and a year between the
+/// series and `No` is the VOLUME year (the ASM line above is the 2022
+/// volume's #26, released 2023), not part of the series name.
+///
+/// Only the `No N YYYY Retail|HYBRID` tail claims a title for this path,
+/// so other formats never reach it.
+// ponytail: a series whose real name ends in a year ("Spawn 1977") would
+// lose it to the volume slot here; none seen in this format yet.
+fn parse_publisher_scene_title(title: &str) -> Option<ParsedRelease> {
+    let spaced = title.replace(['.', '_'], " ");
+    let caps = publisher_scene_re().captures(&spaced)?;
+    let mut head = caps["head"].trim();
+    // `Publisher - Series`, with or without spaces around the hyphen. A
+    // spaced hyphen is always the prefix separator in this format; an
+    // unspaced one only when it follows a corporate word, so
+    // `Spider-Man` stays whole.
+    if let Some((_, rest)) = head.split_once(" - ") {
+        head = rest.trim();
+    } else if let Some(m) = unspaced_publisher_re().find(head) {
+        head = head[m.end()..].trim();
+    }
+    let mut volume_year = None;
+    if let Some(m) = trailing_year_re().captures(head) {
+        volume_year = m[1].parse().ok();
+        head = head[..m.get(0).unwrap().start()].trim();
+    }
+    if head.is_empty() {
+        return None;
+    }
+    Some(ParsedRelease {
+        parsed: ParsedFilename {
+            series_title: head.to_owned(),
+            number: caps["number"].to_owned(),
+            volume: None,
+            year: caps["year"].parse().ok(),
+            title: None,
+            pattern_id: 0,
+        },
+        volume_year,
+    })
+}
+
+static PUBLISHER_SCENE_RE: OnceLock<Regex> = OnceLock::new();
+fn publisher_scene_re() -> &'static Regex {
+    PUBLISHER_SCENE_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?P<head>.+?)\s+(?:issue\s+)?no\s+(?P<number>\d+(?:\.\d+)?)\s+(?P<year>(?:19|20)\d{2})\s+(?:retail|hybrid)\b",
+        )
+        .unwrap()
+    })
+}
+
+static UNSPACED_PUBLISHER_RE: OnceLock<Regex> = OnceLock::new();
+fn unspaced_publisher_re() -> &'static Regex {
+    UNSPACED_PUBLISHER_RE.get_or_init(|| {
+        Regex::new(r"(?i)^.*?\b(?:comics|press|publishing|studios|entertainment)-").unwrap()
+    })
+}
+
+static TRAILING_YEAR_RE: OnceLock<Regex> = OnceLock::new();
+fn trailing_year_re() -> &'static Regex {
+    TRAILING_YEAR_RE.get_or_init(|| Regex::new(r"\s((?:19|20)\d{2})$").unwrap())
+}
+
+/// The generic patterns, tried on the title as given, then with `.cbz`,
+/// then through the bracket and scene normalizers.
+fn parse_canonical_release_title(
+    title: &str,
+    patterns: &[ParsingPattern],
+) -> Option<ParsedFilename> {
     if let Some(parsed) = parse_filename(title, patterns) {
         return Some(parsed);
     }
@@ -394,18 +517,75 @@ fn match_normalize(input: &str) -> String {
     crate::publisher::strip_publisher_tokens(&collapsed)
 }
 
+/// What the year gate checks a release against. Both years come from the
+/// catalog: the issue's effective on-sale year (store date, else cover
+/// date) and the series' start year.
+///
+/// A release whose title marks a volume year (`Spider-Man.2022.No.26`,
+/// `v2014`) must sit within one year of the series start. Otherwise its
+/// release year must be the on-sale year or the year after: cover dates
+/// run ahead of on-sale and scans come later, so the right book is never
+/// dated BEFORE it went on sale. A year earlier is the previous volume,
+/// e.g. `EC.Cruel.Kingdom.No.01.2025` is the first series, not CV's 2026
+/// sequel #1 (whose release is `EC.Cruel.Kingdom.2.No.01.2026`). A
+/// release with no year passes: indexers often omit it, and the title
+/// and issue-number gates still apply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct YearGate {
+    pub on_sale_year: Option<i32>,
+    pub volume_start_year: Option<i32>,
+}
+
+impl YearGate {
+    /// No catalog years known: every release passes the year gate.
+    pub const OPEN: YearGate = YearGate {
+        on_sale_year: None,
+        volume_start_year: None,
+    };
+
+    fn admits(&self, volume_year: Option<i32>, release_year: Option<i32>) -> bool {
+        match (volume_year, self.volume_start_year) {
+            (Some(v), Some(start)) => (v - start).abs() <= 1,
+            _ => match (release_year, self.on_sale_year) {
+                (Some(y), Some(on_sale)) => (0..=1).contains(&(y - on_sale)),
+                _ => true,
+            },
+        }
+    }
+}
+
+/// The patterns to parse releases with for this requested title. The
+/// "Series Book N (YYYY)" rule reads `Book` as a volume marker, which
+/// turns `The Omega Book 001` into series `The Omega`. When the CV title
+/// itself has the word Book, that rule is dropped.
+fn patterns_for<'a>(
+    requested_series_title: &str,
+    patterns: &'a [ParsingPattern],
+) -> std::borrow::Cow<'a, [ParsingPattern]> {
+    let has_book = match_normalize(requested_series_title)
+        .split_whitespace()
+        .any(|t| t == "book");
+    if !has_book {
+        return std::borrow::Cow::Borrowed(patterns);
+    }
+    std::borrow::Cow::Owned(
+        patterns
+            .iter()
+            .filter(|p| !p.pattern.contains("(?i:book)"))
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Pre-grab correctness filter. Drops releases whose year disagrees with
 /// the requested year (silent — different volume, retry next sweep), then
 /// drops releases whose series segment scores below `threshold` against
 /// the requested title in normalized space (mismatch — wrong series,
 /// surface to the user).
 ///
-/// `requested_year = None` skips the year filter entirely (subscription
-/// has no year, e.g. a shallow series). `parsed.year = None` always
-/// passes the year filter — newznab titles sometimes lack year stamps
-/// and over-filtering wrong on `None` would over-reject. See the Bug 3
-/// deferred derivative for the eventual single-candidate fallback
-/// tightening.
+/// The year check is [`YearGate`]: within one year of the series start
+/// for a volume year, else of the issue's on-sale year. [`YearGate::OPEN`]
+/// skips it, and a release with no year always passes it.
 #[allow(clippy::too_many_arguments)] // every arg is a real per-grab filter
                                      // input threaded from the engine; bundling
                                      // into a struct is indirection without a
@@ -415,7 +595,7 @@ pub fn filter_by_series_title(
     releases: Vec<Release>,
     patterns: &[ParsingPattern],
     requested_series_title: &str,
-    requested_year: Option<i32>,
+    year_gate: YearGate,
     threshold: f64,
     exclusion_keywords: &[String],
     min_size_bytes: Option<i64>,
@@ -504,6 +684,7 @@ pub fn filter_by_series_title(
 
     // Loop-invariant: parse the requested issue once, reuse per release.
     let requested_issue_number = IssueNumber::new(requested_issue);
+    let patterns = patterns_for(requested_series_title, patterns);
 
     let mut kept: Vec<Release> = Vec::new();
     let mut parseable_count = 0usize;
@@ -511,7 +692,11 @@ pub fn filter_by_series_title(
     let mut best_series_segment: Option<String> = None;
 
     for release in releases {
-        let Some(parsed) = parse_release_title(&release.title, patterns) else {
+        let Some(ParsedRelease {
+            parsed,
+            volume_year,
+        }) = parse_release(&release.title, &patterns)
+        else {
             continue; // unparseable — counted as wrong-series implicitly
         };
         parseable_count += 1;
@@ -558,11 +743,9 @@ pub fn filter_by_series_title(
             continue;
         }
 
-        // Year gate — silent reject on disagreement, pass on absence.
-        if let (Some(req_year), Some(rel_year)) = (requested_year, parsed.year) {
-            if req_year != rel_year {
-                continue;
-            }
+        // Year gate — silent reject on a wrong volume, pass on absence.
+        if !year_gate.admits(volume_year, parsed.year) {
+            continue;
         }
 
         kept.push(release);
@@ -605,7 +788,10 @@ pub fn score_release_title(
     requested_series_title: &str,
     patterns: &[ParsingPattern],
 ) -> Option<f64> {
-    let parsed = parse_release_title(release_title, patterns)?;
+    let parsed = parse_release_title(
+        release_title,
+        &patterns_for(requested_series_title, patterns),
+    )?;
     let requested_normalized = match_normalize(requested_series_title);
     let parsed_normalized = match_normalize(&parsed.series_title);
     Some(similarity(&requested_normalized, &parsed_normalized))
@@ -679,6 +865,180 @@ mod tests {
     use super::*;
     use longbox_core::filename::default_patterns;
     use time::macros::datetime;
+
+    /// One release title from the 2026-10-26 matcher Step 0, the CV issue
+    /// it was searched for, and what the pre-grab filter must decide.
+    struct Step0Case {
+        release: &'static str,
+        cv_title: &'static str,
+        issue: &'static str,
+        on_sale_year: i32,
+        start_year: i32,
+        /// Expected (series, number, volume year, release year) when the
+        /// parse itself is the point of the case.
+        parse: Option<(&'static str, &'static str, Option<i32>, Option<i32>)>,
+        pass: bool,
+    }
+
+    #[rustfmt::skip]
+    const STEP0_CASES: &[Step0Case] = &[
+        // Bucket 1: publisher-prefix scene format (BitBook / 21A1).
+        Step0Case { release: "Oni.Press.-.EC.Catacomb.of.Torment.No.13.2026.Retail.Comic.eBook-BitBook", cv_title: "EC Catacomb of Torment", issue: "13", on_sale_year: 2026, start_year: 2025,
+            parse: Some(("EC Catacomb of Torment", "13", None, Some(2026))), pass: true },
+        Step0Case { release: "IDW.Publishing.-.The.Twilight.Zone.No.10.2026.HYBRID.COMIC.eBook-21A1-xpost", cv_title: "The Twilight Zone", issue: "10", on_sale_year: 2026, start_year: 2025,
+            parse: Some(("The Twilight Zone", "10", None, Some(2026))), pass: true },
+        Step0Case { release: "Image.Comics.-.Blood.And.Thunder.No.14.2026.HYBRID.COMIC.eBook-21A1-xpost", cv_title: "Blood & Thunder", issue: "14", on_sale_year: 2026, start_year: 2025,
+            parse: Some(("Blood And Thunder", "14", None, Some(2026))), pass: true },
+        Step0Case { release: "Image.Comics-Tigress.Island.No.04.2026.HYBRID.COMIC", cv_title: "Tigress Island", issue: "4", on_sale_year: 2026, start_year: 2026,
+            parse: Some(("Tigress Island", "04", None, Some(2026))), pass: true },
+        Step0Case { release: "TOKYOPOP.-.Masters.of.the.Universe.Legends.of.Eternia.Issue.No.01.2026.Retail.Comic.eBook-BitBook", cv_title: "Masters of the Universe: Legends of Eternia", issue: "1", on_sale_year: 2026, start_year: 2026,
+            parse: Some(("Masters of the Universe Legends of Eternia", "01", None, Some(2026))), pass: true },
+        Step0Case { release: "Oni.Press.-.EC.Cruel.Universe.2.No.10.2026.Retail.Comic.eBook-BitBook", cv_title: "EC Cruel Universe", issue: "10", on_sale_year: 2026, start_year: 2025,
+            parse: Some(("EC Cruel Universe 2", "10", None, Some(2026))), pass: true },
+        Step0Case { release: "Image.Comics.-.I.Tyrant.No.02.2025.HYBRID.COMIC.eBook-21A1-xpost", cv_title: "I, Tyrant", issue: "2", on_sale_year: 2025, start_year: 2025,
+            parse: Some(("I Tyrant", "02", None, Some(2025))), pass: true },
+        Step0Case { release: "Marvel.-.The.Amazing.Spider-Man.2025.No.02.2025.HYBRID.COMIC.eBook-21A1 [8efc26741]-xpost", cv_title: "The Amazing Spider-Man", issue: "2", on_sale_year: 2025, start_year: 2025,
+            parse: Some(("The Amazing Spider-Man", "02", Some(2025), Some(2025))), pass: true },
+        // The 2022 volume's #26, released 2023: same title, wrong volume.
+        Step0Case { release: "Marvel.-.The.Amazing.Spider-Man.2022.No.26.2023.HYBRID.COMIC.eBook-21A1", cv_title: "The Amazing Spider-Man", issue: "26", on_sale_year: 2026, start_year: 2025,
+            parse: Some(("The Amazing Spider-Man", "26", Some(2022), Some(2023))), pass: false },
+        // Bucket 2: article-less releases (found by the new rung; scoring is unchanged).
+        Step0Case { release: "Amazing.Spider-Man.013.(2025).(Digital).(Shan-Empire).cbz-xpost", cv_title: "The Amazing Spider-Man", issue: "13", on_sale_year: 2025, start_year: 2025,
+            parse: None, pass: true },
+        Step0Case { release: "Amazing Venom 001 [2026] [Digital] [Shan-Empire]", cv_title: "The Amazing Venom", issue: "1", on_sale_year: 2026, start_year: 2026,
+            parse: None, pass: true },
+        // Bucket 5: "Book" belongs to the CV title.
+        Step0Case { release: "The Omega Book 001 [2026] [2 covers] [digital] [Knight Ripper-Empire]", cv_title: "The Omega Book", issue: "1", on_sale_year: 2026, start_year: 2026,
+            parse: Some(("The Omega Book", "001", None, Some(2026))), pass: true },
+        Step0Case { release: "The Omega Book 03 [of 05] [2026] [Limited Series] [Mad Cave Studios] [Digital] [LeDuch-DCP]", cv_title: "The Omega Book", issue: "3", on_sale_year: 2026, start_year: 2026,
+            parse: None, pass: true },
+        // Bucket 3: right release, right volume. The year gate must not lose these.
+        Step0Case { release: "Radiant Black 044 [2026] [Digital] [Zone-Empire]", cv_title: "Radiant Black", issue: "44", on_sale_year: 2026, start_year: 2021, parse: None, pass: true },
+        Step0Case { release: "Minor Arcana 019 [2026] [digital] [Goobadaddy-Empire]", cv_title: "Minor Arcana", issue: "19", on_sale_year: 2026, start_year: 2024, parse: None, pass: true },
+        Step0Case { release: "100 Bullets Brother Lono 02 (of 8) (2013) (Digital) (Zone-Empire)", cv_title: "100 Bullets: Brother Lono", issue: "2", on_sale_year: 2013, start_year: 2013, parse: None, pass: true },
+        Step0Case { release: "Black Tower-The Raven Conspiracy 002 [2026] [digital] [Son of Ultron-Empire]", cv_title: "Black Tower: The Raven Conspiracy", issue: "2", on_sale_year: 2026, start_year: 2026, parse: None, pass: true },
+        Step0Case { release: "Dutch 001 (2024) (Digital) (Zone-Empire)", cv_title: "Dutch", issue: "001", on_sale_year: 2024, start_year: 2024, parse: None, pass: true },
+        Step0Case { release: "Powers v3 010 (2012)", cv_title: "Powers", issue: "10", on_sale_year: 2012, start_year: 2009, parse: None, pass: true },
+        // The catalog puts Hyde Street (2025) #1 on sale in 2025; every #1 release is 2024.
+        // Dated before on-sale reads as another volume, so it is rejected (catalog data in question).
+        Step0Case { release: "Hyde Street 001 (2024) (Digital) (Mephisto-Empire)", cv_title: "Hyde Street", issue: "1", on_sale_year: 2025, start_year: 2025, parse: None, pass: false },
+        Step0Case { release: "Green Lantern 037 [2026] [digital] [Son of Ultron-Empire]", cv_title: "Green Lantern", issue: "37", on_sale_year: 2026, start_year: 2023, parse: None, pass: true },
+        // Year gate: right title, wrong volume.
+        Step0Case { release: "Powers 010 (2001) (Digital) (Zone-Empire)", cv_title: "Powers", issue: "10", on_sale_year: 2012, start_year: 2009, parse: None, pass: false },
+        Step0Case { release: "The Authority 003 (2008) (Digital) (Li'l DR & Quinch-Empire)", cv_title: "The Authority", issue: "3", on_sale_year: 1999, start_year: 1999, parse: None, pass: false },
+        Step0Case { release: "Green Lantern 037 (2009) (Digital) (JK-Empire)", cv_title: "Green Lantern", issue: "37", on_sale_year: 2026, start_year: 2023, parse: None, pass: false },
+        // Dated titles whose pattern captures no year: the bracket year still gates them.
+        Step0Case { release: "Powers v1 010 (2001) (digital-Empire)", cv_title: "Powers", issue: "10", on_sale_year: 2012, start_year: 2009, parse: None, pass: false },
+        Step0Case { release: "Amazing Spider-Man 022 [Marvel] [1965.03] [Willie Williams]", cv_title: "The Amazing Spider-Man", issue: "22", on_sale_year: 2026, start_year: 2025, parse: None, pass: false },
+        Step0Case { release: "Twilight Zone V5 007[2014][Digital Exclusive Edition][TLK-EMPIRE-HD]", cv_title: "The Twilight Zone", issue: "7", on_sale_year: 2026, start_year: 2025, parse: None, pass: false },
+        // Acceptance replay: a sequel's #1 against the first series' #1.
+        Step0Case { release: "Oni.Press.-.EC.Cruel.Kingdom.No.01.2025.Retail.Comic.eBook-BitBook-xpost", cv_title: "EC Cruel Kingdom", issue: "1", on_sale_year: 2026, start_year: 2026, parse: None, pass: false },
+        Step0Case { release: "Oni.Press.-.EC.Cruel.Kingdom.2.No.01.2026.Retail.Comic.eBook-BitBook", cv_title: "EC Cruel Kingdom", issue: "1", on_sale_year: 2026, start_year: 2026, parse: None, pass: true },
+        Step0Case { release: "Oni.Press.-.EC.Cruel.Universe.No.03.2024.Retail.Comic.eBook-BitBook", cv_title: "EC Cruel Universe", issue: "3", on_sale_year: 2025, start_year: 2025, parse: None, pass: false },
+        // Bucket 8: a different book. Must stay rejected.
+        Step0Case { release: "Galactic.Patrol.Delta.001.2023.Series.Godhood.Comics.Digital-HD.LeDuch", cv_title: "Galactic", issue: "1", on_sale_year: 2025, start_year: 2025, parse: None, pass: false },
+        Step0Case { release: "Immortal.Thor.013.2024.Digital.Shan-Empire", cv_title: "Thor", issue: "13", on_sale_year: 2026, start_year: 2025, parse: None, pass: false },
+        Step0Case { release: "Criminal Macabre - The Big Bleed Out 01 (of 04) (2019) (digital) (Son of Ultron-Empire)", cv_title: "Criminal: Bad Night", issue: "1", on_sale_year: 2009, start_year: 2009, parse: None, pass: false },
+        // Bucket 4 (aliases, not this change): still rejected.
+        Step0Case { release: "Thundercats X Silverhawks - Thunderhawks 001 (2026) (5 Covers) (Digital) (Shan-Empire) (cbz)", cv_title: "Thunderhawks", issue: "1", on_sale_year: 2026, start_year: 2026, parse: None, pass: false },
+    ];
+
+    #[test]
+    fn step0_fixtures_parse_and_gate_as_expected() {
+        let patterns = default_patterns();
+        let mut wrong = Vec::new();
+        for c in STEP0_CASES {
+            if let Some((series, number, volume_year, year)) = c.parse {
+                let got = parse_release(c.release, &patterns_for(c.cv_title, &patterns));
+                let got = got.map(|r| {
+                    (
+                        r.parsed.series_title,
+                        r.parsed.number,
+                        r.volume_year,
+                        r.parsed.year,
+                    )
+                });
+                let want = Some((series.to_owned(), number.to_owned(), volume_year, year));
+                if got != want {
+                    wrong.push(format!("parse {}: got {got:?}, want {want:?}", c.release));
+                }
+            }
+            let gate = YearGate {
+                on_sale_year: Some(c.on_sale_year),
+                volume_start_year: Some(c.start_year),
+            };
+            let kept = filter_by_series_title(
+                vec![release(c.release, Some(1))],
+                &patterns,
+                c.cv_title,
+                gate,
+                longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+                &[],
+                None,
+                c.issue,
+                &[],
+            )
+            .kept
+            .len();
+            if (kept == 1) != c.pass {
+                wrong.push(format!(
+                    "gate {} for {} #{}: kept={kept}, want pass={}",
+                    c.release, c.cv_title, c.issue, c.pass
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The year gate on its own: a volume year is checked against the
+    /// series start, a release year against the on-sale year, one year of
+    /// slack either way, and a missing year passes.
+    #[test]
+    fn year_gate_checks_volume_year_against_start_and_release_year_against_on_sale() {
+        let gate = YearGate {
+            on_sale_year: Some(2012),
+            volume_start_year: Some(2009),
+        };
+        assert!(gate.admits(None, Some(2012)));
+        assert!(
+            gate.admits(None, Some(2013)),
+            "a cover year runs ahead of on-sale"
+        );
+        assert!(
+            !gate.admits(None, Some(2011)),
+            "dated before it went on sale: another volume"
+        );
+        assert!(
+            gate.admits(Some(2008), None) && gate.admits(Some(2010), None),
+            "volume year: one year either way"
+        );
+        assert!(
+            !gate.admits(None, Some(2001)),
+            "Powers 010 (2001) for Powers (2009) #10"
+        );
+        assert!(
+            gate.admits(Some(2009), Some(2026)),
+            "volume year wins over release year"
+        );
+        assert!(
+            !gate.admits(Some(2022), Some(2012)),
+            "wrong volume, even with an on-sale release year"
+        );
+        assert!(gate.admits(None, None), "no year passes");
+        assert!(YearGate::OPEN.admits(Some(1950), Some(1950)));
+    }
+
+    /// The "Book N" rule still claims a Book volume when the CV title has
+    /// no Book in it.
+    #[test]
+    fn book_rule_still_applies_when_the_cv_title_has_no_book() {
+        let patterns = default_patterns();
+        let p = parse_release("Saga Book 2 (2020).cbz", &patterns_for("Saga", &patterns)).unwrap();
+        assert_eq!(
+            (p.parsed.series_title.as_str(), p.parsed.number.as_str()),
+            ("Saga", "2")
+        );
+    }
 
     #[test]
     fn score_release_title_high_for_match_low_for_wrong_series() {
@@ -856,7 +1216,7 @@ mod tests {
             pool,
             &patterns,
             "Saga",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             Some(10 * 1024 * 1024),
@@ -887,7 +1247,7 @@ mod tests {
             pool,
             &patterns,
             "Odin",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -917,7 +1277,7 @@ mod tests {
             pool,
             &patterns,
             "The Darkness",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -941,7 +1301,10 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            Some(2024),
+            YearGate {
+                on_sale_year: Some(2024),
+                volume_start_year: None,
+            },
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -963,7 +1326,7 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD, // 0.75
             &[],
             None,
@@ -993,7 +1356,7 @@ mod tests {
             pool,
             &patterns,
             "Wolverine: Origin",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1014,7 +1377,10 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            Some(1982),
+            YearGate {
+                on_sale_year: Some(1982),
+                volume_start_year: None,
+            },
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1042,7 +1408,10 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            Some(1982),
+            YearGate {
+                on_sale_year: Some(1982),
+                volume_start_year: None,
+            },
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1065,7 +1434,7 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1095,7 +1464,7 @@ mod tests {
             pool,
             &patterns,
             "Odin",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1133,7 +1502,10 @@ mod tests {
             pool,
             &patterns,
             "Wolverine",
-            Some(1982),
+            YearGate {
+                on_sale_year: Some(1982),
+                volume_start_year: None,
+            },
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1166,7 +1538,7 @@ mod tests {
             pool,
             &patterns,
             "Amazing Spider-Man",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
@@ -1203,7 +1575,7 @@ mod tests {
             pool,
             &patterns,
             "Amazing Spider-Man",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Infinity Comic".into()],
             None,
@@ -1232,7 +1604,7 @@ mod tests {
             pool,
             &patterns,
             "Amazing Spider-Man",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -1262,7 +1634,7 @@ mod tests {
             pool,
             &patterns,
             "Beneath the Trees Where Nobody Sees",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Trade Paperback".into()],
             None,
@@ -1282,7 +1654,7 @@ mod tests {
             pool,
             &patterns,
             "Batman",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Hardcover".into()],
             None,
@@ -1302,7 +1674,7 @@ mod tests {
             pool,
             &patterns,
             "Spider-Man",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &["Omnibus".into()],
             None,
@@ -1770,7 +2142,7 @@ mod tests {
             vec![release(t, Some(10))],
             &patterns,
             "Powers",
-            None,
+            YearGate::OPEN,
             0.75,
             &[],
             None,
@@ -1805,7 +2177,10 @@ mod tests {
             vec![release(t, Some(10))],
             &patterns,
             "The New Space Age",
-            Some(2025),
+            YearGate {
+                on_sale_year: Some(2025),
+                volume_start_year: None,
+            },
             0.75,
             &[],
             None,
@@ -1822,7 +2197,10 @@ mod tests {
             vec![release(t, Some(10))],
             &patterns,
             "The New Space Age",
-            Some(2025),
+            YearGate {
+                on_sale_year: Some(2025),
+                volume_start_year: None,
+            },
             0.75,
             &[],
             None,
@@ -1868,7 +2246,7 @@ mod tests {
                 vec![release(t, Some(10))],
                 &patterns,
                 "My Little Warlord",
-                None,
+                YearGate::OPEN,
                 0.75,
                 &kw,
                 None,
@@ -1915,7 +2293,10 @@ mod tests {
             )],
             &patterns,
             "The Author Immortal",
-            Some(2026),
+            YearGate {
+                on_sale_year: Some(2026),
+                volume_start_year: None,
+            },
             0.75,
             &[],
             None,
@@ -1989,7 +2370,7 @@ mod tests {
             pool,
             &patterns,
             "Absolute Green Lantern",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -2062,7 +2443,7 @@ mod tests {
             pool,
             &patterns,
             "Odin",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -2100,7 +2481,7 @@ mod tests {
             pool,
             &patterns,
             "Hello Darkness",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -2121,7 +2502,7 @@ mod tests {
             Vec::new(),
             &patterns,
             "Wolverine",
-            None,
+            YearGate::OPEN,
             longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
             &[],
             None,
@@ -2195,7 +2576,7 @@ mod tests {
             pool,
             &patterns,
             "FBP: Federal Bureau of Physics",
-            None,
+            YearGate::OPEN,
             0.75,
             &[],
             None,
@@ -2221,7 +2602,7 @@ mod tests {
             pool,
             &patterns,
             "FBP: Federal Bureau of Physics",
-            None,
+            YearGate::OPEN,
             0.75,
             &[],
             None,
@@ -2251,7 +2632,7 @@ mod tests {
             pool,
             &patterns,
             "Saga",
-            None,
+            YearGate::OPEN,
             0.75,
             &[],
             None,
@@ -2276,11 +2657,11 @@ mod tests {
             pool,
             &patterns,
             "Saga",
-            None, // requested_year
-            0.75, // threshold
-            &[],  // exclusion_keywords
-            None, // min_size_bytes
-            "5",  // requested_issue (NEW, last arg) — "5" matches "005"
+            YearGate::OPEN, // requested_year
+            0.75,           // threshold
+            &[],            // exclusion_keywords
+            None,           // min_size_bytes
+            "5",            // requested_issue (NEW, last arg) — "5" matches "005"
             &[],
         );
         assert_eq!(outcome.kept.len(), 1);

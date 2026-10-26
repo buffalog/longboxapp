@@ -157,6 +157,15 @@ pub fn search_ladder(series: &str, issue: &str, aliases: &[String]) -> Vec<Strin
     if let Some(before) = variants.get(2) {
         push(normalize_query(before));
     }
+    // 5: article-less precision. Newznab's text search needs every term,
+    // `the` included, and plenty of releases drop the article:
+    // `Amazing.Spider-Man.013.(2025)` never comes back for
+    // `the amazing spider man 013`. Scoring already strips articles, so
+    // only the query needs this. Precision rather than bare: the bare
+    // `amazing spider man` hits the 100-result cap on decades of back issues.
+    if let Some(bare) = strip_leading_article(&normalize_query(series)) {
+        push(precision_term(bare, issue));
+    }
     if terms.len() == MAX_LADDER_RUNGS {
         // Silent truncation of the ladder would reproduce, one layer up,
         // exactly the invisible failure this change exists to remove.
@@ -168,6 +177,13 @@ pub fn search_ladder(series: &str, issue: &str, aliases: &[String]) -> Vec<Strin
         );
     }
     terms
+}
+
+/// `series` (query-normalized) without a leading `the` / `a` / `an`, or
+/// `None` when it has none or is nothing but the article.
+fn strip_leading_article(series: &str) -> Option<&str> {
+    let (first, rest) = series.split_once(' ')?;
+    matches!(first, "the" | "a" | "an").then_some(rest)
 }
 
 /// `{series} {issue}` with a three-digit zero-pad on purely-numeric
@@ -428,6 +444,33 @@ mod tests {
             vec!["saga 001", "saga"],
             "alias identical to title collapses; no unpadded twin"
         );
+    }
+
+    /// Step 0 (2026-10-26): every Amazing Spider-Man (2025) issue is on
+    /// the indexers as `Amazing.Spider-Man.NNN.(2025)`, with no article,
+    /// so `the amazing spider man 013` never returns them. The
+    /// article-less precision rung comes last.
+    #[test]
+    fn a_leading_article_gets_an_article_less_precision_rung_last() {
+        let ladder = search_ladder("The Amazing Spider-Man", "13", &[]);
+        assert_eq!(
+            ladder,
+            vec![
+                "the amazing spider man 013",
+                "the amazing spider man",
+                "amazing spider man 013",
+            ]
+        );
+        assert_eq!(
+            search_ladder("An Unkindness of Ravens", "2", &[])
+                .last()
+                .unwrap(),
+            "unkindness of ravens 002"
+        );
+        // No article, no extra rung; "A" as the whole word stays.
+        assert_eq!(search_ladder("Saga", "1", &[]), vec!["saga 001", "saga"]);
+        assert_eq!(strip_leading_article("a"), None);
+        assert_eq!(strip_leading_article("theater of fear"), None);
     }
 
     /// When the cap bites, the ALIAS rung must survive and the

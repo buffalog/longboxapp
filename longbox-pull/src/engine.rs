@@ -658,19 +658,21 @@ async fn attempt_pull_for_candidate(
     summary: &mut SweepSummary,
 ) -> Result<AttemptOutcome, PullError> {
     let series_id = series.id;
-    // No year-hint for pull searches. The previous attempts at this
-    // (start_year, then cover_date) both silently dropped valid
-    // hits: CV's recorded cover_date is the cover-month of the
-    // physical issue, but NZB titles carry the SCAN year — and
-    // those routinely differ (off-by-one solicitation windows,
-    // late physical scans of older digital releases, scanner-group
-    // re-rips of back issues). The year-gate's strict equality
-    // turns each disagreement into a silent rejection. Since the
-    // pull engine already knows which series + issue it's pulling
-    // for, the series-title similarity filter is doing all the
-    // wrong-volume disambiguation work; year here is at best
-    // redundant and at worst correctness-destroying.
-    let year_hint: Option<i32> = None;
+    // Year gate: a release must be dated in this issue's on-sale year or
+    // the year after, or, when its title marks a volume year
+    // (`Spider-Man.2022.No.26`), within one year of the series' start
+    // (see `YearGate`). The earlier strict-equality gates (start_year,
+    // then cover_date) dropped valid hits on scan-year drift; the
+    // forward slack absorbs that, and the
+    // gate is what stops `Powers 010 (2001)` passing for Powers (2009)
+    // now that the title filter alone cannot tell volumes apart.
+    let year_hint = longbox_newznab::YearGate {
+        on_sale_year: issue
+            .release_date()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse().ok()),
+        volume_start_year: series.start_year.and_then(|y| i32::try_from(y).ok()),
+    };
 
     let prior = pull_attempt_repo::list_for_issue(db, series_id, issue.id).await?;
     // Retry-exclusion: skip releases already tried. Only a
