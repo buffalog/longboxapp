@@ -13,7 +13,7 @@ use crate::error::{DbError, Result};
 
 /// A pull completed and the file was catalogued.
 pub const EVENT_PULL_SUCCEEDED: i64 = 1 << 0;
-/// A pull failed permanently (after retry exhaustion).
+/// A pull parked after retry exhaustion (retried later on a backoff).
 pub const EVENT_PULL_FAILED: i64 = 1 << 1;
 /// New solicitations appeared for a pulled series.
 pub const EVENT_NEW_SOLICITATIONS: i64 = 1 << 2;

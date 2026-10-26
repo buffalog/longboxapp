@@ -363,7 +363,7 @@ where
 /// row with `status='mismatched'`, `release_id=NULL`,
 /// `download_handle=NULL`, mirroring the engine's submission-failure
 /// shape so that 3 mismatches in a row park the issue via the candidate
-/// query's `retry_count >= 3` check.
+/// query's `retry_count >= 3` backoff.
 ///
 /// `prior_failure_count` is the running cumulative count the engine
 /// already maintains for the issue (it's the same value passed to a
@@ -487,7 +487,10 @@ where
 pub struct AttemptBlockers {
     /// Status of a surviving `pending`/`grabbed` attempt, if any.
     pub in_flight_status: Option<String>,
-    /// Some attempt has `retry_count >= 3`.
+    /// Parked and still inside its backoff: some attempt has
+    /// `retry_count >= 3` and the newest attempt is younger than 7 days
+    /// (retry_count 3), 14 days (4) or 30 days (5+). Same rule as
+    /// `issue_repo::list_pull_candidates`.
     pub retries_exhausted: bool,
     /// A `submitted` attempt landed inside the 6-hour window.
     pub recently_submitted: bool,
@@ -523,8 +526,15 @@ where
              (SELECT status FROM pull_attempts
                WHERE issue_id = ?1 AND status IN ('pending', 'grabbed')
                ORDER BY attempted_at DESC LIMIT 1) AS "in_flight_status?: String",
-             EXISTS(SELECT 1 FROM pull_attempts
-                     WHERE issue_id = ?1 AND retry_count >= 3) AS "retries_exhausted!: bool",
+             EXISTS(SELECT 1 FROM (
+                       SELECT MAX(retry_count) AS rc, MAX(attempted_at) AS last
+                       FROM pull_attempts WHERE issue_id = ?1
+                     ) p
+                     WHERE p.rc >= 3
+                       AND p.last > datetime('now', CASE p.rc WHEN 3 THEN '-7 days'
+                                                             WHEN 4 THEN '-14 days'
+                                                             ELSE '-30 days' END))
+               AS "retries_exhausted!: bool",
              EXISTS(SELECT 1 FROM pull_attempts
                      WHERE issue_id = ?1 AND status = 'submitted'
                        AND attempted_at >= datetime('now', '-6 hours'))

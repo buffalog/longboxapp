@@ -440,7 +440,8 @@ pub(crate) enum SearchOutlook {
     /// The candidate query requires a well-formed date not later than
     /// today.
     NoUsableCoverDate,
-    /// An attempt carries `retry_count >= 3`; the sweep has given up.
+    /// Parked: an attempt carries `retry_count >= 3` and the backoff
+    /// (7 / 14 / 30 days from the newest attempt) has not elapsed.
     RetriesExhausted,
     /// A `pending`/`grabbed` attempt survives. Searching resumes once
     /// the sweep's stale-grab purge clears it.
