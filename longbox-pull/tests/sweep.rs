@@ -202,6 +202,44 @@ async fn sweep_skips_a_wrong_volume_release_for_the_right_one() {
     assert_eq!(attempts[0].release_id.as_deref(), Some("guid-right-volume"));
 }
 
+/// A ` - Subtitle` after the number is refused even with more grabs,
+/// and the refusal is counted in the sweep summary.
+#[tokio::test]
+async fn sweep_refuses_and_counts_a_post_number_subtitle_release() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    let item = |title: &str, guid: &str, grabs: u32| {
+        format!(
+            r#"<item><title>{title}</title><guid>{guid}</guid>
+                  <enclosure url="http://nzb.example/{guid}.nzb"/>
+                  <newznab:attr name="grabs" value="{grabs}"/></item>"#
+        )
+    };
+    let body = format!(
+        r#"<rss version="2.0" xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+          <channel>{}{}</channel></rss>"#,
+        item(
+            "Saga 001 - Secret Origin (2012) (digital).cbz",
+            "guid-subtitle",
+            900
+        ),
+        item("Saga 001 (2012) (digital).cbz", "guid-plain", 10),
+    );
+    indexer_returns(&indexer, body).await;
+    sab_accepts(&downloader, "nzo-1").await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+
+    let summary = sweep(&db, None).await.unwrap();
+    assert_eq!(summary.submitted, 1);
+    assert_eq!(summary.subtitle_rejected, 1);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].release_id.as_deref(), Some("guid-plain"));
+}
+
 #[tokio::test]
 async fn no_indexer_match_records_no_attempt() {
     let (db, series_id, issue_id) = seed_catalog().await;

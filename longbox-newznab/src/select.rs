@@ -461,6 +461,9 @@ pub struct FilterOutcome {
     /// can distinguish "wrong volume" (silent) from "wrong series"
     /// (surface).
     pub mismatch: Option<MismatchDiagnostic>,
+    /// Titles of releases that passed every other gate but carry a
+    /// ` - Subtitle` after the issue number (see [`post_number_subtitle`]).
+    pub subtitle_rejected: Vec<String>,
 }
 
 /// Why an indexer's pool became empty post-filter, used to populate the
@@ -690,6 +693,7 @@ pub fn filter_by_series_title(
     let mut parseable_count = 0usize;
     let mut best_similarity: Option<f64> = None;
     let mut best_series_segment: Option<String> = None;
+    let mut subtitle_rejected: Vec<String> = Vec::new();
 
     for release in releases {
         let Some(ParsedRelease {
@@ -748,6 +752,12 @@ pub fn filter_by_series_title(
             continue;
         }
 
+        // Last, so the list holds only releases this rule alone rejected.
+        if post_number_subtitle(&parsed).is_some() {
+            subtitle_rejected.push(release.title);
+            continue;
+        }
+
         kept.push(release);
     }
 
@@ -771,7 +781,43 @@ pub fn filter_by_series_title(
         None
     };
 
-    FilterOutcome { kept, mismatch }
+    FilterOutcome {
+        kept,
+        mismatch,
+        subtitle_rejected,
+    }
+}
+
+/// The ` - X` a release carries after its issue number, if any.
+///
+/// Such a release is not grabbed. In the 2026-10-26 replay (118 series,
+/// 10,810 releases) every one that cleared the title, number and year
+/// gates was a different book: `Green Lantern 012 - Secret Origin (2025)`
+/// (a reprint series) as Green Lantern (2023) #12, and `Morning Glories
+/// Vol. 1 - For a Better Future (2011)` (a trade) as #1. The cost is a
+/// real story-arc name in that slot (`Batman 012 - The Court of Owls`),
+/// which never appeared; Interactive Search still lists these, marked.
+/// A ` - Subtitle` BEFORE the number is part of the series segment and
+/// is scored as such (`Swamp Thing - Green Hell 001`).
+fn post_number_subtitle(parsed: &ParsedFilename) -> Option<&str> {
+    parsed.title.as_deref().filter(|t| !t.is_empty())
+}
+
+/// Why the pre-grab filter would refuse `release_title` on its subtitle,
+/// for Interactive Search to show beside the result. `None` when the
+/// title doesn't parse or carries no post-number subtitle.
+pub fn subtitle_rejection(
+    release_title: &str,
+    requested_series_title: &str,
+    patterns: &[ParsingPattern],
+) -> Option<String> {
+    let parsed = parse_release_title(
+        release_title,
+        &patterns_for(requested_series_title, patterns),
+    )?;
+    post_number_subtitle(&parsed).map(|x| {
+        format!("subtitle \"{x}\" after the issue number: likely a different series or a trade")
+    })
 }
 
 /// Score a single release title against a requested series title (0.0–1.0).
@@ -916,6 +962,19 @@ mod tests {
         Step0Case { release: "Radiant Black 044 [2026] [Digital] [Zone-Empire]", cv_title: "Radiant Black", issue: "44", on_sale_year: 2026, start_year: 2021, parse: None, pass: true },
         Step0Case { release: "Minor Arcana 019 [2026] [digital] [Goobadaddy-Empire]", cv_title: "Minor Arcana", issue: "19", on_sale_year: 2026, start_year: 2024, parse: None, pass: true },
         Step0Case { release: "100 Bullets Brother Lono 02 (of 8) (2013) (Digital) (Zone-Empire)", cv_title: "100 Bullets: Brother Lono", issue: "2", on_sale_year: 2013, start_year: 2013, parse: None, pass: true },
+        // A " - Subtitle" before the number is part of the series and must match CV's colon title.
+        Step0Case { release: "Swamp Thing - Green Hell 001 (2022) (digital) (Son of Ultron-Empire)", cv_title: "Swamp Thing: Green Hell", issue: "1", on_sale_year: 2022, start_year: 2022,
+            parse: Some(("Swamp Thing - Green Hell", "001", None, Some(2022))), pass: true },
+        Step0Case { release: "100 Bullets - Brother Lono 04 (of 08) (2013) (digital) (Minutemen-Acan) (cbr)", cv_title: "100 Bullets: Brother Lono", issue: "4", on_sale_year: 2013, start_year: 2013,
+            parse: Some(("100 Bullets - Brother Lono", "04", None, Some(2013))), pass: true },
+        // ...and a different series' subtitle fails against a plain CV title.
+        Step0Case { release: "Green Lantern - New Guardians 010 (2012) (D1920) (Nahga-Empire)", cv_title: "Green Lantern", issue: "10", on_sale_year: 2012, start_year: 2011, parse: None, pass: false },
+        // A " - Subtitle" AFTER the number fails even though title, number and year all pass:
+        // a reprint series (on-sale 2024, released 2025) and a trade read as #1.
+        Step0Case { release: "Green.Lantern.012.-.Secret.Origin.(2025).(digital-mobile).(Son.of.Ultron-Empire).cbr-xpost", cv_title: "Green Lantern", issue: "12", on_sale_year: 2024, start_year: 2023,
+            parse: Some(("Green Lantern", "012", None, Some(2025))), pass: false },
+        Step0Case { release: "Morning Glories Vol. 1 - For a Better Future (2011) (Digital TPB) (FawkesGroup-Empire)", cv_title: "Morning Glories", issue: "1", on_sale_year: 2010, start_year: 2010,
+            parse: None, pass: false },
         Step0Case { release: "Black Tower-The Raven Conspiracy 002 [2026] [digital] [Son of Ultron-Empire]", cv_title: "Black Tower: The Raven Conspiracy", issue: "2", on_sale_year: 2026, start_year: 2026, parse: None, pass: true },
         Step0Case { release: "Dutch 001 (2024) (Digital) (Zone-Empire)", cv_title: "Dutch", issue: "001", on_sale_year: 2024, start_year: 2024, parse: None, pass: true },
         Step0Case { release: "Powers v3 010 (2012)", cv_title: "Powers", issue: "10", on_sale_year: 2012, start_year: 2009, parse: None, pass: true },
@@ -988,6 +1047,45 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The post-number subtitle fixtures fail on that rule alone: every
+    /// other gate passes them, so they land in `subtitle_rejected`.
+    #[test]
+    fn post_number_subtitle_is_the_only_gate_rejecting_them() {
+        let patterns = default_patterns();
+        for (title, cv, issue, on_sale, start) in [
+            ("Green.Lantern.012.-.Secret.Origin.(2025).(digital-mobile).(Son.of.Ultron-Empire).cbr-xpost", "Green Lantern", "12", 2024, 2023),
+            ("Morning Glories Vol. 1 - For a Better Future (2011) (Digital TPB) (FawkesGroup-Empire)", "Morning Glories", "1", 2010, 2010),
+        ] {
+            let gate = YearGate {
+                on_sale_year: Some(on_sale),
+                volume_start_year: Some(start),
+            };
+            let outcome = filter_by_series_title(
+                vec![release(title, Some(1))],
+                &patterns,
+                cv,
+                gate,
+                longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+                &[],
+                None,
+                issue,
+                &[],
+            );
+            assert!(outcome.kept.is_empty(), "{title}");
+            assert_eq!(outcome.subtitle_rejected, vec![title.to_owned()]);
+            // Silent, like a year rejection: the series was found.
+            assert_eq!(outcome.mismatch, None, "{title}");
+            assert!(subtitle_rejection(title, cv, &patterns).is_some(), "{title}");
+        }
+        let plain = "Green Lantern 037 [2026] [digital] [Son of Ultron-Empire]";
+        assert_eq!(subtitle_rejection(plain, "Green Lantern", &patterns), None);
+        let before = "Swamp Thing - Green Hell 001 (2022) (digital) (Son of Ultron-Empire)";
+        assert_eq!(
+            subtitle_rejection(before, "Swamp Thing: Green Hell", &patterns),
+            None
+        );
     }
 
     /// The year gate on its own: a volume year is checked against the

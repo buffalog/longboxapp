@@ -9,6 +9,8 @@ export interface InteractiveSearchResult {
   age_days: number | null;
   /** Series-title match score, 0.0–1.0. */
   confidence: number;
+  /** Why the pull engine would refuse this release; null when it wouldn't. */
+  rejected_reason: string | null;
   nzb_url: string;
 }
 

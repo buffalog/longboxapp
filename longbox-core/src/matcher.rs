@@ -351,6 +351,14 @@ fn best_candidate_match<'a>(
                 let b_has = b.1.issues.iter().any(|i| i.number.matches(needle));
                 b_has.cmp(&a_has)
             })
+            // A watch-folder import has no series folder, so release-year
+            // fit to this volume's own issue is the volume evidence there.
+            .then_with(|| {
+                if years.folder != FolderEvidence::NoFolder {
+                    return Ordering::Equal;
+                }
+                release_year_fits(b.1, years, needle).cmp(&release_year_fits(a.1, years, needle))
+            })
             // Prefer the candidate with more issues. When two series
             // share a title and neither matches the year hint (common:
             // NZB filenames carry the scan year, not the series
@@ -466,11 +474,26 @@ fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence, needle: &Issu
     };
 
     match years.folder {
-        // No series folder exists — nothing to be silent. Prior behaviour.
+        // No series folder exists — nothing to be silent. An exact start
+        // year still selects; otherwise the year must fit one volume's own
+        // issue, or nothing decides. Catalog size never does here: GL (2005,
+        // 67 issues) took every GL (2023) download that way.
         FolderEvidence::NoFolder => match hits(years.hint) {
             Some(set) if set.len() == 1 => true,
             Some(set) => resolve(&set),
-            None => resolve(rivals),
+            None => {
+                let holders: Vec<&Candidate> = rivals
+                    .iter()
+                    .copied()
+                    .filter(|c| c.issues.iter().any(|i| i.number.matches(needle)))
+                    .collect();
+                holders.len() == 1
+                    || holders
+                        .iter()
+                        .filter(|c| release_year_fits(c, years, needle))
+                        .count()
+                        == 1
+            }
         },
         // The folder named a volume year.
         FolderEvidence::Year(_) => match hits(years.folder.year()) {
@@ -488,6 +511,25 @@ fn decided_by_evidence(rivals: &[&Candidate], years: YearEvidence, needle: &Issu
             None => false,
         },
     }
+}
+
+/// The pull year gate (`longbox-newznab` `YearGate`), applied to one
+/// candidate volume: a volume year within one of the series start, else a
+/// release year equal to this volume's issue's on-sale year (store date, else
+/// cover date) or the year after. No year, or no date, never fits.
+fn release_year_fits(c: &Candidate, years: YearEvidence, needle: &IssueNumber) -> bool {
+    if let (Some(v), Some(start)) = (years.volume, c.series.start_year) {
+        return (v - start).abs() <= 1;
+    }
+    let Some(y) = years.hint else {
+        return false;
+    };
+    c.issues
+        .iter()
+        .filter(|i| i.number.matches(needle))
+        .filter_map(|i| i.store_date.as_deref().or(i.cover_date.as_deref()))
+        .filter_map(|d| d.get(..4)?.parse::<i32>().ok())
+        .any(|on_sale| (0..=1).contains(&(y - on_sale)))
 }
 
 #[cfg(test)]
@@ -508,6 +550,7 @@ mod tests {
             number: IssueNumber::new(number),
             title: None,
             cover_date: None,
+            store_date: None,
             summary: None,
             cover_url: None,
         }

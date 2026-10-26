@@ -447,8 +447,42 @@ pub async fn find_release_excluding_filtered(
     min_size_bytes: Option<i64>,
     aliases: &[String],
 ) -> Result<FindOutcome, NewznabError> {
+    find_release_counted(
+        indexers,
+        series,
+        issue,
+        year,
+        exclude_guids,
+        patterns,
+        similarity_threshold,
+        exclusion_keywords,
+        cover_date,
+        min_size_bytes,
+        aliases,
+    )
+    .await
+    .map(|(outcome, _)| outcome)
+}
+
+/// [`find_release_excluding_filtered`] plus how many distinct releases the
+/// post-number-subtitle rule rejected, each logged at INFO as
+/// `pull.subtitle_rejected` so the rule's cost can be audited.
+#[allow(clippy::too_many_arguments)] // same inputs as find_release_excluding_filtered
+pub async fn find_release_counted(
+    indexers: &[IndexerConfig],
+    series: &str,
+    issue: &str,
+    year: YearGate,
+    exclude_guids: &[String],
+    patterns: &[ParsingPattern],
+    similarity_threshold: f64,
+    exclusion_keywords: &[String],
+    cover_date: Option<&str>,
+    min_size_bytes: Option<i64>,
+    aliases: &[String],
+) -> Result<(FindOutcome, usize), NewznabError> {
     if indexers.is_empty() {
-        return Ok(FindOutcome::NoMatch);
+        return Ok((FindOutcome::NoMatch, 0));
     }
 
     let survival = SurvivalTest {
@@ -496,6 +530,9 @@ pub async fn find_release_excluding_filtered(
     let mut all_kept: Vec<Release> = Vec::new();
     let mut failures: Vec<(IndexerId, IndexerError)> = Vec::new();
     let mut first_mismatch: Option<(IndexerId, MismatchDiagnostic)> = None;
+    // Deduped: the same release cross-posted to several indexers is one rejection.
+    let mut subtitle_rejected: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     // guid → IndexerId so we can attribute the winning release after select_best.
     let mut guid_to_indexer: std::collections::HashMap<String, IndexerId> =
         std::collections::HashMap::new();
@@ -522,6 +559,7 @@ pub async fn find_release_excluding_filtered(
                     guid_to_indexer.insert(release.guid.clone(), indexer.id);
                 }
                 all_kept.extend(outcome.kept);
+                subtitle_rejected.extend(outcome.subtitle_rejected);
                 if let Some(diag) = outcome.mismatch {
                     if first_mismatch.is_none() {
                         first_mismatch = Some((indexer.id, diag));
@@ -545,6 +583,17 @@ pub async fn find_release_excluding_filtered(
         return Err(NewznabError::AllIndexersFailed(failures));
     }
 
+    for release in &subtitle_rejected {
+        tracing::info!(
+            target: "longbox_newznab",
+            release = %release,
+            series = %series,
+            issue = %issue,
+            "pull.subtitle_rejected"
+        );
+    }
+    let rejected = subtitle_rejected.len();
+
     // select_best across the combined pool from all indexers. The size
     // floor is applied symmetrically at both the per-indexer filter and
     // here so it can't be defeated by an indexer that ranks an
@@ -554,19 +603,25 @@ pub async fn find_release_excluding_filtered(
             .get(&best.guid)
             .copied()
             .unwrap_or(ordered[0].id);
-        return Ok(FindOutcome::Match {
-            indexer: indexer_id,
-            release: best,
-        });
+        return Ok((
+            FindOutcome::Match {
+                indexer: indexer_id,
+                release: best,
+            },
+            rejected,
+        ));
     }
 
     if let Some((indexer, diagnostic)) = first_mismatch {
-        return Ok(FindOutcome::Mismatch {
-            indexer,
-            diagnostic,
-        });
+        return Ok((
+            FindOutcome::Mismatch {
+                indexer,
+                diagnostic,
+            },
+            rejected,
+        ));
     }
-    Ok(FindOutcome::NoMatch)
+    Ok((FindOutcome::NoMatch, rejected))
 }
 
 /// Every release an interactive search turned up, each tagged with its

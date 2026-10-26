@@ -41,6 +41,9 @@ pub struct Issue {
     /// ISO-8601 date string `YYYY-MM-DD`, or partial-date string as returned
     /// by ComicVine. Kept as a `String` to preserve whatever upstream sends.
     pub cover_date: Option<String>,
+    /// On-sale (store) date, same format as `cover_date`.
+    #[serde(default)]
+    pub store_date: Option<String>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
 }

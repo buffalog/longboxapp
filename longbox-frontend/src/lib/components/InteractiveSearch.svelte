@@ -192,7 +192,12 @@
         <tbody>
           {#each sortedResults as r (r.nzb_url)}
             <tr class="border-t border-slate-100">
-              <td class="max-w-md px-3 py-2"><span class="block truncate" title={r.title}>{r.title}</span></td>
+              <td class="max-w-md px-3 py-2">
+                <span class="block truncate" title={r.title}>{r.title}</span>
+                {#if r.rejected_reason}
+                  <span class="block text-xs text-amber-700">Auto-pull skips this: {r.rejected_reason}</span>
+                {/if}
+              </td>
               <td class="whitespace-nowrap px-3 py-2 text-slate-600">{r.indexer}</td>
               <td class="whitespace-nowrap px-3 py-2 tabular-nums text-slate-600">
                 {r.size_bytes !== null ? formatBytes(r.size_bytes) : '—'}

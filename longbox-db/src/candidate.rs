@@ -101,6 +101,7 @@ pub fn row_to_issue(row: IssueRow) -> Issue {
         number: IssueNumber::new(row.number),
         title: row.title,
         cover_date: row.cover_date,
+        store_date: row.store_date,
         summary: row.summary,
         cover_url: row.cover_url,
     }
