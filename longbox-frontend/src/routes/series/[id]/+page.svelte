@@ -14,6 +14,7 @@
   import IssueGrid from '$lib/components/IssueGrid.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import PullListToggle from '$lib/components/PullListToggle.svelte';
+  import SeriesAliases from '$lib/components/SeriesAliases.svelte';
   import SeriesHeader from '$lib/components/SeriesHeader.svelte';
   import type { IssueWithFile, SeriesSearchResult } from '$lib/types';
 
@@ -386,6 +387,10 @@
     />
   </section>
 {/if}
+
+{#key data.series.id}
+  <SeriesAliases seriesId={data.series.id} />
+{/key}
 
 <section class="mt-6">
   <h2 class="mb-2 text-lg font-semibold">Issues ({totalCount})</h2>

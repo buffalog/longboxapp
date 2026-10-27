@@ -378,6 +378,63 @@ async fn aliases_round_trip() {
     );
 }
 
+/// User aliases live in their own column: a CV refresh rewrites `aliases`
+/// and must leave them alone, and the pull path sees both, deduped.
+#[tokio::test]
+async fn user_aliases_survive_a_cv_refresh_and_merge_with_cvs() {
+    let pool = fresh_pool().await;
+    let id = series_repo::insert(&pool, walking_dead()).await.unwrap().id;
+    let affected = series_repo::set_user_aliases(
+        &pool,
+        id,
+        &[
+            " Teenage Mutant Ninja Turtles: The Last Ronin ".to_string(),
+            "teenage mutant ninja turtles: the last ronin".to_string(),
+            "XY".to_string(),
+            "Collider".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(affected, 1);
+    series_repo::update_series_volume_detail(&pool, id, None, None, None, Some("Collider"))
+        .await
+        .unwrap();
+
+    let sources = series_repo::get_alias_sources(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sources.comicvine, vec!["Collider".to_string()]);
+    assert_eq!(
+        sources.user,
+        vec![
+            "Teenage Mutant Ninja Turtles: The Last Ronin".to_string(),
+            "Collider".to_string()
+        ]
+    );
+    assert_eq!(
+        series_repo::get_aliases(&pool, id).await.unwrap(),
+        vec![
+            "Collider".to_string(),
+            "Teenage Mutant Ninja Turtles: The Last Ronin".to_string()
+        ]
+    );
+
+    // Saving an empty list clears them.
+    series_repo::set_user_aliases(&pool, id, &[]).await.unwrap();
+    assert_eq!(
+        series_repo::get_aliases(&pool, id).await.unwrap(),
+        vec!["Collider".to_string()]
+    );
+    assert_eq!(
+        series_repo::set_user_aliases(&pool, 9999, &[])
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn existing_cv_id_pairs_returns_id_and_cv_id() {
     let pool = fresh_pool().await;

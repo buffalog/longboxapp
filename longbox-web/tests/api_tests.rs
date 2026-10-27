@@ -998,6 +998,72 @@ async fn list_series_computes_owned_and_total_counts() {
     assert_eq!(body[0]["owned_count"], 0);
 }
 
+/// The alias editor's round trip: PUT replaces the user's aliases and
+/// returns both sources; a ComicVine alias stays separate and read-only.
+#[tokio::test]
+async fn series_aliases_put_then_get() {
+    let app = build_test_app().await;
+    let series = series_repo::insert(
+        &app.state.db,
+        NewSeries {
+            cv_id: Some(131518),
+            metron_id: None,
+            title: "TMNT: The Last Ronin".into(),
+            sort_title: "tmnt the last ronin".into(),
+            start_year: Some(2020),
+            publisher: None,
+            description: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    series_repo::update_series_volume_detail(
+        &app.state.db,
+        series.id,
+        None,
+        None,
+        None,
+        Some("The Last Ronin"),
+    )
+    .await
+    .unwrap();
+    let uri = format!("/api/series/{}/aliases", series.id);
+
+    let resp = app
+        .request(json_request(
+            "PUT",
+            &uri,
+            r#"{"user":["Teenage Mutant Ninja Turtles: The Last Ronin"]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["user"][0],
+        "Teenage Mutant Ninja Turtles: The Last Ronin"
+    );
+    assert_eq!(body["comicvine"][0], "The Last Ronin");
+
+    let body = response_json(app.request(empty_request("GET", &uri)).await).await;
+    assert_eq!(body["user"].as_array().unwrap().len(), 1);
+
+    let too_many = format!(
+        r#"{{"user":{:?}}}"#,
+        (0..11).map(|i| format!("alias {i}")).collect::<Vec<_>>()
+    );
+    let resp = app.request(json_request("PUT", &uri, too_many)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = app
+        .request(json_request(
+            "PUT",
+            "/api/series/9999/aliases",
+            r#"{"user":[]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn series_detail_orders_issues_naturally() {
     let app = build_test_app().await;
