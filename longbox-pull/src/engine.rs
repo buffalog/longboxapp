@@ -56,6 +56,17 @@ const RETRY_CAP: i64 = 3;
 const LOST_TRACK_MESSAGE: &str =
     "lost track of download — the downloader no longer reports this job";
 
+/// The failure message for a download the downloader reported Completed
+/// that still hasn't imported [`COMPLETED_NOT_IMPORTED_SECS`] later.
+/// Like a lost track, its release is NOT excluded: the download was
+/// fine, the import was the problem.
+const COMPLETED_NOT_IMPORTED_MESSAGE: &str = "completed but not imported";
+
+/// How long after the downloader's own completion time an attempt may
+/// stay `submitted` before it is settled as not imported. Phase B
+/// imports within seconds, so a day is only ever a stuck attempt.
+const COMPLETED_NOT_IMPORTED_SECS: i64 = 24 * 60 * 60;
+
 /// Tallies from one sweep — logged by the scheduler, asserted by tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SweepSummary {
@@ -82,6 +93,10 @@ pub struct SweepSummary {
     /// age out as "lost track of download". Counts toward
     /// `grab_failed` as well; this is the subset with a known cause.
     pub completed_without_comics: usize,
+    /// Completed downloads that still hadn't imported a day after the
+    /// downloader finished them, settled as failed (each logged at WARN
+    /// as `pull.completed_not_imported`). Counted in `grab_failed` too.
+    pub completed_not_imported: usize,
     /// Completed downloads the landed-content check declined to judge.
     ///
     /// This exists because the module's entire safety argument is
@@ -393,7 +408,7 @@ async fn poll_in_flight(
                 // forgets the job and the `Unknown` branch reports
                 // "lost track of download" about a download that
                 // arrived perfectly. See `crate::landed`.
-                settle_if_nothing_landed(
+                let settled = settle_if_nothing_landed(
                     db,
                     &attempt,
                     storage.as_ref(),
@@ -402,6 +417,16 @@ async fn poll_in_flight(
                     summary,
                 )
                 .await?;
+                if !settled {
+                    settle_if_completed_long_ago(
+                        db,
+                        &attempt,
+                        storage.as_ref(),
+                        completed_at,
+                        summary,
+                    )
+                    .await?;
+                }
             }
             Ok(DownloadStatus::Queued | DownloadStatus::Downloading) => {
                 // Still in progress. A known status resets the
@@ -469,7 +494,7 @@ async fn settle_if_nothing_landed(
     completed_at: Option<i64>,
     watch_root: Option<&Path>,
     summary: &mut SweepSummary,
-) -> Result<(), PullError> {
+) -> Result<bool, PullError> {
     // No watch root (Phase B not configured) or no location reported
     // by the downloader → degrade to the previous behaviour.
     //
@@ -501,7 +526,7 @@ async fn settle_if_nothing_landed(
                 attempt_id = attempt.id,
                 "pull.landed_skipped (no watch root configured)"
             );
-            return Ok(());
+            return Ok(false);
         }
         summary.landed_unresolved += 1;
         tracing::info!(
@@ -512,7 +537,7 @@ async fn settle_if_nothing_landed(
             reason = "downloader_reported_no_location",
             "pull.landed_unresolved (no folder to check; attempt left in flight)"
         );
-        return Ok(());
+        return Ok(false);
     };
     // The downloader's path belongs to its own filesystem namespace;
     // only the final component is meaningful here, joined onto *our*
@@ -529,9 +554,24 @@ async fn settle_if_nothing_landed(
             reason = "reported_location_has_no_final_component",
             "pull.landed_unresolved (no folder to check; attempt left in flight)"
         );
-        return Ok(());
+        return Ok(false);
     };
-    let dir = root.join(name);
+    // SABnzbd reports the comic file inside the job folder, not the
+    // folder. When the final component isn't a folder here, the one
+    // before it is the job folder. Only then: a folder-shaped report
+    // keeps resolving exactly as before.
+    let (name, dir) = match (root.join(name), storage.parent_basename()) {
+        (dir, _) if dir.is_dir() => (name, dir),
+        (dir, Some(parent)) => {
+            let job = root.join(parent);
+            if job.is_dir() {
+                (parent, job)
+            } else {
+                (name, dir)
+            }
+        }
+        (dir, None) => (name, dir),
+    };
 
     match landed::classify(&dir, completed_at) {
         LandedVerdict::OnlyKnownNonPayload => {
@@ -548,6 +588,7 @@ async fn settle_if_nothing_landed(
                 "pull.completed_without_comics"
             );
             maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
+            return Ok(true);
         }
         LandedVerdict::HasComicFiles => {
             // Phase B's job. Left alone deliberately.
@@ -572,6 +613,50 @@ async fn settle_if_nothing_landed(
             );
         }
     }
+    Ok(false)
+}
+
+/// Settle an attempt the downloader finished more than
+/// [`COMPLETED_NOT_IMPORTED_SECS`] ago that is still `submitted`, which
+/// means Phase B never imported it into this issue: it landed in the
+/// wrong one, was held, or never parsed. Without this it stays in flight
+/// for as long as the downloader keeps the job, and the issue is never
+/// searched again.
+///
+/// Keyed on the downloader's own completion time, never on our submit
+/// time, so a slow download is not cut off. No completion time, no
+/// verdict.
+async fn settle_if_completed_long_ago(
+    db: &Pool,
+    attempt: &PullAttemptRow,
+    storage: Option<&RemoteStorage>,
+    completed_at: Option<i64>,
+    summary: &mut SweepSummary,
+) -> Result<(), PullError> {
+    let Some(completed_at) = completed_at else {
+        return Ok(());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let age = now - completed_at;
+    if age < COMPLETED_NOT_IMPORTED_SECS {
+        return Ok(());
+    }
+    let msg = COMPLETED_NOT_IMPORTED_MESSAGE;
+    pull_attempt_repo::record_failure_if_submitted(db, attempt.id, msg).await?;
+    summary.grab_failed += 1;
+    summary.completed_not_imported += 1;
+    tracing::warn!(
+        target: "longbox_pull",
+        attempt_id = attempt.id,
+        series_id = attempt.series_id,
+        issue_id = attempt.issue_id,
+        hours_since_completed = age / 3600,
+        downloader_path = ?storage,
+        "pull.completed_not_imported"
+    );
+    maybe_fire_pull_failed(db, attempt.series_id, attempt.issue_id, msg).await;
     Ok(())
 }
 
@@ -693,10 +778,16 @@ async fn attempt_pull_for_candidate(
     // failure records none, so its release is retried as-is (the
     // downloader, not the NZB, was the suspect). Same for a lost-track
     // failure: the job vanished from the downloader, so its release
-    // stays eligible.
+    // stays eligible; and for a completed-but-not-imported one, whose
+    // download was fine.
     let exclude: Vec<String> = prior
         .iter()
-        .filter(|a| a.error_message.as_deref() != Some(LOST_TRACK_MESSAGE))
+        .filter(|a| {
+            !matches!(
+                a.error_message.as_deref(),
+                Some(LOST_TRACK_MESSAGE | COMPLETED_NOT_IMPORTED_MESSAGE)
+            )
+        })
         .filter_map(|a| a.release_id.clone())
         .collect();
     // Bug 3: failure-class for retry-count budget covers both

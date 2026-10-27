@@ -1487,8 +1487,17 @@ async fn without_a_watch_root_the_check_does_not_run() {
 // revision. A guard that is never invoked is indistinguishable from a
 // guard that was deleted.
 
-/// A plausible completion time, matching the unit tests' fixture clock.
-const JOB_COMPLETED: i64 = 1_780_000_000;
+/// A completion time an hour ago. Recent on purpose: a job the
+/// downloader finished more than a day ago is settled as completed but
+/// not imported, which would pre-empt the landed check these tests
+/// exercise.
+fn job_completed() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs() as i64
+        - 3600
+}
 
 #[tokio::test]
 async fn guard_one_end_to_end_a_stale_attempt_is_not_judged_against_a_newer_folder() {
@@ -1499,11 +1508,11 @@ async fn guard_one_end_to_end_a_stale_attempt_is_not_judged_against_a_newer_fold
     let watch = Scratch::new("g1");
     watch.job_file("Saga 1", "info.nfo");
     watch
-        .age("Saga 1/info.nfo", JOB_COMPLETED + 86_400)
-        .age("Saga 1", JOB_COMPLETED + 86_400);
+        .age("Saga 1/info.nfo", job_completed() + 86_400)
+        .age("Saga 1", job_completed() + 86_400);
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-stale", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-stale", "Saga 1", job_completed()).await;
     add_sab_downloader(&db, downloader.uri()).await;
     seed_submitted(&db, series_id, issue_id, "guid-stale", "nzo-stale").await;
 
@@ -1541,13 +1550,13 @@ async fn guard_two_end_to_end_a_folder_phase_b_emptied_is_not_condemned() {
         .job_file("Saga 1", "info.nfo")
         .job_file("Saga 1/disc1", "info.nfo");
     watch
-        .age("Saga 1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1/disc1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1/disc1", JOB_COMPLETED + 600)
-        .age("Saga 1", JOB_COMPLETED);
+        .age("Saga 1/info.nfo", job_completed())
+        .age("Saga 1/disc1/info.nfo", job_completed())
+        .age("Saga 1/disc1", job_completed() + 600)
+        .age("Saga 1", job_completed());
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-emptied", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-emptied", "Saga 1", job_completed()).await;
     add_sab_downloader(&db, downloader.uri()).await;
     seed_submitted(&db, series_id, issue_id, "guid-emptied", "nzo-emptied").await;
 
@@ -1582,12 +1591,12 @@ async fn both_guards_satisfied_still_condemns_a_real_ebook_release() {
         .job_file("Saga 1", "release.epub")
         .job_file("Saga 1", "info.nfo");
     watch
-        .age("Saga 1/release.epub", JOB_COMPLETED)
-        .age("Saga 1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1", JOB_COMPLETED);
+        .age("Saga 1/release.epub", job_completed())
+        .age("Saga 1/info.nfo", job_completed())
+        .age("Saga 1", job_completed());
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-ebook2", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-ebook2", "Saga 1", job_completed()).await;
     add_sab_downloader(&db, downloader.uri()).await;
     seed_submitted(&db, series_id, issue_id, "guid-ebook2", "nzo-ebook2").await;
 
@@ -1614,15 +1623,15 @@ async fn per_directory_comparison_end_to_end_a_sibling_cannot_mask_a_removal() {
         .job_file("Saga 1/disc1", "info.nfo")
         .job_file("Saga 1/disc2", "extra.nfo");
     watch
-        .age("Saga 1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1/disc1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1/disc1", JOB_COMPLETED + 600)
-        .age("Saga 1/disc2/extra.nfo", JOB_COMPLETED + 600)
-        .age("Saga 1/disc2", JOB_COMPLETED + 600)
-        .age("Saga 1", JOB_COMPLETED);
+        .age("Saga 1/info.nfo", job_completed())
+        .age("Saga 1/disc1/info.nfo", job_completed())
+        .age("Saga 1/disc1", job_completed() + 600)
+        .age("Saga 1/disc2/extra.nfo", job_completed() + 600)
+        .age("Saga 1/disc2", job_completed() + 600)
+        .age("Saga 1", job_completed());
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-perdir", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-perdir", "Saga 1", job_completed()).await;
     add_sab_downloader(&db, downloader.uri()).await;
     seed_submitted(&db, series_id, issue_id, "guid-perdir", "nzo-perdir").await;
 
@@ -1670,12 +1679,13 @@ async fn a_download_with_no_reported_location_is_counted_as_unresolved() {
     Mock::given(method("GET"))
         .and(path("/api"))
         .and(query_param("mode", "history"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"{"history": {"slots": [
-                {"nzo_id": "nzo-noloc", "status": "Completed", "fail_message": "",
-                 "completed": 1780000000}
-            ]}}"#,
-        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"history": {{"slots": [
+                {{"nzo_id": "nzo-noloc", "status": "Completed", "fail_message": "",
+                 "completed": {}}}
+            ]}}}}"#,
+            job_completed()
+        )))
         .mount(&downloader)
         .await;
     add_sab_downloader(&db, downloader.uri()).await;
@@ -1718,12 +1728,12 @@ async fn unrecognised_content_end_to_end_is_not_condemned() {
         .job_file("Saga 1", "Saga 001.part01.rar")
         .job_file("Saga 1", "info.nfo");
     watch
-        .age("Saga 1/Saga 001.part01.rar", JOB_COMPLETED)
-        .age("Saga 1/info.nfo", JOB_COMPLETED)
-        .age("Saga 1", JOB_COMPLETED);
+        .age("Saga 1/Saga 001.part01.rar", job_completed())
+        .age("Saga 1/info.nfo", job_completed())
+        .age("Saga 1", job_completed());
 
     let downloader = MockServer::start().await;
-    sab_completed_at_time(&downloader, "nzo-unrec", "Saga 1", JOB_COMPLETED).await;
+    sab_completed_at_time(&downloader, "nzo-unrec", "Saga 1", job_completed()).await;
     add_sab_downloader(&db, downloader.uri()).await;
     seed_submitted(&db, series_id, issue_id, "guid-unrec", "nzo-unrec").await;
 
@@ -1774,4 +1784,91 @@ async fn pre_sweep_hook_runs_on_a_triggered_sweep() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("pre-sweep hook never ran");
+}
+
+/// SABnzbd reports `storage` as the comic file inside the job folder,
+/// not the folder. The landed check resolves the folder from the
+/// component before the file, and judges it as before.
+#[tokio::test]
+async fn a_storage_path_naming_a_file_resolves_to_its_job_folder() {
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("filepath");
+    watch
+        .job_file("Saga 1", "Saga 001.epub")
+        .job_file("Saga 1", "info.nfo");
+
+    let downloader = MockServer::start().await;
+    sab_completed_at(&downloader, "nzo-file", "Saga 1/Saga 001.epub").await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-file", "nzo-file").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_without_comics, 1);
+    assert_eq!(summary.landed_abstained, 0);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "failed");
+}
+
+/// Thundercats (2026) #1: SAB finished the job, Phase B filed the comic
+/// into another volume, and the job folder is gone. A day after SAB's
+/// completion time the attempt is settled as completed but not imported,
+/// and its release stays eligible: the same release is grabbed again in
+/// the same sweep. Under a day, it is left in flight.
+#[tokio::test]
+async fn a_completed_download_not_imported_after_a_day_settles_and_stays_eligible() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs() as i64;
+
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let watch = Scratch::new("notimported");
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(
+        &downloader,
+        "nzo-recent",
+        "Saga 1/Saga 001.cbz",
+        now - 23 * 3600,
+    )
+    .await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-saga-1", "nzo-recent").await;
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_not_imported, 0);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(attempts[0].status, "submitted", "under a day is left alone");
+
+    let (db, series_id, issue_id) = seed_catalog().await;
+    let indexer = MockServer::start().await;
+    let downloader = MockServer::start().await;
+    sab_completed_at_time(
+        &downloader,
+        "nzo-old",
+        "Saga 1/Saga 001.cbz",
+        now - 25 * 3600,
+    )
+    .await;
+    sab_accepts(&downloader, "nzo-again").await;
+    indexer_returns(&indexer, rss_one("guid-saga-1")).await;
+    add_indexer(&db, indexer.uri()).await;
+    add_sab_downloader(&db, downloader.uri()).await;
+    seed_submitted(&db, series_id, issue_id, "guid-saga-1", "nzo-old").await;
+
+    let summary = sweep(&db, Some(watch.path())).await.unwrap();
+    assert_eq!(summary.completed_not_imported, 1);
+    assert_eq!(summary.submitted, 1);
+    let attempts = pull_attempt_repo::list_for_issue(&db, series_id, issue_id)
+        .await
+        .unwrap();
+    let settled = attempts.iter().find(|a| a.status == "failed").unwrap();
+    assert_eq!(
+        settled.error_message.as_deref(),
+        Some("completed but not imported")
+    );
+    let again = attempts.iter().find(|a| a.status == "submitted").unwrap();
+    assert_eq!(again.release_id.as_deref(), Some("guid-saga-1"));
 }
