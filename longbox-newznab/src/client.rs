@@ -118,7 +118,24 @@ fn error_chain(e: &reqwest::Error) -> String {
     out
 }
 
+thread_local! {
+    /// One client per thread, so searches reuse its connection pool
+    /// instead of opening a fresh TLS connection to every indexer for
+    /// every issue (on 2026-10-27, 471 searches each built their own).
+    /// Per thread rather than per process: a pooled connection belongs
+    /// to the tokio runtime that opened it, and each `#[tokio::test]`
+    /// runs its own runtime on its own thread. In the server the threads
+    /// are the runtime's long-lived workers, so this is a handful of
+    /// clients, not one per search.
+    static HTTP_CLIENT: reqwest::Client = build_http_client();
+}
+
 fn http_client() -> reqwest::Client {
+    // `Client` is a handle to a shared pool; cloning it shares the pool.
+    HTTP_CLIENT.with(reqwest::Client::clone)
+}
+
+fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         // Pose as Mylar3, the most widely-allowlisted comic-pulling
@@ -795,6 +812,7 @@ pub async fn search_all_indexers(
                 tracing::warn!(
                     target: "longbox_newznab",
                     indexer = %idx.name,
+                    query = %query,
                     error = %e,
                     "interactive search: indexer query failed"
                 );
@@ -860,6 +878,51 @@ mod tests {
         // Nothing listening — connection refused, not a timeout.
         let result = test_connection(&cfg("http://127.0.0.1:1".into())).await;
         assert!(matches!(result, Err(IndexerError::HttpFailure(_))));
+    }
+
+    /// Searches on one thread share one connection: two searches against
+    /// a keep-alive server arrive on a single TCP connection. With a
+    /// client built per search, each opened its own.
+    #[tokio::test]
+    async fn searches_reuse_one_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&accepted);
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let body = "<rss><channel></channel></rss>";
+                    let mut buf = vec![0u8; 8192];
+                    // One response per request head, connection kept open.
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/xml\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if sock.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let indexer = IndexerConfig {
+            id: IndexerId(4293),
+            ..cfg(format!("http://{addr}"))
+        };
+        search_indexer(&indexer, "saga").await.unwrap();
+        search_indexer(&indexer, "chew").await.unwrap();
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// The failure text carries the cause, not just reqwest's top layer.
