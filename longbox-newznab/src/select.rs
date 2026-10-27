@@ -464,6 +464,9 @@ pub struct FilterOutcome {
     /// Titles of releases that passed every other gate but carry a
     /// ` - Subtitle` after the issue number (see [`post_number_subtitle`]).
     pub subtitle_rejected: Vec<String>,
+    /// Titles of releases skipped as volume-numbered trades (see
+    /// [`volume_numbered`]).
+    pub vnn_rejected: Vec<String>,
 }
 
 /// Why an indexer's pool became empty post-filter, used to populate the
@@ -694,6 +697,7 @@ pub fn filter_by_series_title(
     let mut best_similarity: Option<f64> = None;
     let mut best_series_segment: Option<String> = None;
     let mut subtitle_rejected: Vec<String> = Vec::new();
+    let mut vnn_rejected: Vec<String> = Vec::new();
 
     for release in releases {
         let Some(ParsedRelease {
@@ -752,8 +756,10 @@ pub fn filter_by_series_title(
             continue;
         }
 
-        // A trade, not an issue: silent, like a year rejection.
+        // A trade, not an issue: no mismatch diagnostic, like a year
+        // rejection, but counted.
         if volume_numbered(&release.title, &parsed.number) {
+            vnn_rejected.push(release.title);
             continue;
         }
 
@@ -790,6 +796,7 @@ pub fn filter_by_series_title(
         kept,
         mismatch,
         subtitle_rejected,
+        vnn_rejected,
     }
 }
 
@@ -1127,7 +1134,7 @@ mod tests {
                 true,
             ),
         ] {
-            let kept = filter_by_series_title(
+            let outcome = filter_by_series_title(
                 vec![release(title, Some(1))],
                 &patterns,
                 cv,
@@ -1137,10 +1144,11 @@ mod tests {
                 None,
                 issue,
                 &[],
-            )
-            .kept
-            .len();
-            assert_eq!(kept == 1, pass, "{title}");
+            );
+            assert_eq!(outcome.kept.len() == 1, pass, "{title}");
+            // Each refusal is recorded so the sweep can count it.
+            let expected: Vec<String> = if pass { vec![] } else { vec![title.to_owned()] };
+            assert_eq!(outcome.vnn_rejected, expected, "{title}");
             assert_eq!(
                 auto_pull_rejection(title, cv, &patterns).is_some(),
                 !pass,

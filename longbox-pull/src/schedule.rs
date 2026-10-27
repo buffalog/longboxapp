@@ -114,6 +114,7 @@ async fn scheduler_loop(
                 landed_abstained = s.landed_abstained,
                 landed_unresolved = s.landed_unresolved,
                 subtitle_rejected = s.subtitle_rejected,
+                vnn_rejected = s.vnn_rejected,
                 "pull.sweep_complete"
             ),
             Err(e) => {

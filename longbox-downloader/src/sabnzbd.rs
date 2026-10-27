@@ -2,7 +2,7 @@
 //!
 //! All requests hit `{base_url}/api` with the `apikey` query param and
 //! `output=json`. Submit uses `mode=addurl`; status checks `mode=queue`
-//! then `mode=history`.
+//! then `mode=history`, both filtered to the one job by `nzo_ids`.
 
 use serde::Deserialize;
 
@@ -97,8 +97,14 @@ impl Downloader for SabnzbdClient {
     }
 
     async fn status(&self, handle: &DownloadHandle) -> Result<DownloadStatus, DownloaderError> {
+        // Both lookups ask SAB for this one job by `nzo_ids` rather than
+        // scanning a page of jobs: a job that had scrolled past a history
+        // page read as Unknown, and three Unknowns age an attempt out as
+        // "lost track of download" though SAB still had it.
         // Active queue first — a job lives there until it completes.
-        let queue_body = self.get(&[("mode", "queue")]).await?;
+        let queue_body = self
+            .get(&[("mode", "queue"), ("nzo_ids", &handle.0)])
+            .await?;
         let queue: SabQueueResponse = serde_json::from_str(queue_body.trim())
             .map_err(|e| DownloaderError::MalformedResponse(format!("SABnzbd queue: {e}")))?;
         if let Some(slot) = queue.queue.slots.iter().find(|s| s.nzo_id == handle.0) {
@@ -106,7 +112,9 @@ impl Downloader for SabnzbdClient {
         }
 
         // Then history — completed / failed / mid-post-processing.
-        let history_body = self.get(&[("mode", "history"), ("limit", "200")]).await?;
+        let history_body = self
+            .get(&[("mode", "history"), ("nzo_ids", &handle.0)])
+            .await?;
         let history: SabHistoryResponse = serde_json::from_str(history_body.trim())
             .map_err(|e| DownloaderError::MalformedResponse(format!("SABnzbd history: {e}")))?;
         if let Some(slot) = history.history.slots.iter().find(|s| s.nzo_id == handle.0) {
@@ -259,6 +267,46 @@ mod tests {
             client.test_connection().await,
             Err(DownloaderError::AuthFailed(_))
         ));
+    }
+
+    /// SAB's history API pages by recency, so an unfiltered read misses
+    /// any job older than the page. The mock answers only a request
+    /// filtered to the job, as SAB does; an unfiltered read sees an
+    /// empty page and reports Unknown.
+    #[tokio::test]
+    async fn status_asks_sab_for_the_job_by_nzo_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"queue":{"slots":[]}}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "history"))
+            .and(query_param("nzo_ids", "SABnzbd_nzo_old"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"history":{"slots":[{"nzo_id":"SABnzbd_nzo_old","status":"Completed","storage":"/dl/Old 1","completed":1700000000}]}}"#,
+            ))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "history"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"history":{"slots":[]}}"#))
+            .mount(&server)
+            .await;
+        let client = SabnzbdClient::new(server.uri(), "KEY".into(), String::new());
+        let status = client
+            .status(&DownloadHandle("SABnzbd_nzo_old".into()))
+            .await
+            .expect("status");
+        assert!(
+            matches!(status, DownloadStatus::Completed { .. }),
+            "got {status:?}"
+        );
     }
 
     #[test]
