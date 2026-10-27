@@ -418,6 +418,47 @@ pub async fn sweep_now(
     Ok(summary)
 }
 
+/// The result of [`import_anyway`].
+#[derive(Debug)]
+pub enum ImportAnyway {
+    /// `source` is not a page-count hold in the cache. Only those are
+    /// eligible: other failures are fixed on disk, and a path the cache
+    /// doesn't hold is never touched.
+    NotHeld,
+    /// The import ran; the outcome says whether it landed.
+    Ran(processor::Outcome),
+}
+
+/// File a page-count hold into the issue it was matched to, skipping only
+/// the page check. Called when the user has looked at a
+/// [`InterventionReason::LikelyCollectedEdition`] hold (a giant-size
+/// issue, say) and says it is the issue.
+pub async fn import_anyway(
+    library_root: &Path,
+    library_root_id: i64,
+    watch_path: &Path,
+    db: &longbox_db::Pool,
+    cache: &PendingInterventionsCache,
+    source: &Path,
+) -> Result<ImportAnyway> {
+    let held = cache.snapshot().into_iter().find(|item| {
+        item.source_path == source
+            && matches!(item.reason, InterventionReason::LikelyCollectedEdition(_))
+    });
+    let Some(issue_id) = held.and_then(|item| item.issue_id) else {
+        return Ok(ImportAnyway::NotHeld);
+    };
+    let outcome =
+        processor::import_held(source, issue_id, library_root, library_root_id, db).await?;
+    if outcome_removes_source(&outcome) {
+        if let Ok(root) = watch_path.canonicalize() {
+            cleanup_empty_parent(source, &root);
+        }
+    }
+    apply_outcome_to_cache(cache, source, outcome.clone());
+    Ok(ImportAnyway::Ran(outcome))
+}
+
 /// Walk `watch_path` bottom-up and remove any subdirectory that has
 /// zero entries. Returns the count removed for telemetry. Never
 /// touches the watch root itself; never recurses into something that
@@ -843,6 +884,7 @@ fn apply_outcome_to_cache(
             reason,
             target,
             size,
+            issue_id,
         } => {
             // Race-straggler guard: if the source isn't on disk by the
             // time the outcome lands here, another path (watcher
@@ -873,6 +915,7 @@ fn apply_outcome_to_cache(
                 reason,
                 size,
                 last_attempt: time::OffsetDateTime::now_utc(),
+                issue_id: Some(issue_id),
             });
         }
     }
@@ -998,6 +1041,7 @@ mod tests {
             reason: InterventionReason::Conflict,
             size: 4096,
             last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+            issue_id: None,
         });
         assert_eq!(cache.len(), 1);
         apply_outcome_to_cache(
@@ -1029,6 +1073,7 @@ mod tests {
                 reason: InterventionReason::MoveFailed("EXDEV".into()),
                 target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
                 size: 4096,
+                issue_id: 1,
             },
         );
         let snap = cache.snapshot();
@@ -1074,6 +1119,7 @@ mod tests {
             reason: InterventionReason::MoveFailed("old race".into()),
             size: 1,
             last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+            issue_id: None,
         });
         assert_eq!(cache.len(), 1);
 
@@ -1086,6 +1132,7 @@ mod tests {
                 ),
                 target: PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
                 size: 4096,
+                issue_id: 1,
             },
         );
         assert!(
@@ -1110,6 +1157,7 @@ mod tests {
             reason: InterventionReason::MoveFailed("EXDEV".into()),
             size: 4096,
             last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+            issue_id: None,
         });
         assert_eq!(cache.len(), 1);
         apply_outcome_to_cache(
@@ -1145,6 +1193,7 @@ mod tests {
             reason: InterventionReason::ComicInfoWriteFailed("permission".into()),
             size: 1,
             last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+            issue_id: None,
         });
         apply_outcome_to_cache(
             &cache,
@@ -1230,6 +1279,7 @@ mod tests {
             reason: InterventionReason::Conflict,
             target: PathBuf::from("/library/Saga (2012)/Saga (2012) 001.cbz"),
             size: 1_024,
+            issue_id: 1,
         }));
     }
 

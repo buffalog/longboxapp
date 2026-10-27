@@ -16,3 +16,13 @@ export function getPendingInterventions(): Promise<PendingResponse> {
 export function triggerPostprocess(): Promise<SweepSummary> {
   return apiFetch('/postprocess/trigger', { method: 'POST' });
 }
+
+/** File a page-count hold into the issue it was matched to, skipping
+ *  only the page check. 404 when `sourcePath` is not a page-count hold
+ *  in the pending list; 409 when the import didn't land. */
+export function importAnyway(sourcePath: string): Promise<{ target: string; issue_id: number }> {
+  return apiFetch('/postprocess/import-anyway', {
+    method: 'POST',
+    body: JSON.stringify({ source_path: sourcePath })
+  });
+}

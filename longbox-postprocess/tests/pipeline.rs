@@ -1460,6 +1460,7 @@ async fn rewrite_failure_surfaces_as_outcome_failed() {
             reason,
             size,
             target,
+            ..
         } => {
             use longbox_postprocess::InterventionReason;
             assert!(
@@ -1678,6 +1679,81 @@ fn write_cbz_pages(path: &Path, pages: usize) {
     zip.finish().unwrap();
     let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
     filetime::set_file_mtime(path, filetime::FileTime::from_system_time(earlier)).ok();
+}
+
+/// Amazing Spider-Man #1000 (102 pages) was a real giant-size issue held
+/// as a likely trade. "Import anyway" files it into the issue it was
+/// matched to, skipping only the page check; a path that isn't a page
+/// hold in the cache is never touched.
+#[tokio::test]
+async fn import_anyway_files_a_page_hold_into_its_issue() {
+    let f = seed_basic_fixture().await;
+    longbox_db::settings_repo::set(&f.db, longbox_db::settings_repo::KEY_MIN_FILE_SIZE_MB, "0")
+        .await
+        .unwrap();
+    let source = f._watch.path().join("Saga 1").join("Saga 001.cbz");
+    write_cbz_pages(&source, 102);
+    let stray = f._watch.path().join("stray.cbz");
+    write_cbz_pages(&stray, 3);
+
+    let cache = Arc::new(PendingInterventionsCache::new());
+    longbox_postprocess::sweep_now(
+        f.library.path(),
+        f.library_root_id,
+        f._watch.path(),
+        f.db.clone(),
+        Arc::clone(&cache),
+    )
+    .await
+    .unwrap();
+    let held = cache.snapshot();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].issue_id, Some(f.issue_id));
+
+    let not_held = longbox_postprocess::import_anyway(
+        f.library.path(),
+        f.library_root_id,
+        f._watch.path(),
+        &f.db,
+        &cache,
+        &stray,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        not_held,
+        longbox_postprocess::ImportAnyway::NotHeld
+    ));
+    assert!(stray.exists());
+
+    let ran = longbox_postprocess::import_anyway(
+        f.library.path(),
+        f.library_root_id,
+        f._watch.path(),
+        &f.db,
+        &cache,
+        &source,
+    )
+    .await
+    .unwrap();
+    match ran {
+        longbox_postprocess::ImportAnyway::Ran(Outcome::Imported { issue_id, .. }) => {
+            assert_eq!(issue_id, f.issue_id)
+        }
+        other => panic!("expected an import, got {other:?}"),
+    }
+    assert!(f
+        .library
+        .path()
+        .join("Saga (2012)/Saga (2012) 001.cbz")
+        .exists());
+    assert!(!source.exists());
+    assert!(cache.is_empty());
+    assert!(
+        longbox_db::issue_repo::has_owned_present_file(&f.db, f.issue_id)
+            .await
+            .unwrap()
+    );
 }
 
 /// G.I. Joe v01 (129 pages) and Hyde Street v02 (132) were trades filed

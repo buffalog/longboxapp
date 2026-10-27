@@ -10,25 +10,42 @@
     retryPull,
     type PullFailure
   } from '$lib/api/needs_attention';
+  import { importAnyway } from '$lib/api/postprocess';
   import { toast } from '$lib/stores/toast.svelte';
   import { formatBytes, formatRelative } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
-  import type { InterventionReason } from '$lib/types';
+  import type { InterventionReason, PendingIntervention } from '$lib/types';
 
   let { data } = $props();
 
   // Pull failures are self-owned — retry / dismiss / clear-all all drop
   // rows from local state optimistically. Phase B's pending list is
-  // read-only here (resolved on disk, not in the UI).
+  // resolved on disk, except a page-count hold, which can be imported
+  // anyway from here.
   let pullFailures = $state<PullFailure[]>([...data.pullFailures]);
   let error = $state<ApiError | null>(null);
   let retryingIssue = $state<number | null>(null);
   let dismissingAttempt = $state<number | null>(null);
   let clearingAll = $state(false);
 
-  const pending = $derived(data.pending);
+  let pendingItems = $state([...data.pending.items]);
+  let importingPath = $state<string | null>(null);
+
+  async function handleImportAnyway(item: PendingIntervention): Promise<void> {
+    importingPath = item.source_path;
+    error = null;
+    try {
+      const { target } = await importAnyway(item.source_path);
+      pendingItems = pendingItems.filter((p) => p.source_path !== item.source_path);
+      toast.success(`Imported as ${target.split('/').pop()}.`);
+    } catch (e) {
+      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+    } finally {
+      importingPath = null;
+    }
+  }
 
   function categoryLabel(category: string): string {
     switch (category) {
@@ -123,7 +140,7 @@
   <div class="mb-4"><ErrorBanner {error} onDismiss={() => (error = null)} /></div>
 {/if}
 
-{#if pullFailures.length === 0 && pending.count === 0}
+{#if pullFailures.length === 0 && pendingItems.length === 0}
   <EmptyState
     icon={CircleSlash}
     title="Nothing needs attention"
@@ -222,7 +239,7 @@
       Files the post-processor couldn't place. Resolve each on disk (move, rename, delete the
       conflicting target); processing re-triggers on the next filesystem event for that file.
     </p>
-    {#if pending.count === 0}
+    {#if pendingItems.length === 0}
       <p class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
         No files are stuck.
       </p>
@@ -239,7 +256,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each pending.items as item (item.source_path)}
+            {#each pendingItems as item (item.source_path)}
               <tr class="border-t border-slate-100">
                 <td class="break-all px-3 py-2 font-mono text-xs">{item.source_path}</td>
                 <td class="break-all px-3 py-2 font-mono text-xs text-slate-600">
@@ -249,6 +266,19 @@
                   <span class="font-medium">{reasonLabel(item.reason)}</span>
                   {#if reasonDetail(item.reason)}
                     <div class="mt-0.5 text-xs text-slate-500">{reasonDetail(item.reason)}</div>
+                  {/if}
+                  {#if item.reason.kind === 'likely_collected_edition' && item.issue_id}
+                    <div class="mt-1">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onclick={() => handleImportAnyway(item)}
+                        loading={importingPath === item.source_path}
+                        disabled={importingPath !== null}
+                      >
+                        Import anyway
+                      </Button>
+                    </div>
                   {/if}
                 </td>
                 <td class="whitespace-nowrap px-3 py-2 text-right">{formatBytes(item.size)}</td>

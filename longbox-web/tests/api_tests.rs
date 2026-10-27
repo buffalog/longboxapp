@@ -3160,6 +3160,7 @@ async fn stats_aggregates_pull_list_and_failures_and_pending_interventions() {
                 reason: longbox_postprocess::InterventionReason::Conflict,
                 size: 1,
                 last_attempt: time::OffsetDateTime::UNIX_EPOCH,
+                issue_id: None,
             });
     }
 
@@ -3504,6 +3505,48 @@ async fn pending_endpoint_returns_empty_on_fresh_cache() {
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
+/// Import anyway acts only on a page-count hold in the pending list:
+/// another kind of hold, or a path the list doesn't have, is a 404 and
+/// nothing on disk is touched. (The import itself is covered in
+/// longbox-postprocess's pipeline tests.)
+#[tokio::test]
+async fn import_anyway_refuses_anything_but_a_page_count_hold() {
+    use longbox_postprocess::{InterventionReason, PendingIntervention};
+    let mut app = build_test_app().await;
+    let watch = tempfile::TempDir::new().unwrap();
+    let mut config = (*app.state.config).clone();
+    config.download_watch_path = Some(watch.path().to_string_lossy().into_owned());
+    app.state.config = std::sync::Arc::new(config);
+    app.router = longbox_web::build_router(app.state.clone());
+
+    let conflict = watch.path().join("Saga 001.cbz");
+    std::fs::write(&conflict, b"bytes").unwrap();
+    app.state.pending_cache.push(PendingIntervention {
+        source_path: conflict.clone(),
+        target_path: std::path::PathBuf::from("/lib/Saga (2012)/Saga (2012) 001.cbz"),
+        reason: InterventionReason::Conflict,
+        size: 5,
+        last_attempt: time::OffsetDateTime::now_utc(),
+        issue_id: Some(1),
+    });
+
+    for path in [
+        conflict.to_string_lossy().into_owned(),
+        "/etc/hosts".to_owned(),
+    ] {
+        let resp = app
+            .request(json_request(
+                "POST",
+                "/api/postprocess/import-anyway",
+                serde_json::json!({ "source_path": path }).to_string(),
+            ))
+            .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    assert!(conflict.exists());
+    assert_eq!(app.state.pending_cache.len(), 1);
+}
+
 #[tokio::test]
 async fn pending_endpoint_reflects_cache_contents() {
     use longbox_postprocess::{InterventionReason, PendingIntervention};
@@ -3518,6 +3561,7 @@ async fn pending_endpoint_reflects_cache_contents() {
         reason: InterventionReason::Conflict,
         size: 4096,
         last_attempt: time::OffsetDateTime::now_utc(),
+        issue_id: None,
     });
     app.state.pending_cache.push(PendingIntervention {
         source_path: std::path::PathBuf::from("/watch/Hellboy 002.cbz"),
@@ -3525,6 +3569,7 @@ async fn pending_endpoint_reflects_cache_contents() {
         reason: InterventionReason::MoveFailed("EXDEV cross-device".into()),
         size: 8192,
         last_attempt: time::OffsetDateTime::now_utc(),
+        issue_id: None,
     });
 
     let resp = app

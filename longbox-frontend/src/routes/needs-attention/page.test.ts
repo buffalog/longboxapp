@@ -8,6 +8,7 @@ import {
   retryPull,
   type PullFailure
 } from '$lib/api/needs_attention';
+import { importAnyway } from '$lib/api/postprocess';
 import type { PendingIntervention } from '$lib/types';
 import NeedsAttentionPage from './+page.svelte';
 import type { PageData } from './$types';
@@ -17,6 +18,11 @@ vi.mock('$lib/api/needs_attention', async (importOriginal) => ({
   retryPull: vi.fn(),
   dismissPullFailure: vi.fn(),
   clearAllPullFailures: vi.fn()
+}));
+
+vi.mock('$lib/api/postprocess', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api/postprocess')>()),
+  importAnyway: vi.fn()
 }));
 
 vi.mock('$lib/stores/toast.svelte', () => ({
@@ -137,5 +143,30 @@ describe('needs-attention page', () => {
   it('hides Clear all when the pull-failure list is empty', () => {
     render(NeedsAttentionPage, pageData([], [conflictItem()]));
     expect(screen.queryByRole('button', { name: 'Clear all' })).not.toBeInTheDocument();
+  });
+
+  it('imports a page-count hold anyway and drops the row; other holds have no button', async () => {
+    vi.mocked(importAnyway).mockResolvedValue({
+      target: '/comics/The Amazing Spider-Man (2025)/The Amazing Spider-Man (2025) 1000.cbz',
+      issue_id: 14711
+    });
+    const held: PendingIntervention = {
+      source_path: '/watch/The Amazing Spider-Man 1000/ASM 1000.cbz',
+      target_path: '/comics/The Amazing Spider-Man (2025)/The Amazing Spider-Man (2025) 1000.cbz',
+      reason: { kind: 'likely_collected_edition', detail: 102 },
+      size: 234425626,
+      last_attempt: '2026-10-27T17:46:53Z',
+      issue_id: 14711
+    };
+    render(NeedsAttentionPage, pageData([], [held, conflictItem()]));
+
+    // getByRole throws on more than one match: only the page-count hold gets the button.
+    await fireEvent.click(screen.getByRole('button', { name: 'Import anyway' }));
+
+    await waitFor(() => expect(importAnyway).toHaveBeenCalledWith(held.source_path));
+    await waitFor(() =>
+      expect(screen.queryByText(held.source_path)).not.toBeInTheDocument()
+    );
+    expect(screen.getByText('/watch/x.cbz')).toBeInTheDocument();
   });
 });

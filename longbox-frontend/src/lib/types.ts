@@ -222,6 +222,8 @@ export interface PendingIntervention {
   reason: InterventionReason;
   size: number;
   last_attempt: string;
+  /** The issue the file was matched to; set on holds from this version on. */
+  issue_id?: number | null;
 }
 
 export interface PendingResponse {
