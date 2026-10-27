@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, PrimitiveDateTime};
 
 use crate::error::ApiError;
-use crate::routes::series::{add_or_get_from_cv, spawn_auto_rematch};
+use crate::routes::series::{add_or_get_from_cv, spawn_auto_rematch, COLLECTED_EDITION};
 use crate::state::{AppState, SubscribeOutcome};
 
 /// How long a cached CV release-calendar payload stays fresh. A user
@@ -232,7 +232,7 @@ async fn try_add_one(
             message: "cv_volume_id must be > 0".into(),
         });
     }
-    let (series, was_new) = add_or_get_from_cv(state, cv, cv_volume_id).await?;
+    let (series, was_new) = add_or_get_from_cv(state, cv, cv_volume_id, true).await?;
     if was_new {
         // A freshly created series: match any of its files already on
         // disk, same as the /files and Library Tidy add paths.
@@ -367,7 +367,7 @@ async fn add_to_pull_list_bulk(
                     Err(e) => BulkAddResult {
                         cv_volume_id: Some(cv),
                         metron_series_id: None,
-                        status: "failed",
+                        status: failure_status(&e),
                         series_id: None,
                         error: Some(e.to_string()),
                     },
@@ -403,6 +403,15 @@ async fn add_to_pull_list_bulk(
     }
 
     Ok(Json(BulkAddResponse { results }))
+}
+
+/// Bulk status for a failed item: a collected edition is skipped and
+/// reported, not an error (bulk subscribe never adds one).
+fn failure_status(e: &ApiError) -> &'static str {
+    match e {
+        ApiError::Conflict { code, .. } if *code == COLLECTED_EDITION => "skipped_collected",
+        _ => "failed",
+    }
 }
 
 /// The frontend row discriminator for an add request — `cv:{id}` or
@@ -462,7 +471,7 @@ fn spawn_background_resolve(state: AppState, item: AddToPullBody, key: String) {
                     "pull-list background resolve failed"
                 );
                 SubscribeOutcome {
-                    status: "failed".to_string(),
+                    status: failure_status(&e).to_string(),
                     series_id: None,
                     error: Some(e.to_string()),
                 }

@@ -211,7 +211,10 @@ export interface LibraryRoot {
 export type InterventionReason =
   | { kind: 'conflict' }
   | { kind: 'comic_info_write_failed'; detail: string }
-  | { kind: 'move_failed'; detail: string };
+  | { kind: 'move_failed'; detail: string }
+  | { kind: 'source_archive_unreadable'; detail: string }
+  /** `detail` is the page count. */
+  | { kind: 'likely_collected_edition'; detail: number };
 
 export interface PendingIntervention {
   source_path: string;

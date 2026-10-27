@@ -74,11 +74,15 @@ pub async fn process_one(
     // 50+ MB is almost always SAB handing off a half-downloaded job.
     // Operator action: investigate or replace the bad NZB. File
     // stays in /watch/.
-    let threshold_bytes = i64::from(min_file_size_mb) * 1024 * 1024;
-    if size < threshold_bytes {
+    let floor_mb = if longbox_archive::is_pdf(source) {
+        min_file_size_mb.min(crate::PDF_MIN_FILE_SIZE_MB)
+    } else {
+        min_file_size_mb
+    };
+    if size < i64::from(floor_mb) * 1024 * 1024 {
         let outcome = Outcome::RejectedTooSmall {
             size,
-            threshold_mb: min_file_size_mb,
+            threshold_mb: floor_mb,
         };
         log_outcome(&outcome, started_at, source);
         return Ok(outcome);
@@ -321,6 +325,39 @@ pub enum Outcome {
     /// `phase_b.rejected_too_small` carries the size + threshold so
     /// the operator can investigate or replace the bad download.
     RejectedTooSmall { size: i64, threshold_mb: u32 },
+}
+
+/// The page count when `source` has more pages than a single issue and
+/// the series it's filed into is not itself a collected edition (a trade
+/// volume the user chose to track). `None` when the count can't be read:
+/// an unreadable archive is reported by the import itself.
+async fn collected_edition_pages(
+    source: &Path,
+    series: &SeriesRow,
+    db: &Pool,
+) -> Result<Option<usize>> {
+    let owned = source.to_path_buf();
+    let names = tokio::task::spawn_blocking(move || longbox_archive::list_entry_names(&owned))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let Some(names) = names else {
+        return Ok(None);
+    };
+    let pages = names
+        .iter()
+        .filter(|n| longbox_core::archive_label::is_image(n))
+        .count();
+    if pages <= crate::MAX_SINGLE_ISSUE_PAGES {
+        return Ok(None);
+    }
+    let issues = issue_repo::list_by_series(db, series.id).await?;
+    let issue_names: Vec<&str> = issues.iter().filter_map(|i| i.title.as_deref()).collect();
+    if longbox_core::collected_edition_reason(series.description.as_deref(), &issue_names).is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(pages))
 }
 
 async fn wait_for_stability(source: &Path) {
@@ -596,6 +633,26 @@ async fn import_as_owned(
         // and operator action on the stale file is easy.
         cleanup_conflict_source(source, &target_abs, size);
         return Ok(Outcome::Conflict {
+            target: target_abs,
+            size,
+        });
+    }
+
+    if let Some(pages) = collected_edition_pages(source, &series, db).await? {
+        let message = format!("{pages} pages: likely a collected edition, held for review");
+        let settled =
+            pull_attempt_repo::record_failure_for_issue(db, series.id, issue.id, &message).await?;
+        tracing::warn!(
+            target: "longbox_postprocess",
+            source = %source.display(),
+            series_id = series.id,
+            issue_id = issue.id,
+            pages,
+            attempts = settled,
+            "phase_b.held_collected_edition"
+        );
+        return Ok(Outcome::Failed {
+            reason: InterventionReason::LikelyCollectedEdition(pages),
             target: target_abs,
             size,
         });

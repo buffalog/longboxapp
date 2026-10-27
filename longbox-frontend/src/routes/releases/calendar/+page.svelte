@@ -188,6 +188,16 @@
     );
   }
 
+  // Collected editions (TPB/HC volumes) the server refused to subscribe,
+  // named in one toast so the user sees exactly which were left off.
+  function reportSkippedCollected(keys: (string | null)[]): void {
+    if (keys.length === 0) return;
+    const names = keys.map(
+      (k) => rows.find((r) => rowKey(r) === k)?.volume_name ?? k ?? 'unknown volume'
+    );
+    toast.warning(`Skipped ${keys.length} collected edition${keys.length === 1 ? '' : 's'}: ${names.join(', ')}.`);
+  }
+
   async function bulkAdd(): Promise<void> {
     const keys = [...sel.selected];
     const items = keys
@@ -201,6 +211,7 @@
       const added = results.filter((r) => r.status === 'added').length;
       const already = results.filter((r) => r.status === 'already_on_list').length;
       const syncFailures = results.filter((r) => r.status === 'failed');
+      const skipped = results.filter((r) => r.status === 'skipped_collected');
 
       // Flip rows for the synchronous added/already results.
       const seriesByKey = new Map<string, number>();
@@ -232,6 +243,7 @@
       const msg = parts.join(', ') + (pending.size > 0 ? '…' : '.');
       if (syncFailures.length > 0) toast.warning(msg);
       else toast.success(msg);
+      reportSkippedCollected(skipped.map(resultKey));
 
       // Track background resolutions without blocking the handler — the
       // UI unlocks as soon as `finally` clears bulkBusy.
@@ -249,6 +261,7 @@
   async function trackResolving(pending: Set<string>): Promise<void> {
     let resolved = 0;
     let failed = 0;
+    const skipped: string[] = [];
     for (
       let attempt = 0;
       attempt < SUBSCRIBE_POLL_MAX_ATTEMPTS && pending.size > 0;
@@ -269,6 +282,8 @@
         if (outcome.status === 'added' || outcome.status === 'already_on_list') {
           resolved++;
           if (outcome.series_id != null) newlySubscribed.set(key, outcome.series_id);
+        } else if (outcome.status === 'skipped_collected') {
+          skipped.push(key);
         } else {
           failed++;
           logSubscribeFailure(key, outcome.error);
@@ -281,6 +296,7 @@
       failed++;
       logSubscribeFailure(key, 'still resolving after timeout');
     }
+    reportSkippedCollected(skipped);
     if (resolved === 0 && failed === 0) return;
     const parts: string[] = [];
     if (resolved > 0) parts.push(`${resolved} resolved`);

@@ -238,7 +238,7 @@ async fn add_one(state: &AppState, folder: &AddFolder) -> Result<i64, ApiError> 
             message: "cv_id must be > 0".into(),
         });
     }
-    let (series, _was_new) = add_or_get_from_cv(state, &state.cv, folder.cv_id).await?;
+    let (series, _was_new) = add_or_get_from_cv(state, &state.cv, folder.cv_id, false).await?;
     // Auto-dismiss: the folder is now tracked, but if the user later
     // removes the series the folder must resurface — system action,
     // not user-permanent.

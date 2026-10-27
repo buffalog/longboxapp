@@ -1665,3 +1665,182 @@ async fn release_year_that_fits_no_volume_is_held_not_sized() {
     );
     assert!(source.exists(), "the file must stay in the watch folder");
 }
+
+/// A CBZ with `pages` tiny page images.
+fn write_cbz_pages(path: &Path, pages: usize) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = ZipWriter::new(std::fs::File::create(path).unwrap());
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for n in 1..=pages {
+        zip.start_file(format!("page-{n:03}.jpg"), opts).unwrap();
+        zip.write_all(b"\xFF\xD8\xFF\xE0\x00\x10JFIF").unwrap();
+    }
+    zip.finish().unwrap();
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(earlier)).ok();
+}
+
+/// G.I. Joe v01 (129 pages) and Hyde Street v02 (132) were trades filed
+/// as #1 and #2. Over 100 pages is held for a human, with the pull attempt
+/// failed so another release is tried; 100 pages still imports.
+#[tokio::test]
+async fn a_file_over_100_pages_is_held_as_a_likely_collected_edition() {
+    let f = seed_basic_fixture().await;
+    longbox_db::pull_attempt_repo::insert(
+        &f.db,
+        longbox_db::NewPullAttempt {
+            series_id: f.series_id,
+            issue_id: f.issue_id,
+            indexer_id: None,
+            release_id: Some("guid-trade".into()),
+            status: "submitted".into(),
+            error_message: None,
+            retry_count: 0,
+            download_handle: Some("nzo-trade".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let source = f._watch.path().join("Saga 1").join("Saga 001.cbz");
+    write_cbz_pages(&source, 101);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        Outcome::Failed { reason, .. } => assert_eq!(
+            reason,
+            longbox_postprocess::InterventionReason::LikelyCollectedEdition(101)
+        ),
+        other => panic!("expected a held collected edition, got {other:?}"),
+    }
+    assert!(source.exists(), "held file stays in /watch");
+    assert!(!f
+        .library
+        .path()
+        .join("Saga (2012)/Saga (2012) 001.cbz")
+        .exists());
+    let attempts = longbox_db::pull_attempt_repo::list_for_issue(&f.db, f.series_id, f.issue_id)
+        .await
+        .unwrap();
+    assert!(
+        attempts.iter().any(|a| a.status == "failed"
+            && a.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("101 pages"))),
+        "the attempt is failed with the page count: {attempts:?}"
+    );
+
+    let at_limit = f._watch.path().join("Saga 1b").join("Saga 001.cbz");
+    std::fs::remove_file(&source).unwrap();
+    write_cbz_pages(&at_limit, 100);
+    let outcome = processor::process_one(
+        &at_limit,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Imported { .. }), "{outcome:?}");
+}
+
+/// A trade volume the user chose to track (confirmed on Add) imports its
+/// trades: those are not single issues.
+#[tokio::test]
+async fn a_long_file_imports_into_a_series_that_is_itself_a_collected_edition() {
+    let f = seed_basic_fixture().await;
+    issue_repo::update(
+        &f.db,
+        f.issue_id,
+        longbox_db::IssueUpdate {
+            title: Some("Volume One".into()),
+            cover_date: None,
+            summary: None,
+            cover_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let source = f._watch.path().join("Saga 1").join("Saga 001.cbz");
+    write_cbz_pages(&source, 130);
+
+    let outcome = processor::process_one(
+        &source,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        longbox_core::DEFAULT_MATCH_THRESHOLD,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Imported { .. }), "{outcome:?}");
+}
+
+/// A PDF's floor is 5 MB (capped at the setting): Battle Beast #10 and
+/// Rascal Randy #2 were complete 9.6 MB PDFs held under the 10 MB floor.
+/// A CBZ of the same size is still rejected.
+#[tokio::test]
+async fn a_pdf_has_a_lower_size_floor_than_a_cbz() {
+    let f = seed_basic_fixture().await;
+    let six_mb = vec![0u8; 6 * 1024 * 1024];
+
+    let cbz = f._watch.path().join("Saga 001.cbz");
+    std::fs::write(&cbz, &six_mb).unwrap();
+    let outcome =
+        processor::process_one(&cbz, f.library.path(), f.library_root_id, &f.db, 0.85, 10)
+            .await
+            .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::RejectedTooSmall {
+                threshold_mb: 10,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+
+    let pdf = f._watch.path().join("Saga 002.pdf");
+    std::fs::write(&pdf, &six_mb).unwrap();
+    let outcome =
+        processor::process_one(&pdf, f.library.path(), f.library_root_id, &f.db, 0.85, 10).await;
+    assert!(
+        !matches!(outcome, Ok(Outcome::RejectedTooSmall { .. })),
+        "a 6 MB PDF clears the PDF floor: {outcome:?}"
+    );
+
+    let small_pdf = f._watch.path().join("Saga 003.pdf");
+    std::fs::write(&small_pdf, vec![0u8; 4 * 1024 * 1024]).unwrap();
+    let outcome = processor::process_one(
+        &small_pdf,
+        f.library.path(),
+        f.library_root_id,
+        &f.db,
+        0.85,
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::RejectedTooSmall {
+                threshold_mb: 5,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+}

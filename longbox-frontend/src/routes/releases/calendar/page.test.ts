@@ -9,6 +9,7 @@ import {
   getSubscribeStatus,
   type CalendarRow
 } from '$lib/api/releases';
+import { toast } from '$lib/stores/toast.svelte';
 import CalendarPage from './+page.svelte';
 
 vi.mock('$lib/api/releases', async (importOriginal) => ({
@@ -82,26 +83,18 @@ describe('release calendar page', () => {
 
   it('bulk-adds selected volumes and flips their rows', async () => {
     vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
-      results: [
-        { cv_volume_id: 100, metron_series_id: null, status: 'added', series_id: 7 }
-      ]
+      results: [{ cv_volume_id: 100, metron_series_id: null, status: 'added', series_id: 7 }]
     });
     render(
       CalendarPage,
       pageData([calRow({ cv_volume_id: 100, volume_name: 'Saga', on_pull_list: false })])
     );
 
-    await fireEvent.click(
-      screen.getByRole('checkbox', { name: 'Select all addable volumes' })
-    );
-    await fireEvent.click(
-      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-    );
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all addable volumes' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
 
     await waitFor(() =>
-      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
-        { cv_volume_id: 100 }
-      ])
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([{ cv_volume_id: 100 }])
     );
     await waitFor(() =>
       expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
@@ -125,17 +118,11 @@ describe('release calendar page', () => {
         pageData([calRow({ cv_volume_id: 100, volume_name: 'Saga', on_pull_list: false })])
       );
 
-      await fireEvent.click(
-        screen.getByRole('checkbox', { name: 'Select all addable volumes' })
-      );
-      await fireEvent.click(
-        screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-      );
+      await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all addable volumes' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
 
       // Row is NOT flipped yet — the resolver hasn't run.
-      await vi.waitFor(() =>
-        expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalled()
-      );
+      await vi.waitFor(() => expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalled());
       expect(screen.queryByText('On pull list', { selector: 'span' })).toBeNull();
 
       // Drive the background poll loop to completion.
@@ -147,6 +134,30 @@ describe('release calendar page', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reports a skipped collected edition by name and leaves its row unsubscribed', async () => {
+    vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
+      results: [
+        {
+          cv_volume_id: 167375,
+          metron_series_id: null,
+          status: 'skipped_collected',
+          error: 'looks like a collected edition'
+        }
+      ]
+    });
+    render(
+      CalendarPage,
+      pageData([calRow({ cv_volume_id: 167375, volume_name: 'Hyde Street', on_pull_list: false })])
+    );
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all addable volumes' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
+
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith('Skipped 1 collected edition: Hyde Street.')
+    );
+    expect(screen.queryByText('On pull list', { selector: 'span' })).toBeNull();
   });
 
   it('logs a background resolve failure to the console', async () => {
@@ -164,12 +175,8 @@ describe('release calendar page', () => {
         CalendarPage,
         pageData([calRow({ cv_volume_id: 404, volume_name: 'Ghost', on_pull_list: false })])
       );
-      await fireEvent.click(
-        screen.getByRole('checkbox', { name: 'Select all addable volumes' })
-      );
-      await fireEvent.click(
-        screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-      );
+      await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all addable volumes' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
       await vi.advanceTimersByTimeAsync(2000);
 
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('volume not found'));
@@ -204,17 +211,11 @@ describe('release calendar page', () => {
       ])
     );
 
-    await fireEvent.click(
-      screen.getByRole('checkbox', { name: 'Select all addable volumes' })
-    );
-    await fireEvent.click(
-      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-    );
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all addable volumes' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
 
     await waitFor(() =>
-      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
-        { metron_series_id: 7777 }
-      ])
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([{ metron_series_id: 7777 }])
     );
     await waitFor(() =>
       expect(screen.getByText('On pull list', { selector: 'span' })).toBeInTheDocument()
@@ -268,16 +269,12 @@ describe('release calendar page', () => {
     expect(asm).not.toBeChecked();
     expect(cyc).not.toBeChecked();
     // BulkActionBar count badge — exactly one selected.
-    expect(
-      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add 1 selected to pull list' })).toBeInTheDocument();
   });
 
   it('bulk-add of one Metron row sends only that row, not its siblings', async () => {
     vi.mocked(bulkAddCalendarVolumesToPullList).mockResolvedValue({
-      results: [
-        { cv_volume_id: null, metron_series_id: 10959, status: 'added', series_id: 42 }
-      ]
+      results: [{ cv_volume_id: null, metron_series_id: 10959, status: 'added', series_id: 42 }]
     });
     render(
       CalendarPage,
@@ -303,17 +300,11 @@ describe('release calendar page', () => {
       ])
     );
 
-    await fireEvent.click(
-      screen.getByRole('checkbox', { name: 'Select Absolute Green Lantern' })
-    );
-    await fireEvent.click(
-      screen.getByRole('button', { name: 'Add 1 selected to pull list' })
-    );
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select Absolute Green Lantern' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add 1 selected to pull list' }));
 
     await waitFor(() =>
-      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([
-        { metron_series_id: 10959 }
-      ])
+      expect(bulkAddCalendarVolumesToPullList).toHaveBeenCalledWith([{ metron_series_id: 10959 }])
     );
   });
 
@@ -321,7 +312,12 @@ describe('release calendar page', () => {
     render(
       CalendarPage,
       pageData([
-        calRow({ cv_issue_id: 1, volume_name: 'Subscribed', cv_volume_id: 100, on_pull_list: true }),
+        calRow({
+          cv_issue_id: 1,
+          volume_name: 'Subscribed',
+          cv_volume_id: 100,
+          on_pull_list: true
+        }),
         calRow({
           cv_issue_id: 2,
           volume_name: 'Unsubscribed',
@@ -411,12 +407,15 @@ describe('release calendar page', () => {
       pageData([
         calRow({ cv_issue_id: 1, cv_volume_id: 100, volume_name: 'Saga', publisher: 'Image' }),
         calRow({ cv_issue_id: 2, cv_volume_id: 200, volume_name: 'Batman', publisher: 'DC' }),
-        calRow({ cv_issue_id: 3, cv_volume_id: 300, volume_name: 'Hellboy', publisher: 'Dark Horse' })
+        calRow({
+          cv_issue_id: 3,
+          cv_volume_id: 300,
+          volume_name: 'Hellboy',
+          publisher: 'Dark Horse'
+        })
       ])
     );
-    const headings = screen
-      .getAllByRole('heading', { level: 2 })
-      .map((h) => h.textContent?.trim());
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent?.trim());
     // localeCompare is case-insensitive: "Dark Horse" sorts before
     // "DC" because 'a' < 'c'. That's the right semantic — alphabetical
     // order should ignore case — so the expected order encodes it.

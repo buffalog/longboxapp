@@ -19,7 +19,7 @@ use longbox_db::{
 };
 use longbox_downloader::{connect, AnyDownloader, Downloader, DownloaderAuth, DownloaderConfig};
 use longbox_newznab::{
-    score_release_title, search_all_indexers, subtitle_rejection, IndexerConfig, IndexerId,
+    auto_pull_rejection, score_release_title, search_all_indexers, IndexerConfig, IndexerId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -73,7 +73,7 @@ struct SearchResult {
     /// Series-title match score 0.0–1.0 (see `score_release_title`).
     confidence: f64,
     /// Why the pull engine would refuse this release (see
-    /// `subtitle_rejection`). Shown, not hidden, so a real arc-titled
+    /// `auto_pull_rejection`). Shown, not hidden, so a real arc-titled
     /// issue can still be grabbed by hand.
     rejected_reason: Option<String>,
     nzb_url: String,
@@ -123,7 +123,7 @@ async fn interactive_search(
         .map(|(indexer_id, release)| SearchResult {
             confidence: score_release_title(&release.title, &series.title, &patterns)
                 .unwrap_or(0.0),
-            rejected_reason: subtitle_rejection(&release.title, &series.title, &patterns),
+            rejected_reason: auto_pull_rejection(&release.title, &series.title, &patterns),
             age_days: release
                 .published
                 .map(|p| (today - p.date()).whole_days().max(0)),

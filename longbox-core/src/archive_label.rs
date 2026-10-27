@@ -50,7 +50,9 @@ pub struct ArchiveIdentity {
 
 const IMAGE_EXTS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "gif"];
 
-fn is_image(name: &str) -> bool {
+/// True when an archive entry name is a page image (not a macOS resource
+/// fork). Also counts pages for Phase B's collected-edition hold.
+pub fn is_image(name: &str) -> bool {
     // macOS resource forks are not pages. They shadow every real image under
     // a `__MACOSX/` tree, which breaks the single-top-directory rule and
     // demotes a good `Dir` label to a weaker `Page` one for free.

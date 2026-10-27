@@ -57,6 +57,10 @@ pub enum InterventionReason {
     /// File move from watch folder to final library path failed
     /// (cross-device error, target permissions, race condition).
     MoveFailed(String),
+    /// More pages than a single issue has (the payload is the page
+    /// count): almost certainly a trade grabbed for an issue. Held for a
+    /// human; the pull attempt is failed so another release is tried.
+    LikelyCollectedEdition(usize),
 }
 
 /// In-memory cache of files awaiting manual intervention. Shared with
