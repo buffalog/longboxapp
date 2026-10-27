@@ -1,7 +1,9 @@
 //! HTTP orchestration — single-indexer search and the high-level
 //! cross-indexer [`find_release`].
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use longbox_core::ParsingPattern;
 
@@ -40,6 +42,81 @@ pub enum FindOutcome {
 /// Per-request timeout. Newznab indexers are usually fast; a slow one
 /// shouldn't stall the whole pull sweep.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an indexer that answers HTTP 429 without a usable
+/// `Retry-After` is left alone.
+const DEFAULT_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(15 * 60);
+
+/// Longest pause honored from a `Retry-After`, so a bogus header can't
+/// switch an indexer off for good.
+const MAX_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Indexers paused after an HTTP 429, until the instant they may be
+/// queried again. Process-wide, so the sweep, on-demand searches and
+/// Manual search all respect one indexer's limit. In memory only: a
+/// restart forgets the pauses, and the indexer says 429 again if it
+/// still means it.
+static RATE_LIMITED: OnceLock<Mutex<HashMap<IndexerId, Instant>>> = OnceLock::new();
+
+fn rate_limited() -> std::sync::MutexGuard<'static, HashMap<IndexerId, Instant>> {
+    RATE_LIMITED
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("rate-limit lock poisoned")
+}
+
+/// Time left on `id`'s pause, if any. Clears an expired one.
+fn rate_limit_remaining(id: IndexerId) -> Option<Duration> {
+    let mut paused = rate_limited();
+    let until = *paused.get(&id)?;
+    let left = until.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        paused.remove(&id);
+        None
+    } else {
+        Some(left)
+    }
+}
+
+/// The pause an HTTP 429 asks for: `Retry-After` as seconds or an
+/// HTTP-date, else [`DEFAULT_RATE_LIMIT_PAUSE`]; capped at
+/// [`MAX_RATE_LIMIT_PAUSE`].
+fn rate_limit_pause(headers: &reqwest::header::HeaderMap) -> Duration {
+    let asked = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .and_then(|v| {
+            if let Ok(secs) = v.parse::<u64>() {
+                return Some(Duration::from_secs(secs));
+            }
+            let at = time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc2822)
+                .ok()?;
+            let secs = (at - time::OffsetDateTime::now_utc()).whole_seconds();
+            Some(Duration::from_secs(secs.max(0) as u64))
+        });
+    asked
+        .unwrap_or(DEFAULT_RATE_LIMIT_PAUSE)
+        .min(MAX_RATE_LIMIT_PAUSE)
+}
+
+/// A reqwest error with every `source()` below it, joined with ": ".
+/// reqwest's own Display is only the top layer ("error sending
+/// request"), which says nothing about why. Takes the error after
+/// `without_url()`, so the apikey-bearing URL never reaches the text.
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        let text = s.to_string();
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = s.source();
+    }
+    out
+}
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -95,6 +172,12 @@ async fn search_with(
     search_term: &str,
     maxage: MaxAge,
 ) -> Result<Vec<Release>, IndexerError> {
+    if let Some(left) = rate_limit_remaining(indexer.id) {
+        return Err(IndexerError::RateLimited {
+            indexer: indexer.name.clone(),
+            retry_in_secs: left.as_secs(),
+        });
+    }
     let url = build_url(indexer, search_term, maxage)?;
     // `without_url()` strips the request URL from the reqwest error's
     // Display — the newznab URL embeds `apikey=...`, and these messages
@@ -104,10 +187,24 @@ async fn search_with(
         IndexerError::HttpFailure(format!(
             "request to {} failed: {}",
             indexer.name,
-            e.without_url()
+            error_chain(&e.without_url())
         ))
     })?;
     let status = resp.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let pause = rate_limit_pause(resp.headers());
+        rate_limited().insert(indexer.id, Instant::now() + pause);
+        tracing::warn!(
+            target: "longbox_newznab",
+            indexer = %indexer.name,
+            pause_secs = pause.as_secs(),
+            "indexer.rate_limited"
+        );
+        return Err(IndexerError::RateLimited {
+            indexer: indexer.name.clone(),
+            retry_in_secs: pause.as_secs(),
+        });
+    }
     if !status.is_success() {
         return Err(IndexerError::HttpFailure(format!(
             "indexer {} returned HTTP {status}",
@@ -118,7 +215,7 @@ async fn search_with(
         IndexerError::HttpFailure(format!(
             "reading body from {} failed: {}",
             indexer.name,
-            e.without_url()
+            error_chain(&e.without_url())
         ))
     })?;
     parse_response(&body)
@@ -763,6 +860,92 @@ mod tests {
         // Nothing listening — connection refused, not a timeout.
         let result = test_connection(&cfg("http://127.0.0.1:1".into())).await;
         assert!(matches!(result, Err(IndexerError::HttpFailure(_))));
+    }
+
+    /// The failure text carries the cause, not just reqwest's top layer.
+    /// Every indexer failure on 2026-10-27 read "error sending request"
+    /// and nothing more.
+    #[tokio::test]
+    async fn a_connection_failure_reports_its_cause() {
+        let Err(IndexerError::HttpFailure(msg)) =
+            test_connection(&cfg("http://127.0.0.1:1".into())).await
+        else {
+            panic!("expected HttpFailure");
+        };
+        assert!(
+            msg.to_lowercase().contains("connect")
+                && msg.len() > "request to test-indexer failed: error sending request".len(),
+            "{msg}"
+        );
+        assert!(!msg.contains("apikey"), "{msg}");
+    }
+
+    /// An HTTP 429 pauses that indexer for its Retry-After: the next
+    /// search doesn't reach it, and another indexer is still queried.
+    /// Ids are unique to this test: the pause registry is process-wide.
+    #[tokio::test]
+    async fn a_429_pauses_only_that_indexer_for_its_retry_after() {
+        let limited = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "120"))
+            .mount(&limited)
+            .await;
+        let fine = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<rss><channel></channel></rss>"),
+            )
+            .mount(&fine)
+            .await;
+        let limited_cfg = IndexerConfig {
+            id: IndexerId(4291),
+            ..cfg(limited.uri())
+        };
+        let fine_cfg = IndexerConfig {
+            id: IndexerId(4292),
+            ..cfg(fine.uri())
+        };
+
+        match search_indexer(&limited_cfg, "saga").await {
+            Err(IndexerError::RateLimited { retry_in_secs, .. }) => {
+                assert!((119..=120).contains(&retry_in_secs), "{retry_in_secs}")
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(matches!(
+            search_indexer(&limited_cfg, "saga").await,
+            Err(IndexerError::RateLimited { .. })
+        ));
+        assert_eq!(
+            limited.received_requests().await.unwrap().len(),
+            1,
+            "a paused indexer is not queried"
+        );
+        assert!(search_indexer(&fine_cfg, "saga").await.is_ok());
+    }
+
+    #[test]
+    fn retry_after_seconds_date_missing_and_cap() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(RETRY_AFTER, HeaderValue::from_str(v).unwrap());
+            rate_limit_pause(&h)
+        };
+        assert_eq!(with("90"), Duration::from_secs(90));
+        let in_ten_min = (time::OffsetDateTime::now_utc() + time::Duration::minutes(10))
+            .format(&time::format_description::well_known::Rfc2822)
+            .unwrap();
+        let date = with(&in_ten_min);
+        assert!((590..=600).contains(&date.as_secs()), "{date:?}");
+        assert_eq!(with("soon"), DEFAULT_RATE_LIMIT_PAUSE);
+        assert_eq!(
+            rate_limit_pause(&HeaderMap::new()),
+            DEFAULT_RATE_LIMIT_PAUSE
+        );
+        assert_eq!(with("9999999"), MAX_RATE_LIMIT_PAUSE);
     }
 
     /// Two releases for the same issue — a cbz (guid abc-123) and a cbr

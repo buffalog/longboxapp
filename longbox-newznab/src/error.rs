@@ -25,6 +25,12 @@ pub enum IndexerError {
     /// investigation rather than cleanly transient or permanent.
     #[error("malformed indexer response: {0}")]
     MalformedResponse(String),
+
+    /// The indexer answered HTTP 429, now or within its pause window
+    /// (its `Retry-After`, else [`crate::client`]'s default). Transient,
+    /// and only this indexer is paused; the others keep being queried.
+    #[error("indexer {indexer} is rate-limited (HTTP 429); paused for {retry_in_secs}s")]
+    RateLimited { indexer: String, retry_in_secs: u64 },
 }
 
 impl IndexerError {
