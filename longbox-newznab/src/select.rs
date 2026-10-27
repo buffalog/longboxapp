@@ -625,14 +625,21 @@ pub fn filter_by_series_title(
         releases
     };
 
-    // All titles a release may legitimately match: the primary plus any known
-    // alias (e.g. CV's "Collider" for FBP). A release scores against the BEST
-    // of these — alias-titled scene releases otherwise fail similarity against
-    // the primary title even after the alias query surfaced them.
-    let candidate_titles: Vec<String> = std::iter::once(requested_series_title)
-        .chain(aliases.iter().map(String::as_str))
-        .map(match_normalize)
-        .filter(|t| !t.is_empty())
+    // The primary title is scored fuzzily. An alias (CV's "Collider" for FBP,
+    // or one the user set) is a name, not a fuzzy target: it matches only a
+    // release whose title has exactly its words. Fuzzily, a long alias admits
+    // its sequels — "Teenage Mutant Ninja Turtles: The Last Ronin" scores
+    // 0.78 against "... The Last Ronin - Lost Years".
+    let primary_title = match_normalize(requested_series_title);
+    let alias_word_sets: Vec<std::collections::BTreeSet<String>> = aliases
+        .iter()
+        .map(|a| {
+            match_normalize(a)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .filter(|words| !words.is_empty())
         .collect();
 
     // Normalized alias tokens, stripped from a release's parsed title before
@@ -723,15 +730,18 @@ pub fn filter_by_series_title(
             .filter(|t| !alias_tokens.contains(*t))
             .collect::<Vec<_>>()
             .join(" ");
-        let score = candidate_titles
-            .iter()
-            .flat_map(|cand| {
-                [
-                    similarity(cand, &parsed_normalized),
-                    similarity(cand, &parsed_dealiased),
-                ]
-            })
-            .fold(0.0_f64, f64::max);
+        let parsed_words: std::collections::BTreeSet<String> = parsed_normalized
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let score = if alias_word_sets.contains(&parsed_words) {
+            1.0
+        } else if primary_title.is_empty() {
+            0.0
+        } else {
+            similarity(&primary_title, &parsed_normalized)
+                .max(similarity(&primary_title, &parsed_dealiased))
+        };
 
         if best_similarity.map_or(true, |b| score > b) {
             best_similarity = Some(score);
@@ -2829,6 +2839,91 @@ mod tests {
             1,
             "alias-embedded release should be kept"
         );
+    }
+
+    /// User aliases for the two Step 0 bucket-4 series, against the release
+    /// names the indexers carry (from Manual search, 2026-10-27). Each must
+    /// pass with its alias, and fail without it; the Last Ronin sequels must
+    /// fail on title alone, since their years sit inside the gate's slack.
+    #[test]
+    fn user_alias_matches_the_long_scene_name_but_not_a_sequel() {
+        let patterns = default_patterns();
+        let ronin = ["Teenage Mutant Ninja Turtles: The Last Ronin".to_string()];
+        let hawks = ["Thundercats X Silverhawks: Thunderhawks".to_string()];
+        let kept = |title: &str, cv: &str, issue: &str, aliases: &[String]| {
+            filter_by_series_title(
+                vec![release(title, Some(1))],
+                &patterns,
+                cv,
+                YearGate::OPEN,
+                longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+                &[],
+                None,
+                issue,
+                aliases,
+            )
+            .kept
+            .len()
+                == 1
+        };
+        for (title, issue) in [
+            (
+                "Teenage.Mutant.Ninja.Turtles-The.Last.Ronin.002.2021.Digital.Mephisto-Empire",
+                "2",
+            ),
+            (
+                "Teenage.Mutant.Ninja.Turtles-The.Last.Ronin.003.2021.Digital.Mephisto-Empire",
+                "3",
+            ),
+            (
+                "Teenage Mutant Ninja Turtles - The Last Ronin 004 (2021) (Digital) (Mephisto-Empire)",
+                "4",
+            ),
+            (
+                "Teenage Mutant Ninja Turtles - The Last Ronin 005 (2022) (Digital) (Mephisto-Empire)",
+                "5",
+            ),
+        ] {
+            assert!(kept(title, "TMNT: The Last Ronin", issue, &ronin), "{title}");
+            assert!(!kept(title, "TMNT: The Last Ronin", issue, &[]), "{title}");
+        }
+        for (title, issue) in [
+            (
+                "Dynamite.-.Thundercats.X.Silverhawks.Thunderhawks.No.01.2026.Hybrid.Comic.eBook-BitBook",
+                "1",
+            ),
+            (
+                "Dynamite.-.Thundercats.X.Silverhawks.Thunderhawks.No.02.2026.Hybrid.Comic.eBook-BitBook",
+                "2",
+            ),
+            (
+                "Dynamite.-.Thundercats.X.Silverhawks.Thunderhawks.No.03.2026.Hybrid.Comic.eBook-BitBook",
+                "3",
+            ),
+            (
+                "Dynamite.-.Thundercats.X.Silverhawks.Thunderhawks.No.04.2026.Hybrid.Comic.eBook-BitBook",
+                "4",
+            ),
+            (
+                "Thundercats X Silverhawks-Thunderhawks 005 [2026] [Digital] [Shan-Empire]",
+                "5",
+            ),
+        ] {
+            assert!(kept(title, "Thunderhawks", issue, &hawks), "{title}");
+            assert!(!kept(title, "Thunderhawks", issue, &[]), "{title}");
+        }
+        for (title, issue) in [
+            (
+                "Teenage Mutant Ninja Turtles - The Last Ronin - Lost Years 005 (2023) (Digital) (Mephisto-Empire)",
+                "5",
+            ),
+            (
+                "Teenage.Mutant.Ninja.Turtles-The.Last.Ronin-Lost.Years.001.2023.Digital.Mephisto-Empire",
+                "1",
+            ),
+        ] {
+            assert!(!kept(title, "TMNT: The Last Ronin", issue, &ronin), "{title}");
+        }
     }
 
     #[test]

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT aliases, user_aliases FROM series WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "aliases",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_aliases",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "dfe6356842323bea6685fc93361d1f65c533472ff9bad276c1271fa7c8a8c25f"
+}

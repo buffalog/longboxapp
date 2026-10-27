@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/series/:id/refresh", post(refresh))
         .route("/series/:id/cv-id", patch(set_cv_id))
         .route("/series/:id/folder-path", get(folder_path))
+        .route("/series/:id/aliases", get(get_aliases).put(set_aliases))
 }
 
 // -------- shapes --------
@@ -874,6 +875,76 @@ async fn folder_path(
         host_path,
         host_path_configured,
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct AliasesResponse {
+    /// From ComicVine; shown read-only, replaced on every refresh.
+    comicvine: Vec<String>,
+    /// Set here; never touched by a refresh.
+    user: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetAliasesBody {
+    user: Vec<String>,
+}
+
+/// Most user aliases a series takes. Each becomes a search-ladder rung,
+/// and the ladder is capped, so more would only be dropped.
+const MAX_USER_ALIASES: usize = 10;
+const MAX_ALIAS_CHARS: usize = 200;
+
+async fn load_aliases(state: &AppState, id: i64) -> Result<AliasesResponse, ApiError> {
+    let sources = series_repo::get_alias_sources(&state.db, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        })?;
+    Ok(AliasesResponse {
+        comicvine: sources.comicvine,
+        user: sources.user,
+    })
+}
+
+/// A series' alternate titles, used by auto-pull to search and to match
+/// release names: ComicVine's, plus the user's own.
+async fn get_aliases(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<AliasesResponse>, ApiError> {
+    Ok(Json(load_aliases(&state, id).await?))
+}
+
+/// Replace the user's aliases for a series. An alias matches a release
+/// only when the release's title has exactly its words.
+async fn set_aliases(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetAliasesBody>,
+) -> Result<Json<AliasesResponse>, ApiError> {
+    if body.user.len() > MAX_USER_ALIASES {
+        return Err(ApiError::BadRequest {
+            message: format!("at most {MAX_USER_ALIASES} aliases"),
+        });
+    }
+    if body
+        .user
+        .iter()
+        .any(|a| a.chars().count() > MAX_ALIAS_CHARS)
+    {
+        return Err(ApiError::BadRequest {
+            message: format!("an alias is at most {MAX_ALIAS_CHARS} characters"),
+        });
+    }
+    if series_repo::set_user_aliases(&state.db, id, &body.user).await? == 0 {
+        return Err(ApiError::NotFound {
+            resource: "series",
+            id: id.to_string(),
+        });
+    }
+    Ok(Json(load_aliases(&state, id).await?))
 }
 
 async fn refresh(

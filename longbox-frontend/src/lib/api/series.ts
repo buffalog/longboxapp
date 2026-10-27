@@ -72,3 +72,22 @@ export interface SeriesFolderPath {
 export function getSeriesFolderPath(id: number): Promise<SeriesFolderPath> {
   return apiFetch(`/series/${id}/folder-path`);
 }
+
+/** A series' alternate titles. Auto-pull searches each and accepts a
+ *  release whose title has exactly an alias's words. `comicvine` is
+ *  replaced on every refresh; `user` is only ever changed here. */
+export interface SeriesAliases {
+  comicvine: string[];
+  user: string[];
+}
+
+export function getSeriesAliases(id: number): Promise<SeriesAliases> {
+  return apiFetch(`/series/${id}/aliases`);
+}
+
+export function setSeriesAliases(id: number, user: string[]): Promise<SeriesAliases> {
+  return apiFetch(`/series/${id}/aliases`, {
+    method: 'PUT',
+    body: JSON.stringify({ user })
+  });
+}

@@ -354,23 +354,90 @@ where
 /// false positive surfaces (deterministic-list philosophy: extend on evidence).
 const MIN_ALIAS_LEN: usize = 3;
 
-/// Read a series' aliases as a split, trimmed, sanitized list. CV stores them
-/// newline-separated; `None`/empty column → empty vec. Entries shorter than
-/// `MIN_ALIAS_LEN` are dropped (junk guard, see above). Used only by the pull
-/// search path (kept off `SeriesRow` to avoid widening every series SELECT).
+/// Split a newline-separated alias column into trimmed entries, dropping
+/// those shorter than `MIN_ALIAS_LEN` (junk guard, see above).
+fn split_aliases(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.chars().count() >= MIN_ALIAS_LEN)
+        .collect()
+}
+
+/// Read a series' aliases, CV's then the user's, as a split, trimmed,
+/// sanitized list. Both columns are newline-separated; `None`/empty → no
+/// entries. Used only by the pull search path (kept off `SeriesRow` to avoid
+/// widening every series SELECT).
 pub async fn get_aliases<'e, E>(executor: E, series_id: i64) -> Result<Vec<String>>
 where
     E: SqliteExecutor<'e>,
 {
-    let row = sqlx::query!(r#"SELECT aliases FROM series WHERE id = ?"#, series_id)
-        .fetch_optional(executor)
-        .await?;
-    let raw = row.and_then(|r| r.aliases).unwrap_or_default();
-    Ok(raw
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| l.chars().count() >= MIN_ALIAS_LEN)
-        .collect())
+    let row = sqlx::query!(
+        r#"SELECT aliases, user_aliases FROM series WHERE id = ?"#,
+        series_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let mut all = split_aliases(row.aliases.as_deref());
+    for alias in split_aliases(row.user_aliases.as_deref()) {
+        if !all.iter().any(|a| a.eq_ignore_ascii_case(&alias)) {
+            all.push(alias);
+        }
+    }
+    Ok(all)
+}
+
+/// A series' aliases split by source, for the alias editor. `None` when the
+/// series doesn't exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesAliases {
+    /// From ComicVine; read-only here, overwritten by enrichment.
+    pub comicvine: Vec<String>,
+    /// Set by the user; never touched by enrichment.
+    pub user: Vec<String>,
+}
+
+pub async fn get_alias_sources<'e, E>(executor: E, series_id: i64) -> Result<Option<SeriesAliases>>
+where
+    E: SqliteExecutor<'e>,
+{
+    let row = sqlx::query!(
+        r#"SELECT aliases, user_aliases FROM series WHERE id = ?"#,
+        series_id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|r| SeriesAliases {
+        comicvine: split_aliases(r.aliases.as_deref()),
+        user: split_aliases(r.user_aliases.as_deref()),
+    }))
+}
+
+/// Replace a series' user aliases. Entries are trimmed, those shorter than
+/// `MIN_ALIAS_LEN` dropped, and case-insensitive duplicates collapsed; an
+/// empty result clears the column. Returns rows-affected (0 = no such series).
+pub async fn set_user_aliases<'e, E>(executor: E, series_id: i64, aliases: &[String]) -> Result<u64>
+where
+    E: SqliteExecutor<'e>,
+{
+    let mut kept: Vec<String> = Vec::new();
+    for alias in split_aliases(Some(&aliases.join("\n"))) {
+        if !kept.iter().any(|k| k.eq_ignore_ascii_case(&alias)) {
+            kept.push(alias);
+        }
+    }
+    let joined = (!kept.is_empty()).then(|| kept.join("\n"));
+    let result = sqlx::query!(
+        r#"UPDATE series SET user_aliases = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"#,
+        joined,
+        series_id
+    )
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn find_by_metron_id<'e, E>(executor: E, metron_id: &str) -> Result<Option<SeriesRow>>
