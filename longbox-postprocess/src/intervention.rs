@@ -22,6 +22,9 @@ pub struct PendingIntervention {
     pub size: i64,
     #[serde(with = "time::serde::iso8601")]
     pub last_attempt: OffsetDateTime,
+    /// The issue the file was matched to; an "import anyway" files it there.
+    #[serde(default)]
+    pub issue_id: Option<i64>,
 }
 
 /// Why a file is sitting in `_pending` rather than the library proper.
@@ -137,6 +140,7 @@ mod tests {
             reason: InterventionReason::Conflict,
             size: 123,
             last_attempt: OffsetDateTime::now_utc(),
+            issue_id: None,
         }
     }
 

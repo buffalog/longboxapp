@@ -118,6 +118,7 @@ pub async fn process_one(
             size,
             mtime,
             db,
+            true,
         )
         .await?;
         log_outcome(&outcome, started_at, source);
@@ -222,6 +223,7 @@ pub async fn process_one(
                 size,
                 mtime,
                 db,
+                true,
             )
             .await?
         }
@@ -243,6 +245,7 @@ pub async fn process_one(
                 size,
                 mtime,
                 db,
+                true,
             )
             .await?
         }
@@ -316,6 +319,8 @@ pub enum Outcome {
         reason: InterventionReason,
         target: PathBuf,
         size: i64,
+        /// The issue the file was matched to and would have been filed as.
+        issue_id: i64,
     },
     /// File size is below `min_file_size_mb` — almost certainly a
     /// partial/corrupt SAB delivery (e.g. an Absolute Batman issue
@@ -325,6 +330,34 @@ pub enum Outcome {
     /// `phase_b.rejected_too_small` carries the size + threshold so
     /// the operator can investigate or replace the bad download.
     RejectedTooSmall { size: i64, threshold_mb: u32 },
+}
+
+/// Import a held file into `issue_id` without the page-count check: the
+/// user looked at a [`InterventionReason::LikelyCollectedEdition`] hold
+/// and said it is the issue. Every other step of a normal import runs.
+pub async fn import_held(
+    source: &Path,
+    issue_id: i64,
+    library_root: &Path,
+    library_root_id: i64,
+    db: &Pool,
+) -> Result<Outcome> {
+    let started_at = std::time::Instant::now();
+    let meta = std::fs::metadata(source)?;
+    let mtime = system_time_to_offset(meta.modified()?);
+    let outcome = import_as_owned(
+        source,
+        issue_id,
+        library_root,
+        library_root_id,
+        meta.len() as i64,
+        mtime,
+        db,
+        false,
+    )
+    .await?;
+    log_outcome(&outcome, started_at, source);
+    Ok(outcome)
 }
 
 /// The page count when `source` has more pages than a single issue and
@@ -586,6 +619,7 @@ fn cleanup_conflict_source(source: &Path, target: &Path, size: i64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // check_pages is only false for an import anyway
 async fn import_as_owned(
     source: &Path,
     issue_id: i64,
@@ -594,6 +628,7 @@ async fn import_as_owned(
     size: i64,
     mtime: OffsetDateTime,
     db: &Pool,
+    check_pages: bool,
 ) -> Result<Outcome> {
     let issue =
         issue_repo::find_by_id(db, issue_id)
@@ -638,7 +673,12 @@ async fn import_as_owned(
         });
     }
 
-    if let Some(pages) = collected_edition_pages(source, &series, db).await? {
+    let held_pages = if check_pages {
+        collected_edition_pages(source, &series, db).await?
+    } else {
+        None
+    };
+    if let Some(pages) = held_pages {
         let message = format!("{pages} pages: likely a collected edition, held for review");
         let settled =
             pull_attempt_repo::record_failure_for_issue(db, series.id, issue.id, &message).await?;
@@ -655,6 +695,7 @@ async fn import_as_owned(
             reason: InterventionReason::LikelyCollectedEdition(pages),
             target: target_abs,
             size,
+            issue_id: issue.id,
         });
     }
 
@@ -707,6 +748,7 @@ async fn import_as_owned(
                 reason: InterventionReason::SourceArchiveUnreadable(e.to_string()),
                 target: target_abs,
                 size,
+                issue_id: issue.id,
             });
         }
         Err(other) => {
@@ -717,6 +759,7 @@ async fn import_as_owned(
                 reason: InterventionReason::ComicInfoWriteFailed(other.into_error().to_string()),
                 target: target_abs,
                 size,
+                issue_id: issue.id,
             });
         }
     };
@@ -733,6 +776,7 @@ async fn import_as_owned(
             reason: InterventionReason::MoveFailed(e.to_string()),
             target: target_abs,
             size,
+            issue_id: issue.id,
         });
     }
 

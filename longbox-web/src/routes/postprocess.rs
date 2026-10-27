@@ -6,15 +6,18 @@
 //! - `POST /api/postprocess/trigger` runs an on-demand drain of the
 //!   watch folder via `longbox_postprocess::sweep_now` and returns a
 //!   per-outcome tally so the Settings page can render a result toast.
+//! - `POST /api/postprocess/import-anyway` files a page-count hold into
+//!   the issue it was matched to, once the user has looked at it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use longbox_postprocess::{PendingIntervention, SweepSummary};
-use serde::Serialize;
+use longbox_postprocess::processor::Outcome;
+use longbox_postprocess::{ImportAnyway, PendingIntervention, SweepSummary};
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -23,6 +26,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/postprocess/pending", get(handler))
         .route("/postprocess/trigger", post(trigger))
+        .route("/postprocess/import-anyway", post(import_anyway))
 }
 
 #[derive(Debug, Serialize)]
@@ -89,4 +93,66 @@ async fn trigger(State(state): State<AppState>) -> Result<Json<SweepSummary>, Ap
         "postprocess.trigger_completed"
     );
     Ok(Json(summary))
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportAnywayBody {
+    /// A `source_path` from `GET /api/postprocess/pending`.
+    source_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct ImportAnywayResponse {
+    target: PathBuf,
+    issue_id: i64,
+}
+
+/// File a page-count hold into the issue it was matched to. 404 when the
+/// path is not a page-count hold in the pending list (nothing else is
+/// eligible, and no other path is touched); 409 when the import itself
+/// didn't land, e.g. the library already has that issue.
+async fn import_anyway(
+    State(state): State<AppState>,
+    Json(body): Json<ImportAnywayBody>,
+) -> Result<Json<ImportAnywayResponse>, ApiError> {
+    let Some(watch_path) = state.config.download_watch_path.as_deref() else {
+        return Err(ApiError::BadRequest {
+            message: "DOWNLOAD_WATCH_PATH is not configured; no watch folder to import from."
+                .into(),
+        });
+    };
+    let result = longbox_postprocess::import_anyway(
+        Path::new(&state.config.library_root_path),
+        state.library_root_id,
+        Path::new(watch_path),
+        &state.db,
+        &state.pending_cache,
+        &body.source_path,
+    )
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("import anyway failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    match result {
+        ImportAnyway::Ran(Outcome::Imported {
+            target, issue_id, ..
+        }) => Ok(Json(ImportAnywayResponse { target, issue_id })),
+        ImportAnyway::NotHeld => Err(ApiError::NotFound {
+            resource: "page-count hold",
+            id: body.source_path.display().to_string(),
+        }),
+        ImportAnyway::Ran(other) => Err(ApiError::Conflict {
+            code: "conflict.import_anyway",
+            message: match other {
+                Outcome::Conflict { target, .. } => format!(
+                    "The library already has this issue at {}; the held copy was removed.",
+                    target.display()
+                ),
+                Outcome::Failed { reason, .. } => format!("The import failed: {reason:?}"),
+                other => format!("The file was not imported: {other:?}"),
+            },
+            details: serde_json::Value::Null,
+        }),
+    }
 }
