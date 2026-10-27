@@ -42,6 +42,8 @@ export interface SearchAllMissingSummary {
   /** Solicited issues skipped because they haven't shipped yet
    *  (release date is today or later). */
   skipped_solicited: number;
+  /** Issues of trade/hardcover volumes in the catalog, never searched. */
+  skipped_collected_edition: number;
 }
 
 /** Fire-and-forget: dispatch a per-issue indexer search for every

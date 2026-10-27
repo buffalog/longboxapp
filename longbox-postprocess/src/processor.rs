@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use longbox_core::{
-    classify_status, match_file, ComicInfo, ComicInfoMetadata, FileStatus, LibraryPath,
-    MatchMethod, MetronInfoMetadata, ParsingPattern,
+    classify_status, match_file, normalize_title, ComicInfo, ComicInfoMetadata, FileStatus,
+    IssueNumber, LibraryPath, MatchMethod, MetronInfoMetadata, ParsingPattern,
 };
 use longbox_db::{
     file_repo, find_candidates, issue_repo, parsing_pattern_repo, pull_attempt_repo, series_repo,
@@ -26,7 +26,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::PostprocessError;
-use crate::intervention::InterventionReason;
+use crate::intervention::{AmbiguousCandidate, InterventionReason};
 use crate::Result;
 
 /// Stability check: skip files whose mtime is within this many seconds
@@ -249,17 +249,38 @@ pub async fn process_one(
             )
             .await?
         }
-        // An ambiguous match usually scores ABOVE the threshold (0.90 vs
-        // 0.85) — saying "below owned threshold" would be a flat lie in the
-        // logs of exactly the files someone is trying to debug.
-        (Some(_), _, false) if match_result.ambiguous => Outcome::Skipped {
-            reason: format!(
-                "ambiguous match for series hint {hint:?}: this file's ComicInfo \
-                 and its filename name different issues (confidence={:.2}) — \
-                 left in the watch folder for a human",
-                match_result.confidence
-            ),
-        },
+        // Held for the user to pick from the issues it could be. Nothing is
+        // moved or rewritten until they do.
+        (Some(issue_id), _, false) if match_result.ambiguous => {
+            let numbers: Vec<&str> = [
+                comic_info.as_ref().and_then(|c| c.number.as_deref()),
+                filename_parse.as_ref().map(|p| p.number.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let options = ambiguous_candidates(&candidates, issue_id, &numbers);
+            if options.len() > 1 {
+                Outcome::Failed {
+                    reason: InterventionReason::Ambiguous(options),
+                    target: PathBuf::new(),
+                    size,
+                    issue_id,
+                }
+            } else {
+                // An ambiguous match usually scores ABOVE the threshold (0.90
+                // vs 0.85) — saying "below owned threshold" would be a flat
+                // lie in the logs of exactly the files someone is trying to
+                // debug.
+                Outcome::Skipped {
+                    reason: format!(
+                        "ambiguous match for series hint {hint:?} (confidence={:.2}) — \
+                         left in the watch folder for a human",
+                        match_result.confidence
+                    ),
+                }
+            }
+        }
         (Some(_), _, false) => Outcome::Skipped {
             reason: format!(
                 "needs-review-tier match for series hint {hint:?} \
@@ -279,6 +300,48 @@ pub async fn process_one(
 
     log_outcome(&outcome, started_at, source);
     Ok(outcome)
+}
+
+/// Every issue an ambiguous match could be: in the matched series and each
+/// same-titled volume, the issues numbered as ComicInfo or the filename
+/// says. Ordered by volume year, then series id.
+fn ambiguous_candidates(
+    candidates: &[longbox_core::Candidate],
+    matched_issue_id: i64,
+    numbers: &[&str],
+) -> Vec<AmbiguousCandidate> {
+    let Some(matched) = candidates
+        .iter()
+        .find(|c| c.issues.iter().any(|i| i.id == matched_issue_id))
+    else {
+        return Vec::new();
+    };
+    let key = normalize_title(&matched.series.title);
+    let needles: Vec<IssueNumber> = numbers.iter().map(|n| IssueNumber::new(*n)).collect();
+    let mut volumes: Vec<&longbox_core::Candidate> = candidates
+        .iter()
+        .filter(|c| normalize_title(&c.series.title) == key)
+        .collect();
+    volumes.sort_by_key(|c| (c.series.start_year, c.series.id));
+    let mut out: Vec<AmbiguousCandidate> = Vec::new();
+    for c in volumes {
+        for issue in &c.issues {
+            if needles.iter().any(|n| issue.number.matches(n))
+                && !out.iter().any(|o| o.issue_id == issue.id)
+            {
+                out.push(AmbiguousCandidate {
+                    issue_id: issue.id,
+                    series_id: c.series.id,
+                    series_title: c.series.title.clone(),
+                    start_year: c.series.start_year,
+                    number: issue.number.as_str().to_string(),
+                    store_date: issue.store_date.clone(),
+                    cover_date: issue.cover_date.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// What happened to the file. Returned so callers (and tests) can
@@ -332,15 +395,16 @@ pub enum Outcome {
     RejectedTooSmall { size: i64, threshold_mb: u32 },
 }
 
-/// Import a held file into `issue_id` without the page-count check: the
-/// user looked at a [`InterventionReason::LikelyCollectedEdition`] hold
-/// and said it is the issue. Every other step of a normal import runs.
+/// Import a held file into the issue the user chose. `check_pages` is
+/// false when they looked at a [`InterventionReason::LikelyCollectedEdition`]
+/// hold and said it is the issue; every other step of a normal import runs.
 pub async fn import_held(
     source: &Path,
     issue_id: i64,
     library_root: &Path,
     library_root_id: i64,
     db: &Pool,
+    check_pages: bool,
 ) -> Result<Outcome> {
     let started_at = std::time::Instant::now();
     let meta = std::fs::metadata(source)?;
@@ -353,7 +417,7 @@ pub async fn import_held(
         meta.len() as i64,
         mtime,
         db,
-        false,
+        check_pages,
     )
     .await?;
     log_outcome(&outcome, started_at, source);

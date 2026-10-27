@@ -64,6 +64,23 @@ pub enum InterventionReason {
     /// count): almost certainly a trade grabbed for an issue. Held for a
     /// human; the pull attempt is failed so another release is tried.
     LikelyCollectedEdition(usize),
+    /// The match was ambiguous: same-titled volumes the evidence couldn't
+    /// choose between, or ComicInfo and filename naming different issues.
+    /// The payload is every issue the file could be; the user picks one.
+    Ambiguous(Vec<AmbiguousCandidate>),
+}
+
+/// One issue an [`InterventionReason::Ambiguous`] hold could be filed as.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AmbiguousCandidate {
+    pub issue_id: i64,
+    pub series_id: i64,
+    pub series_title: String,
+    pub start_year: Option<i32>,
+    pub number: String,
+    /// On-sale date, else `None`; the UI falls back to `cover_date`.
+    pub store_date: Option<String>,
+    pub cover_date: Option<String>,
 }
 
 /// In-memory cache of files awaiting manual intervention. Shared with

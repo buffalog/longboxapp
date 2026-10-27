@@ -18,11 +18,16 @@ export function triggerPostprocess(): Promise<SweepSummary> {
 }
 
 /** File a page-count hold into the issue it was matched to, skipping
- *  only the page check. 404 when `sourcePath` is not a page-count hold
- *  in the pending list; 409 when the import didn't land. */
-export function importAnyway(sourcePath: string): Promise<{ target: string; issue_id: number }> {
+ *  only the page check, or an ambiguous hold into `issueId`, one of its
+ *  candidates. 404 when `sourcePath` is neither kind of hold in the
+ *  pending list; 400 when an ambiguous hold's `issueId` isn't a
+ *  candidate; 409 when the import didn't land. */
+export function importAnyway(
+  sourcePath: string,
+  issueId?: number
+): Promise<{ target: string; issue_id: number }> {
   return apiFetch('/postprocess/import-anyway', {
     method: 'POST',
-    body: JSON.stringify({ source_path: sourcePath })
+    body: JSON.stringify({ source_path: sourcePath, issue_id: issueId ?? null })
   });
 }

@@ -2,6 +2,7 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use longbox_core::IssueNumber;
+use longbox_db::series_repo;
 use serde::{Deserialize, Serialize};
 use time::PrimitiveDateTime;
 
@@ -64,8 +65,9 @@ struct MissingRow {
     series_start_year: Option<i64>,
 }
 
-/// "Missing" = an issue with no present owned file. Mirrors the predicate
-/// used by series_repo::list_..._with_counts and routes/stats.rs.
+/// "Missing" = an issue with no present owned file, outside
+/// collected-edition volumes. Mirrors the predicate used by
+/// series_repo::list_..._with_counts and routes/stats.rs.
 async fn handler(
     State(state): State<AppState>,
     Query(params): Query<MissingParams>,
@@ -195,6 +197,14 @@ async fn handler(
         message: format!("missing query failed: {e}"),
         source: anyhow::anyhow!(e),
     })?;
+
+    // Trade, hardcover and graphic-novel volumes are never missing
+    // anything: their issues are books the user collects as singles.
+    let trades = series_repo::collected_edition_ids(&state.db).await?;
+    let rows: Vec<MissingRow> = rows
+        .into_iter()
+        .filter(|r| !trades.contains(&r.series_id))
+        .collect();
 
     // SQL ORDER BY on `s.sort_title, i.id` is a series grouping with
     // arbitrary intra-series order. Apply natural issue-number ordering

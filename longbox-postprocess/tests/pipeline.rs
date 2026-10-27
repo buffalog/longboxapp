@@ -1149,7 +1149,13 @@ async fn ambiguous_match_is_never_trusted_through_by_a_pull_attempt() {
     .unwrap();
 
     assert!(
-        matches!(outcome, Outcome::Skipped { .. }),
+        matches!(
+            &outcome,
+            Outcome::Failed {
+                reason: longbox_postprocess::InterventionReason::Ambiguous(options),
+                ..
+            } if options.len() == 2
+        ),
         "an ambiguous match must not be trusted through by pull history; got {outcome:?}"
     );
 
@@ -1271,7 +1277,13 @@ async fn ambiguous_folder_match_is_never_trusted_through_by_a_pull_attempt() {
     .unwrap();
 
     assert!(
-        matches!(outcome, Outcome::Skipped { .. }),
+        matches!(
+            &outcome,
+            Outcome::Failed {
+                reason: longbox_postprocess::InterventionReason::Ambiguous(options),
+                ..
+            } if options.len() == 2
+        ),
         "an ambiguous FOLDER match must not be trusted through by pull history; got {outcome:?}"
     );
     assert!(
@@ -1639,9 +1651,13 @@ async fn release_year_files_into_the_volume_whose_issue_it_fits_not_the_bigger_c
 async fn release_year_that_fits_no_volume_is_held_not_sized() {
     // 2019 is neither volume's #26 on-sale year (or the year after), and no
     // volume starts in 2019. Nothing decides, so the file is held, even
-    // though GL (2005) is the bigger catalog.
+    // though GL (2005) is the bigger catalog. The hold lists both #26s with
+    // their dates, and "Import anyway" files it into the one the user picks.
     let f = seed_basic_fixture().await;
-    seed_green_lanterns(&f.db).await;
+    longbox_db::settings_repo::set(&f.db, longbox_db::settings_repo::KEY_MIN_FILE_SIZE_MB, "0")
+        .await
+        .unwrap();
+    let (gl2005, gl2023) = seed_green_lanterns(&f.db).await;
     let source = f
         ._watch
         .path()
@@ -1649,22 +1665,85 @@ async fn release_year_that_fits_no_volume_is_held_not_sized() {
         .join("Green Lantern 026 (2019) (digital) (Zone-Empire).cbz");
     write_cbz(&source, None);
 
-    let outcome = processor::process_one(
-        &source,
+    let cache = Arc::new(PendingInterventionsCache::new());
+    longbox_postprocess::sweep_now(
         f.library.path(),
         f.library_root_id,
-        &f.db,
-        longbox_core::DEFAULT_MATCH_THRESHOLD,
-        0,
+        f._watch.path(),
+        f.db.clone(),
+        Arc::clone(&cache),
     )
     .await
     .unwrap();
-
-    assert!(
-        matches!(outcome, Outcome::Skipped { .. }),
-        "an unsettled volume question must be held; got {outcome:?}"
-    );
     assert!(source.exists(), "the file must stay in the watch folder");
+    let held = cache.snapshot();
+    assert_eq!(held.len(), 1, "{held:?}");
+    let options = match &held[0].reason {
+        longbox_postprocess::InterventionReason::Ambiguous(options) => options.clone(),
+        other => panic!("an unsettled volume question must be held as ambiguous; got {other:?}"),
+    };
+    let listed: Vec<_> = options
+        .iter()
+        .map(|o| {
+            (
+                o.issue_id,
+                o.start_year,
+                o.cover_date.as_deref(),
+                o.store_date.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (gl2005[2], Some(2005), Some("2008-02-01"), None),
+            (
+                gl2023[1],
+                Some(2023),
+                Some("2025-10-01"),
+                Some("2025-08-27")
+            ),
+        ]
+    );
+
+    for pick in [None, Some(gl2023[0])] {
+        let refused = longbox_postprocess::import_anyway(
+            f.library.path(),
+            f.library_root_id,
+            f._watch.path(),
+            &f.db,
+            &cache,
+            &source,
+            pick,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(refused, longbox_postprocess::ImportAnyway::NotACandidate),
+            "{pick:?}: {refused:?}"
+        );
+        assert!(source.exists());
+    }
+
+    let ran = longbox_postprocess::import_anyway(
+        f.library.path(),
+        f.library_root_id,
+        f._watch.path(),
+        &f.db,
+        &cache,
+        &source,
+        Some(gl2023[1]),
+    )
+    .await
+    .unwrap();
+    match ran {
+        longbox_postprocess::ImportAnyway::Ran(Outcome::Imported { issue_id, .. }) => {
+            assert_eq!(issue_id, gl2023[1])
+        }
+        other => panic!("expected an import into GL (2023) #26, got {other:?}"),
+    }
+    assert!(!source.exists());
+    assert!(cache.is_empty());
 }
 
 /// A CBZ with `pages` tiny page images.
@@ -1717,6 +1796,7 @@ async fn import_anyway_files_a_page_hold_into_its_issue() {
         &f.db,
         &cache,
         &stray,
+        None,
     )
     .await
     .unwrap();
@@ -1733,6 +1813,7 @@ async fn import_anyway_files_a_page_hold_into_its_issue() {
         &f.db,
         &cache,
         &source,
+        None,
     )
     .await
     .unwrap();

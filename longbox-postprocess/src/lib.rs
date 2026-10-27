@@ -35,7 +35,9 @@ use tokio::sync::mpsc;
 
 pub use config::PostprocessConfig;
 pub use error::{PostprocessError, Result};
-pub use intervention::{InterventionReason, PendingIntervention, PendingInterventionsCache};
+pub use intervention::{
+    AmbiguousCandidate, InterventionReason, PendingIntervention, PendingInterventionsCache,
+};
 
 /// Channel capacity for the watcher → consumer queue. Bounded so a
 /// runaway producer (e.g., SAB dumping thousands of files at once)
@@ -421,18 +423,22 @@ pub async fn sweep_now(
 /// The result of [`import_anyway`].
 #[derive(Debug)]
 pub enum ImportAnyway {
-    /// `source` is not a page-count hold in the cache. Only those are
-    /// eligible: other failures are fixed on disk, and a path the cache
-    /// doesn't hold is never touched.
+    /// `source` is not a page-count or ambiguous hold in the cache. Only
+    /// those are eligible: other failures are fixed on disk, and a path the
+    /// cache doesn't hold is never touched.
     NotHeld,
+    /// An ambiguous hold, and `issue_id` is missing or not one of its
+    /// candidates.
+    NotACandidate,
     /// The import ran; the outcome says whether it landed.
     Ran(processor::Outcome),
 }
 
-/// File a page-count hold into the issue it was matched to, skipping only
-/// the page check. Called when the user has looked at a
-/// [`InterventionReason::LikelyCollectedEdition`] hold (a giant-size
-/// issue, say) and says it is the issue.
+/// File a held file through the normal import. A page-count hold
+/// ([`InterventionReason::LikelyCollectedEdition`]: a giant-size issue,
+/// say) goes into the issue it was matched to, skipping only the page
+/// check; `pick` is ignored. An [`InterventionReason::Ambiguous`] hold goes
+/// into `pick`, which must be one of its candidates, with every check run.
 pub async fn import_anyway(
     library_root: &Path,
     library_root_id: i64,
@@ -440,16 +446,34 @@ pub async fn import_anyway(
     db: &longbox_db::Pool,
     cache: &PendingInterventionsCache,
     source: &Path,
+    pick: Option<i64>,
 ) -> Result<ImportAnyway> {
-    let held = cache.snapshot().into_iter().find(|item| {
-        item.source_path == source
-            && matches!(item.reason, InterventionReason::LikelyCollectedEdition(_))
-    });
-    let Some(issue_id) = held.and_then(|item| item.issue_id) else {
+    let Some(held) = cache
+        .snapshot()
+        .into_iter()
+        .find(|item| item.source_path == source)
+    else {
         return Ok(ImportAnyway::NotHeld);
     };
-    let outcome =
-        processor::import_held(source, issue_id, library_root, library_root_id, db).await?;
+    let (issue_id, check_pages) = match (&held.reason, held.issue_id) {
+        (InterventionReason::LikelyCollectedEdition(_), Some(id)) => (id, false),
+        (InterventionReason::Ambiguous(options), _) => {
+            match pick.filter(|p| options.iter().any(|o| o.issue_id == *p)) {
+                Some(id) => (id, true),
+                None => return Ok(ImportAnyway::NotACandidate),
+            }
+        }
+        _ => return Ok(ImportAnyway::NotHeld),
+    };
+    let outcome = processor::import_held(
+        source,
+        issue_id,
+        library_root,
+        library_root_id,
+        db,
+        check_pages,
+    )
+    .await?;
     if outcome_removes_source(&outcome) {
         if let Ok(root) = watch_path.canonicalize() {
             cleanup_empty_parent(source, &root);

@@ -28,6 +28,7 @@ function series(over: Partial<SeriesWithCounts> = {}): SeriesWithCounts {
     missing_count: 0,
     solicited_count: 0,
     finished: false,
+    collected_edition: false,
     ...over
   };
 }
@@ -137,6 +138,17 @@ describe('SeriesCard badge', () => {
     const f = fraction(container)!;
     expect(f.textContent).toMatch(/10\/12/);
     expect(f.className).toContain('status-unmatched');
+  });
+
+  it('stays neutral (not red) for a trade volume with unowned issues', () => {
+    const { container } = render(SeriesCard, {
+      props: {
+        series: series({ total_count: 2, owned_count: 0, collected_edition: true })
+      }
+    });
+    const f = fraction(container)!;
+    expect(f.textContent).toMatch(/0\/2/);
+    expect(f.className).not.toContain('status-unmatched');
   });
 
   it('stays neutral (not purple) when fully owned but finished is unknown', () => {

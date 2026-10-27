@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteExecutor;
 use time::PrimitiveDateTime;
@@ -497,16 +499,59 @@ pub struct SeriesWithCounts {
     /// false for CV-only series and until the finished-state enrichment
     /// runs — populated only via the Metron detail path (GH #7).
     pub finished: bool,
+    /// A trade, hardcover or graphic novel volume (see
+    /// [`collected_edition_ids`]). Its `missing_count` is 0: nothing in it
+    /// is searched for or counted as missing.
+    pub collected_edition: bool,
+}
+
+/// Ids of the series [`longbox_core::collected_edition_reason`] flags:
+/// trade, hardcover and graphic-novel volumes in the catalog. Their unowned
+/// issues are never searched for or counted as missing.
+pub async fn collected_edition_ids(pool: &crate::Pool) -> Result<HashSet<i64>> {
+    let series = sqlx::query!(r#"SELECT id AS "id!: i64", description FROM series"#)
+        .fetch_all(pool)
+        .await?;
+    let issues = sqlx::query!(
+        r#"SELECT series_id AS "series_id!: i64", title AS "title!"
+           FROM issues WHERE title IS NOT NULL AND title != ''"#
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut names: HashMap<i64, Vec<&str>> = HashMap::new();
+    for issue in &issues {
+        names.entry(issue.series_id).or_default().push(&issue.title);
+    }
+    Ok(series
+        .iter()
+        .filter(|s| {
+            let names = names.get(&s.id).map(Vec::as_slice).unwrap_or(&[]);
+            longbox_core::collected_edition_reason(s.description.as_deref(), names).is_some()
+        })
+        .map(|s| s.id)
+        .collect())
+}
+
+/// Zero `missing_count` on collected-edition rows and mark them.
+async fn mark_collected_editions(
+    pool: &crate::Pool,
+    mut rows: Vec<SeriesWithCounts>,
+) -> Result<Vec<SeriesWithCounts>> {
+    let trades = collected_edition_ids(pool).await?;
+    for row in &mut rows {
+        if trades.contains(&row.series.id) {
+            row.collected_edition = true;
+            row.missing_count = 0;
+        }
+    }
+    Ok(rows)
 }
 
 /// Like [`find_all`] but augments each row with the per-status issue
 /// counts. `missing_count` is "issues for which no present owned file
 /// exists" — not derivable from `total_count - owned_count`, because that
 /// conflates with needs_review and ignored.
-pub async fn find_all_with_counts<'e, E>(executor: E) -> Result<Vec<SeriesWithCounts>>
-where
-    E: SqliteExecutor<'e>,
-{
+pub async fn find_all_with_counts(pool: &crate::Pool) -> Result<Vec<SeriesWithCounts>> {
     let rows = sqlx::query!(
         r#"SELECT
              s.id AS "id!: i64",
@@ -552,10 +597,10 @@ where
            GROUP BY s.id
            ORDER BY s.sort_title"#
     )
-    .fetch_all(executor)
+    .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let rows = rows
         .into_iter()
         .map(|r| SeriesWithCounts {
             series: SeriesRow {
@@ -579,20 +624,19 @@ where
             missing_count: r.missing_count,
             solicited_count: r.solicited_count,
             finished: r.finished,
+            collected_edition: false,
         })
-        .collect())
+        .collect();
+    mark_collected_editions(pool, rows).await
 }
 
 /// Like [`find_all_with_counts`] but newest-first by `created_at` and
 /// limited. Used by the dashboard activity feed's "Recently added series"
 /// section.
-pub async fn list_recent_with_counts<'e, E>(
-    executor: E,
+pub async fn list_recent_with_counts(
+    pool: &crate::Pool,
     limit: u32,
-) -> Result<Vec<SeriesWithCounts>>
-where
-    E: SqliteExecutor<'e>,
-{
+) -> Result<Vec<SeriesWithCounts>> {
     let limit_i64 = i64::from(limit);
     let rows = sqlx::query!(
         r#"SELECT
@@ -641,10 +685,10 @@ where
            LIMIT ?"#,
         limit_i64
     )
-    .fetch_all(executor)
+    .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let rows = rows
         .into_iter()
         .map(|r| SeriesWithCounts {
             series: SeriesRow {
@@ -668,8 +712,10 @@ where
             missing_count: r.missing_count,
             solicited_count: r.solicited_count,
             finished: r.finished,
+            collected_edition: false,
         })
-        .collect())
+        .collect();
+    mark_collected_editions(pool, rows).await
 }
 
 pub async fn find_all<'e, E>(executor: E) -> Result<Vec<SeriesRow>>

@@ -163,10 +163,49 @@ describe('needs-attention page', () => {
     // getByRole throws on more than one match: only the page-count hold gets the button.
     await fireEvent.click(screen.getByRole('button', { name: 'Import anyway' }));
 
-    await waitFor(() => expect(importAnyway).toHaveBeenCalledWith(held.source_path));
+    await waitFor(() =>
+      expect(importAnyway).toHaveBeenCalledWith(held.source_path, undefined)
+    );
     await waitFor(() =>
       expect(screen.queryByText(held.source_path)).not.toBeInTheDocument()
     );
     expect(screen.getByText('/watch/x.cbz')).toBeInTheDocument();
+  });
+  it('imports an ambiguous hold as the candidate picked, showing each on-sale date', async () => {
+    vi.mocked(importAnyway).mockResolvedValue({
+      target: '/comics/Dutch (2023)/Dutch (2023) 001.cbz',
+      issue_id: 13354
+    });
+    const candidate = (issue_id: number, start_year: number, store_date: string | null) => ({
+      issue_id,
+      series_id: issue_id,
+      series_title: 'Dutch',
+      start_year,
+      number: '1',
+      store_date,
+      cover_date: '2024-09-01'
+    });
+    const held: PendingIntervention = {
+      source_path: '/watch/Dutch 001/Dutch 001 (2024) (Digital) (Zone-Empire).cbr',
+      target_path: '',
+      reason: {
+        kind: 'ambiguous',
+        detail: [candidate(13354, 2023, '2024-02-14'), candidate(502, 2024, null)]
+      },
+      size: 66328754,
+      last_attempt: '2026-10-27T20:41:47Z',
+      issue_id: 502
+    };
+    render(NeedsAttentionPage, pageData([], [held]));
+
+    expect(screen.getByText('on sale 2024-02-14')).toBeInTheDocument();
+    expect(screen.getByText('cover date 2024-09-01')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Import anyway' })).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Dutch \(2023\) #1/ }));
+
+    await waitFor(() => expect(importAnyway).toHaveBeenCalledWith(held.source_path, 13354));
+    await waitFor(() =>
+      expect(screen.queryByText(held.source_path)).not.toBeInTheDocument()
+    );
   });
 });
