@@ -8937,3 +8937,101 @@ async fn delta_window_clamps_absurd_settings() {
         "{filter}"
     );
 }
+
+// -------- collected-edition guard (Add + calendar subscribe) --------
+
+/// A CV volume whose issues are "Volume One" / "Volume Two": the Hyde
+/// Street (2025) trade-paperback shape.
+const TRADE_VOLUME_ISSUES: &str = r#"{
+    "status_code": 1, "error": "OK",
+    "number_of_total_results": 2, "limit": 100, "offset": 0,
+    "results": [
+        { "id": 20001, "issue_number": "1", "name": "Volume One",
+          "cover_date": "2025-10-01", "store_date": "2025-10-01",
+          "description": null, "image": null, "site_detail_url": "https://cv/4000-20001/" },
+        { "id": 20002, "issue_number": "2", "name": "Volume Two",
+          "cover_date": "2026-07-29", "store_date": "2026-07-29",
+          "description": null, "image": null, "site_detail_url": "https://cv/4000-20002/" }
+    ]
+}"#;
+
+#[tokio::test]
+async fn add_series_refuses_a_collected_edition_until_confirmed() {
+    let app = build_test_app().await;
+    mount_cv_volume_and_issues(&app, 167375, TRADE_VOLUME_ISSUES).await;
+
+    let resp = app
+        .request(json_request("POST", "/api/series", r#"{"cv_id": 167375}"#))
+        .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "conflict.collected_edition");
+    assert!(body["error"]["details"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("Volume One"));
+    assert!(series_repo::find_by_cv_id(&app.state.db, 167375)
+        .await
+        .unwrap()
+        .is_none());
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/series",
+            r#"{"cv_id": 167375, "confirm_collected": true}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(series_repo::find_by_cv_id(&app.state.db, 167375)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn calendar_bulk_add_skips_a_collected_edition_and_reports_it() {
+    let app = build_test_app().await;
+    mount_cv_volume_and_issues(&app, 167375, TRADE_VOLUME_ISSUES).await;
+
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull/bulk",
+            r#"{"items":[{"cv_volume_id":167375}]}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let outcome = poll_subscribe_status(&app, "cv:167375", 100).await;
+    assert_eq!(outcome["status"], "skipped_collected");
+    assert!(outcome["error"].as_str().unwrap().contains("Volume One"));
+    assert!(series_repo::find_by_cv_id(&app.state.db, 167375)
+        .await
+        .unwrap()
+        .is_none());
+
+    // Already tracked (confirmed on Add), the synchronous path skips it too.
+    app.request(json_request(
+        "POST",
+        "/api/series",
+        r#"{"cv_id": 167375, "confirm_collected": true}"#,
+    ))
+    .await;
+    let resp = app
+        .request(json_request(
+            "POST",
+            "/api/releases/calendar/pull/bulk",
+            r#"{"items":[{"cv_volume_id":167375}]}"#,
+        ))
+        .await;
+    let body = response_json(resp).await;
+    assert_eq!(body["results"][0]["status"], "skipped_collected");
+    let series = series_repo::find_by_cv_id(&app.state.db, 167375)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pull_list_repo::get(&app.state.db, series.id)
+        .await
+        .unwrap()
+        .is_none());
+}

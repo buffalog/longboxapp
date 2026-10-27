@@ -752,6 +752,11 @@ pub fn filter_by_series_title(
             continue;
         }
 
+        // A trade, not an issue: silent, like a year rejection.
+        if volume_numbered(&release.title, &parsed.number) {
+            continue;
+        }
+
         // Last, so the list holds only releases this rule alone rejected.
         if post_number_subtitle(&parsed).is_some() {
             subtitle_rejected.push(release.title);
@@ -803,10 +808,31 @@ fn post_number_subtitle(parsed: &ParsedFilename) -> Option<&str> {
     parsed.title.as_deref().filter(|t| !t.is_empty())
 }
 
-/// Why the pre-grab filter would refuse `release_title` on its subtitle,
-/// for Interactive Search to show beside the result. `None` when the
-/// title doesn't parse or carries no post-number subtitle.
-pub fn subtitle_rejection(
+/// True when the parsed issue number is really a volume number: it shows
+/// up only as `vNN` or right after `Vol` / `Volume`, never on its own.
+///
+/// `G.I._Joe_v01_-_The_Cobra_Strikes_(2025)` and `Hyde.Street.v02.[2026]`
+/// are trades, and the volume patterns read their `v01` / `v02` as issue
+/// 1 and 2. Both were grabbed and filed as single issues on 2026-10-26.
+/// `Powers v3 010 (2012)` keeps its own number, so it passes.
+fn volume_numbered(release_title: &str, number: &str) -> bool {
+    let tokens: Vec<String> = release_title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let after_vol = |i: usize| i > 0 && matches!(tokens[i - 1].as_str(), "vol" | "volume");
+    let standalone = (0..tokens.len()).any(|i| tokens[i] == number && !after_vol(i));
+    let as_volume = tokens.iter().any(|t| *t == format!("v{number}"))
+        || (0..tokens.len()).any(|i| tokens[i] == number && after_vol(i));
+    as_volume && !standalone
+}
+
+/// Why the pre-grab filter would refuse `release_title` though its series
+/// matches, for Interactive Search to show beside the result: a volume
+/// number in the issue slot, or a subtitle after the issue number. `None`
+/// when the title doesn't parse or neither applies.
+pub fn auto_pull_rejection(
     release_title: &str,
     requested_series_title: &str,
     patterns: &[ParsingPattern],
@@ -815,6 +841,12 @@ pub fn subtitle_rejection(
         release_title,
         &patterns_for(requested_series_title, patterns),
     )?;
+    if volume_numbered(release_title, &parsed.number) {
+        return Some(format!(
+            "volume {} with no issue number: likely a trade paperback",
+            parsed.number
+        ));
+    }
     post_number_subtitle(&parsed).map(|x| {
         format!("subtitle \"{x}\" after the issue number: likely a different series or a trade")
     })
@@ -1049,41 +1081,115 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// The post-number subtitle fixtures fail on that rule alone: every
-    /// other gate passes them, so they land in `subtitle_rejected`.
+    /// The two trades grabbed as single issues on 2026-10-26 fail; a
+    /// volume-plus-issue release passes.
     #[test]
-    fn post_number_subtitle_is_the_only_gate_rejecting_them() {
+    fn volume_numbered_release_is_a_trade_not_an_issue() {
         let patterns = default_patterns();
-        for (title, cv, issue, on_sale, start) in [
-            ("Green.Lantern.012.-.Secret.Origin.(2025).(digital-mobile).(Son.of.Ultron-Empire).cbr-xpost", "Green Lantern", "12", 2024, 2023),
-            ("Morning Glories Vol. 1 - For a Better Future (2011) (Digital TPB) (FawkesGroup-Empire)", "Morning Glories", "1", 2010, 2010),
+        let gate = |on_sale, start| YearGate {
+            on_sale_year: Some(on_sale),
+            volume_start_year: Some(start),
+        };
+        for (title, cv, issue, year, pass) in [
+            (
+                "G.I._Joe_v01_-_The_Cobra_Strikes___2025___digital___Knight_Ripper-Empire___cbr",
+                "G.I. Joe",
+                "1",
+                gate(2025, 2025),
+                false,
+            ),
+            (
+                "Hyde.Street.v02.[2026].[Digital].[DR.and.Quinch-Empire]",
+                "Hyde Street",
+                "2",
+                gate(2026, 2025),
+                false,
+            ),
+            (
+                "Saga v01 (2012) (digital)",
+                "Saga",
+                "1",
+                gate(2012, 2012),
+                false,
+            ),
+            (
+                "Powers v3 010 (2012)",
+                "Powers",
+                "10",
+                gate(2012, 2009),
+                true,
+            ),
+            (
+                "Hyde.Street.002.[2024].[Digital].[DR.and.Quinch-Empire]",
+                "Hyde Street",
+                "2",
+                gate(2024, 2024),
+                true,
+            ),
         ] {
-            let gate = YearGate {
-                on_sale_year: Some(on_sale),
-                volume_start_year: Some(start),
-            };
-            let outcome = filter_by_series_title(
+            let kept = filter_by_series_title(
                 vec![release(title, Some(1))],
                 &patterns,
                 cv,
-                gate,
+                year,
                 longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
                 &[],
                 None,
                 issue,
                 &[],
+            )
+            .kept
+            .len();
+            assert_eq!(kept == 1, pass, "{title}");
+            assert_eq!(
+                auto_pull_rejection(title, cv, &patterns).is_some(),
+                !pass,
+                "{title}"
             );
-            assert!(outcome.kept.is_empty(), "{title}");
-            assert_eq!(outcome.subtitle_rejected, vec![title.to_owned()]);
-            // Silent, like a year rejection: the series was found.
-            assert_eq!(outcome.mismatch, None, "{title}");
-            assert!(subtitle_rejection(title, cv, &patterns).is_some(), "{title}");
         }
+        assert!(volume_numbered(
+            "Morning Glories Vol. 2 (2011) (Digital TPB)",
+            "2"
+        ));
+        assert!(!volume_numbered("Batman Vol 3 012 (2017)", "012"));
+        // Step 0's Morning Glories trade: the volume rule catches it before R2.
+        assert!(volume_numbered(
+            "Morning Glories Vol. 1 - For a Better Future (2011) (Digital TPB) (FawkesGroup-Empire)",
+            "1"
+        ));
+    }
+
+    /// The post-number subtitle fixture fails on that rule alone: every
+    /// other gate passes it, so it lands in `subtitle_rejected`.
+    #[test]
+    fn post_number_subtitle_is_the_only_gate_rejecting_it() {
+        let patterns = default_patterns();
+        let title = "Green.Lantern.012.-.Secret.Origin.(2025).(digital-mobile).(Son.of.Ultron-Empire).cbr-xpost";
+        let gate = YearGate {
+            on_sale_year: Some(2024),
+            volume_start_year: Some(2023),
+        };
+        let outcome = filter_by_series_title(
+            vec![release(title, Some(1))],
+            &patterns,
+            "Green Lantern",
+            gate,
+            longbox_core::PULL_INDEXER_MATCH_THRESHOLD,
+            &[],
+            None,
+            "12",
+            &[],
+        );
+        assert!(outcome.kept.is_empty());
+        assert_eq!(outcome.subtitle_rejected, vec![title.to_owned()]);
+        // Silent, like a year rejection: the series was found.
+        assert_eq!(outcome.mismatch, None);
+        assert!(auto_pull_rejection(title, "Green Lantern", &patterns).is_some());
         let plain = "Green Lantern 037 [2026] [digital] [Son of Ultron-Empire]";
-        assert_eq!(subtitle_rejection(plain, "Green Lantern", &patterns), None);
+        assert_eq!(auto_pull_rejection(plain, "Green Lantern", &patterns), None);
         let before = "Swamp Thing - Green Hell 001 (2022) (digital) (Son of Ultron-Empire)";
         assert_eq!(
-            subtitle_rejection(before, "Swamp Thing: Green Hell", &patterns),
+            auto_pull_rejection(before, "Swamp Thing: Green Hell", &patterns),
             None
         );
     }
@@ -2235,7 +2341,9 @@ mod tests {
         assert_eq!(p.year, Some(2024));
         assert_eq!(p.pattern_id, 14, "id=14 (Series vNN (YYYY)) must claim it");
 
-        // And it survives the real gate for the issue it actually is.
+        // The parse is right, but `v06` with no issue number is a trade
+        // (the 2026-10-26 replay: every vNN-only release at or above the
+        // threshold was a collection), so the gate refuses it as issue 6.
         let outcome = filter_by_series_title(
             vec![release(t, Some(10))],
             &patterns,
@@ -2247,7 +2355,8 @@ mod tests {
             "6",
             &[],
         );
-        assert_eq!(outcome.kept.len(), 1, "vNN release must be grabbable");
+        assert!(outcome.kept.is_empty(), "a vNN-only release is a trade");
+        assert_eq!(outcome.mismatch, None, "the series was found: silent");
     }
 
     /// A bare `N covers` art-count tag must not be mistaken for the

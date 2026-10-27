@@ -49,11 +49,22 @@
         return 'ComicInfo write failed';
       case 'move_failed':
         return 'Move failed';
+      case 'source_archive_unreadable':
+        return 'Archive unreadable';
+      case 'likely_collected_edition':
+        return 'Likely a collected edition';
     }
   }
 
   function reasonDetail(reason: InterventionReason): string | null {
-    return reason.kind === 'conflict' ? null : reason.detail;
+    switch (reason.kind) {
+      case 'conflict':
+        return null;
+      case 'likely_collected_edition':
+        return `${reason.detail} pages, more than a single issue. Check it before importing.`;
+      default:
+        return reason.detail;
+    }
   }
 
   async function handleRetry(failure: PullFailure): Promise<void> {

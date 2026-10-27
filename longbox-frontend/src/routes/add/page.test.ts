@@ -45,9 +45,7 @@ beforeEach(() => {
 
 describe('Add page', () => {
   it('retries a busy search once, showing the busy notice while it waits', async () => {
-    vi.mocked(searchVolumes)
-      .mockRejectedValueOnce(busy())
-      .mockResolvedValueOnce(response('Saga'));
+    vi.mocked(searchVolumes).mockRejectedValueOnce(busy()).mockResolvedValueOnce(response('Saga'));
     render(AddPage);
     await type('saga');
 
@@ -80,6 +78,30 @@ describe('Add page', () => {
 
     expect(await screen.findByText(/Added "Saga"/, {}, { timeout: 3000 })).toBeInTheDocument();
     expect(addSeries).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks before adding a collected edition, then adds with the confirmation', async () => {
+    vi.mocked(searchVolumes).mockResolvedValue(response('Hyde Street', 167375));
+    vi.mocked(addSeries)
+      .mockRejectedValueOnce(
+        new ApiError(409, 'conflict.collected_edition', 'looks like a collected edition', {
+          cv_id: 167375,
+          reason: '2 of 2 named issues are volumes, e.g. "Volume One"'
+        })
+      )
+      .mockResolvedValueOnce({ pull_search_queued: 0 } as AddSeriesResponse);
+    render(AddPage);
+    await type('hyde');
+    await fireEvent.click(await screen.findByText('Add to Library'));
+
+    expect(await screen.findByText('Collected edition?')).toBeInTheDocument();
+    expect(screen.getByText(/2 of 2 named issues are volumes/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(addSeries).toHaveBeenLastCalledWith(167375, false);
+
+    await fireEvent.click(screen.getByText('Add anyway'));
+    expect(await screen.findByText(/Added "Hyde Street"/)).toBeInTheDocument();
+    expect(addSeries).toHaveBeenLastCalledWith(167375, true);
   });
 
   it('drops a stale search response that lands after a newer one', async () => {
@@ -115,9 +137,7 @@ describe('Add page', () => {
   });
 
   it('skips the retry of a busy search the user has typed past', async () => {
-    vi.mocked(searchVolumes)
-      .mockRejectedValueOnce(busy())
-      .mockResolvedValue(response('Newer'));
+    vi.mocked(searchVolumes).mockRejectedValueOnce(busy()).mockResolvedValue(response('Newer'));
     render(AddPage);
 
     await type('old');

@@ -5,7 +5,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::stream::{self, StreamExt};
 use longbox_comicvine::ComicVineClient;
-use longbox_core::{normalize_title, IssueNumber};
+use longbox_core::{collected_edition_reason, normalize_title, IssueNumber};
 use longbox_db::{
     downloader_config_repo, file_repo, indexer_config_repo, issue_repo, library_root_repo,
     series_repo, settings_repo, IssueRow, NewIssue, NewSeries, SeriesRow, SeriesUpdate,
@@ -34,6 +34,10 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct AddSeriesBody {
     cv_id: i64,
+    /// The user confirmed adding a volume ComicVine lists as a collected
+    /// edition (the `409 conflict.collected_edition` round trip).
+    #[serde(default)]
+    confirm_collected: bool,
 }
 
 /// Summary of a finished-state enrichment run.
@@ -193,7 +197,8 @@ async fn add(
         });
     }
 
-    let (inserted, _was_new) = add_or_get_from_cv(&state, &state.cv, body.cv_id).await?;
+    let (inserted, _was_new) =
+        add_or_get_from_cv(&state, &state.cv, body.cv_id, !body.confirm_collected).await?;
 
     // Pre-create the on-disk series folder so the user can drop files
     // into it immediately without waiting for the next scan or for the
@@ -314,17 +319,39 @@ async fn spawn_auto_pull_search(
 /// `cv` picks the lane: user-initiated callers pass `&state.cv`
 /// (interactive); the calendar's background resolver passes a
 /// background-lane handle.
+///
+/// `refuse_collected` makes a ComicVine collected edition (TPB/HC volume,
+/// see [`collected_edition_reason`]) a `409 conflict.collected_edition`
+/// instead of an add, checked before anything is inserted. It applies to
+/// an already-tracked series too, from its stored description and issue
+/// names: subscribing a tracked trade volume is the same mistake.
 pub(crate) async fn add_or_get_from_cv(
     state: &AppState,
     cv: &ComicVineClient,
     cv_volume_id: i64,
+    refuse_collected: bool,
 ) -> Result<(SeriesRow, bool), ApiError> {
     if let Some(existing) = series_repo::find_by_cv_id(&state.db, cv_volume_id).await? {
+        if refuse_collected {
+            let issues = issue_repo::list_by_series(&state.db, existing.id).await?;
+            let names: Vec<&str> = issues.iter().filter_map(|i| i.title.as_deref()).collect();
+            refuse_if_collected(
+                cv_volume_id,
+                collected_edition_reason(existing.description.as_deref(), &names),
+            )?;
+        }
         return Ok((existing, false));
     }
 
     let volume = cv.fetch_volume(cv_volume_id).await?;
     let cv_issues = cv.fetch_issues(cv_volume_id).await?;
+    if refuse_collected {
+        let names: Vec<&str> = cv_issues.iter().filter_map(|i| i.name.as_deref()).collect();
+        refuse_if_collected(
+            cv_volume_id,
+            collected_edition_reason(volume.description.as_deref(), &names),
+        )?;
+    }
 
     let new_series = NewSeries {
         cv_id: Some(volume.cv_id),
@@ -360,6 +387,24 @@ pub(crate) async fn add_or_get_from_cv(
 
     Ok((inserted, true))
 }
+
+/// The `409` a collected edition gets when the caller didn't confirm it.
+/// `details.reason` is what the UI shows in its confirmation.
+fn refuse_if_collected(cv_volume_id: i64, reason: Option<String>) -> Result<(), ApiError> {
+    match reason {
+        Some(reason) => Err(ApiError::Conflict {
+            code: COLLECTED_EDITION,
+            message: format!(
+                "ComicVine volume {cv_volume_id} looks like a collected edition: {reason}"
+            ),
+            details: serde_json::json!({ "cv_id": cv_volume_id, "reason": reason }),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Error code for [`refuse_if_collected`].
+pub(crate) const COLLECTED_EDITION: &str = "conflict.collected_edition";
 
 /// Fire-and-forget `rematch_for_series` with the standard log triage. Does
 /// not touch scan_status. `caller` is a short tag (`"add-series"`,

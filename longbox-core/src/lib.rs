@@ -32,7 +32,7 @@ pub use library_path::LibraryPath;
 pub use matcher::{match_file, Candidate, MatchResult};
 pub use metroninfo_writer::MetronInfoMetadata;
 pub use normalize::normalize_title;
-pub use series::Series;
+pub use series::{collected_edition_reason, Series};
 
 /// Confidence floor below which a tier produces no match and the matcher
 /// falls through to the next tier.

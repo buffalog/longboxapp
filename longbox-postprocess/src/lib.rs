@@ -246,6 +246,18 @@ async fn load_owned_threshold(db: &longbox_db::Pool) -> Result<f64> {
 /// owns.
 pub const MIN_FILE_SIZE_MB_DEFAULT: u32 = 10;
 
+/// The size floor for a PDF, capped at the configured floor. A PDF single
+/// issue runs smaller than a CBZ of the same book: Battle Beast #10 and
+/// Rascal Randy #2 arrived complete at 9.6 MB and sat in /watch under the
+/// 10 MB floor, and the smallest PDF in the library on 2026-10-26 was
+/// 7.9 MB.
+pub const PDF_MIN_FILE_SIZE_MB: u32 = 5;
+
+/// A file with more pages than this, filed as a single issue, is held for
+/// a human: G.I. Joe v01 (129 pages) and Hyde Street v02 (132) were trades
+/// imported as #1 and #2.
+pub const MAX_SINGLE_ISSUE_PAGES: usize = 100;
+
 async fn load_min_file_size_mb(db: &longbox_db::Pool) -> Result<u32> {
     let value = settings_repo::get_or_default(
         db,

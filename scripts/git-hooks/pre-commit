@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enable once per clone: git config core.hooksPath scripts/git-hooks
+exec "$(git rev-parse --show-toplevel)/scripts/check-secrets.sh" --staged

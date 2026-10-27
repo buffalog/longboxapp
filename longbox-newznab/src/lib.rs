@@ -31,7 +31,7 @@ pub use client::{
 };
 pub use error::{IndexerError, NewznabError};
 pub use select::{
-    normalize_scene_title, score_release_title, subtitle_rejection, FilterOutcome,
+    auto_pull_rejection, normalize_scene_title, score_release_title, FilterOutcome,
     MismatchDiagnostic, YearGate,
 };
 pub use types::{ArchiveFormat, IndexerConfig, IndexerId, Release};

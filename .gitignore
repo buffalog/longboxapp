@@ -4,6 +4,11 @@
 .DS_Store
 .claude/
 .env
+# Any env file (metronapi.env sat untracked in the repo root). The
+# committed .env.example stays tracked.
+*.env
+.env.*
+!.env.example
 
 # Stray node_modules at the repo root — `npx ctx7@latest` and
 # friends initialize one when run from here. The real frontend

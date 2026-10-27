@@ -74,7 +74,13 @@ export function addCalendarVolumeToPullList(
 /** Terminal status of a subscribe attempt, plus `resolving` for an item
  *  the server deferred to its background resolver (a not-yet-local volume
  *  whose ComicVine fetch would otherwise block the request). */
-export type SubscribeStatus = 'added' | 'already_on_list' | 'resolving' | 'failed';
+export type SubscribeStatus =
+  | 'added'
+  | 'already_on_list'
+  | 'resolving'
+  | 'failed'
+  /** A collected edition (TPB/HC volume): bulk subscribe never adds one. */
+  | 'skipped_collected';
 
 /** Per-volume outcome of a bulk add-to-pull-list. Echoes back whichever
  *  of `cv_volume_id` / `metron_series_id` the caller sent so the toast

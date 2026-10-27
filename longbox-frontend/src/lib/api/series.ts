@@ -18,10 +18,13 @@ export interface AddSeriesResponse extends Series {
   pull_search_queued: number;
 }
 
-export function addSeries(cvId: number): Promise<AddSeriesResponse> {
+/** Add a series from ComicVine. A volume CV lists as a collected edition
+ *  (TPB/HC) is refused with `409 conflict.collected_edition` unless
+ *  `confirmCollected` is set; `details.reason` says why it was flagged. */
+export function addSeries(cvId: number, confirmCollected = false): Promise<AddSeriesResponse> {
   return apiFetch('/series', {
     method: 'POST',
-    body: JSON.stringify({ cv_id: cvId })
+    body: JSON.stringify({ cv_id: cvId, confirm_collected: confirmCollected })
   });
 }
 

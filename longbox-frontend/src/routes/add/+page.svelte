@@ -7,6 +7,7 @@
   import Button from '$lib/components/Button.svelte';
   import ErrorBanner from '$lib/components/ErrorBanner.svelte';
   import LoadingSpinner from '$lib/components/LoadingSpinner.svelte';
+  import Modal from '$lib/components/Modal.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import type { CvSearchResultItem } from '$lib/api/cv';
 
@@ -22,6 +23,9 @@
   let error = $state<ApiError | null>(null);
   let successMessage = $state<string | null>(null);
   let busyMessage = $state<string | null>(null);
+  // A volume the server flagged as a collected edition, awaiting the
+  // user's "add anyway".
+  let collected = $state<{ cvId: number; name: string; reason: string } | null>(null);
   // Bumped on every keystroke and on leaving the page, so a slow older
   // response can't overwrite a newer one, and a busy search the user has
   // moved on from doesn't spend a ComicVine call on its retry.
@@ -113,12 +117,13 @@
     if (q !== '') void runSearch(q);
   }
 
-  async function handleAdd(cvId: number, name: string): Promise<void> {
+  async function handleAdd(cvId: number, name: string, confirmCollected = false): Promise<void> {
     addingId = cvId;
     error = null;
     successMessage = null;
+    collected = null;
     try {
-      const result = await withBusyRetry(() => addSeries(cvId));
+      const result = await withBusyRetry(() => addSeries(cvId, confirmCollected));
       addedIds = new Set(addedIds).add(cvId);
       // Build the success message based on what the auto-search did.
       // `pull_search_queued === 0` covers both (a) no missing-and-shipped
@@ -134,12 +139,38 @@
         successMessage = `Added "${name}". Issues will sync from ComicVine; the next scan picks them up.`;
       }
     } catch (e) {
-      error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      if (e instanceof ApiError && e.code === 'conflict.collected_edition') {
+        const reason = (e.details as { reason?: string } | undefined)?.reason ?? e.message;
+        collected = { cvId, name, reason };
+      } else {
+        error = e instanceof ApiError ? e : new ApiError(0, 'unknown', String(e));
+      }
     } finally {
       addingId = null;
     }
   }
 </script>
+
+<Modal open={collected !== null} title="Collected edition?" onClose={() => (collected = null)}>
+  {#if collected}
+    <div class="space-y-3 p-4 text-sm">
+      <p>
+        <strong>{collected.name}</strong> looks like a collected edition (trade paperback or hardcover),
+        not a series of single issues. {collected.reason}.
+      </p>
+      <p class="text-slate-600">The pull engine would grab whole trades for it. Add it anyway?</p>
+      <div class="flex justify-end gap-2">
+        <Button type="button" variant="secondary" onclick={() => (collected = null)}>Cancel</Button>
+        <Button
+          type="button"
+          onclick={() => collected && handleAdd(collected.cvId, collected.name, true)}
+        >
+          Add anyway
+        </Button>
+      </div>
+    </div>
+  {/if}
+</Modal>
 
 <h1 class="mb-4 text-2xl font-bold">Add series</h1>
 

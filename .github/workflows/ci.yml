@@ -11,6 +11,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Env files and 64-hex tokens the change ADDS (scripts/check-secrets.sh).
+      - name: Check for env files and tokens
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: scripts/check-secrets.sh --range "$BASE"
+
   rust:
     name: Rust (clippy + test)
     runs-on: ubuntu-latest
