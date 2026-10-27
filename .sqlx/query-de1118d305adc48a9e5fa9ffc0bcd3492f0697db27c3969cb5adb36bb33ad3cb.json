@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"issue_id!: i64\",\n                  i.series_id AS \"series_id!: i64\",\n                  COALESCE(i.store_date, i.cover_date) AS \"release_date?: String\"\n           FROM issues i\n           JOIN series s ON s.id = i.series_id\n           WHERE NOT EXISTS (\n               SELECT 1 FROM files f\n               WHERE f.issue_id = i.id\n                 AND f.status = 'owned'\n                 AND f.is_present = 1\n           )",
+  "describe": {
+    "columns": [
+      {
+        "name": "issue_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "series_id!: i64",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "release_date?: String",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "de1118d305adc48a9e5fa9ffc0bcd3492f0697db27c3969cb5adb36bb33ad3cb"
+}

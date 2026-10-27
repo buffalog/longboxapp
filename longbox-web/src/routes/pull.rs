@@ -236,22 +236,22 @@ struct SearchAllMissingResponse {
 /// the log. The engine's per-issue in-flight dedup keeps a re-click
 /// from doubling the indexer load on already-running searches.
 ///
-/// Watch out: this fans out to ALL non-solicited missing issues at
-/// once. Per-indexer rate limits in the newznab clients absorb some of
-/// the bombardment but a library with thousands of missing issues
-/// will produce a sustained burst of indexer hits. Same fanout pattern
-/// the per-series endpoint has had since A.8 — this just scales it to
-/// the whole catalog.
+/// Every missing issue is dispatched at once, but the searches run two
+/// at a time (`longbox_pull::fire_issue_search`'s global cap), so a
+/// large catalog drains over minutes rather than hitting every indexer
+/// with hundreds of searches together, which on 2026-10-27 failed every
+/// indexer request until the burst drained.
 async fn search_all_missing(State(state): State<AppState>) -> Result<Response, ApiError> {
     // Same "missing" predicate as routes/missing.rs and stats.rs — no
-    // owned, present file matches this issue. We only need
-    // (series_id, issue_id, release date); skip the join with the
-    // series table because the per-issue search call doesn't use it.
+    // owned, present file matches this issue. The join drops issue rows
+    // whose series is gone: dispatching them only fails ("series not
+    // found"), and 15 such rows rode along in the 2026-10-27 burst.
     let rows = sqlx::query!(
         r#"SELECT i.id AS "issue_id!: i64",
                   i.series_id AS "series_id!: i64",
                   COALESCE(i.store_date, i.cover_date) AS "release_date?: String"
            FROM issues i
+           JOIN series s ON s.id = i.series_id
            WHERE NOT EXISTS (
                SELECT 1 FROM files f
                WHERE f.issue_id = i.id

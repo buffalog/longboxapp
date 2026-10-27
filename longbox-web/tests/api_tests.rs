@@ -4662,6 +4662,40 @@ async fn search_all_missing_excludes_owned_present_issues() {
     let _ = iid_missing;
 }
 
+/// Issue rows whose series was deleted (15 of them, from four series,
+/// rode along in the 2026-10-27 burst and each failed "series not
+/// found") are not dispatched.
+#[tokio::test]
+async fn search_all_missing_skips_issues_whose_series_is_gone() {
+    let app = build_test_app().await;
+    let sid = seed_pull_series(&app, "Saga").await;
+    insert_issue(&app, sid, "1", Some("2012-01-01")).await;
+    let mut conn = app.state.db.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues (series_id, number) VALUES (9999, '1')")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let body = response_json(
+        app.request(empty_request("POST", "/api/pull/search-all-missing"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        body["searched"], 1,
+        "the orphaned issue must not be dispatched"
+    );
+}
+
 #[tokio::test]
 async fn search_all_missing_is_a_clean_zero_when_catalog_is_empty() {
     let app = build_test_app().await;

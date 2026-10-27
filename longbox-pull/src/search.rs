@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::engine;
 use longbox_db::Pool;
@@ -99,7 +99,8 @@ impl PullSearchHandle {
 /// the "I clicked Search on issue 4 of Saga, go fill it" path.
 pub fn fire_issue_search(db: Pool, series_id: i64, issue_id: i64) {
     tokio::spawn(async move {
-        let outcome = engine::sweep_single_issue(&db, series_id, issue_id).await;
+        let outcome =
+            one_issue_search_at_a_time(engine::sweep_single_issue(&db, series_id, issue_id)).await;
         match &outcome {
             Ok(summary) => tracing::info!(
                 target: "longbox_pull",
@@ -123,9 +124,27 @@ pub fn fire_issue_search(db: Pool, series_id: i64, issue_id: i64) {
     });
 }
 
+/// Most per-issue searches running at once, across every caller of
+/// [`fire_issue_search`] (Search missing, Search all missing, the
+/// per-issue button, the downloader webhook). Each search queries every
+/// indexer at once, and on 2026-10-27 "Search all missing" spawned 471
+/// together: every indexer request failed for the two minutes it took
+/// them to drain. Queued searches wait their turn.
+const MAX_CONCURRENT_ISSUE_SEARCHES: usize = 2;
+
+static ISSUE_SEARCHES: Semaphore = Semaphore::const_new(MAX_CONCURRENT_ISSUE_SEARCHES);
+
+/// Run one issue search under the global cap.
+async fn one_issue_search_at_a_time<F: std::future::Future>(search: F) -> F::Output {
+    // The semaphore is a static that is never closed, so acquire can't fail.
+    let _permit = ISSUE_SEARCHES.acquire().await.expect("never closed");
+    search.await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn fresh_pool() -> Pool {
         longbox_db::open(":memory:").await.unwrap()
@@ -158,5 +177,25 @@ mod tests {
         // A third, distinct series is still accepted; the guard is
         // per-series, not global.
         assert!(handle.try_start(3).await);
+    }
+
+    #[tokio::test]
+    async fn issue_searches_run_at_most_two_at_a_time() {
+        static RUNNING: AtomicUsize = AtomicUsize::new(0);
+        static PEAK: AtomicUsize = AtomicUsize::new(0);
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                tokio::spawn(one_issue_search_at_a_time(async {
+                    let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+                    PEAK.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    RUNNING.fetch_sub(1, Ordering::SeqCst);
+                }))
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(PEAK.load(Ordering::SeqCst), MAX_CONCURRENT_ISSUE_SEARCHES);
     }
 }
