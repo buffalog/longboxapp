@@ -67,13 +67,43 @@ impl RemoteStorage {
     /// Splits on both separators: the downloader may run on Windows
     /// even when LongBox does not.
     pub fn basename(&self) -> Option<&str> {
+        self.component_from_end(0)
+    }
+
+    /// The component before the final one. SABnzbd reports a job's
+    /// `storage` as the comic file inside the job folder, not the folder
+    /// (`.../complete/Thundercats 1/ThunderCats 001 (2026).cbz`), so the
+    /// job folder is this, not [`basename`](Self::basename).
+    pub fn parent_basename(&self) -> Option<&str> {
+        self.component_from_end(1)
+    }
+
+    fn component_from_end(&self, n: usize) -> Option<&str> {
         let trimmed = self.0.trim_end_matches(['/', '\\']);
-        let name = trimmed.rsplit(['/', '\\']).next()?;
+        let name = trimmed.rsplit(['/', '\\']).nth(n)?;
         if name.is_empty() || name == "." || name == ".." {
             None
         } else {
             Some(name)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteStorage;
+
+    #[test]
+    fn basename_and_parent_basename() {
+        let file = RemoteStorage::new(
+            "/Users/you/Downloads/complete/Thundercats 1/ThunderCats 001 (2026).cbz",
+        );
+        assert_eq!(file.basename(), Some("ThunderCats 001 (2026).cbz"));
+        assert_eq!(file.parent_basename(), Some("Thundercats 1"));
+        let windows = RemoteStorage::new("C:\\sab\\Saga 1.1\\");
+        assert_eq!(windows.basename(), Some("Saga 1.1"));
+        assert_eq!(windows.parent_basename(), Some("sab"));
+        assert_eq!(RemoteStorage::new("/Saga 1").parent_basename(), None);
     }
 }
 
