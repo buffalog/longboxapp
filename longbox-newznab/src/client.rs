@@ -464,9 +464,19 @@ pub async fn find_release_excluding_filtered(
     .map(|(outcome, _)| outcome)
 }
 
+/// Distinct releases the auto-pull-only rules refused in one search.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AutoPullRejections {
+    /// ` - Subtitle` after the issue number, logged as `pull.subtitle_rejected`.
+    pub subtitle: usize,
+    /// Volume-numbered trade (`vNN` with no issue number), logged as
+    /// `pull.vnn_rejected`.
+    pub vnn: usize,
+}
+
 /// [`find_release_excluding_filtered`] plus how many distinct releases the
-/// post-number-subtitle rule rejected, each logged at INFO as
-/// `pull.subtitle_rejected` so the rule's cost can be audited.
+/// auto-pull-only rules rejected, each logged at INFO so the rules' cost
+/// can be audited.
 #[allow(clippy::too_many_arguments)] // same inputs as find_release_excluding_filtered
 pub async fn find_release_counted(
     indexers: &[IndexerConfig],
@@ -480,9 +490,9 @@ pub async fn find_release_counted(
     cover_date: Option<&str>,
     min_size_bytes: Option<i64>,
     aliases: &[String],
-) -> Result<(FindOutcome, usize), NewznabError> {
+) -> Result<(FindOutcome, AutoPullRejections), NewznabError> {
     if indexers.is_empty() {
-        return Ok((FindOutcome::NoMatch, 0));
+        return Ok((FindOutcome::NoMatch, AutoPullRejections::default()));
     }
 
     let survival = SurvivalTest {
@@ -533,6 +543,7 @@ pub async fn find_release_counted(
     // Deduped: the same release cross-posted to several indexers is one rejection.
     let mut subtitle_rejected: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
+    let mut vnn_rejected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // guid → IndexerId so we can attribute the winning release after select_best.
     let mut guid_to_indexer: std::collections::HashMap<String, IndexerId> =
         std::collections::HashMap::new();
@@ -560,6 +571,7 @@ pub async fn find_release_counted(
                 }
                 all_kept.extend(outcome.kept);
                 subtitle_rejected.extend(outcome.subtitle_rejected);
+                vnn_rejected.extend(outcome.vnn_rejected);
                 if let Some(diag) = outcome.mismatch {
                     if first_mismatch.is_none() {
                         first_mismatch = Some((indexer.id, diag));
@@ -592,7 +604,19 @@ pub async fn find_release_counted(
             "pull.subtitle_rejected"
         );
     }
-    let rejected = subtitle_rejected.len();
+    for release in &vnn_rejected {
+        tracing::info!(
+            target: "longbox_newznab",
+            release = %release,
+            series = %series,
+            issue = %issue,
+            "pull.vnn_rejected"
+        );
+    }
+    let rejected = AutoPullRejections {
+        subtitle: subtitle_rejected.len(),
+        vnn: vnn_rejected.len(),
+    };
 
     // select_best across the combined pool from all indexers. The size
     // floor is applied symmetrically at both the per-indexer filter and

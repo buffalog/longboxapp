@@ -27,7 +27,8 @@ mod types;
 
 pub use client::{
     find_release, find_release_counted, find_release_excluding, find_release_excluding_filtered,
-    search_all_indexers, search_indexer, test_connection, FindOutcome, SearchAllOutcome,
+    search_all_indexers, search_indexer, test_connection, AutoPullRejections, FindOutcome,
+    SearchAllOutcome,
 };
 pub use error::{IndexerError, NewznabError};
 pub use select::{

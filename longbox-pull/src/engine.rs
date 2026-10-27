@@ -113,6 +113,9 @@ pub struct SweepSummary {
     /// Releases refused only for a ` - Subtitle` after the issue number
     /// (each logged as `pull.subtitle_rejected`): what that rule costs.
     pub subtitle_rejected: usize,
+    /// Releases skipped as volume-numbered trades (each logged as
+    /// `pull.vnn_rejected`).
+    pub vnn_rejected: usize,
 }
 
 /// Per-sweep context: the rebuilt downloader, the enabled indexers,
@@ -732,7 +735,8 @@ async fn attempt_pull_for_candidate(
     )
     .await
     .map(|(outcome, rejected)| {
-        summary.subtitle_rejected += rejected;
+        summary.subtitle_rejected += rejected.subtitle;
+        summary.vnn_rejected += rejected.vnn;
         outcome
     });
     match found {
