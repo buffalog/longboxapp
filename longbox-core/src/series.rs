@@ -60,11 +60,15 @@ impl Series {
 ///   collected into ten trade paperbacks", "Collected in Absolute Batman"),
 ///   so only the opening sentence counts, and bare "collected" never does.
 /// - At least half the named issues are "Volume N" / "Vol. N"
-///   ("Volume 1: The Cobra Strikes!"). "Book One" is a prestige-format
-///   issue name, not a trade marker.
+///   ("Volume 1: The Cobra Strikes!"), or a bare format name: exactly
+///   "TPB", "HC", "TP" or "GN" (Dutch (2024), whose one issue is "TPB"
+///   under a story-blurb description). Whole name only: "HC Svnt
+///   Dracones" is a story title. "Book One" is a prestige-format issue
+///   name, not a trade marker.
 ///
 /// Measured 2026-10-26 on the live catalog (926 series): 36 hits, every
-/// one a trade, hardcover or original graphic novel. Original graphic
+/// one a trade, hardcover or original graphic novel. The bare-format rung
+/// added 5 more on 2026-10-28 (40 of 925), all one-issue books. Original graphic
 /// novels are single books, but they still need confirmation to add.
 pub fn collected_edition_reason(description: Option<&str>, issue_names: &[&str]) -> Option<String> {
     static TAG: OnceLock<Regex> = OnceLock::new();
@@ -102,7 +106,12 @@ pub fn collected_edition_reason(description: Option<&str>, issue_names: &[&str])
     let volumes: Vec<&str> = named
         .iter()
         .copied()
-        .filter(|n| volume.is_match(n))
+        .filter(|n| {
+            volume.is_match(n)
+                || ["TPB", "HC", "TP", "GN"]
+                    .iter()
+                    .any(|f| n.eq_ignore_ascii_case(f))
+        })
         .collect();
     if !volumes.is_empty() && volumes.len() * 2 >= named.len() {
         return Some(format!(
@@ -123,13 +132,16 @@ mod tests {
     /// lists them, and the lookalikes that must stay real series.
     #[test]
     fn collected_edition_reason_flags_trades_not_lookalikes() {
-        let trades: [(&str, Option<&str>, &[&str]); 5] = [
+        let trades: [(&str, Option<&str>, &[&str]); 7] = [
             // Description alone: no named issues.
             ("Subgenre (2024)", Some("<p>Hardcover collecting <a href=\"/subgenre/4050-1/\">Subgenre</a>.</p>"), &[]),
             ("Hyde Street (2025)", Some("<p>Series of trade paperbacks based on <a href=\"/hyde-street/4050-160218/\">Hyde Street</a></p>"), &["Volume One", "Volume Two"]),
             ("G.I. Joe (2025)", Some(" "), &["Volume 1: The Cobra Strikes!", "Volume 2: Bludd's Revenge", "Volume 3: Dreadnok War", ""]),
             ("Invincible Universe: Battle Beast (2025)", Some("<p>Trade paperbacks collecting <a href=\"/x/4050-164334/\">Invincible Universe: Battle Beast</a>.</p>"), &["Volume One: Heart of Glory", ""]),
             ("Murder Podcast (2026)", None, &["Volume One"]),
+            // A bare format name under a story blurb.
+            ("Dutch (2024)", Some("<p>A drifter rides into a town that has already buried him.</p>"), &["TPB"]),
+            ("Mixed case", None, &["hc", " Gn ", ""]),
         ];
         for (name, desc, issues) in trades {
             assert!(
@@ -138,12 +150,14 @@ mod tests {
             );
         }
 
-        let real: [(&str, Option<&str>, &[&str]); 5] = [
+        let real: [(&str, Option<&str>, &[&str]); 6] = [
             ("The Exterminators", Some("<p>The issues below are collected in the following trade paperbacks #1-5: Bug Brothers</p>"), &[]),
             ("The Nice House by the Sea", None, &["Book One", "Book Two", "Book Three", "Book Four"]),
             ("Absolute Batman", Some("<p>Collected in <a href=\"/absolute-batman/4050-167340/\">Absolute Batman</a>.</p>"), &["The Zoo, Part One", "The Zoo, Part Two"]),
             ("Y The Last Man", Some("<p>A tale about Yorick Brown, the last man on Earth. The entire series was collected into ten trade paperbacks.</p>"), &[]),
             ("Saga", Some("<p>Saga is an ongoing series.</p><h4>Collected Editions</h4><p>Trade paperbacks Volume 1 (#1-6)</p>"), &["Chapter One", "Chapter Two"]),
+            // Names that contain the format letters but aren't one.
+            ("Letters, not formats", None, &["HC Svnt Dracones", "TPB Day", "The Gnashing", "Outpost", "GN-z11"]),
         ];
         for (name, desc, issues) in real {
             assert_eq!(
