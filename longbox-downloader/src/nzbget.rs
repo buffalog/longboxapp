@@ -53,7 +53,9 @@ impl NzbgetClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| DownloaderError::HttpFailure(format!("NZBGet request failed: {e}")))?;
+            .map_err(|e| {
+                DownloaderError::HttpFailure(format!("NZBGet request failed: {}", e.without_url()))
+            })?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -67,10 +69,9 @@ impl NzbgetClient {
             )));
         }
 
-        let envelope: NzbgetEnvelope = resp
-            .json()
-            .await
-            .map_err(|e| DownloaderError::MalformedResponse(format!("NZBGet JSON-RPC: {e}")))?;
+        let envelope: NzbgetEnvelope = resp.json().await.map_err(|e| {
+            DownloaderError::MalformedResponse(format!("NZBGet JSON-RPC: {}", e.without_url()))
+        })?;
         if let Some(err) = envelope.error {
             return Err(DownloaderError::ApiError(format!(
                 "NZBGet JSON-RPC error {}: {}",
