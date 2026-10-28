@@ -12,6 +12,7 @@ pub struct ParsingPatternRow {
     pub priority: i64,
     /// Stored as INTEGER (0/1); decoded as bool via sqlx-sqlite.
     pub enabled: bool,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
 }
 

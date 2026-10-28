@@ -12,6 +12,7 @@ pub struct PullAttemptRow {
     pub id: i64,
     pub series_id: i64,
     pub issue_id: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub attempted_at: PrimitiveDateTime,
     /// `None` once the indexer that served the release is deconfigured.
     pub indexer_id: Option<i64>,
@@ -127,6 +128,7 @@ pub struct FailedPull {
     pub status: String,
     pub error_message: Option<String>,
     pub retry_count: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub attempted_at: PrimitiveDateTime,
 }
 

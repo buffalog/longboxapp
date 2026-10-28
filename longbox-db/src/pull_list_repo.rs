@@ -10,11 +10,14 @@ use crate::error::{DbError, Result};
 pub struct PullListRow {
     pub id: i64,
     pub series_id: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub added_at: PrimitiveDateTime,
     /// `None` = pull from the first solicited issue.
     pub start_issue: Option<String>,
     pub paused: bool,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub last_pull_attempt_at: Option<PrimitiveDateTime>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub last_successful_pull_at: Option<PrimitiveDateTime>,
     pub failure_count: i64,
 }
@@ -131,8 +134,11 @@ pub struct PullListWithSeries {
     pub series_sort_title: String,
     pub series_start_year: Option<i64>,
     pub paused: bool,
+    #[serde(with = "longbox_core::rfc3339")]
     pub added_at: PrimitiveDateTime,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub last_pull_attempt_at: Option<PrimitiveDateTime>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub last_successful_pull_at: Option<PrimitiveDateTime>,
     /// Series-level *consecutive-sweep-failure* counter — incremented
     /// when a sweep of this series fails, zeroed on a successful pull.

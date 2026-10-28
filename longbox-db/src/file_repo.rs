@@ -11,7 +11,9 @@ pub struct FileRow {
     pub library_root_id: i64,
     pub path_relative: String,
     pub size_bytes: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub mtime: PrimitiveDateTime,
+    #[serde(with = "longbox_core::rfc3339")]
     pub last_scanned_at: PrimitiveDateTime,
     /// Enum stored as TEXT. Convert with [`longbox_core::MatchMethod::from_db_str`].
     pub match_method: String,
@@ -19,15 +21,18 @@ pub struct FileRow {
     /// Enum stored as TEXT. Convert with [`longbox_core::FileStatus::from_db_str`].
     pub status: String,
     pub cached_comicinfo_xml: Option<String>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub cached_at: Option<PrimitiveDateTime>,
     /// `true` iff the most recent scan visited this row on disk. Flipped to
     /// `false` by [`mark_files_not_seen_since`].
     pub is_present: bool,
     /// Timestamp of the most recent scan that visited this row.
+    #[serde(with = "longbox_core::rfc3339")]
     pub last_seen_at: PrimitiveDateTime,
     /// Wall-clock time when `issue_id` was most recently set to its current
     /// value. NULL when `issue_id` is NULL, and on pre-Task-3 rows that
     /// were matched before the column existed (no backfill).
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub matched_at: Option<PrimitiveDateTime>,
 }
 
@@ -538,6 +543,7 @@ pub struct DuplicateFileCandidate {
     /// size/mtime are not sufficient evidence.
     pub content_blake3: Option<String>,
     pub hashed_size_bytes: Option<i64>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub hashed_mtime: Option<PrimitiveDateTime>,
 }
 

@@ -17,7 +17,9 @@ pub struct SeriesRow {
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub cover_url: Option<String>,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
+    #[serde(with = "longbox_core::rfc3339")]
     pub updated_at: PrimitiveDateTime,
 }
 
@@ -814,6 +816,7 @@ pub struct PhantomSeries {
     pub awaiting_first_download: bool,
     /// Recovery deadline when the series has been marked for automatic
     /// removal; `None` when unmarked.
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub auto_tidy_due_at: Option<PrimitiveDateTime>,
 }
 

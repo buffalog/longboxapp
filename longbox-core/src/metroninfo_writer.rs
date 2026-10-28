@@ -71,6 +71,7 @@ pub struct MetronInfoMetadata {
     /// `<LastModified>` timestamp. Caller supplies — tests use a fixed
     /// value, production hands `OffsetDateTime::now_utc()`. Output is
     /// RFC 3339, which `xs:dateTime` accepts.
+    #[serde(with = "crate::rfc3339")]
     pub last_modified: OffsetDateTime,
 }
 

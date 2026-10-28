@@ -8,6 +8,7 @@ use crate::error::{DbError, Result};
 pub struct LibraryRootRow {
     pub id: i64,
     pub path: String,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
 }
 

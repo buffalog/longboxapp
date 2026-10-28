@@ -19,6 +19,7 @@ pub struct DownloaderConfigRow {
     pub secret: String,
     pub category: String,
     pub enabled: bool,
+    #[serde(with = "longbox_core::rfc3339")]
     pub updated_at: PrimitiveDateTime,
 }
 

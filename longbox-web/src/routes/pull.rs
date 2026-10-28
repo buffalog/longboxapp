@@ -423,6 +423,7 @@ struct PullListExportRow {
     title: String,
     cv_id: Option<i64>,
     start_year: Option<i64>,
+    #[serde(with = "longbox_core::rfc3339")]
     subscribed_at: time::PrimitiveDateTime,
 }
 

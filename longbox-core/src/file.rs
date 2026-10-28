@@ -142,7 +142,9 @@ pub struct LocalFile {
     /// Path relative to the library root. Forward slashes; no leading slash.
     pub path_relative: String,
     pub size_bytes: i64,
+    #[serde(with = "crate::rfc3339")]
     pub mtime: OffsetDateTime,
+    #[serde(with = "crate::rfc3339")]
     pub last_scanned_at: OffsetDateTime,
     pub match_method: MatchMethod,
     pub match_confidence: f64,
@@ -150,6 +152,7 @@ pub struct LocalFile {
     /// Cached ComicInfo.xml bytes so re-matching doesn't re-open the .cbz
     /// archive when `(size, mtime)` is unchanged.
     pub cached_comicinfo_xml: Option<String>,
+    #[serde(default, with = "crate::rfc3339")]
     pub cached_at: Option<OffsetDateTime>,
 }
 

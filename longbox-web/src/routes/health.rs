@@ -27,7 +27,9 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     db_ok: bool,
+    #[serde(default, with = "longbox_core::rfc3339")]
     last_scan_at: Option<PrimitiveDateTime>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     last_enrichment_at: Option<PrimitiveDateTime>,
     enrichment_queue_depth: i64,
     uptime_seconds: i64,

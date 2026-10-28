@@ -151,9 +151,9 @@ pub struct ScanStatus {
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct AnalyzeStatus {
     pub running: bool,
-    #[serde(with = "time::serde::iso8601::option")]
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub started_at: Option<time::OffsetDateTime>,
-    #[serde(with = "time::serde::iso8601::option")]
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub finished_at: Option<time::OffsetDateTime>,
     /// Stats from the most recent completed pass.
     pub last: Option<crate::content_hash::HashStats>,
@@ -168,7 +168,7 @@ pub struct CurrentScan {
     pub scan_id: String,
     pub library_root_id: i64,
     pub kind: ScanKind,
-    #[serde(with = "time::serde::iso8601")]
+    #[serde(with = "longbox_core::rfc3339")]
     pub started_at: time::OffsetDateTime,
 }
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ScanRun } from '$lib/types';
-  import { formatDateTime, formatDuration } from '$lib/format';
+  import { formatDateTime, formatDuration, parseUtc } from '$lib/format';
 
   interface Props {
     report: ScanRun;
@@ -12,8 +12,8 @@
   // get a finished_at, so this is effectively only mid-scan today).
   const durationMs = $derived.by(() => {
     if (!report.finished_at) return null;
-    const start = Date.parse(report.started_at.replace(' ', 'T') + 'Z');
-    const end = Date.parse(report.finished_at.replace(' ', 'T') + 'Z');
+    const start = parseUtc(report.started_at).getTime();
+    const end = parseUtc(report.finished_at).getTime();
     if (Number.isNaN(start) || Number.isNaN(end)) return null;
     return end - start;
   });

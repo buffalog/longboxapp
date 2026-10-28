@@ -1304,6 +1304,7 @@ dependencies = [
  "quick-xml 0.31.0",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "time",
  "unicode-normalization",

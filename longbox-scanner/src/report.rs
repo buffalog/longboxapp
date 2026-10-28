@@ -4,7 +4,9 @@ use time::PrimitiveDateTime;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanReport {
     pub library_root_id: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub started_at: PrimitiveDateTime,
+    #[serde(with = "longbox_core::rfc3339")]
     pub completed_at: PrimitiveDateTime,
     pub duration_ms: u64,
     pub files_seen: u32,

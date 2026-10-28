@@ -26,7 +26,9 @@ pub struct CvVolumeCacheRow {
     pub description: Option<String>,
     pub start_year: Option<i64>,
     pub cover_url: Option<String>,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub fetched_at: Option<PrimitiveDateTime>,
+    #[serde(with = "longbox_core::rfc3339")]
     pub first_seen_at: PrimitiveDateTime,
 }
 

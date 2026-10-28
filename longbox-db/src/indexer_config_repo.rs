@@ -16,6 +16,7 @@ pub struct IndexerConfigRow {
     /// Lower number = queried first.
     pub priority: i64,
     pub maxage_days: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
 }
 

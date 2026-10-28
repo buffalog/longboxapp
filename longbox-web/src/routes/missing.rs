@@ -39,6 +39,7 @@ struct MissingIssue {
     store_date: Option<String>,
     /// When the issue was added to the catalog. Frontend uses this as a
     /// "missing for" lower bound when `cover_date` is null.
+    #[serde(with = "longbox_core::rfc3339")]
     issue_created_at: PrimitiveDateTime,
     series: MissingIssueSeries,
 }
