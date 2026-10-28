@@ -227,6 +227,9 @@ struct SearchAllMissingResponse {
     /// release hasn't happened yet, so the indexer call would be pure
     /// noise. Matches the frontend's `isSolicited` predicate exactly.
     skipped_solicited: usize,
+    /// Issues of trade, hardcover and graphic-novel volumes
+    /// (`series_repo::collected_edition_ids`), never searched.
+    skipped_collected_edition: usize,
 }
 
 /// Dispatch a per-issue search for every "missing" issue in the
@@ -266,10 +269,18 @@ async fn search_all_missing(State(state): State<AppState>) -> Result<Response, A
         source: anyhow::anyhow!(e),
     })?;
 
+    let trades = series_repo::collected_edition_ids(&state.db).await?;
     let today = time::OffsetDateTime::now_utc().date();
     let mut searched = 0usize;
     let mut skipped_solicited = 0usize;
+    let mut skipped_collected_edition = 0usize;
     for row in rows {
+        // A trade volume in the catalog: its issues are trades, and the
+        // singles are collected through the issue series.
+        if trades.contains(&row.series_id) {
+            skipped_collected_edition += 1;
+            continue;
+        }
         if is_solicited(row.release_date.as_deref(), today) {
             skipped_solicited += 1;
             continue;
@@ -282,6 +293,7 @@ async fn search_all_missing(State(state): State<AppState>) -> Result<Response, A
         Json(SearchAllMissingResponse {
             searched,
             skipped_solicited,
+            skipped_collected_edition,
         }),
     )
         .into_response())

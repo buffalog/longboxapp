@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT series_id AS \"series_id!: i64\", title AS \"title!\"\n           FROM issues WHERE title IS NOT NULL AND title != ''",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "title!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "84d654ddfc6b8cb3864206207f57e611e9ab45e1d39077308c489018e695c6e1"
+}

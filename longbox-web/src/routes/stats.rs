@@ -3,6 +3,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
+use longbox_db::series_repo;
+
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -15,7 +17,8 @@ pub fn router() -> Router<AppState> {
 /// `missing_issues` counts issues with no present owned file (distinct
 /// from "file rows with is_present=0") that aren't solicited — the
 /// effective release date `COALESCE(store_date, cover_date)` isn't a full
-/// date today or later.
+/// date today or later, outside collected-edition volumes
+/// (`series_repo::collected_edition_ids`).
 ///
 /// The pull/needs-attention counts here are what previously required
 /// three additional HTTP round-trips per dashboard load (one each for
@@ -76,30 +79,6 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
               WHERE status = 'ignored' AND is_present = 1) AS "ignored_files!: i64",
              (SELECT COUNT(*) FROM files
               WHERE status = 'unmatched' AND is_present = 1) AS "unmatched_files!: i64",
-             (SELECT COUNT(*) FROM issues i
-              WHERE NOT EXISTS (
-                SELECT 1 FROM files f
-                WHERE f.issue_id = i.id
-                  AND f.status = 'owned'
-                  AND f.is_present = 1
-              )
-                -- Not solicited: same split as series_repo's
-                -- solicited_count and the frontend's isSolicited, so
-                -- undated issues still count as missing.
-                AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10
-                     OR COALESCE(i.store_date, i.cover_date) < date('now'))) AS "missing_issues!: i64",
-             (SELECT COUNT(DISTINCT i.series_id) FROM issues i
-              WHERE NOT EXISTS (
-                SELECT 1 FROM files f
-                WHERE f.issue_id = i.id
-                  AND f.status = 'owned'
-                  AND f.is_present = 1
-              )
-                -- Not solicited: same split as series_repo's
-                -- solicited_count and the frontend's isSolicited, so
-                -- undated issues still count as missing.
-                AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10
-                     OR COALESCE(i.store_date, i.cover_date) < date('now'))) AS "series_with_missing!: i64",
              (SELECT COUNT(*) FROM pull_list) AS "pull_list_count!: i64",
              -- Failure-class pull attempts, one row per issue (latest
              -- attempt semantics — matches `pull_attempt_repo::list_failed`).
@@ -120,6 +99,36 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
         message: format!("stats query failed: {e}"),
         source: anyhow::anyhow!(e),
     })?;
+    // Missing per series, so collected-edition volumes can be left out:
+    // the guard that names them is Rust, not SQL.
+    let missing = sqlx::query!(
+        r#"SELECT i.series_id AS "series_id!: i64", COUNT(*) AS "n!: i64"
+           FROM issues i
+           WHERE NOT EXISTS (
+             SELECT 1 FROM files f
+             WHERE f.issue_id = i.id
+               AND f.status = 'owned'
+               AND f.is_present = 1
+           )
+             -- Not solicited: same split as series_repo's
+             -- solicited_count and the frontend's isSolicited, so
+             -- undated issues still count as missing.
+             AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10
+                  OR COALESCE(i.store_date, i.cover_date) < date('now'))
+           GROUP BY i.series_id"#
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("stats missing query failed: {e}"),
+        source: anyhow::anyhow!(e),
+    })?;
+    let trades = series_repo::collected_edition_ids(&state.db).await?;
+    let missing: Vec<i64> = missing
+        .iter()
+        .filter(|r| !trades.contains(&r.series_id))
+        .map(|r| r.n)
+        .collect();
     // The post-processor's pending-intervention count lives in an
     // in-memory cache, not the DB — O(1) read under the cache's
     // RwLock. Folded into the same response so the dashboard's
@@ -132,8 +141,8 @@ async fn handler(State(state): State<AppState>) -> Result<Json<Stats>, ApiError>
         needs_review_files: row.needs_review_files,
         ignored_files: row.ignored_files,
         unmatched_files: row.unmatched_files,
-        missing_issues: row.missing_issues,
-        series_with_missing: row.series_with_missing,
+        missing_issues: missing.iter().sum(),
+        series_with_missing: i64::try_from(missing.len()).unwrap_or(i64::MAX),
         pull_list_count: row.pull_list_count,
         pull_failures_count: row.pull_failures_count,
         pending_interventions_count,

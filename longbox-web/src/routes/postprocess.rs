@@ -7,7 +7,8 @@
 //!   watch folder via `longbox_postprocess::sweep_now` and returns a
 //!   per-outcome tally so the Settings page can render a result toast.
 //! - `POST /api/postprocess/import-anyway` files a page-count hold into
-//!   the issue it was matched to, once the user has looked at it.
+//!   the issue it was matched to, or an ambiguous hold into the candidate
+//!   the user picked, once they have looked at it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -99,6 +100,9 @@ async fn trigger(State(state): State<AppState>) -> Result<Json<SweepSummary>, Ap
 struct ImportAnywayBody {
     /// A `source_path` from `GET /api/postprocess/pending`.
     source_path: PathBuf,
+    /// For an ambiguous hold: the candidate issue to file it as.
+    #[serde(default)]
+    issue_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,9 +111,11 @@ struct ImportAnywayResponse {
     issue_id: i64,
 }
 
-/// File a page-count hold into the issue it was matched to. 404 when the
-/// path is not a page-count hold in the pending list (nothing else is
-/// eligible, and no other path is touched); 409 when the import itself
+/// File a page-count hold into the issue it was matched to, or an
+/// ambiguous hold into the candidate `issue_id` the user picked. 404 when
+/// the path is neither kind of hold in the pending list (nothing else is
+/// eligible, and no other path is touched); 400 when an ambiguous hold's
+/// `issue_id` is missing or not a candidate; 409 when the import itself
 /// didn't land, e.g. the library already has that issue.
 async fn import_anyway(
     State(state): State<AppState>,
@@ -128,6 +134,7 @@ async fn import_anyway(
         &state.db,
         &state.pending_cache,
         &body.source_path,
+        body.issue_id,
     )
     .await
     .map_err(|e| ApiError::Internal {
@@ -139,8 +146,11 @@ async fn import_anyway(
             target, issue_id, ..
         }) => Ok(Json(ImportAnywayResponse { target, issue_id })),
         ImportAnyway::NotHeld => Err(ApiError::NotFound {
-            resource: "page-count hold",
+            resource: "held file",
             id: body.source_path.display().to_string(),
+        }),
+        ImportAnyway::NotACandidate => Err(ApiError::BadRequest {
+            message: "Pick one of the hold's candidate issues (issue_id).".into(),
         }),
         ImportAnyway::Ran(other) => Err(ApiError::Conflict {
             code: "conflict.import_anyway",

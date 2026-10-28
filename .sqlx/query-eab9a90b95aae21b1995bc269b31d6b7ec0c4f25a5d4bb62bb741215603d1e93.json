@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.series_id AS \"series_id!: i64\", COUNT(*) AS \"n!: i64\"\n           FROM issues i\n           WHERE NOT EXISTS (\n             SELECT 1 FROM files f\n             WHERE f.issue_id = i.id\n               AND f.status = 'owned'\n               AND f.is_present = 1\n           )\n             -- Not solicited: same split as series_repo's\n             -- solicited_count and the frontend's isSolicited, so\n             -- undated issues still count as missing.\n             AND (length(COALESCE(i.store_date, i.cover_date)) IS NOT 10\n                  OR COALESCE(i.store_date, i.cover_date) < date('now'))\n           GROUP BY i.series_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "eab9a90b95aae21b1995bc269b31d6b7ec0c4f25a5d4bb62bb741215603d1e93"
+}

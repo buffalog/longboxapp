@@ -23,7 +23,7 @@
   // Pull failures are self-owned — retry / dismiss / clear-all all drop
   // rows from local state optimistically. Phase B's pending list is
   // resolved on disk, except a page-count hold, which can be imported
-  // anyway from here.
+  // anyway from here, and an ambiguous hold, imported as the issue picked.
   let pullFailures = $state<PullFailure[]>([...data.pullFailures]);
   let error = $state<ApiError | null>(null);
   let retryingIssue = $state<number | null>(null);
@@ -33,11 +33,11 @@
   let pendingItems = $state([...data.pending.items]);
   let importingPath = $state<string | null>(null);
 
-  async function handleImportAnyway(item: PendingIntervention): Promise<void> {
+  async function handleImportAnyway(item: PendingIntervention, issueId?: number): Promise<void> {
     importingPath = item.source_path;
     error = null;
     try {
-      const { target } = await importAnyway(item.source_path);
+      const { target } = await importAnyway(item.source_path, issueId);
       pendingItems = pendingItems.filter((p) => p.source_path !== item.source_path);
       toast.success(`Imported as ${target.split('/').pop()}.`);
     } catch (e) {
@@ -70,6 +70,8 @@
         return 'Archive unreadable';
       case 'likely_collected_edition':
         return 'Likely a collected edition';
+      case 'ambiguous':
+        return 'Ambiguous match';
     }
   }
 
@@ -79,6 +81,8 @@
         return null;
       case 'likely_collected_edition':
         return `${reason.detail} pages, more than a single issue. Check it before importing.`;
+      case 'ambiguous':
+        return 'It could be any of these. Pick the one it is.';
       default:
         return reason.detail;
     }
@@ -260,7 +264,7 @@
               <tr class="border-t border-slate-100">
                 <td class="break-all px-3 py-2 font-mono text-xs">{item.source_path}</td>
                 <td class="break-all px-3 py-2 font-mono text-xs text-slate-600">
-                  {item.target_path}
+                  {item.target_path || '—'}
                 </td>
                 <td class="px-3 py-2">
                   <span class="font-medium">{reasonLabel(item.reason)}</span>
@@ -279,6 +283,33 @@
                         Import anyway
                       </Button>
                     </div>
+                  {/if}
+                  {#if item.reason.kind === 'ambiguous'}
+                    <ul class="mt-1 flex flex-col gap-1">
+                      {#each item.reason.detail as option (option.issue_id)}
+                        <li class="flex items-center gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onclick={() => handleImportAnyway(item, option.issue_id)}
+                            loading={importingPath === item.source_path}
+                            disabled={importingPath !== null}
+                          >
+                            Import as {option.series_title}
+                            ({option.start_year ?? '?'}) #{option.number}
+                          </Button>
+                          <span class="text-xs text-slate-500">
+                            {#if option.store_date}
+                              on sale {option.store_date}
+                            {:else if option.cover_date}
+                              cover date {option.cover_date}
+                            {:else}
+                              no date
+                            {/if}
+                          </span>
+                        </li>
+                      {/each}
+                    </ul>
                   {/if}
                 </td>
                 <td class="whitespace-nowrap px-3 py-2 text-right">{formatBytes(item.size)}</td>

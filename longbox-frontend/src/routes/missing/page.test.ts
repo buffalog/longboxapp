@@ -192,7 +192,11 @@ describe('missing page series grouping', () => {
   });
 
   it('dispatches the global Search-all and reports the summary in a toast', async () => {
-    vi.mocked(searchAllMissing).mockResolvedValue({ searched: 5, skipped_solicited: 2 });
+    vi.mocked(searchAllMissing).mockResolvedValue({
+      searched: 5,
+      skipped_solicited: 2,
+      skipped_collected_edition: 0
+    });
     render(
       MissingPage,
       pageData([

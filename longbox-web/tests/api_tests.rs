@@ -3571,12 +3571,13 @@ async fn pending_endpoint_returns_empty_on_fresh_cache() {
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
-/// Import anyway acts only on a page-count hold in the pending list:
-/// another kind of hold, or a path the list doesn't have, is a 404 and
-/// nothing on disk is touched. (The import itself is covered in
+/// Import anyway acts only on a page-count or ambiguous hold in the
+/// pending list: another kind of hold, or a path the list doesn't have, is
+/// a 404, an ambiguous hold without a candidate pick is a 400, and nothing
+/// on disk is touched. (The import itself is covered in
 /// longbox-postprocess's pipeline tests.)
 #[tokio::test]
-async fn import_anyway_refuses_anything_but_a_page_count_hold() {
+async fn import_anyway_refuses_anything_but_a_held_file_and_a_candidate() {
     use longbox_postprocess::{InterventionReason, PendingIntervention};
     let mut app = build_test_app().await;
     let watch = tempfile::TempDir::new().unwrap();
@@ -3611,6 +3612,39 @@ async fn import_anyway_refuses_anything_but_a_page_count_hold() {
     }
     assert!(conflict.exists());
     assert_eq!(app.state.pending_cache.len(), 1);
+
+    // An ambiguous hold files only into one of its candidates.
+    let ambiguous = watch.path().join("Green Lantern 026 (2019).cbz");
+    std::fs::write(&ambiguous, b"bytes").unwrap();
+    let candidate = |issue_id: i64, start_year: i32| longbox_postprocess::AmbiguousCandidate {
+        issue_id,
+        series_id: issue_id,
+        series_title: "Green Lantern".into(),
+        start_year: Some(start_year),
+        number: "26".into(),
+        store_date: None,
+        cover_date: None,
+    };
+    app.state.pending_cache.push(PendingIntervention {
+        source_path: ambiguous.clone(),
+        target_path: std::path::PathBuf::new(),
+        reason: InterventionReason::Ambiguous(vec![candidate(10, 2005), candidate(20, 2023)]),
+        size: 5,
+        last_attempt: time::OffsetDateTime::now_utc(),
+        issue_id: Some(10),
+    });
+    for pick in [serde_json::Value::Null, serde_json::json!(30)] {
+        let resp = app
+            .request(json_request(
+                "POST",
+                "/api/postprocess/import-anyway",
+                serde_json::json!({ "source_path": ambiguous, "issue_id": pick }).to_string(),
+            ))
+            .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{pick}");
+    }
+    assert!(ambiguous.exists());
+    assert_eq!(app.state.pending_cache.len(), 2);
 }
 
 #[tokio::test]
@@ -4694,6 +4728,61 @@ async fn search_all_missing_skips_issues_whose_series_is_gone() {
         body["searched"], 1,
         "the orphaned issue must not be dispatched"
     );
+}
+
+/// A trade volume in the catalog (Hyde Street (2025), "Series of trade
+/// paperbacks…", issue "Volume One") is never searched for and never
+/// counted as missing: not by Search all missing, the dashboard stats, the
+/// Missing page, or the series list.
+#[tokio::test]
+async fn collected_edition_series_are_never_searched_or_counted_missing() {
+    let app = build_test_app().await;
+    let saga = seed_pull_series(&app, "Saga").await;
+    insert_issue(&app, saga, "1", Some("2012-01-01")).await;
+    let hyde = seed_pull_series(&app, "Hyde Street").await;
+    let volume = insert_issue(&app, hyde, "1", Some("2025-06-01")).await;
+    sqlx::query("UPDATE series SET description = ? WHERE id = ?")
+        .bind("<p>Series of trade paperbacks based on Hyde Street</p>")
+        .bind(hyde)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE issues SET title = 'Volume One' WHERE id = ?")
+        .bind(volume)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    let body = response_json(
+        app.request(empty_request("POST", "/api/pull/search-all-missing"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["searched"], 1, "{body}");
+    assert_eq!(body["skipped_collected_edition"], 1, "{body}");
+
+    let stats = response_json(app.request(empty_request("GET", "/api/stats")).await).await;
+    assert_eq!(stats["missing_issues"], 1, "{stats}");
+    assert_eq!(stats["series_with_missing"], 1, "{stats}");
+
+    let missing = response_json(app.request(empty_request("GET", "/api/missing")).await).await;
+    assert_eq!(missing["total"], 1, "{missing}");
+    assert_eq!(missing["missing"][0]["series"]["id"], saga);
+
+    let series = response_json(app.request(empty_request("GET", "/api/series")).await).await;
+    let row = |id: i64| {
+        series
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(hyde)["collected_edition"], true);
+    assert_eq!(row(hyde)["missing_count"], 0);
+    assert_eq!(row(saga)["collected_edition"], false);
+    assert_eq!(row(saga)["missing_count"], 1);
 }
 
 #[tokio::test]

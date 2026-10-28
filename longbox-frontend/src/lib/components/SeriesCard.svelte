@@ -30,6 +30,10 @@
   // to count (the fraction is suppressed and only +N shows).
   const fractionClass = $derived.by(() => {
     if (available <= 0) return null;
+    // A trade volume is never missing anything: neutral, owned or not.
+    if (series.collected_edition && series.owned_count < available) {
+      return 'bg-slate-100 text-slate-600';
+    }
     if (series.owned_count >= available) {
       // Own everything that's shipped. Purple only when the run is
       // confirmed over AND nothing is upcoming — the complete-collection

@@ -49,6 +49,10 @@ export interface SeriesWithCounts extends Series {
   /// for CV-only series and until the Metron finished-state enrichment
   /// (`POST /api/series/enrich-finished`) runs.
   finished: boolean;
+  /// A trade, hardcover or graphic-novel volume (the #64 Add guard's
+  /// test). Its `missing_count` is 0 and its badge is never red: nothing
+  /// in it is searched for or counted as missing.
+  collected_edition: boolean;
 }
 
 export interface Issue {
@@ -214,7 +218,19 @@ export type InterventionReason =
   | { kind: 'move_failed'; detail: string }
   | { kind: 'source_archive_unreadable'; detail: string }
   /** `detail` is the page count. */
-  | { kind: 'likely_collected_edition'; detail: number };
+  | { kind: 'likely_collected_edition'; detail: number }
+  /** `detail` is every issue the file could be; the user picks one. */
+  | { kind: 'ambiguous'; detail: AmbiguousCandidate[] };
+
+export interface AmbiguousCandidate {
+  issue_id: number;
+  series_id: number;
+  series_title: string;
+  start_year: number | null;
+  number: string;
+  store_date: string | null;
+  cover_date: string | null;
+}
 
 export interface PendingIntervention {
   source_path: string;

@@ -34,6 +34,11 @@ sqlite_flags=(-cmd '.headers on' -cmd '.mode column')
 if [[ -z $write ]]; then
   mount_opts="longbox-db:/data:ro"
   sqlite_flags+=(-readonly)
+else
+  # SQLite enforces foreign keys per connection and defaults to off, so
+  # without this a DELETE FROM series leaves its issues behind instead of
+  # cascading. The app pool turns it on (longbox-db/src/pool.rs).
+  sqlite_flags+=(-cmd 'PRAGMA foreign_keys=ON;')
 fi
 
 # Run as uid:gid 1000:1000 to match the volume file ownership
