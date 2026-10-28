@@ -30,17 +30,21 @@ use crate::error::Result;
 pub struct DiscoveredFolderRow {
     pub id: i64,
     pub folder_name: String,
+    #[serde(with = "longbox_core::rfc3339")]
     pub first_seen_at: PrimitiveDateTime,
+    #[serde(with = "longbox_core::rfc3339")]
     pub last_seen_at: PrimitiveDateTime,
     /// User-permanent dismiss: set when the user explicitly opts out
     /// of tracking this folder via /api/reconcile/dismiss. Preserved
     /// by [`upsert`] — once set, the row stays hidden until manually
     /// un-dismissed.
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub dismissed_at: Option<PrimitiveDateTime>,
     /// State-derived dismiss: set by [`auto_dismiss`] (post-add,
     /// post-convert) or [`auto_dismiss_not_in`] (scanner F6).
     /// Cleared by [`upsert`] on re-detection so a folder resurfaces
     /// the moment scanner detection re-qualifies it.
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub auto_dismissed_at: Option<PrimitiveDateTime>,
     pub file_count: i64,
 }

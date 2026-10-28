@@ -20,7 +20,7 @@ pub struct PendingIntervention {
     pub target_path: PathBuf,
     pub reason: InterventionReason,
     pub size: i64,
-    #[serde(with = "time::serde::iso8601")]
+    #[serde(with = "longbox_core::rfc3339")]
     pub last_attempt: OffsetDateTime,
     /// The issue the file was matched to; an "import anyway" files it there.
     #[serde(default)]

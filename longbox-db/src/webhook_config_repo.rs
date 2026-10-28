@@ -32,6 +32,7 @@ pub struct WebhookConfigRow {
     /// Bitset of `EVENT_*` flags this webhook subscribes to.
     pub event_mask: i64,
     pub enabled: bool,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
 }
 

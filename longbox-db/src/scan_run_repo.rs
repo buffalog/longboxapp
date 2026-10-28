@@ -53,7 +53,9 @@ impl ScanRunKind {
 pub struct ScanRunRow {
     pub id: i64,
     pub library_root_id: i64,
+    #[serde(with = "longbox_core::rfc3339")]
     pub started_at: PrimitiveDateTime,
+    #[serde(default, with = "longbox_core::rfc3339")]
     pub finished_at: Option<PrimitiveDateTime>,
     pub files_seen: i64,
     pub files_added: i64,

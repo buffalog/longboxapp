@@ -21,6 +21,7 @@ pub struct ReleaseCacheRow {
     pub publisher: String,
     /// The CV projection serialized as JSON.
     pub payload_json: String,
+    #[serde(with = "longbox_core::rfc3339")]
     pub cached_at: PrimitiveDateTime,
 }
 

@@ -30,6 +30,7 @@ pub struct MetronCalendarCacheRow {
     /// calendar handler deserializes and merges directly into the
     /// response.
     pub payload_json: String,
+    #[serde(with = "longbox_core::rfc3339")]
     pub cached_at: PrimitiveDateTime,
 }
 

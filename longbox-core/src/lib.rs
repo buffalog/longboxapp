@@ -17,6 +17,7 @@ pub mod library_path;
 pub mod matcher;
 pub mod metroninfo_writer;
 pub mod normalize;
+pub mod rfc3339;
 pub mod series;
 pub mod similarity;
 

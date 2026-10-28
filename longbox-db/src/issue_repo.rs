@@ -18,7 +18,9 @@ pub struct IssueRow {
     /// CV on-sale date (`YYYY-MM-DD`). Runs ahead of `cover_date`;
     /// eligibility uses `COALESCE(store_date, cover_date)`.
     pub store_date: Option<String>,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
+    #[serde(with = "longbox_core::rfc3339")]
     pub updated_at: PrimitiveDateTime,
 }
 

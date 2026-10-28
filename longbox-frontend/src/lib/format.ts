@@ -1,11 +1,10 @@
 // Display formatters. All pure functions; no DOM or fetch dependencies.
 
-// Backend serializes time::PrimitiveDateTime via the Display impl, which
-// produces "YYYY-MM-DD HH:MM:SS[.fff]" (space separator, no timezone).
-// SQLite stores values in UTC, so we normalize: replace the space with "T"
-// and append "Z" if there's no offset, then parse. Without this, Safari
-// rejects the string outright and Chrome interprets it as local time.
-function parseUtc(s: string): Date {
+// The backend sends RFC 3339 UTC ("2026-10-28T15:59:00Z", see
+// longbox_core::rfc3339). Older builds sent "YYYY-MM-DD HH:MM:SS[.fff]"
+// (space, no zone), which Safari rejects and Chrome reads as local time,
+// so that shape is still normalized: space to "T", "Z" appended.
+export function parseUtc(s: string): Date {
   const tIso = s.replace(' ', 'T');
   const hasTz = /Z$|[+\-]\d{2}:?\d{2}$/.test(tIso);
   return new Date(hasTz ? tIso : `${tIso}Z`);

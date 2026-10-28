@@ -117,6 +117,7 @@ pub struct PublisherFilterRow {
     pub publisher_name: String,
     /// Enum as TEXT; `block` | `allow`.
     pub mode: String,
+    #[serde(with = "longbox_core::rfc3339")]
     pub created_at: PrimitiveDateTime,
 }
 

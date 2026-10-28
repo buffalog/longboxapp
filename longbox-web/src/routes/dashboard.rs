@@ -33,6 +33,7 @@ struct ActivityResponse {
 struct RecentMatch {
     file_id: i64,
     path_relative: String,
+    #[serde(with = "longbox_core::rfc3339")]
     matched_at: PrimitiveDateTime,
     issue: RecentMatchIssue,
     series: RecentMatchSeries,

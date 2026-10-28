@@ -8,7 +8,8 @@ import {
   formatDateTime,
   formatDuration,
   formatMatchMethod,
-  formatRelative
+  formatRelative,
+  parseUtc
 } from './format';
 
 describe('formatConfidence', () => {
@@ -134,5 +135,13 @@ describe('cvIssueUrl', () => {
 describe('cvSeriesUrl', () => {
   it('builds the canonical /volume/4050-… form (CV calls series "volumes")', () => {
     expect(cvSeriesUrl(167340)).toBe('https://comicvine.gamespot.com/volume/4050-167340/');
+  });
+});
+
+describe('parseUtc', () => {
+  it('reads the RFC 3339 the API sends and the old space form as the same UTC instant', () => {
+    const want = Date.UTC(2026, 9, 28, 15, 59, 0);
+    expect(parseUtc('2026-10-28T15:59:00Z').getTime()).toBe(want);
+    expect(parseUtc('2026-10-28 15:59:00.0').getTime()).toBe(want);
   });
 });
