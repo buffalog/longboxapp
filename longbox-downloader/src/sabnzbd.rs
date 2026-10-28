@@ -36,15 +36,13 @@ impl SabnzbdClient {
         all.push(("apikey", &self.api_key));
         all.push(("output", "json"));
 
-        let resp =
-            self.http.get(&url).query(&all).send().await.map_err(|e| {
-                DownloaderError::HttpFailure(format!("SABnzbd request failed: {e}"))
-            })?;
+        let resp = self.http.get(&url).query(&all).send().await.map_err(|e| {
+            DownloaderError::HttpFailure(format!("SABnzbd request failed: {}", e.without_url()))
+        })?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| DownloaderError::HttpFailure(format!("SABnzbd body read failed: {e}")))?;
+        let body = resp.text().await.map_err(|e| {
+            DownloaderError::HttpFailure(format!("SABnzbd body read failed: {}", e.without_url()))
+        })?;
 
         let trimmed = body.trim();
         // SABnzbd reports bad/missing api keys as a plain-text body,

@@ -10,6 +10,7 @@ description = "LongBox Usenet downloader client — SABnzbd + NZBGet behind a co
 workspace = true
 
 [dependencies]
+longbox-core = { path = "../longbox-core" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

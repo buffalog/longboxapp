@@ -618,3 +618,117 @@ async fn release_cache_prune_stale() {
         .unwrap()
         .is_none());
 }
+
+/// Every writer of `pull_attempts.error_message` redacts: a downloader or
+/// indexer URL with its apikey must never be stored (2026-10-28: SAB's
+/// key and an indexer's key were on Needs Attention).
+#[tokio::test]
+async fn pull_attempt_error_messages_are_stored_redacted() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool, "I, Tyrant").await;
+    let issue_id = seed_issue(&pool, series_id, "2").await;
+    let leaky = "SABnzbd request failed: error sending request for url \
+                 (http://sab:8081/api?mode=addurl&apikey=00112233445566778899aabbccddeeff)";
+    let stored = |id: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT error_message FROM pull_attempts WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .unwrap()
+        }
+    };
+    let assert_clean = |s: String| {
+        assert!(
+            !s.contains("://") && !s.to_lowercase().contains("apikey=0"),
+            "{s}"
+        );
+        assert!(!s.contains("00112233445566778899aabbccddeeff"), "{s}");
+    };
+
+    let mut attempt = new_attempt(series_id, issue_id, "failed");
+    attempt.error_message = Some(leaky.into());
+    let a = pull_attempt_repo::insert(&pool, attempt).await.unwrap().id;
+    assert_clean(stored(a).await);
+
+    let b = pull_attempt_repo::record_mismatch(&pool, series_id, issue_id, None, leaky, 0)
+        .await
+        .unwrap();
+    assert_clean(stored(b).await);
+
+    let c = pull_attempt_repo::insert(&pool, new_attempt(series_id, issue_id, "submitted"))
+        .await
+        .unwrap()
+        .id;
+    pull_attempt_repo::update_status(&pool, c, "failed", Some(leaky))
+        .await
+        .unwrap();
+    assert_clean(stored(c).await);
+
+    let d = pull_attempt_repo::insert(&pool, new_attempt(series_id, issue_id, "submitted"))
+        .await
+        .unwrap()
+        .id;
+    pull_attempt_repo::record_failure_if_submitted(&pool, d, leaky)
+        .await
+        .unwrap();
+    assert_clean(stored(d).await);
+
+    let e = pull_attempt_repo::insert(&pool, new_attempt(series_id, issue_id, "submitted"))
+        .await
+        .unwrap()
+        .id;
+    pull_attempt_repo::record_failure_for_issue(&pool, series_id, issue_id, leaky)
+        .await
+        .unwrap();
+    assert_clean(stored(e).await);
+}
+
+/// Rows stored before the write path redacted get scrubbed in place, once.
+#[tokio::test]
+async fn redact_stored_errors_scrubs_old_rows_once() {
+    let pool = fresh_pool().await;
+    let series_id = seed_series(&pool, "I, Tyrant").await;
+    let issue_id = seed_issue(&pool, series_id, "2").await;
+    let id = pull_attempt_repo::insert(&pool, new_attempt(series_id, issue_id, "failed"))
+        .await
+        .unwrap()
+        .id;
+    // As an old build stored it: straight SQL, no redaction.
+    sqlx::query("UPDATE pull_attempts SET error_message = ? WHERE id = ?")
+        .bind("failed (http://sab/api?apikey=00112233445566778899aabbccddeeff)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pull_attempt_repo::insert(&pool, {
+        let mut a = new_attempt(series_id, issue_id, "failed");
+        a.error_message = Some("File CRC error".into());
+        a
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        pull_attempt_repo::redact_stored_errors(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let msg: String = sqlx::query_scalar("SELECT error_message FROM pull_attempts WHERE id = ?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(msg, "failed (<url>)");
+    assert_eq!(
+        pull_attempt_repo::redact_stored_errors(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}

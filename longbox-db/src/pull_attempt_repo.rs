@@ -49,6 +49,12 @@ pub async fn insert<'e, E>(executor: E, input: NewPullAttempt) -> Result<PullAtt
 where
     E: SqliteExecutor<'e>,
 {
+    // Redacted at the sink too: an error that echoed a downloader or
+    // indexer URL carried its apikey onto Needs Attention.
+    let error_message = input
+        .error_message
+        .as_deref()
+        .map(longbox_core::redact::secrets);
     let row = sqlx::query_as!(
         PullAttemptRow,
         r#"INSERT INTO pull_attempts
@@ -65,7 +71,7 @@ where
         input.indexer_id,
         input.release_id,
         input.status,
-        input.error_message,
+        error_message,
         input.retry_count,
         input.download_handle,
     )
@@ -382,6 +388,7 @@ pub async fn record_mismatch<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    let error_message = longbox_core::redact::secrets(error_message);
     let new_retry = prior_failure_count + 1;
     let row = sqlx::query!(
         r#"INSERT INTO pull_attempts
@@ -626,6 +633,7 @@ pub async fn record_failure_for_issue<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    let error_message = longbox_core::redact::secrets(error_message);
     let result = sqlx::query!(
         r#"UPDATE pull_attempts
            SET status = 'failed',
@@ -653,6 +661,7 @@ pub async fn update_status<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    let error_message = error_message.map(longbox_core::redact::secrets);
     let result = sqlx::query!(
         r#"UPDATE pull_attempts SET status = ?, error_message = ? WHERE id = ?"#,
         status,
@@ -700,6 +709,7 @@ pub async fn record_failure_if_submitted<'e, E>(
 where
     E: SqliteExecutor<'e>,
 {
+    let error_message = longbox_core::redact::secrets(error_message);
     sqlx::query!(
         r#"UPDATE pull_attempts
            SET status = 'failed',
@@ -712,6 +722,30 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+/// Redact every stored `error_message` in place; returns how many rows
+/// changed. Rows written before the write path redacted (2026-10-28)
+/// held SAB's apikey and indexer NZB links. Idempotent: run at startup.
+pub async fn redact_stored_errors(pool: &crate::Pool) -> Result<u64> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, error_message FROM pull_attempts WHERE error_message IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut changed = 0;
+    for (id, message) in rows {
+        let clean = longbox_core::redact::secrets(&message);
+        if clean != message {
+            sqlx::query("UPDATE pull_attempts SET error_message = ? WHERE id = ?")
+                .bind(clean)
+                .bind(id)
+                .execute(pool)
+                .await?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 /// Increment an attempt's consecutive-`Unknown` poll counter. The

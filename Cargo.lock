@@ -1347,6 +1347,7 @@ dependencies = [
 name = "longbox-downloader"
 version = "2.1.0"
 dependencies = [
+ "longbox-core",
  "pretty_assertions",
  "reqwest",
  "serde",

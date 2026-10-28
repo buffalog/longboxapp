@@ -41,6 +41,12 @@ pub async fn run(config: AppConfig) -> Result<AppState, BootstrapError> {
     let db = longbox_db::open(&config.database_url).await?;
     info!(target: "longbox_web", db = %config.database_url, "database pool opened");
 
+    // Old failure rows can hold a downloader or indexer key; scrub them.
+    let redacted = longbox_db::pull_attempt_repo::redact_stored_errors(&db).await?;
+    if redacted > 0 {
+        info!(target: "longbox_web", rows = redacted, "pull_attempts.errors_redacted");
+    }
+
     // 3. Upsert library_roots row from config.library_root_path.
     let configured = normalize_path(&config.library_root_path);
     let existing_rows = library_root_repo::list_all(&db).await?;
